@@ -8,3 +8,4 @@ coverage/
 packages/cli/README.md
 packages/cli/LICENSE
 packages/cli/*.tgz
+/target/

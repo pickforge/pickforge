@@ -33,6 +33,25 @@ jobs:
             ghcr.io/gitleaks/gitleaks:v8.30.1 \
             git --redact --no-banner /repo
 
+  # Independent of the Bun job: the experimental `pickforge` Rust binary has no
+  # shared toolchain or artifacts with the TypeScript packages.
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --check
+
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - run: cargo test --workspace --locked
+
   test:
     runs-on: ubuntu-latest
     steps:
