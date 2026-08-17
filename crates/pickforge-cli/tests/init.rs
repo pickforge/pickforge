@@ -2,6 +2,8 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use pickforge_cli::adapters::{codex_config, json_config, Harness, IntegrationPack, McpServerSpec};
+#[cfg(windows)]
+use pickforge_cli::init::ActionKind;
 use pickforge_cli::init::{ApplyReport, ApplyState};
 use pickforge_cli::{apply_init, plan_init, render, Environment, InitRequest};
 use tempfile::TempDir;
@@ -96,12 +98,13 @@ fn nonempty_unowned_state_directory_is_refused() {
 }
 
 #[test]
-fn owned_interruption_artifacts_do_not_block_receipt_recovery() {
+fn empty_or_owned_interruption_state_allows_receipt_recovery() {
     let (_temp, project, env) = fixture();
     let request = InitRequest::new(&project);
     let initial_plan = plan_init(&request, &env).unwrap();
     let state_dir = Path::new(&initial_plan.report.state_dir);
     std::fs::create_dir_all(state_dir).unwrap();
+    assert!(plan_init(&request, &env).is_ok());
     std::fs::write(state_dir.join(".pickforge-tmp-interrupted"), "partial").unwrap();
     let recovery = plan_init(&request, &env).unwrap();
     assert!(apply_init(&recovery, "recovery").changed);
@@ -138,6 +141,11 @@ fn symlinked_home_and_state_roots_are_resolved_safely() {
     request.pack = pack();
     request.harnesses = vec![Harness::ClaudeCode];
     let plan = plan_init(&request, &env).unwrap();
+    let receipt_action = plan.report.actions.last().unwrap();
+    assert_eq!(
+        Path::new(&plan.report.state_dir),
+        Path::new(&receipt_action.target).parent().unwrap()
+    );
     assert!(apply_init(&plan, "symlinked").changed);
     assert!(real_home.join(".claude.json").is_file());
     assert!(real_state.join("projects").is_dir());
@@ -218,7 +226,16 @@ fn codex_managed_block_creates_and_preserves_surroundings_and_newline_style() {
         assert!(codex_config(Some(foreign), &pack()).is_err(), "{foreign}");
     }
     assert!(codex_config(Some("[mcp_servers.\"pickforge-helperx\"]\n"), &pack()).is_ok());
+    assert!(codex_config(Some("[mcp_servers]\n"), &pack()).is_ok());
     assert!(codex_config(Some("not = [valid"), &pack()).is_err());
+
+    let crossing_scope = "# >>> pickforge >>>\n[mcp_servers.\"pickforge-helper\"]\ncommand = \"old\"\nargs = []\n# <<< pickforge <<<\nmodel = \"gpt\"\n";
+    assert!(codex_config(Some(crossing_scope), &pack()).is_err());
+    let mixed = "title = \"foreign\"\r\n# >>> pickforge >>>\nold = true\n# <<< pickforge <<<\n[other]\r\nx = 1\r\n";
+    let mixed_output =
+        String::from_utf8(codex_config(Some(mixed), &pack()).unwrap().unwrap()).unwrap();
+    assert!(mixed_output.starts_with("title = \"foreign\"\r\n# >>> pickforge >>>"));
+    assert!(mixed_output.ends_with("\n[other]\r\nx = 1\r\n"));
 }
 
 #[test]
@@ -295,6 +312,54 @@ fn codex_absolute_home_override_works_without_a_user_home_and_relative_override_
         "{error}"
     );
     assert!(!temp.path().join("state").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_state_artifact_symlinks_are_refused_as_foreign_state() {
+    use std::os::unix::fs::symlink;
+
+    let (_temp, project, env) = fixture();
+    let request = InitRequest::new(&project);
+    let initial = plan_init(&request, &env).unwrap();
+    let state_dir = Path::new(&initial.report.state_dir);
+    std::fs::create_dir_all(state_dir).unwrap();
+    symlink("missing", state_dir.join(".pickforge-tmp-dangling")).unwrap();
+    let error = plan_init(&request, &env).unwrap_err().to_string();
+    assert!(error.contains("non-empty but has no Pickforge project receipt"));
+    assert!(!error.contains("could not inspect state artifact"));
+}
+
+#[cfg(windows)]
+#[test]
+#[allow(clippy::permissions_set_readonly_false)]
+fn windows_readonly_init_rerun_is_a_noop_without_verbatim_paths() {
+    let (_temp, project, env) = fixture();
+    let mut request = InitRequest::new(project);
+    request.pack = pack();
+    request.harnesses = vec![Harness::ClaudeCode];
+    let first = plan_init(&request, &env).unwrap();
+    assert!(apply_init(&first, "first").changed);
+    let config = env.home_dir().unwrap().join(".claude.json");
+    let mut permissions = std::fs::metadata(&config).unwrap().permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(&config, permissions).unwrap();
+
+    let second = plan_init(&request, &env).unwrap();
+    assert!(second
+        .report
+        .actions
+        .iter()
+        .all(|action| !action.target.starts_with("\\\\?\\")));
+    assert!(!second.report.state_dir.starts_with("\\\\?\\"));
+    assert!(second.report.actions.iter().any(|action| {
+        action.target.ends_with(".claude.json") && action.action == ActionKind::Unchanged
+    }));
+    assert!(!apply_init(&second, "second").changed);
+
+    let mut permissions = std::fs::metadata(&config).unwrap().permissions();
+    permissions.set_readonly(false);
+    std::fs::set_permissions(config, permissions).unwrap();
 }
 
 #[test]

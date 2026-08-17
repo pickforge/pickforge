@@ -166,7 +166,6 @@ fn recoverable_state_artifacts(
             state_dir.display()
         )
     })?;
-    let mut found = false;
     for entry in entries {
         let entry = entry.map_err(|error| {
             format!(
@@ -180,16 +179,16 @@ fn recoverable_state_artifacts(
                 entry.path().display()
             )
         })?;
+        if file_type.is_symlink() {
+            return Ok(false);
+        }
         let metadata = entry.metadata().map_err(|error| {
             format!(
                 "could not inspect state artifact {}: {error}",
                 entry.path().display()
             )
         })?;
-        if file_type.is_symlink()
-            || !metadata.is_file()
-            || metadata.len() > MAX_STATE_ARTIFACT_BYTES
-        {
+        if !metadata.is_file() || metadata.len() > MAX_STATE_ARTIFACT_BYTES {
             return Ok(false);
         }
         let name = entry.file_name();
@@ -197,7 +196,6 @@ fn recoverable_state_artifacts(
             return Ok(false);
         };
         if name.starts_with(".pickforge-tmp-") {
-            found = true;
             continue;
         }
         if name.starts_with("project.json.pickforge-backup-") {
@@ -208,12 +206,11 @@ fn recoverable_state_artifacts(
                 )
             })?;
             validate_existing_receipt(&bytes, expected_path, expected_id)?;
-            found = true;
             continue;
         }
         return Ok(false);
     }
-    Ok(found)
+    Ok(true)
 }
 
 fn normalized_harnesses(selected: &[Harness]) -> Vec<Harness> {
@@ -286,7 +283,7 @@ pub fn plan_init(request: &InitRequest, env: &Environment) -> Result<InitPlan, I
                     continue;
                 }
             };
-            let planned = transaction::plan_file(target.clone(), Vec::new(), true);
+            let planned = transaction::inspect_file(target.clone(), true);
             let (snapshot, existing) = match planned {
                 Ok(value) => value,
                 Err(error) => {
@@ -306,7 +303,13 @@ pub fn plan_init(request: &InitRequest, env: &Environment) -> Result<InitPlan, I
             };
             match transformed {
                 Ok(Some(desired)) => {
-                    let file = snapshot.with_desired(desired);
+                    let file = match snapshot.with_desired(desired) {
+                        Ok(file) => file,
+                        Err(error) => {
+                            conflicts.push(error.to_string());
+                            continue;
+                        }
+                    };
                     let warning = (harness == Harness::Pi).then(|| {
                         "Core Pi has no built-in MCP; this config requires pi-mcp-adapter."
                             .to_string()
@@ -343,15 +346,20 @@ pub fn plan_init(request: &InitRequest, env: &Environment) -> Result<InitPlan, I
     let mut receipt_bytes = serde_json::to_vec_pretty(&receipt).expect("receipt is serializable");
     receipt_bytes.push(b'\n');
     let receipt_path = state_dir.join("project.json");
+    let mut reported_state_dir = state_dir.clone();
     match transaction::plan_file(receipt_path.clone(), receipt_bytes, true) {
         Ok((file, existing)) => {
+            let physical_state_dir = file
+                .path()
+                .parent()
+                .expect("receipt target always has a parent");
             let receipt_conflict = if let Some(bytes) = existing {
                 validate_existing_receipt(&bytes, &project_path, &project_id).err()
-            } else if state_dir.is_dir() {
-                match recoverable_state_artifacts(&state_dir, &project_path, &project_id) {
+            } else if physical_state_dir.is_dir() {
+                match recoverable_state_artifacts(physical_state_dir, &project_path, &project_id) {
                     Ok(false) => Some(format!(
                         "state directory {} is non-empty but has no Pickforge project receipt",
-                        state_dir.display()
+                        physical_state_dir.display()
                     )),
                     Ok(true) => None,
                     Err(error) => Some(error),
@@ -362,6 +370,7 @@ pub fn plan_init(request: &InitRequest, env: &Environment) -> Result<InitPlan, I
             if let Some(conflict) = receipt_conflict {
                 conflicts.push(conflict);
             } else {
+                reported_state_dir = physical_state_dir.to_path_buf();
                 actions.push(action(
                     file.path(),
                     &file,
@@ -383,7 +392,7 @@ pub fn plan_init(request: &InitRequest, env: &Environment) -> Result<InitPlan, I
             schema_version: INIT_SCHEMA_VERSION,
             project_path,
             project_id,
-            state_dir: state_dir.to_string_lossy().into_owned(),
+            state_dir: reported_state_dir.to_string_lossy().into_owned(),
             pack: PackReport {
                 name: request.pack.name.clone(),
                 version: request.pack.version,

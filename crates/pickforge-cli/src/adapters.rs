@@ -118,6 +118,8 @@ pub enum AdapterError {
     MalformedToml(String),
     #[error("Codex config mcp_servers value must be a table")]
     McpServersTomlTable,
+    #[error("Codex config has values whose TOML scope crosses the Pickforge block markers")]
+    MarkerScope,
     #[error(
         "Codex config manages {0} outside the Pickforge block; move or remove that entry first"
     )]
@@ -162,11 +164,30 @@ pub fn json_config(
 const START: &str = "# >>> pickforge >>>";
 const END: &str = "# <<< pickforge <<<";
 
+fn without_managed_servers(
+    mut table: toml::Table,
+    names: &[String],
+    keep_empty_servers: bool,
+) -> toml::Table {
+    let remove_servers = if let Some(toml::Value::Table(servers)) = table.get_mut("mcp_servers") {
+        for name in names {
+            servers.remove(name);
+        }
+        servers.is_empty() && !keep_empty_servers
+    } else {
+        false
+    };
+    if remove_servers {
+        table.remove("mcp_servers");
+    }
+    table
+}
+
 fn validate_codex_outside_block(
     lines: &[&str],
     range: Option<(usize, usize)>,
     names: &[String],
-) -> Result<(), AdapterError> {
+) -> Result<toml::Table, AdapterError> {
     let outside = lines
         .iter()
         .enumerate()
@@ -174,19 +195,27 @@ fn validate_codex_outside_block(
         .map(|(_, line)| *line)
         .collect::<Vec<_>>()
         .join("\n");
-    let table = outside
+    let outside = outside
         .parse::<toml::Table>()
         .map_err(|error| AdapterError::MalformedToml(error.to_string()))?;
-    let Some(servers) = table.get("mcp_servers") else {
-        return Ok(());
-    };
-    let servers = servers
-        .as_table()
-        .ok_or(AdapterError::McpServersTomlTable)?;
-    if let Some(name) = names.iter().find(|name| servers.contains_key(*name)) {
-        return Err(AdapterError::ManagedTableOutsideBlock(name.clone()));
+    if let Some(servers) = outside.get("mcp_servers") {
+        let servers = servers
+            .as_table()
+            .ok_or(AdapterError::McpServersTomlTable)?;
+        if let Some(name) = names.iter().find(|name| servers.contains_key(*name)) {
+            return Err(AdapterError::ManagedTableOutsideBlock(name.clone()));
+        }
     }
-    Ok(())
+    if let Some((_, end)) = range {
+        let first_value_after_block = lines[end + 1..]
+            .iter()
+            .map(|line| line.trim())
+            .find(|line| !line.is_empty() && !line.starts_with('#'));
+        if first_value_after_block.is_some_and(|line| !line.starts_with('[')) {
+            return Err(AdapterError::MarkerScope);
+        }
+    }
+    Ok(outside)
 }
 
 fn toml_string(value: &str) -> String {
@@ -207,6 +236,7 @@ pub fn codex_config(
     let newline = if crlf_count > lf_count { "\r\n" } else { "\n" };
     let normalized = raw.replace("\r\n", "\n");
     let lines: Vec<&str> = normalized.split('\n').collect();
+    let raw_lines: Vec<&str> = raw.split_inclusive('\n').collect();
     let starts: Vec<usize> = lines
         .iter()
         .enumerate()
@@ -229,7 +259,7 @@ pub fn codex_config(
     }
     let range = starts.first().zip(ends.first()).map(|(a, b)| (*a, *b));
     let names: Vec<String> = pack.mcp_servers.iter().map(|s| s.name.clone()).collect();
-    validate_codex_outside_block(&lines, range, &names)?;
+    let outside = validate_codex_outside_block(&lines, range, &names)?;
     let mut block = vec![START.to_string()];
     for (index, server) in pack.mcp_servers.iter().enumerate() {
         if index > 0 {
@@ -248,26 +278,36 @@ pub fn codex_config(
         ));
     }
     block.push(END.to_string());
-    let block = block.join("\n");
+    let block = block.join(newline);
     let output = if let Some((start, end)) = range {
-        let mut result = Vec::new();
-        result.extend_from_slice(&lines[..start]);
-        result.push(&block);
-        result.extend_from_slice(&lines[end + 1..]);
-        result.join("\n")
-    } else if normalized.is_empty() {
-        format!("{block}\n")
+        let mut output = String::new();
+        for line in &raw_lines[..start] {
+            output.push_str(line);
+        }
+        output.push_str(&block);
+        if raw_lines.get(end).is_some_and(|line| line.ends_with('\n')) || end + 1 < raw_lines.len()
+        {
+            output.push_str(newline);
+        }
+        for line in &raw_lines[end + 1..] {
+            output.push_str(line);
+        }
+        output
+    } else if raw.is_empty() {
+        format!("{block}{newline}")
     } else if normalized.ends_with("\n\n") {
-        format!("{normalized}{block}\n")
+        format!("{raw}{block}{newline}")
     } else if normalized.ends_with('\n') {
-        format!("{normalized}\n{block}\n")
+        format!("{raw}{newline}{block}{newline}")
     } else {
-        format!("{normalized}\n\n{block}\n")
+        format!("{raw}{newline}{newline}{block}{newline}")
     };
-    let output = output.replace('\n', newline);
-    output
+    let complete = output
         .parse::<toml::Table>()
         .map_err(|error| AdapterError::MalformedToml(error.to_string()))?;
+    if without_managed_servers(complete, &names, outside.contains_key("mcp_servers")) != outside {
+        return Err(AdapterError::MarkerScope);
+    }
     Ok(Some(output.into_bytes()))
 }
 
