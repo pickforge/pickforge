@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Client } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { createMcpServer } from "../src/index.js";
 
 export const FAKE_SERIAL = "emulator-5554";
@@ -43,13 +43,16 @@ export interface ConnectedLab {
 export async function connectLab(opts: {
   projectDir: string;
   env: Record<string, string | undefined>;
+  era?: "legacy" | "modern";
 }): Promise<ConnectedLab> {
   // Default new runs to the pre-#34 project-local layout so existing
   // fixtures (`writeSyntheticRun`, hardcoded `.picklab/runs` assertions)
   // keep working; individual tests can still override PICKLAB_STORAGE_MODE
   // via opts.env to exercise the new "home" default explicitly.
+  const era = opts.era ?? "legacy";
   const server = createMcpServer({
     ...opts,
+    era,
     env: { PICKLAB_STORAGE_MODE: "project-local", ...opts.env },
   });
   const client = new Client({ name: "picklab-test", version: "0.0.0" });

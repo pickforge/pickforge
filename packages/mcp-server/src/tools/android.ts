@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import {
   back,
@@ -94,7 +94,10 @@ export function registerAndroidTools(
         const sessions = await createSessions(
           ctx,
           { type: "android", avdName: args.avdName },
-          { onProgress: progressReporter(extra), signal: extra.signal },
+          {
+            onProgress: progressReporter(extra),
+            signal: extra.mcpReq.signal,
+          },
         );
         await recordCreatedSessionsEvidence(ctx, sessions, "android_start");
         return { data: { sessions } };

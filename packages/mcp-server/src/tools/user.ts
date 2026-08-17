@@ -1,7 +1,7 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { ElicitRequestFormParams } from "@modelcontextprotocol/sdk/types.js";
+import type { McpServer } from "@modelcontextprotocol/server";
+import type { ElicitRequestFormParams } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { runTool } from "../context.js";
+import { runTool, type ServerContext } from "../context.js";
 
 const SECRET_QUESTION_PATTERN =
   /password|api[_ -]?key|token|secret|2fa|otp|credential/i;
@@ -21,7 +21,15 @@ const NO_ELICITATION_GUIDANCE =
   "This client does not support elicitation. Relay the question to the " +
   "user in your conversation and wait for their answer before continuing.";
 
-export function registerUserTools(server: McpServer): void {
+const MODERN_RELAY_GUIDANCE =
+  "Modern MCP does not support interactive push elicitation here. Relay " +
+  "the question to the user in your conversation, then retry this tool " +
+  "after receiving the answer.";
+
+export function registerUserTools(
+  server: McpServer,
+  serverContext: ServerContext,
+): void {
   server.registerTool(
     "request_user_input",
     {
@@ -36,10 +44,7 @@ export function registerUserTools(server: McpServer): void {
         "control session, or into the environment, then confirm with kind " +
         '"confirm".',
       inputSchema: {
-        question: z
-          .string()
-          .min(1)
-          .describe("The question to put to the user"),
+        question: z.string().min(1).describe("The question to put to the user"),
         kind: z
           .enum(["text", "confirm"])
           .optional()
@@ -54,11 +59,14 @@ export function registerUserTools(server: McpServer): void {
           .describe("Why this input is needed, shown alongside the question"),
       },
     },
-    (args) =>
+    (args, ctx) =>
       runTool(async () => {
         const kind = args.kind ?? "text";
         if (kind === "text" && SECRET_QUESTION_PATTERN.test(args.question)) {
           return { errors: [SECRET_GUIDANCE] };
+        }
+        if (serverContext.era === "modern") {
+          return { errors: [MODERN_RELAY_GUIDANCE] };
         }
         if (server.server.getClientCapabilities()?.elicitation === undefined) {
           return { errors: [NO_ELICITATION_GUIDANCE] };
@@ -86,7 +94,7 @@ export function registerUserTools(server: McpServer): void {
           },
           required: [fieldName],
         };
-        const result = await server.server.elicitInput({
+        const result = await ctx.mcpReq.elicitInput({
           message,
           requestedSchema,
         });

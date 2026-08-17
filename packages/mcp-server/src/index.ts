@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@modelcontextprotocol/server";
 import { resolveContext, type CreateMcpServerOptions } from "./context.js";
 import { registerPrompts } from "./prompts.js";
 import { registerResources } from "./resources.js";
@@ -15,7 +15,11 @@ const { version } = require("../package.json") as { version: string };
 
 export const packageName = "@pickforge/picklab-mcp-server";
 
-export type { CreateMcpServerOptions, ServerContext } from "./context.js";
+export type {
+  CreateMcpServerOptions,
+  McpEra,
+  ServerContext,
+} from "./context.js";
 
 export function createMcpServer(
   opts: CreateMcpServerOptions = {},
@@ -27,7 +31,7 @@ export function createMcpServer(
   registerAndroidTools(server, ctx);
   registerArtifactTools(server, ctx);
   registerTakeoverTools(server, ctx);
-  registerUserTools(server);
+  registerUserTools(server, ctx);
   registerResources(server, ctx);
   registerPrompts(server);
   return server;

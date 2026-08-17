@@ -3,8 +3,8 @@ import path from "node:path";
 import {
   ResourceTemplate,
   type McpServer,
-} from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { Variables } from "@modelcontextprotocol/sdk/shared/uriTemplate.js";
+} from "@modelcontextprotocol/server";
+import type { Variables } from "@modelcontextprotocol/server";
 import {
   EVIDENCE_ACTION_LOG,
   EVIDENCE_REPORT,

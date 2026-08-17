@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult } from "@modelcontextprotocol/server";
 import {
   resolveRunnableSession,
   resolveScreenshotTarget as resolveTarget,
@@ -19,14 +19,18 @@ export {
 
 const MAX_INLINE_IMAGE_BYTES = 2 * 1024 * 1024;
 
+export type McpEra = "legacy" | "modern";
+
 export interface CreateMcpServerOptions {
   projectDir?: string;
   env?: EnvLike;
+  era?: McpEra;
 }
 
 export interface ServerContext {
   projectDir: string;
   env: EnvLike;
+  era: McpEra;
 }
 
 export function resolveContext(
@@ -36,7 +40,7 @@ export function resolveContext(
   const projectDir = path.resolve(
     opts.projectDir ?? env.PICKLAB_PROJECT_DIR ?? process.cwd(),
   );
-  return { projectDir, env };
+  return { projectDir, env, era: opts.era ?? "legacy" };
 }
 
 export interface ToolReport {

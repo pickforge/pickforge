@@ -40,13 +40,14 @@
     "prepack": "node -e \"const fs=require('node:fs');fs.copyFileSync('../../README.md','README.md');fs.copyFileSync('../../LICENSE','LICENSE')\""
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.17.0",
+    "@modelcontextprotocol/server": "^2.0.0",
     "@sentry/node": "^10.64.0",
     "commander": "^14.0.0",
     "chrome-devtools-mcp": "1.5.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
     "@pickforge/picklab-agent-installers": "*",
     "@pickforge/picklab-android": "*",
     "@pickforge/picklab-browser": "*",

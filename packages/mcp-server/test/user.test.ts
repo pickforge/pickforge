@@ -1,10 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import {
-  ElicitRequestSchema,
-  type ElicitResult,
-} from "@modelcontextprotocol/sdk/types.js";
+import { Client } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
+import type { ElicitResult } from "@modelcontextprotocol/server";
 import { createMcpServer } from "../src/index.js";
 import {
   connectLab,
@@ -24,6 +21,7 @@ interface ElicitingLab {
 
 async function connectElicitingLab(dirs: LabDirs): Promise<ElicitingLab> {
   const server = createMcpServer({
+    era: "legacy",
     projectDir: dirs.projectDir,
     env: { PICKLAB_HOME: dirs.home, PATH: dirs.binDir },
   });
@@ -33,7 +31,7 @@ async function connectElicitingLab(dirs: LabDirs): Promise<ElicitingLab> {
   );
   const requests: Array<{ message: string; requestedSchema: unknown }> = [];
   let nextResult: ElicitResult = { action: "cancel" };
-  client.setRequestHandler(ElicitRequestSchema, async (request) => {
+  client.setRequestHandler("elicitation/create", async (request) => {
     const params = request.params as {
       message: string;
       requestedSchema: unknown;
@@ -177,6 +175,7 @@ describe("request_user_input without elicitation support", () => {
   beforeEach(async () => {
     dirs = makeLabDirs();
     lab = await connectLab({
+      era: "legacy",
       projectDir: dirs.projectDir,
       env: { PICKLAB_HOME: dirs.home, PATH: dirs.binDir },
     });
@@ -206,5 +205,30 @@ describe("request_user_input without elicitation support", () => {
     const report = parseToolJson(result);
     expect(report.ok).toBe(false);
     expect(report.errors[0]).toMatch(/vnc/i);
+  });
+});
+
+describe("request_user_input in the modern era", () => {
+  it("returns deterministic relay guidance without push elicitation", async () => {
+    const dirs = makeLabDirs();
+    const lab = await connectLab({
+      era: "modern",
+      projectDir: dirs.projectDir,
+      env: { PICKLAB_HOME: dirs.home, PATH: dirs.binDir },
+    });
+    try {
+      const result = await lab.client.callTool({
+        name: "request_user_input",
+        arguments: { question: "Which AVD should I use?" },
+      });
+      const report = parseToolJson(result);
+      expect(report.ok).toBe(false);
+      expect(report.errors[0]).toContain("Modern MCP");
+      expect(report.errors[0]).toContain("Relay the question");
+      expect(report.errors[0]).toContain("retry this tool");
+    } finally {
+      await lab.close();
+      removeLabDirs(dirs);
+    }
   });
 });
