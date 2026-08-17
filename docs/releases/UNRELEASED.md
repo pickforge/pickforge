@@ -9,8 +9,9 @@ GitHub release description, then reset it after the release is published.
 
 ## Internal/release changes
 
-- Raised vulnerable npm override and lockfile resolutions for `brace-expansion`,
-  `fast-uri`, `hono`, `ip-address`, and `nanoid` to their patched releases.
+- Raised the vulnerable `fast-uri` and `hono` overrides, plus lockfile
+  resolutions for both `brace-expansion` majors, `fast-uri`, `hono`,
+  `ip-address`, and `nanoid`, to patched releases.
 
 ## Validation
 
