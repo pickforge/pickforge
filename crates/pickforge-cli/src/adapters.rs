@@ -106,7 +106,7 @@ impl IntegrationPack {
     pub fn flutter() -> Self {
         Self {
             name: "pickforge-flutter".into(),
-            version: 1,
+            version: 2,
             mcp_servers: vec![McpServerSpec {
                 name: "pickforge-dart".into(),
                 command: "dart".into(),

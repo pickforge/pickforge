@@ -6,6 +6,7 @@
 pub mod adapters;
 pub mod doctor;
 pub mod env;
+pub mod evidence;
 pub mod init;
 pub mod project;
 pub mod render;
@@ -16,5 +17,6 @@ pub mod transaction;
 
 pub use doctor::diagnose;
 pub use env::Environment;
+pub use evidence::{record, EvidenceError, RecordResult};
 pub use init::{apply_init, plan_init, ApplyReport, InitPlan, InitPlanReport, InitRequest};
 pub use report::{Check, CheckStatus, DoctorReport, ProjectInfo, SCHEMA_VERSION};

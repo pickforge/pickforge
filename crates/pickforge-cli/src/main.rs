@@ -1,3 +1,5 @@
+use std::fs::File;
+use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -29,6 +31,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Record one completed Flutter evidence run.
+    Evidence {
+        #[command(subcommand)]
+        command: EvidenceCommand,
+    },
     /// Plan or apply experimental harness integration.
     Init {
         #[arg(long, value_name = "PATH")]
@@ -41,6 +48,19 @@ enum Command {
         json: bool,
         #[arg(long, hide = true)]
         mobile_integration_alpha: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum EvidenceCommand {
+    /// Validate and record a complete evidence document.
+    Record {
+        #[arg(long, value_name = "PATH")]
+        project_dir: Option<PathBuf>,
+        #[arg(long, value_name = "PATH", default_value = "-")]
+        input: String,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -87,6 +107,57 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         }
+        Command::Evidence { command } => match command {
+            EvidenceCommand::Record {
+                project_dir,
+                input,
+                json,
+            } => {
+                let project_dir = project_dir
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_else(|| PathBuf::from("."));
+                let bytes = if input == "-" {
+                    pickforge_cli::evidence::read_bounded(io::stdin().lock())
+                } else {
+                    File::open(&input)
+                        .map_err(|error| pickforge_cli::EvidenceError::Io(error.to_string()))
+                        .and_then(pickforge_cli::evidence::read_bounded)
+                };
+                let outcome = bytes.and_then(|bytes| {
+                    pickforge_cli::record(&project_dir, &Environment::from_process(), &bytes)
+                });
+                match outcome {
+                    Ok(result) => {
+                        if json {
+                            print!("{}", json_line(&result));
+                        } else {
+                            println!("recorded Flutter evidence run {}", result.run_id);
+                            println!("evidence: {}", render::terminal_safe(&result.evidence_path));
+                            println!("report: {}", render::terminal_safe(&result.report_path));
+                        }
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        if json {
+                            print!(
+                                "{}",
+                                json_line(&ErrorOutput {
+                                    schema_version: 1,
+                                    error: &message
+                                })
+                            );
+                        } else {
+                            eprintln!(
+                                "pickforge evidence record failed: {}",
+                                render::terminal_safe(&message)
+                            );
+                        }
+                        ExitCode::FAILURE
+                    }
+                }
+            }
+        },
         Command::Init {
             project_dir,
             harness,

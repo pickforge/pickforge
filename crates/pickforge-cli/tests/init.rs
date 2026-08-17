@@ -122,12 +122,36 @@ fn nonempty_unowned_state_directory_is_refused() {
 }
 
 #[test]
+fn arbitrary_runs_directory_is_not_treated_as_owned_recovery_state() {
+    let (_temp, project, env) = fixture();
+    let request = InitRequest::new(&project);
+    let initial = plan_init(&request, &env).unwrap();
+    let runs = Path::new(&initial.report.state_dir).join("runs/foreign");
+    std::fs::create_dir_all(&runs).unwrap();
+    std::fs::write(runs.join("user.txt"), "foreign").unwrap();
+    let error = plan_init(&request, &env).unwrap_err().to_string();
+    assert!(error.contains("non-empty but has no Pickforge project receipt"));
+}
+
+#[test]
 fn empty_or_owned_interruption_state_allows_receipt_recovery() {
     let (_temp, project, env) = fixture();
     let request = InitRequest::new(&project);
     let initial_plan = plan_init(&request, &env).unwrap();
     let state_dir = Path::new(&initial_plan.report.state_dir);
-    std::fs::create_dir_all(state_dir).unwrap();
+    let run = state_dir.join("runs/20240101-000000-flutter");
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::write(
+        run.join("evidence.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion":1,
+            "projectPath":initial_plan.report.project_path,
+            "projectId":initial_plan.report.project_id
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(run.join("report.md"), "# owned\n").unwrap();
     assert!(plan_init(&request, &env).is_ok());
     std::fs::write(state_dir.join(".pickforge-tmp-interrupted"), "partial").unwrap();
     let recovery = plan_init(&request, &env).unwrap();
@@ -294,6 +318,7 @@ fn flutter_pack_plans_owned_harness_configs_and_deduplicated_workflows_in_order(
     let before = std::fs::read(project.join("pubspec.yaml")).unwrap();
     let plan = plan_init(&request, &env).unwrap();
     assert_eq!(plan.report.pack.name, "pickforge-flutter");
+    assert_eq!(plan.report.pack.version, 2);
     assert_eq!(plan.report.actions.len(), 6);
     assert!(plan.report.actions[0].target.ends_with(".claude.json"));
     assert!(plan.report.actions[1].target.ends_with("config.toml"));
