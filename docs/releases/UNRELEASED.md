@@ -50,7 +50,7 @@ GitHub release description, then reset it after the release is published.
   one skips, coverage passes at 82.48% lines, and build passes.
 - The pinned OSV Scanner v2.3.8 image reports no unfiltered advisories.
 - `cargo fmt --check`, `cargo clippy --workspace --all-targets --locked -- -D
-  warnings`, and `cargo test --workspace --locked` pass with 64 tests covering
+  warnings`, and `cargo test --workspace --locked` pass with 65 tests covering
   project/framework detection, tool and harness discovery, state and project-id
   boundaries, adapter preservation/refusal, transaction rollback and drift,
   dry-run, receipt ownership, file modes, idempotency, Git-tree cleanliness,

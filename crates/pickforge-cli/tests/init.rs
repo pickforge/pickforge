@@ -5,6 +5,8 @@ use pickforge_cli::adapters::{
     codex_config, json_config, AdapterError, Harness, HarnessArgsSpec, IntegrationPack,
     McpServerSpec, WorkflowRoot,
 };
+#[cfg(unix)]
+use pickforge_cli::adapters::{WorkflowSpec, WorkflowTargetSpec};
 #[cfg(windows)]
 use pickforge_cli::init::ActionKind;
 use pickforge_cli::init::{ApplyReport, ApplyState};
@@ -428,12 +430,14 @@ fn pack_validation_rejects_invalid_harness_tool_and_workflow_policy() {
         invalid.validate(),
         Err(AdapterError::InvalidWorkflowContent(_))
     ));
-    let mut invalid = IntegrationPack::flutter();
-    invalid.workflows[0].ownership_marker = "foreign".into();
-    assert!(matches!(
-        invalid.validate(),
-        Err(AdapterError::InvalidWorkflowOwnership(_))
-    ));
+    for marker in ["", "bad\nmarker", "foreign"] {
+        let mut invalid = IntegrationPack::flutter();
+        invalid.workflows[0].ownership_marker = marker.into();
+        assert!(matches!(
+            invalid.validate(),
+            Err(AdapterError::InvalidWorkflowOwnership(_))
+        ));
+    }
     let mut invalid = IntegrationPack::flutter();
     invalid.workflows[0].targets[0].root = WorkflowRoot::SharedAgentSkills;
     assert!(matches!(
@@ -506,6 +510,55 @@ fn physically_shared_workflow_roots_are_planned_and_written_once() {
         ApplyState::Success
     );
     assert!(claude_skills.join("pickforge-flutter/SKILL.md").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn physically_shared_workflow_targets_with_different_contents_conflict() {
+    use std::os::unix::fs::symlink;
+
+    let (temp, project, env) = fixture();
+    let first_dir = temp.path().join("home/.claude/skills/pickforge-first");
+    std::fs::create_dir_all(&first_dir).unwrap();
+    let shared_skills = temp.path().join("home/.agents/skills");
+    std::fs::create_dir_all(&shared_skills).unwrap();
+    symlink(&first_dir, shared_skills.join("pickforge-second")).unwrap();
+    let mut request = InitRequest::new(&project);
+    request.harnesses = vec![Harness::ClaudeCode, Harness::Codex];
+    request.pack = IntegrationPack {
+        name: "fixture".into(),
+        version: 1,
+        mcp_servers: vec![],
+        required_tools: vec![],
+        workflows: vec![
+            WorkflowSpec {
+                name: "pickforge-first".into(),
+                content: b"<!-- first-owned -->\nfirst\n".to_vec(),
+                ownership_marker: "<!-- first-owned -->".into(),
+                targets: vec![WorkflowTargetSpec {
+                    harness: Harness::ClaudeCode,
+                    root: WorkflowRoot::ClaudeSkills,
+                }],
+            },
+            WorkflowSpec {
+                name: "pickforge-second".into(),
+                content: b"<!-- second-owned -->\nsecond\n".to_vec(),
+                ownership_marker: "<!-- second-owned -->".into(),
+                targets: vec![WorkflowTargetSpec {
+                    harness: Harness::Codex,
+                    root: WorkflowRoot::SharedAgentSkills,
+                }],
+            },
+        ],
+    };
+
+    let error = plan_init(&request, &env).unwrap_err().to_string();
+    assert!(
+        error.contains("workflow targets resolve to") && error.contains("with different contents"),
+        "{error}"
+    );
+    assert!(!first_dir.join("SKILL.md").exists());
+    assert!(!temp.path().join("state").exists());
 }
 
 #[test]
