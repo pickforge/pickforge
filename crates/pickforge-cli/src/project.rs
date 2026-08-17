@@ -32,7 +32,7 @@ fn lexically_absolute(path: &Path) -> PathBuf {
 }
 
 #[cfg(windows)]
-fn normalize_windows_canonical_path(path: PathBuf) -> PathBuf {
+pub(crate) fn normalize_windows_canonical_path(path: PathBuf) -> PathBuf {
     use std::ffi::OsString;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
@@ -67,7 +67,7 @@ fn normalize_windows_canonical_path(path: PathBuf) -> PathBuf {
 }
 
 #[cfg(not(windows))]
-fn normalize_windows_canonical_path(path: PathBuf) -> PathBuf {
+pub(crate) fn normalize_windows_canonical_path(path: PathBuf) -> PathBuf {
     path
 }
 

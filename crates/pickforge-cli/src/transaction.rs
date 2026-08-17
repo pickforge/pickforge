@@ -38,9 +38,10 @@ impl FilePlan {
     pub fn is_create(&self) -> bool {
         matches!(self.snapshot, Snapshot::Missing)
     }
-    pub(crate) fn with_desired(mut self, desired: Vec<u8>) -> Self {
+    pub(crate) fn with_desired(mut self, desired: Vec<u8>) -> Result<Self, TransactionError> {
         self.desired = desired;
-        self
+        refuse_changed_readonly(&self)?;
+        Ok(self)
     }
 }
 
@@ -93,10 +94,12 @@ fn resolve_target_parent(path: &Path) -> Result<PathBuf, TransactionError> {
                 return Err(unsafe_target(path, "a parent path is not a directory"));
             }
             Ok(_) => {
-                break fs::canonicalize(cursor).map_err(|source| TransactionError::Io {
-                    path: cursor.into(),
-                    source,
-                })?;
+                let canonical =
+                    fs::canonicalize(cursor).map_err(|source| TransactionError::Io {
+                        path: cursor.into(),
+                        source,
+                    })?;
+                break crate::project::normalize_windows_canonical_path(canonical);
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 missing.push(
@@ -238,21 +241,29 @@ fn unsafe_target(path: &Path, reason: &str) -> TransactionError {
     }
 }
 
-pub fn plan_file(
+#[cfg(windows)]
+fn refuse_changed_readonly(file: &FilePlan) -> Result<(), TransactionError> {
+    if matches!(file.snapshot, Snapshot::Present { readonly: true, .. }) && file.is_changed() {
+        return Err(unsafe_target(
+            &file.path,
+            "read-only files are not edited on Windows",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn refuse_changed_readonly(_file: &FilePlan) -> Result<(), TransactionError> {
+    Ok(())
+}
+
+pub(crate) fn inspect_file(
     path: PathBuf,
-    desired: Vec<u8>,
     require_utf8: bool,
 ) -> Result<(FilePlan, Option<Vec<u8>>), TransactionError> {
     let path = resolve_target_parent(&path)?;
     let (snapshot, existing) = inspect(&path, require_utf8)?;
-    #[cfg(windows)]
-    if matches!(snapshot, Snapshot::Present { readonly: true, hash, .. } if hash != digest(&desired))
-    {
-        return Err(unsafe_target(
-            &path,
-            "read-only files are not edited on Windows",
-        ));
-    }
+    let desired = existing.clone().unwrap_or_default();
     Ok((
         FilePlan {
             path,
@@ -261,6 +272,15 @@ pub fn plan_file(
         },
         existing,
     ))
+}
+
+pub fn plan_file(
+    path: PathBuf,
+    desired: Vec<u8>,
+    require_utf8: bool,
+) -> Result<(FilePlan, Option<Vec<u8>>), TransactionError> {
+    let (file, existing) = inspect_file(path, require_utf8)?;
+    Ok((file.with_desired(desired)?, existing))
 }
 
 fn set_mode(path: &Path, mode: Option<u32>, readonly: bool) -> io::Result<()> {
