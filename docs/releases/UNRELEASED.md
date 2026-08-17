@@ -9,13 +9,17 @@ GitHub release description, then reset it after the release is published.
 
 ## Internal/release changes
 
-- None yet.
+- Raised the vulnerable `fast-uri` and `hono` overrides, plus lockfile
+  resolutions for both `brace-expansion` majors, `fast-uri`, `hono`,
+  `ip-address`, and `nanoid`, to patched releases.
 
 ## Validation
 
 ### Tested
 
-- Not tested yet.
+- Pinned Bun 1.3.12 CI: frozen install, typecheck, lint, 1,133 tests pass,
+  one skips, coverage passes at 82.48% lines, and build passes.
+- The pinned OSV Scanner v2.3.8 image reports no unfiltered advisories.
 
 ### Not tested yet
 
