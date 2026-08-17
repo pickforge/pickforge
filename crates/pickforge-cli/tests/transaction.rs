@@ -29,11 +29,11 @@ fn update_retains_exclusive_backup_and_uses_dash_two_on_collision() {
     )
     .unwrap();
     let (plan, _) = plan_file(target.clone(), b"new".to_vec(), true).unwrap();
+    let expected_backup = plan
+        .path()
+        .with_file_name("config.json.pickforge-backup-s-2");
     let backups = apply_files(&[plan], "s").unwrap();
-    assert_eq!(
-        backups,
-        vec![temp.path().join("config.json.pickforge-backup-s-2")]
-    );
+    assert_eq!(backups, vec![expected_backup]);
     assert_eq!(std::fs::read_to_string(&backups[0]).unwrap(), "old");
     assert_eq!(std::fs::read_to_string(target).unwrap(), "new");
 }
