@@ -1,5 +1,6 @@
 //! Read-only init planning and transactional orchestration.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -366,7 +367,31 @@ pub fn plan_init(request: &InitRequest, env: &Environment) -> Result<InitPlan, I
                 }
             };
             match transaction::plan_file(target_path, workflow.content.clone(), true) {
-                Ok((file, _)) => {
+                Ok((file, existing)) => {
+                    let foreign_content = existing.as_ref().is_some_and(|content| {
+                        content != &workflow.content
+                            && !content
+                                .windows(workflow.ownership_marker.len())
+                                .any(|window| window == workflow.ownership_marker.as_bytes())
+                    });
+                    if foreign_content {
+                        conflicts.push(format!(
+                            "{} contains a workflow not managed by Pickforge; move or remove it first",
+                            file.path().display()
+                        ));
+                        continue;
+                    }
+                    if let Some(planned) =
+                        files.iter().find(|planned| planned.path() == file.path())
+                    {
+                        if planned.desired != file.desired {
+                            conflicts.push(format!(
+                                "workflow targets resolve to {} with different contents",
+                                file.path().display()
+                            ));
+                        }
+                        continue;
+                    }
                     actions.push(action(
                         file.path(),
                         &file,
@@ -436,6 +461,8 @@ pub fn plan_init(request: &InitRequest, env: &Environment) -> Result<InitPlan, I
         Err(error) => conflicts.push(error.to_string()),
     }
     if !conflicts.is_empty() {
+        let mut unique = BTreeSet::new();
+        conflicts.retain(|conflict| unique.insert(conflict.clone()));
         return Err(InitError::Conflicts(conflicts.join("\n")));
     }
 

@@ -5,6 +5,8 @@ description: >-
   Dart and Flutter MCP server.
 ---
 
+<!-- pickforge-managed: pickforge-flutter -->
+
 # Pickforge Flutter workflow
 
 1. Protect pre-existing work. Inspect the current Git state and relevant source

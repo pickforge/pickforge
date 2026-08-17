@@ -78,6 +78,7 @@ pub struct WorkflowTargetSpec {
 pub struct WorkflowSpec {
     pub name: String,
     pub content: Vec<u8>,
+    pub ownership_marker: String,
     pub targets: Vec<WorkflowTargetSpec>,
 }
 
@@ -125,6 +126,7 @@ impl IntegrationPack {
             workflows: vec![WorkflowSpec {
                 name: "pickforge-flutter".into(),
                 content: include_bytes!("../assets/skills/pickforge-flutter/SKILL.md").to_vec(),
+                ownership_marker: "<!-- pickforge-managed: pickforge-flutter -->".into(),
                 targets: vec![
                     WorkflowTargetSpec {
                         harness: Harness::ClaudeCode,
@@ -204,6 +206,17 @@ impl IntegrationPack {
             if workflow.content.is_empty() || std::str::from_utf8(&workflow.content).is_err() {
                 return Err(AdapterError::InvalidWorkflowContent(workflow.name.clone()));
             }
+            if workflow.ownership_marker.is_empty()
+                || workflow.ownership_marker.chars().any(char::is_control)
+                || !workflow
+                    .content
+                    .windows(workflow.ownership_marker.len())
+                    .any(|window| window == workflow.ownership_marker.as_bytes())
+            {
+                return Err(AdapterError::InvalidWorkflowOwnership(
+                    workflow.name.clone(),
+                ));
+            }
             let mut harnesses = BTreeSet::new();
             for target in &workflow.targets {
                 if !harnesses.insert(target.harness)
@@ -240,6 +253,8 @@ pub enum AdapterError {
     DuplicateWorkflowName(String),
     #[error("workflow content must be nonempty UTF-8: {0}")]
     InvalidWorkflowContent(String),
+    #[error("workflow content must contain its nonempty, control-free ownership marker: {0}")]
+    InvalidWorkflowOwnership(String),
     #[error("workflow has a duplicate or incompatible harness target: {0}")]
     InvalidWorkflowTarget(String),
     #[error("{0} must contain a JSON object")]
