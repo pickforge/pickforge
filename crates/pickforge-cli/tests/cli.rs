@@ -1,6 +1,7 @@
 //! Just enough end-to-end coverage to pin output rendering and exit mapping.
 
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 
 use assert_cmd::Command;
 use tempfile::TempDir;
@@ -48,6 +49,42 @@ fn flutter_project(root: &Path) -> PathBuf {
     std::fs::create_dir_all(&project_dir).unwrap();
     std::fs::write(project_dir.join("pubspec.yaml"), FLUTTER_PUBSPEC).unwrap();
     project_dir
+}
+
+fn git(project: &Path, args: &[&str]) -> Vec<u8> {
+    let output = ProcessCommand::new("git")
+        .args(args)
+        .current_dir(project)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {args:?} failed: {output:?}");
+    output.stdout
+}
+
+fn snapshot_without_git(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+    fn visit(root: &Path, path: &Path, entries: &mut Vec<(PathBuf, Option<Vec<u8>>)>) {
+        let mut children = std::fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        children.sort();
+        for child in children {
+            if child.file_name().is_some_and(|name| name == ".git") {
+                continue;
+            }
+            let relative = child.strip_prefix(root).unwrap().to_path_buf();
+            if child.is_dir() {
+                entries.push((relative, None));
+                visit(root, &child, entries);
+            } else {
+                entries.push((relative, Some(std::fs::read(&child).unwrap())));
+            }
+        }
+    }
+
+    let mut entries = Vec::new();
+    visit(root, root, &mut entries);
+    entries
 }
 
 #[test]
@@ -131,4 +168,110 @@ fn the_current_directory_is_the_default_project() {
         .arg("doctor")
         .assert()
         .success();
+}
+
+#[test]
+fn init_dry_run_preserves_clean_and_dirty_git_trees_byte_for_byte() {
+    for dirty in [false, true] {
+        let temp = TempDir::new().unwrap();
+        let project_dir = flutter_project(temp.path());
+        git(&project_dir, &["init", "--quiet"]);
+        git(&project_dir, &["add", "pubspec.yaml"]);
+        git(
+            &project_dir,
+            &[
+                "-c",
+                "user.name=Pickforge Test",
+                "-c",
+                "user.email=test@invalid.example",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ],
+        );
+        if dirty {
+            std::fs::write(project_dir.join("dirty.txt"), "user work\n").unwrap();
+        }
+        let mut command = pickforge(temp.path(), &[]);
+        let status_before = git(&project_dir, &["status", "--porcelain=v1"]);
+        let tree_before = snapshot_without_git(temp.path());
+        let output = command
+            .args(["init", "--dry-run", "--json", "--project-dir"])
+            .arg(&project_dir)
+            .assert()
+            .success();
+        let value: serde_json::Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+        assert_eq!(value["plan"]["schemaVersion"], 1);
+        assert!(value.get("outcome").is_none());
+        assert_eq!(
+            git(&project_dir, &["status", "--porcelain=v1"]),
+            status_before
+        );
+        assert_eq!(snapshot_without_git(temp.path()), tree_before);
+        assert!(!temp.path().join("state").exists());
+    }
+}
+
+#[test]
+fn init_apply_and_noop_use_success_exit_codes_and_leave_dirty_project_untouched() {
+    let temp = TempDir::new().unwrap();
+    let project_dir = flutter_project(temp.path());
+    git(&project_dir, &["init", "--quiet"]);
+    git(&project_dir, &["add", "pubspec.yaml"]);
+    git(
+        &project_dir,
+        &[
+            "-c",
+            "user.name=Pickforge Test",
+            "-c",
+            "user.email=test@invalid.example",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+    );
+    std::fs::write(project_dir.join("dirty.txt"), "user work\n").unwrap();
+    let status_before = git(&project_dir, &["status", "--porcelain=v1"]);
+    let tree_before = snapshot_without_git(&project_dir);
+    for _ in 0..2 {
+        pickforge(temp.path(), &[])
+            .args(["init", "--project-dir"])
+            .arg(&project_dir)
+            .assert()
+            .success();
+    }
+    assert_eq!(
+        git(&project_dir, &["status", "--porcelain=v1"]),
+        status_before
+    );
+    assert_eq!(snapshot_without_git(&project_dir), tree_before);
+}
+
+#[test]
+fn init_human_output_escapes_path_control_characters() {
+    let temp = TempDir::new().unwrap();
+    let project_dir = flutter_project(temp.path());
+    let unsafe_state = temp.path().join("state\nunsafe");
+    let output = pickforge(temp.path(), &[])
+        .env("PICKFORGE_HOME", &unsafe_state)
+        .args(["init", "--dry-run", "--project-dir"])
+        .arg(&project_dir)
+        .assert()
+        .success();
+    let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("state\\nunsafe"), "{stdout:?}");
+    assert!(!stdout.contains(&unsafe_state.to_string_lossy().into_owned()));
+}
+
+#[test]
+fn init_precondition_failure_exits_one_without_writing() {
+    let temp = TempDir::new().unwrap();
+    pickforge(temp.path(), &[])
+        .args(["init", "--json", "--project-dir"])
+        .arg(temp.path().join("missing"))
+        .assert()
+        .code(1);
+    assert!(!temp.path().join("state").exists());
 }
