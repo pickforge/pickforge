@@ -159,3 +159,25 @@ pub fn detect_flutter(project_dir: &Path) -> Result<(), FrameworkError> {
         Err(FrameworkError::NotFlutter)
     }
 }
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::normalize_windows_canonical_path;
+    use std::path::PathBuf;
+
+    #[test]
+    fn windows_verbatim_prefix_normalization_covers_disk_unc_and_other_namespaces() {
+        assert_eq!(
+            normalize_windows_canonical_path(PathBuf::from(r"\\?\C:\app")),
+            PathBuf::from(r"C:\app")
+        );
+        assert_eq!(
+            normalize_windows_canonical_path(PathBuf::from(r"\\?\UNC\server\share\app")),
+            PathBuf::from(r"\\server\share\app")
+        );
+        assert_eq!(
+            normalize_windows_canonical_path(PathBuf::from(r"\\?\Volume{0}\app")),
+            PathBuf::from(r"\\?\Volume{0}\app")
+        );
+    }
+}

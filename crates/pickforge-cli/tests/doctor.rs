@@ -515,6 +515,31 @@ fn windows_environment_keys_are_case_insensitive() {
     assert!(Path::new(report.project.state_dir.as_deref().unwrap()).starts_with(state_root));
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_tool_discovery_defaults_invalid_or_missing_pathext() {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+
+    let temp = TempDir::new().unwrap();
+    let project_dir = temp.path().join("app");
+    write_project(&project_dir, Some(FLUTTER_PUBSPEC));
+    let base = Environment::empty()
+        .with_var("PATH", fake_bin(temp.path(), &all_tools()))
+        .with_home_dir(temp.path().join("home"));
+
+    let missing = diagnose(&project_dir, &base);
+    let invalid = diagnose(
+        &project_dir,
+        &base
+            .clone()
+            .with_var("PATHEXT", OsString::from_wide(&[0xd800])),
+    );
+
+    assert!(missing.ready, "{missing:?}");
+    assert!(invalid.ready, "{invalid:?}");
+}
+
 #[test]
 fn state_root_defaults_under_the_pickforge_company_root() {
     let env = Environment::empty().with_home_dir("/home/someone");

@@ -23,12 +23,15 @@ pub fn find_on_path(env: &Environment, name: &str) -> Option<PathBuf> {
     if path.is_empty() {
         return None;
     }
-    let extensions = env.var("PATHEXT")?.to_str()?;
+    let extensions = env
+        .var("PATHEXT")
+        .and_then(|value| value.to_str())
+        .unwrap_or(".COM;.EXE;.BAT;.CMD");
     let extensions: Vec<&str> = extensions
         .split(';')
         .filter(|extension| extension.starts_with('.') && extension.len() > 1)
         .collect();
-    let cwd = std::env::current_dir().ok()?;
+    let cwd = std::env::current_dir().ok();
 
     for directory in std::env::split_paths(path) {
         if directory.as_os_str().is_empty() {
@@ -36,8 +39,10 @@ pub fn find_on_path(env: &Environment, name: &str) -> Option<PathBuf> {
         }
         let directory = if directory.is_absolute() {
             directory
-        } else {
+        } else if let Some(cwd) = &cwd {
             cwd.join(directory)
+        } else {
+            continue;
         };
         for extension in &extensions {
             let candidate = directory.join(format!("{name}{extension}"));
