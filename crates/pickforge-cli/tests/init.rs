@@ -2,7 +2,8 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use pickforge_cli::adapters::{
-    codex_config, json_config, AdapterError, Harness, IntegrationPack, McpServerSpec,
+    codex_config, json_config, AdapterError, Harness, HarnessArgsSpec, IntegrationPack,
+    McpServerSpec,
 };
 #[cfg(windows)]
 use pickforge_cli::init::ActionKind;
@@ -20,8 +21,27 @@ fn pack() -> IntegrationPack {
             name: "pickforge-helper".into(),
             command: "pickforge".into(),
             args: vec!["serve".into(), "a b".into()],
+            harness_args: vec![],
         }],
+        required_tools: vec![],
+        workflows: vec![],
     }
+}
+
+fn fake_tool(root: &Path, name: &str) -> std::path::PathBuf {
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    #[cfg(windows)]
+    let tool = bin.join(format!("{name}.EXE"));
+    #[cfg(not(windows))]
+    let tool = bin.join(name);
+    std::fs::write(&tool, "not executed").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
 }
 
 fn fixture() -> (TempDir, std::path::PathBuf, Environment) {
@@ -155,7 +175,9 @@ fn symlinked_home_and_state_roots_are_resolved_safely() {
 
 #[test]
 fn json_adapters_create_merge_validate_and_are_equivalent_and_idempotent() {
-    let created = json_config(None, &pack(), "config").unwrap().unwrap();
+    let created = json_config(None, &pack(), Harness::ClaudeCode, "config")
+        .unwrap()
+        .unwrap();
     let created_value: serde_json::Value = serde_json::from_slice(&created).unwrap();
     assert_eq!(
         created_value["mcpServers"]["pickforge-helper"]["command"],
@@ -163,10 +185,15 @@ fn json_adapters_create_merge_validate_and_are_equivalent_and_idempotent() {
     );
 
     let input = r#"{"root":1,"mcpServers":{"foreign":{"command":"x"}}}"#;
-    let claude = json_config(Some(input), &pack(), "Claude Code config")
-        .unwrap()
-        .unwrap();
-    let pi = json_config(Some(input), &pack(), "Pi MCP config")
+    let claude = json_config(
+        Some(input),
+        &pack(),
+        Harness::ClaudeCode,
+        "Claude Code config",
+    )
+    .unwrap()
+    .unwrap();
+    let pi = json_config(Some(input), &pack(), Harness::Pi, "Pi MCP config")
         .unwrap()
         .unwrap();
     assert_eq!(claude, pi);
@@ -174,6 +201,7 @@ fn json_adapters_create_merge_validate_and_are_equivalent_and_idempotent() {
         json_config(
             Some(std::str::from_utf8(&claude).unwrap()),
             &pack(),
+            Harness::ClaudeCode,
             "Claude Code config"
         )
         .unwrap()
@@ -183,16 +211,22 @@ fn json_adapters_create_merge_validate_and_are_equivalent_and_idempotent() {
     let value: serde_json::Value = serde_json::from_slice(&claude).unwrap();
     assert_eq!(value["root"], 1);
     assert_eq!(value["mcpServers"]["foreign"]["command"], "x");
-    assert!(json_config(Some("[]"), &pack(), "config").is_err());
-    assert!(json_config(Some("{"), &pack(), "config").is_err());
-    assert!(json_config(Some(r#"{"mcpServers":1}"#), &pack(), "config").is_err());
+    assert!(json_config(Some("[]"), &pack(), Harness::ClaudeCode, "config").is_err());
+    assert!(json_config(Some("{"), &pack(), Harness::ClaudeCode, "config").is_err());
+    assert!(json_config(
+        Some(r#"{"mcpServers":1}"#),
+        &pack(),
+        Harness::ClaudeCode,
+        "config",
+    )
+    .is_err());
 
     let mut invalid = pack();
     invalid.mcp_servers[0].name = "pickforge-invalid.name".into();
-    assert!(json_config(None, &invalid, "config").is_err());
+    assert!(json_config(None, &invalid, Harness::ClaudeCode, "config").is_err());
     let mut duplicate = pack();
     duplicate.mcp_servers.push(duplicate.mcp_servers[0].clone());
-    assert!(json_config(None, &duplicate, "config").is_err());
+    assert!(json_config(None, &duplicate, Harness::ClaudeCode, "config").is_err());
     let mut control = pack();
     control.mcp_servers[0].args.push("bad\u{7f}".into());
     assert!(codex_config(None, &control).is_err());
@@ -245,6 +279,130 @@ fn codex_managed_block_creates_and_preserves_surroundings_and_newline_style() {
         String::from_utf8(codex_config(Some(mixed), &pack()).unwrap().unwrap()).unwrap();
     assert!(mixed_output.starts_with("title = \"foreign\"\r\n# >>> pickforge >>>"));
     assert!(mixed_output.ends_with("\n[other]\r\nx = 1\r\n"));
+}
+
+#[test]
+fn flutter_pack_plans_owned_harness_configs_and_deduplicated_workflows_in_order() {
+    let (temp, project, env) = fixture();
+    let bin = fake_tool(temp.path(), "dart");
+    let env = env.with_var("PATH", &bin).with_var("PATHEXT", ".EXE");
+    let mut request = InitRequest::new(&project);
+    request.pack = IntegrationPack::flutter();
+
+    let before = std::fs::read(project.join("pubspec.yaml")).unwrap();
+    let plan = plan_init(&request, &env).unwrap();
+    assert_eq!(plan.report.pack.name, "pickforge-flutter");
+    assert_eq!(plan.report.actions.len(), 6);
+    assert!(plan.report.actions[0].target.ends_with(".claude.json"));
+    assert!(plan.report.actions[1].target.ends_with("config.toml"));
+    assert!(plan.report.actions[2].target.ends_with("mcp.json"));
+    assert!(Path::new(&plan.report.actions[3].target)
+        .ends_with(Path::new(".claude/skills/pickforge-flutter/SKILL.md")));
+    assert!(Path::new(&plan.report.actions[4].target)
+        .ends_with(Path::new(".agents/skills/pickforge-flutter/SKILL.md")));
+    assert!(plan.report.actions[5].target.ends_with("project.json"));
+    assert!(plan.report.actions[2].warning.is_some());
+    assert!(!temp.path().join("home").exists());
+    assert_eq!(std::fs::read(project.join("pubspec.yaml")).unwrap(), before);
+
+    assert!(apply_init(&plan, "flutter").changed);
+    let asset = include_bytes!("../assets/skills/pickforge-flutter/SKILL.md");
+    assert_eq!(
+        std::fs::read(
+            temp.path()
+                .join("home/.claude/skills/pickforge-flutter/SKILL.md")
+        )
+        .unwrap(),
+        asset
+    );
+    assert_eq!(
+        std::fs::read(
+            temp.path()
+                .join("home/.agents/skills/pickforge-flutter/SKILL.md")
+        )
+        .unwrap(),
+        asset
+    );
+    let claude: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(temp.path().join("home/.claude.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        claude["mcpServers"]["pickforge-dart"],
+        serde_json::json!({"command":"dart","args":["mcp-server"]})
+    );
+    let pi: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(temp.path().join("home/.config/mcp/mcp.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        pi["mcpServers"]["pickforge-dart"]["args"],
+        serde_json::json!(["mcp-server", "--force-roots-fallback"])
+    );
+    let codex = std::fs::read_to_string(temp.path().join("home/.codex/config.toml")).unwrap();
+    assert!(codex.contains("args = [\"mcp-server\", \"--force-roots-fallback\"]"));
+
+    let snapshots = plan
+        .report
+        .actions
+        .iter()
+        .map(|action| {
+            let path = std::path::PathBuf::from(&action.target);
+            (
+                path.clone(),
+                std::fs::read(&path).unwrap(),
+                std::fs::metadata(&path).unwrap().modified().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let second = plan_init(&request, &env).unwrap();
+    let outcome = apply_init(&second, "flutter-second");
+    assert!(!outcome.changed);
+    assert!(outcome.backup_paths.is_empty());
+    for (path, bytes, mtime) in snapshots {
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(std::fs::metadata(path).unwrap().modified().unwrap(), mtime);
+    }
+}
+
+#[test]
+fn flutter_pack_requires_dart_only_when_a_harness_is_selected() {
+    let (temp, project, env) = fixture();
+    let mut request = InitRequest::new(&project);
+    request.pack = IntegrationPack::flutter();
+    let error = plan_init(&request, &env).unwrap_err().to_string();
+    assert!(error.contains("requires dart on PATH"), "{error}");
+    assert!(error.contains("pickforge doctor"), "{error}");
+    assert!(!temp.path().join("state").exists());
+    assert!(!temp.path().join("home").exists());
+
+    request.harnesses.clear();
+    let plan = plan_init(&request, &env).unwrap();
+    assert_eq!(plan.report.actions.len(), 1);
+}
+
+#[test]
+fn pack_validation_rejects_duplicate_and_empty_harness_policy() {
+    let mut pack = pack();
+    pack.mcp_servers[0].harness_args = vec![
+        HarnessArgsSpec {
+            harness: Harness::Pi,
+            extra_args: vec!["one".into()],
+        },
+        HarnessArgsSpec {
+            harness: Harness::Pi,
+            extra_args: vec!["two".into()],
+        },
+    ];
+    assert!(matches!(
+        pack.validate(),
+        Err(AdapterError::DuplicateHarnessPolicy(_))
+    ));
+    pack.mcp_servers[0].harness_args.truncate(1);
+    pack.mcp_servers[0].harness_args[0].extra_args.clear();
+    assert!(matches!(
+        pack.validate(),
+        Err(AdapterError::InvalidHarnessPolicy(_))
+    ));
 }
 
 #[test]
