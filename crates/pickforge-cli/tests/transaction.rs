@@ -98,7 +98,7 @@ fn invalid_backup_stamp_is_rejected_without_writing() {
 
 #[cfg(unix)]
 #[test]
-fn symlinked_parent_is_refused_even_when_target_is_missing() {
+fn symlinked_parent_is_resolved_before_a_missing_target_is_planned() {
     use std::os::unix::fs::symlink;
 
     let temp = TempDir::new().unwrap();
@@ -106,8 +106,24 @@ fn symlinked_parent_is_refused_even_when_target_is_missing() {
     std::fs::create_dir(&real).unwrap();
     let linked_parent = temp.path().join("linked-parent");
     symlink(&real, &linked_parent).unwrap();
-    assert!(plan_file(linked_parent.join("config"), b"new".to_vec(), true).is_err());
-    assert!(!real.join("config").exists());
+    let (plan, _) = plan_file(linked_parent.join("config"), b"new".to_vec(), true).unwrap();
+    apply_files(&[plan], "s").unwrap();
+    assert_eq!(std::fs::read_to_string(real.join("config")).unwrap(), "new");
+}
+
+#[cfg(windows)]
+#[test]
+fn changed_readonly_target_is_refused_but_identical_content_is_a_noop() {
+    let temp = TempDir::new().unwrap();
+    let target = temp.path().join("config");
+    std::fs::write(&target, "same").unwrap();
+    let mut permissions = std::fs::metadata(&target).unwrap().permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(&target, permissions).unwrap();
+    assert!(plan_file(target.clone(), b"changed".to_vec(), true).is_err());
+    let (noop, _) = plan_file(target.clone(), b"same".to_vec(), true).unwrap();
+    assert!(apply_files(&[noop], "s").unwrap().is_empty());
+    assert!(std::fs::metadata(target).unwrap().permissions().readonly());
 }
 
 #[test]
