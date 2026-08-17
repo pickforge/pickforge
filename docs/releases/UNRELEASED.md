@@ -17,15 +17,14 @@ GitHub release description, then reset it after the release is published.
 
 ### Tested
 
-- Pinned Bun 1.3.12: frozen install, typecheck, lint, and build pass.
+- Pinned Bun 1.3.12 CI: frozen install, typecheck, lint, 1,133 tests pass,
+  one skips, coverage passes at 82.48% lines, and build passes.
 - The pinned OSV Scanner v2.3.8 image reports no unfiltered advisories.
-- Local suite: 1,082 tests pass and 44 skip. Eight existing desktop CLI tests
-  cannot run because this machine lacks Xvfb, x11vnc, xdotool, and xterm.
 
 ### Not tested yet
 
-- Full desktop suite with CI's X11 dependencies.
+- None recorded.
 
 ### Release blockers
 
-- None known; CI must confirm the desktop suite and dependency audit.
+- None known.
