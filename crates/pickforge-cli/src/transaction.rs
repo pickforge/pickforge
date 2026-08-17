@@ -636,6 +636,7 @@ mod tests {
         let failed = temp.path().join("failed");
         fs::write(&updated, "old").unwrap();
         let (update, _) = plan_file(updated.clone(), b"pickforge".to_vec(), true).unwrap();
+        let planned_updated = update.path().to_path_buf();
         let (failure, _) = plan_file(failed, b"failed".to_vec(), true).unwrap();
         let mut writes = 0;
         let result = apply_files_with(
@@ -653,7 +654,7 @@ mod tests {
         .unwrap_err();
         assert!(!result.rolled_back, "{result:?}");
         assert_eq!(fs::read_to_string(&updated).unwrap(), "external");
-        assert_eq!(result.residual_paths, vec![updated]);
+        assert_eq!(result.residual_paths, vec![planned_updated]);
         assert_eq!(result.backup_paths.len(), 1);
     }
 
@@ -668,6 +669,7 @@ mod tests {
         let external = temp.path().join("external");
         fs::write(&external, "external").unwrap();
         let (create, _) = plan_file(created.clone(), b"pickforge".to_vec(), true).unwrap();
+        let planned_created = create.path().to_path_buf();
         let (failure, _) = plan_file(failed, b"failed".to_vec(), true).unwrap();
         let mut writes = 0;
         let result = apply_files_with(
@@ -686,6 +688,6 @@ mod tests {
         .unwrap_err();
         assert!(!result.rolled_back, "{result:?}");
         assert_eq!(fs::read_to_string(&external).unwrap(), "external");
-        assert_eq!(result.residual_paths, vec![created]);
+        assert_eq!(result.residual_paths, vec![planned_created]);
     }
 }
