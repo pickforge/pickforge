@@ -1,7 +1,9 @@
 use std::path::Path;
 use std::time::SystemTime;
 
-use pickforge_cli::adapters::{codex_config, json_config, Harness, IntegrationPack, McpServerSpec};
+use pickforge_cli::adapters::{
+    codex_config, json_config, AdapterError, Harness, IntegrationPack, McpServerSpec,
+};
 #[cfg(windows)]
 use pickforge_cli::init::ActionKind;
 use pickforge_cli::init::{ApplyReport, ApplyState};
@@ -228,6 +230,13 @@ fn codex_managed_block_creates_and_preserves_surroundings_and_newline_style() {
     assert!(codex_config(Some("[mcp_servers.\"pickforge-helperx\"]\n"), &pack()).is_ok());
     assert!(codex_config(Some("[mcp_servers]\n"), &pack()).is_ok());
     assert!(codex_config(Some("not = [valid"), &pack()).is_err());
+    assert!(matches!(
+        codex_config(
+            Some("mcp_servers = { other = { command = \"z\" } }\n"),
+            &pack()
+        ),
+        Err(AdapterError::GeneratedToml(_))
+    ));
 
     let crossing_scope = "# >>> pickforge >>>\n[mcp_servers.\"pickforge-helper\"]\ncommand = \"old\"\nargs = []\n# <<< pickforge <<<\nmodel = \"gpt\"\n";
     assert!(codex_config(Some(crossing_scope), &pack()).is_err());

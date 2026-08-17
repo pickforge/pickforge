@@ -299,5 +299,13 @@ fn init_precondition_failure_exits_one_without_writing() {
         .arg(temp.path().join("missing"))
         .assert()
         .code(1);
+    let human = pickforge(temp.path(), &[])
+        .args(["init", "--project-dir"])
+        .arg(temp.path().join("mïssing\npath"))
+        .assert()
+        .code(1);
+    let stdout = String::from_utf8(human.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("mïssing\\npath"), "{stdout:?}");
+    assert!(!stdout.contains("\\u{ef}"), "{stdout:?}");
     assert!(!temp.path().join("state").exists());
 }

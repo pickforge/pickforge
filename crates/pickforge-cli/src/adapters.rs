@@ -116,6 +116,8 @@ pub enum AdapterError {
     UnbalancedMarkers,
     #[error("Codex config contains malformed TOML outside the Pickforge block: {0}")]
     MalformedToml(String),
+    #[error("Codex config is incompatible with the generated Pickforge block: {0}")]
+    GeneratedToml(String),
     #[error("Codex config mcp_servers value must be a table")]
     McpServersTomlTable,
     #[error("Codex config has values whose TOML scope crosses the Pickforge block markers")]
@@ -304,7 +306,7 @@ pub fn codex_config(
     };
     let complete = output
         .parse::<toml::Table>()
-        .map_err(|error| AdapterError::MalformedToml(error.to_string()))?;
+        .map_err(|error| AdapterError::GeneratedToml(error.to_string()))?;
     if without_managed_servers(complete, &names, outside.contains_key("mcp_servers")) != outside {
         return Err(AdapterError::MarkerScope);
     }

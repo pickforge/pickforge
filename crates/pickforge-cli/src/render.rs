@@ -10,7 +10,7 @@ fn label(status: CheckStatus) -> &'static str {
     }
 }
 
-pub(crate) fn terminal_safe(value: &str) -> String {
+pub fn terminal_safe(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
         if character.is_control() {
