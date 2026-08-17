@@ -295,7 +295,30 @@ fn init_human_output_escapes_path_control_characters() {
 }
 
 #[test]
-fn hidden_mobile_alpha_flag_requires_but_never_executes_dart_and_honors_subset() {
+fn mobile_alpha_flag_is_hidden_and_missing_dart_fails_without_writing() {
+    let temp = TempDir::new().unwrap();
+    let project_dir = flutter_project(temp.path());
+    let help = pickforge(temp.path(), &[])
+        .args(["init", "--help"])
+        .assert()
+        .success();
+    assert!(
+        !String::from_utf8_lossy(&help.get_output().stdout).contains("mobile-integration-alpha")
+    );
+
+    let missing = pickforge(temp.path(), &[])
+        .args(["init", "--mobile-integration-alpha", "--project-dir"])
+        .arg(&project_dir)
+        .assert()
+        .code(1);
+    assert!(String::from_utf8_lossy(&missing.get_output().stdout).contains("requires dart on PATH"));
+    assert!(!temp.path().join("state").exists());
+    assert!(!temp.path().join("home").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn mobile_alpha_never_executes_dart_and_keeps_the_project_clean() {
     let temp = TempDir::new().unwrap();
     let project_dir = flutter_project(temp.path());
     git(&project_dir, &["init", "--quiet"]);
@@ -315,30 +338,11 @@ fn hidden_mobile_alpha_flag_requires_but_never_executes_dart_and_honors_subset()
     );
     let status_before = git(&project_dir, &["status", "--porcelain=v1"]);
     let tree_before = snapshot_without_git(&project_dir);
-    let help = pickforge(temp.path(), &[])
-        .args(["init", "--help"])
-        .assert()
-        .success();
-    assert!(
-        !String::from_utf8_lossy(&help.get_output().stdout).contains("mobile-integration-alpha")
-    );
-
-    let missing = pickforge(temp.path(), &[])
-        .args(["init", "--mobile-integration-alpha", "--project-dir"])
-        .arg(&project_dir)
-        .assert()
-        .code(1);
-    assert!(String::from_utf8_lossy(&missing.get_output().stdout).contains("requires dart on PATH"));
-    assert!(!temp.path().join("state").exists());
-    assert!(!temp.path().join("home").exists());
-
     let marker = temp.path().join("dart-ran");
     let bin = fake_bin(temp.path(), &["dart"]);
-    #[cfg(not(windows))]
-    {
-        let dart = bin.join("dart");
-        std::fs::write(&dart, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
-    }
+    let dart = bin.join("dart");
+    std::fs::write(&dart, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+
     let output = pickforge(temp.path(), &[])
         .env("PATH", bin)
         .args([
