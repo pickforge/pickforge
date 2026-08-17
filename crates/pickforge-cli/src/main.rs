@@ -114,13 +114,7 @@ fn main() -> ExitCode {
                             })
                         );
                     } else {
-                        println!(
-                            "pickforge init failed: {}",
-                            message
-                                .chars()
-                                .flat_map(char::escape_default)
-                                .collect::<String>()
-                        );
+                        println!("pickforge init failed: {}", render::terminal_safe(&message));
                     }
                     return ExitCode::FAILURE;
                 }

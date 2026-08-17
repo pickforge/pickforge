@@ -199,12 +199,14 @@ fn recoverable_state_artifacts(
             continue;
         }
         if name.starts_with("project.json.pickforge-backup-") {
-            let bytes = std::fs::read(entry.path()).map_err(|error| {
+            let (_, bytes) = transaction::inspect_file(entry.path(), true).map_err(|error| {
                 format!(
-                    "could not read state backup {}: {error}",
+                    "could not safely read state backup {}: {error}",
                     entry.path().display()
                 )
             })?;
+            let bytes = bytes
+                .ok_or_else(|| format!("state backup {} disappeared", entry.path().display()))?;
             validate_existing_receipt(&bytes, expected_path, expected_id)?;
             continue;
         }
@@ -324,7 +326,7 @@ pub fn plan_init(request: &InitRequest, env: &Environment) -> Result<InitPlan, I
                     files.push(file);
                 }
                 Ok(None) => {}
-                Err(error) => conflicts.push(format!("{}: {error}", target.display())),
+                Err(error) => conflicts.push(format!("{}: {error}", snapshot.path().display())),
             }
         }
     }
