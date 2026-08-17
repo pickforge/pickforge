@@ -1,11 +1,12 @@
 //! Fail-closed snapshots and transactional atomic file replacement.
 
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::ffi::OsString;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
-use tempfile::NamedTempFile;
+use tempfile::Builder;
 use thiserror::Error;
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -67,6 +68,63 @@ fn digest(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
+fn resolve_target_parent(path: &Path) -> Result<PathBuf, TransactionError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|source| TransactionError::Io {
+                path: path.into(),
+                source,
+            })?
+            .join(path)
+    };
+    let file_name = absolute
+        .file_name()
+        .ok_or_else(|| unsafe_target(path, "target has no filename"))?
+        .to_os_string();
+    let mut cursor = absolute
+        .parent()
+        .ok_or_else(|| unsafe_target(path, "target has no parent"))?;
+    let mut missing: Vec<OsString> = Vec::new();
+    let resolved = loop {
+        match fs::symlink_metadata(cursor) {
+            Ok(metadata) if !metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                return Err(unsafe_target(path, "a parent path is not a directory"));
+            }
+            Ok(_) => {
+                break fs::canonicalize(cursor).map_err(|source| TransactionError::Io {
+                    path: cursor.into(),
+                    source,
+                })?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                missing.push(
+                    cursor
+                        .file_name()
+                        .ok_or_else(|| unsafe_target(path, "target has no existing ancestor"))?
+                        .to_os_string(),
+                );
+                cursor = cursor
+                    .parent()
+                    .ok_or_else(|| unsafe_target(path, "target has no existing ancestor"))?;
+            }
+            Err(source) => {
+                return Err(TransactionError::Io {
+                    path: cursor.into(),
+                    source,
+                });
+            }
+        }
+    };
+    let mut target = resolved;
+    for component in missing.into_iter().rev() {
+        target.push(component);
+    }
+    target.push(file_name);
+    Ok(target)
+}
+
 fn inspect_ancestors(path: &Path) -> Result<(), TransactionError> {
     let mut cursor = path.parent();
     while let Some(parent) = cursor {
@@ -121,20 +179,45 @@ fn inspect(
             return Err(unsafe_target(path, "hardlinked files are not edited"));
         }
     }
-    if metadata.len() > MAX_CONFIG_BYTES {
-        return Err(unsafe_target(path, "file exceeds the 1 MiB safety limit"));
-    }
-    let bytes = fs::read(path).map_err(|source| TransactionError::Io {
+    let file = File::open(path).map_err(|source| TransactionError::Io {
         path: path.into(),
         source,
     })?;
+    let opened_metadata = file.metadata().map_err(|source| TransactionError::Io {
+        path: path.into(),
+        source,
+    })?;
+    if !opened_metadata.is_file() {
+        return Err(unsafe_target(path, "target changed while it was inspected"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.dev() != opened_metadata.dev() || metadata.ino() != opened_metadata.ino() {
+            return Err(unsafe_target(path, "target changed while it was inspected"));
+        }
+    }
+    let mut bytes = Vec::with_capacity(
+        opened_metadata
+            .len()
+            .min(MAX_CONFIG_BYTES.saturating_add(1)) as usize,
+    );
+    file.take(MAX_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| TransactionError::Io {
+            path: path.into(),
+            source,
+        })?;
+    if bytes.len() as u64 > MAX_CONFIG_BYTES {
+        return Err(unsafe_target(path, "file exceeds the 1 MiB safety limit"));
+    }
     if require_utf8 && std::str::from_utf8(&bytes).is_err() {
         return Err(unsafe_target(path, "config is not valid UTF-8"));
     }
     #[cfg(unix)]
     let mode = {
         use std::os::unix::fs::PermissionsExt;
-        Some(metadata.permissions().mode())
+        Some(opened_metadata.permissions().mode())
     };
     #[cfg(not(unix))]
     let mode = None;
@@ -142,7 +225,7 @@ fn inspect(
         Snapshot::Present {
             hash: digest(&bytes),
             mode,
-            readonly: metadata.permissions().readonly(),
+            readonly: opened_metadata.permissions().readonly(),
         },
         Some(bytes),
     ))
@@ -160,7 +243,16 @@ pub fn plan_file(
     desired: Vec<u8>,
     require_utf8: bool,
 ) -> Result<(FilePlan, Option<Vec<u8>>), TransactionError> {
+    let path = resolve_target_parent(&path)?;
     let (snapshot, existing) = inspect(&path, require_utf8)?;
+    #[cfg(windows)]
+    if matches!(snapshot, Snapshot::Present { readonly: true, hash, .. } if hash != digest(&desired))
+    {
+        return Err(unsafe_target(
+            &path,
+            "read-only files are not edited on Windows",
+        ));
+    }
     Ok((
         FilePlan {
             path,
@@ -216,12 +308,15 @@ fn create_private_dirs(parent: &Path, created: &mut Vec<PathBuf>) -> io::Result<
         }
     }
     for directory in missing.into_iter().rev() {
-        fs::create_dir(&directory)?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(0o700).create(&directory)?;
             fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
         }
+        #[cfg(not(unix))]
+        fs::create_dir(&directory)?;
         created.push(directory);
     }
     Ok(())
@@ -238,7 +333,9 @@ fn atomic_write(
         .parent()
         .ok_or_else(|| io::Error::other("target has no parent"))?;
     create_private_dirs(parent, created_dirs)?;
-    let mut temp = NamedTempFile::new_in(parent)?;
+    let mut temp = Builder::new()
+        .prefix(".pickforge-tmp-")
+        .tempfile_in(parent)?;
     temp.write_all(bytes)?;
     temp.flush()?;
     temp.as_file().sync_all()?;
@@ -451,13 +548,13 @@ fn rollback(
                     residuals.push(file.path.clone());
                 }
             }
-            None => match fs::read(&file.path) {
-                Ok(bytes) if digest(&bytes) == digest(&file.desired) => {
+            None => match inspect(&file.path, false) {
+                Ok((Snapshot::Present { hash, .. }, _)) if hash == digest(&file.desired) => {
                     if fs::remove_file(&file.path).is_err() {
                         residuals.push(file.path.clone());
                     }
                 }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Ok((Snapshot::Missing, _)) => {}
                 Ok(_) | Err(_) => residuals.push(file.path.clone()),
             },
         }
@@ -538,5 +635,37 @@ mod tests {
         assert_eq!(fs::read_to_string(&updated).unwrap(), "external");
         assert_eq!(result.residual_paths, vec![updated]);
         assert_eq!(result.backup_paths.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_does_not_follow_a_replacement_symlink_for_a_created_file() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let created = temp.path().join("created");
+        let failed = temp.path().join("failed");
+        let external = temp.path().join("external");
+        fs::write(&external, "external").unwrap();
+        let (create, _) = plan_file(created.clone(), b"pickforge".to_vec(), true).unwrap();
+        let (failure, _) = plan_file(failed, b"failed".to_vec(), true).unwrap();
+        let mut writes = 0;
+        let result = apply_files_with(
+            &[create, failure],
+            "stamp",
+            |path, bytes, mode, readonly, dirs| {
+                writes += 1;
+                if writes == 2 {
+                    fs::remove_file(&created)?;
+                    symlink(&external, &created)?;
+                    return Err(io::Error::other("injected failure"));
+                }
+                atomic_write(path, bytes, mode, readonly, dirs)
+            },
+        )
+        .unwrap_err();
+        assert!(!result.rolled_back, "{result:?}");
+        assert_eq!(fs::read_to_string(&external).unwrap(), "external");
+        assert_eq!(result.residual_paths, vec![created]);
     }
 }

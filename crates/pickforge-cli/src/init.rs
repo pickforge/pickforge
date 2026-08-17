@@ -10,6 +10,7 @@ use crate::transaction::{self, FilePlan};
 use crate::{project, state, Environment};
 
 pub const INIT_SCHEMA_VERSION: u32 = 1;
+const MAX_STATE_ARTIFACT_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct InitRequest {
@@ -154,6 +155,67 @@ fn validate_existing_receipt(
     Ok(())
 }
 
+fn recoverable_state_artifacts(
+    state_dir: &Path,
+    expected_path: &str,
+    expected_id: &str,
+) -> Result<bool, String> {
+    let entries = std::fs::read_dir(state_dir).map_err(|error| {
+        format!(
+            "could not inspect state directory {}: {error}",
+            state_dir.display()
+        )
+    })?;
+    let mut found = false;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!(
+                "could not inspect state directory {}: {error}",
+                state_dir.display()
+            )
+        })?;
+        let file_type = entry.file_type().map_err(|error| {
+            format!(
+                "could not inspect state artifact {}: {error}",
+                entry.path().display()
+            )
+        })?;
+        let metadata = entry.metadata().map_err(|error| {
+            format!(
+                "could not inspect state artifact {}: {error}",
+                entry.path().display()
+            )
+        })?;
+        if file_type.is_symlink()
+            || !metadata.is_file()
+            || metadata.len() > MAX_STATE_ARTIFACT_BYTES
+        {
+            return Ok(false);
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return Ok(false);
+        };
+        if name.starts_with(".pickforge-tmp-") {
+            found = true;
+            continue;
+        }
+        if name.starts_with("project.json.pickforge-backup-") {
+            let bytes = std::fs::read(entry.path()).map_err(|error| {
+                format!(
+                    "could not read state backup {}: {error}",
+                    entry.path().display()
+                )
+            })?;
+            validate_existing_receipt(&bytes, expected_path, expected_id)?;
+            found = true;
+            continue;
+        }
+        return Ok(false);
+    }
+    Ok(found)
+}
+
 fn normalized_harnesses(selected: &[Harness]) -> Vec<Harness> {
     Harness::ALL
         .into_iter()
@@ -250,7 +312,7 @@ pub fn plan_init(request: &InitRequest, env: &Environment) -> Result<InitPlan, I
                             .to_string()
                     });
                     actions.push(action(
-                        &target,
+                        file.path(),
                         &file,
                         format!("Configure {harness} MCP servers"),
                         server_names.clone(),
@@ -286,17 +348,13 @@ pub fn plan_init(request: &InitRequest, env: &Environment) -> Result<InitPlan, I
             let receipt_conflict = if let Some(bytes) = existing {
                 validate_existing_receipt(&bytes, &project_path, &project_id).err()
             } else if state_dir.is_dir() {
-                match std::fs::read_dir(&state_dir) {
-                    Ok(entries) => entries.into_iter().next().map(|_| {
-                        format!(
-                            "state directory {} is non-empty but has no Pickforge project receipt",
-                            state_dir.display()
-                        )
-                    }),
-                    Err(error) => Some(format!(
-                        "could not inspect state directory {}: {error}",
+                match recoverable_state_artifacts(&state_dir, &project_path, &project_id) {
+                    Ok(false) => Some(format!(
+                        "state directory {} is non-empty but has no Pickforge project receipt",
                         state_dir.display()
                     )),
+                    Ok(true) => None,
+                    Err(error) => Some(error),
                 }
             } else {
                 None
@@ -305,7 +363,7 @@ pub fn plan_init(request: &InitRequest, env: &Environment) -> Result<InitPlan, I
                 conflicts.push(conflict);
             } else {
                 actions.push(action(
-                    &receipt_path,
+                    file.path(),
                     &file,
                     "Write external project receipt".into(),
                     vec![],

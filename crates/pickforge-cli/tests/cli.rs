@@ -250,6 +250,32 @@ fn init_apply_and_noop_use_success_exit_codes_and_leave_dirty_project_untouched(
 }
 
 #[test]
+fn init_success_and_noop_output_contracts_are_stable() {
+    let temp = TempDir::new().unwrap();
+    let project_dir = flutter_project(temp.path());
+    let first = pickforge(temp.path(), &[])
+        .args(["init", "--json", "--project-dir"])
+        .arg(&project_dir)
+        .assert()
+        .success();
+    let first: serde_json::Value = serde_json::from_slice(&first.get_output().stdout).unwrap();
+    assert_eq!(first["plan"]["schemaVersion"], 1);
+    assert_eq!(first["plan"]["actions"][0]["action"], "create");
+    assert_eq!(first["outcome"]["outcome"], "success");
+    assert_eq!(first["outcome"]["changed"], true);
+
+    let second = pickforge(temp.path(), &[])
+        .args(["init", "--project-dir"])
+        .arg(&project_dir)
+        .assert()
+        .success();
+    let stdout = String::from_utf8(second.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("[UNCHANGED]"), "{stdout}");
+    assert!(stdout.contains("outcome: no-op"), "{stdout}");
+    assert!(stdout.contains("changed: no"), "{stdout}");
+}
+
+#[test]
 fn init_human_output_escapes_path_control_characters() {
     let temp = TempDir::new().unwrap();
     let project_dir = flutter_project(temp.path());

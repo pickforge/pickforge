@@ -85,6 +85,12 @@ impl IntegrationPack {
             if server.command.is_empty() {
                 return Err(AdapterError::EmptyServerCommand(server.name.clone()));
             }
+            if std::iter::once(&server.command)
+                .chain(&server.args)
+                .any(|value| value.chars().any(char::is_control))
+            {
+                return Err(AdapterError::ControlCharacter(server.name.clone()));
+            }
         }
         Ok(())
     }
@@ -98,6 +104,8 @@ pub enum AdapterError {
     DuplicateServerName(String),
     #[error("MCP server command must not be empty: {0}")]
     EmptyServerCommand(String),
+    #[error("MCP server command and arguments must not contain control characters: {0}")]
+    ControlCharacter(String),
     #[error("{0} must contain a JSON object")]
     JsonObject(&'static str),
     #[error("{0} contains malformed JSON: {1}")]
@@ -106,8 +114,12 @@ pub enum AdapterError {
     McpServersObject(&'static str),
     #[error("Codex config has unbalanced Pickforge block markers")]
     UnbalancedMarkers,
+    #[error("Codex config contains malformed TOML outside the Pickforge block: {0}")]
+    MalformedToml(String),
+    #[error("Codex config mcp_servers value must be a table")]
+    McpServersTomlTable,
     #[error(
-        "Codex config manages {0} outside the Pickforge block; move or remove that table first"
+        "Codex config manages {0} outside the Pickforge block; move or remove that entry first"
     )]
     ManagedTableOutsideBlock(String),
 }
@@ -150,86 +162,31 @@ pub fn json_config(
 const START: &str = "# >>> pickforge >>>";
 const END: &str = "# <<< pickforge <<<";
 
-fn toml_key_segments(table: &str) -> Option<Vec<String>> {
-    let mut characters = table.chars().peekable();
-    let mut segments = Vec::new();
-    loop {
-        while characters
-            .peek()
-            .is_some_and(|character| character.is_whitespace())
-        {
-            characters.next();
-        }
-        let segment = match characters.peek().copied()? {
-            quote @ ('\'' | '"') => {
-                characters.next();
-                let mut value = String::new();
-                loop {
-                    match characters.next()? {
-                        character if character == quote => break,
-                        '\\' if quote == '"' => return None,
-                        character => value.push(character),
-                    }
-                }
-                value
-            }
-            _ => {
-                let mut value = String::new();
-                while let Some(character) = characters.peek().copied() {
-                    if character == '.' || character.is_whitespace() {
-                        break;
-                    }
-                    value.push(character);
-                    characters.next();
-                }
-                value
-            }
-        };
-        if segment.is_empty() {
-            return None;
-        }
-        segments.push(segment);
-        while characters
-            .peek()
-            .is_some_and(|character| character.is_whitespace())
-        {
-            characters.next();
-        }
-        match characters.next() {
-            Some('.') => continue,
-            None => return Some(segments),
-            Some(_) => return None,
-        }
-    }
-}
-
-fn managed_table(line: &str, names: &[String]) -> Option<String> {
-    let trimmed = line.trim();
-    let (inner, rest) = if let Some(table) = trimmed.strip_prefix("[[") {
-        let end = table.find("]]")?;
-        (&table[..end], &table[end + 2..])
-    } else if let Some(table) = trimmed.strip_prefix('[') {
-        let end = table.find(']')?;
-        (&table[..end], &table[end + 1..])
-    } else {
-        return None;
+fn validate_codex_outside_block(
+    lines: &[&str],
+    range: Option<(usize, usize)>,
+    names: &[String],
+) -> Result<(), AdapterError> {
+    let outside = lines
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !range.is_some_and(|(start, end)| *index >= start && *index <= end))
+        .map(|(_, line)| *line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let table = outside
+        .parse::<toml::Table>()
+        .map_err(|error| AdapterError::MalformedToml(error.to_string()))?;
+    let Some(servers) = table.get("mcp_servers") else {
+        return Ok(());
     };
-    let rest = rest.trim();
-    if !rest.is_empty() && !rest.starts_with('#') {
-        return None;
+    let servers = servers
+        .as_table()
+        .ok_or(AdapterError::McpServersTomlTable)?;
+    if let Some(name) = names.iter().find(|name| servers.contains_key(*name)) {
+        return Err(AdapterError::ManagedTableOutsideBlock(name.clone()));
     }
-    let segments = toml_key_segments(inner)?;
-    if segments
-        .first()
-        .is_some_and(|segment| segment == "mcp_servers")
-    {
-        if let Some(name) = segments.get(1) {
-            if names.iter().any(|managed| managed == name) {
-                return Some(name.clone());
-            }
-        }
-    }
-    None
+    Ok(())
 }
 
 fn toml_string(value: &str) -> String {
@@ -272,14 +229,7 @@ pub fn codex_config(
     }
     let range = starts.first().zip(ends.first()).map(|(a, b)| (*a, *b));
     let names: Vec<String> = pack.mcp_servers.iter().map(|s| s.name.clone()).collect();
-    for (index, line) in lines.iter().enumerate() {
-        if range.is_some_and(|(start, end)| index >= start && index <= end) {
-            continue;
-        }
-        if let Some(name) = managed_table(line, &names) {
-            return Err(AdapterError::ManagedTableOutsideBlock(name));
-        }
-    }
+    validate_codex_outside_block(&lines, range, &names)?;
     let mut block = vec![START.to_string()];
     for (index, server) in pack.mcp_servers.iter().enumerate() {
         if index > 0 {
@@ -314,7 +264,11 @@ pub fn codex_config(
     } else {
         format!("{normalized}\n\n{block}\n")
     };
-    Ok(Some(output.replace('\n', newline).into_bytes()))
+    let output = output.replace('\n', newline);
+    output
+        .parse::<toml::Table>()
+        .map_err(|error| AdapterError::MalformedToml(error.to_string()))?;
+    Ok(Some(output.into_bytes()))
 }
 
 pub(crate) fn target_for(harness: Harness, env: &crate::Environment) -> Result<PathBuf, String> {

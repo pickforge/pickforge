@@ -2,7 +2,8 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use pickforge_cli::adapters::{codex_config, json_config, Harness, IntegrationPack, McpServerSpec};
-use pickforge_cli::{apply_init, plan_init, Environment, InitRequest};
+use pickforge_cli::init::{ApplyReport, ApplyState};
+use pickforge_cli::{apply_init, plan_init, render, Environment, InitRequest};
 use tempfile::TempDir;
 
 const PUBSPEC: &str = "name: app\ndependencies:\n  flutter:\n    sdk: flutter\n";
@@ -95,6 +96,54 @@ fn nonempty_unowned_state_directory_is_refused() {
 }
 
 #[test]
+fn owned_interruption_artifacts_do_not_block_receipt_recovery() {
+    let (_temp, project, env) = fixture();
+    let request = InitRequest::new(&project);
+    let initial_plan = plan_init(&request, &env).unwrap();
+    let state_dir = Path::new(&initial_plan.report.state_dir);
+    std::fs::create_dir_all(state_dir).unwrap();
+    std::fs::write(state_dir.join(".pickforge-tmp-interrupted"), "partial").unwrap();
+    let recovery = plan_init(&request, &env).unwrap();
+    assert!(apply_init(&recovery, "recovery").changed);
+    let receipt = state_dir.join("project.json");
+    assert!(receipt.is_file());
+    std::fs::rename(
+        &receipt,
+        state_dir.join("project.json.pickforge-backup-interrupted"),
+    )
+    .unwrap();
+    let backup_recovery = plan_init(&request, &env).unwrap();
+    assert!(apply_init(&backup_recovery, "backup-recovery").changed);
+    assert!(receipt.is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_home_and_state_roots_are_resolved_safely() {
+    use std::os::unix::fs::symlink;
+
+    let (temp, project, _) = fixture();
+    let real_home = temp.path().join("real-home");
+    let real_state = temp.path().join("real-state");
+    std::fs::create_dir(&real_home).unwrap();
+    std::fs::create_dir(&real_state).unwrap();
+    let linked_home = temp.path().join("linked-home");
+    let linked_state = temp.path().join("linked-state");
+    symlink(&real_home, &linked_home).unwrap();
+    symlink(&real_state, &linked_state).unwrap();
+    let env = Environment::empty()
+        .with_home_dir(&linked_home)
+        .with_var("PICKFORGE_HOME", &linked_state);
+    let mut request = InitRequest::new(&project);
+    request.pack = pack();
+    request.harnesses = vec![Harness::ClaudeCode];
+    let plan = plan_init(&request, &env).unwrap();
+    assert!(apply_init(&plan, "symlinked").changed);
+    assert!(real_home.join(".claude.json").is_file());
+    assert!(real_state.join("projects").is_dir());
+}
+
+#[test]
 fn json_adapters_create_merge_validate_and_are_equivalent_and_idempotent() {
     let created = json_config(None, &pack(), "config").unwrap().unwrap();
     let created_value: serde_json::Value = serde_json::from_slice(&created).unwrap();
@@ -134,11 +183,15 @@ fn json_adapters_create_merge_validate_and_are_equivalent_and_idempotent() {
     let mut duplicate = pack();
     duplicate.mcp_servers.push(duplicate.mcp_servers[0].clone());
     assert!(json_config(None, &duplicate, "config").is_err());
+    let mut control = pack();
+    control.mcp_servers[0].args.push("bad\u{7f}".into());
+    assert!(codex_config(None, &control).is_err());
 }
 
 #[test]
 fn codex_managed_block_creates_and_preserves_surroundings_and_newline_style() {
     let created = String::from_utf8(codex_config(None, &pack()).unwrap().unwrap()).unwrap();
+    assert!(created.parse::<toml::Table>().is_ok());
     assert!(created.starts_with("# >>> pickforge >>>\n"));
     assert!(created.contains("[mcp_servers.\"pickforge-helper\"]"));
     assert!(created.ends_with("# <<< pickforge <<<\n"));
@@ -158,10 +211,14 @@ fn codex_managed_block_creates_and_preserves_surroundings_and_newline_style() {
         "[mcp_servers.\"pickforge-helper\"]\n",
         "[mcp_servers . 'pickforge-helper'] # foreign\n",
         "[[\"mcp_servers\".'pickforge-helper'.env]]\n",
+        "mcp_servers.\"pickforge-helper\".command = \"foreign\"\n",
+        "mcp_servers = { \"pickforge-helper\" = { command = \"foreign\", args = [] } }\n",
+        "[mcp_servers]\n\"pickforge-helper\" = { command = \"foreign\" }\n",
     ] {
         assert!(codex_config(Some(foreign), &pack()).is_err(), "{foreign}");
     }
     assert!(codex_config(Some("[mcp_servers.\"pickforge-helperx\"]\n"), &pack()).is_ok());
+    assert!(codex_config(Some("not = [valid"), &pack()).is_err());
 }
 
 #[test]
@@ -187,6 +244,38 @@ fn planning_nonempty_pack_is_read_only_and_deduplicates_in_fixed_order() {
 }
 
 #[test]
+fn nonempty_pack_apply_is_byte_and_mtime_stable_on_rerun() {
+    let (_temp, project, env) = fixture();
+    let mut request = InitRequest::new(project);
+    request.pack = pack();
+    let first_plan = plan_init(&request, &env).unwrap();
+    let first = apply_init(&first_plan, "first");
+    assert!(first.changed);
+    assert!(first.backup_paths.is_empty());
+    let snapshots = first_plan
+        .report
+        .actions
+        .iter()
+        .map(|action| {
+            let path = std::path::PathBuf::from(&action.target);
+            (
+                path.clone(),
+                std::fs::read(&path).unwrap(),
+                std::fs::metadata(&path).unwrap().modified().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let second_plan = plan_init(&request, &env).unwrap();
+    let second = apply_init(&second_plan, "second");
+    assert!(!second.changed);
+    assert!(second.backup_paths.is_empty());
+    for (path, bytes, mtime) in snapshots {
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(std::fs::metadata(path).unwrap().modified().unwrap(), mtime);
+    }
+}
+
+#[test]
 fn codex_absolute_home_override_works_without_a_user_home_and_relative_override_refuses() {
     let (temp, project, _) = fixture();
     let mut request = InitRequest::new(&project);
@@ -206,4 +295,22 @@ fn codex_absolute_home_override_works_without_a_user_home_and_relative_override_
         "{error}"
     );
     assert!(!temp.path().join("state").exists());
+}
+
+#[test]
+fn failed_apply_reports_render_residuals_and_backups_without_controls() {
+    let report = ApplyReport {
+        schema_version: 1,
+        outcome: ApplyState::FailedPartial,
+        changed: true,
+        backup_paths: vec!["backup\npath".into()],
+        rollback_residuals: vec!["residual\tpath".into()],
+        error: Some("failed\rreason".into()),
+    };
+    let text = render::render_init_outcome(&report);
+    assert!(text.contains("outcome: failed-partial"), "{text:?}");
+    assert!(text.contains("changed: yes"), "{text:?}");
+    assert!(text.contains("backup\\npath"), "{text:?}");
+    assert!(text.contains("residual\\tpath"), "{text:?}");
+    assert!(text.contains("failed\\rreason"), "{text:?}");
 }
