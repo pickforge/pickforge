@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::adapters::{self, Harness, IntegrationPack};
+use crate::adapters::{self, Harness, IntegrationPack, WorkflowRoot};
 use crate::transaction::{self, FilePlan};
-use crate::{project, state, Environment};
+use crate::{project, state, tools, Environment};
 
 pub const INIT_SCHEMA_VERSION: u32 = 1;
 const MAX_STATE_ARTIFACT_BYTES: u64 = 1024 * 1024;
@@ -263,6 +263,19 @@ pub fn plan_init(request: &InitRequest, env: &Environment) -> Result<InitPlan, I
         .validate()
         .map_err(|error| InitError::Conflicts(error.to_string()))?;
     let harnesses = normalized_harnesses(&request.harnesses);
+    if !harnesses.is_empty() {
+        if let Some(tool) = request
+            .pack
+            .required_tools
+            .iter()
+            .find(|tool| tools::find_on_path(env, tool).is_none())
+        {
+            return Err(InitError::Conflicts(format!(
+                "{} requires {tool} on PATH; install the Dart/Flutter SDK or fix PATH, then run `pickforge doctor`",
+                request.pack.name
+            )));
+        }
+    }
     let mut files = Vec::new();
     let mut actions = Vec::new();
     let mut conflicts = Vec::new();
@@ -297,10 +310,15 @@ pub fn plan_init(request: &InitRequest, env: &Environment) -> Result<InitPlan, I
                 .as_deref()
                 .map(|bytes| std::str::from_utf8(bytes).expect("preflight validated UTF-8"));
             let transformed = match harness {
-                Harness::ClaudeCode => {
-                    adapters::json_config(text, &request.pack, "Claude Code config")
+                Harness::ClaudeCode => adapters::json_config(
+                    text,
+                    &request.pack,
+                    Harness::ClaudeCode,
+                    "Claude Code config",
+                ),
+                Harness::Pi => {
+                    adapters::json_config(text, &request.pack, Harness::Pi, "Pi MCP config")
                 }
-                Harness::Pi => adapters::json_config(text, &request.pack, "Pi MCP config"),
                 Harness::Codex => adapters::codex_config(text, &request.pack),
             };
             match transformed {
@@ -327,6 +345,38 @@ pub fn plan_init(request: &InitRequest, env: &Environment) -> Result<InitPlan, I
                 }
                 Ok(None) => {}
                 Err(error) => conflicts.push(format!("{}: {error}", snapshot.path().display())),
+            }
+        }
+    }
+
+    for root in [WorkflowRoot::ClaudeSkills, WorkflowRoot::SharedAgentSkills] {
+        for workflow in &request.pack.workflows {
+            if !workflow
+                .targets
+                .iter()
+                .any(|target| target.root == root && harnesses.contains(&target.harness))
+            {
+                continue;
+            }
+            let target_path = match adapters::workflow_target(root, &workflow.name, env) {
+                Ok(path) => path,
+                Err(error) => {
+                    conflicts.push(error);
+                    continue;
+                }
+            };
+            match transaction::plan_file(target_path, workflow.content.clone(), true) {
+                Ok((file, _)) => {
+                    actions.push(action(
+                        file.path(),
+                        &file,
+                        format!("Install {} workflow", workflow.name),
+                        vec![],
+                        None,
+                    ));
+                    files.push(file);
+                }
+                Err(error) => conflicts.push(error.to_string()),
             }
         }
     }
