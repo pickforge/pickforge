@@ -275,6 +275,7 @@ fn init_success_and_noop_output_contracts_are_stable() {
     assert!(stdout.contains("changed: no"), "{stdout}");
 }
 
+#[cfg(unix)]
 #[test]
 fn init_human_output_escapes_path_control_characters() {
     let temp = TempDir::new().unwrap();
