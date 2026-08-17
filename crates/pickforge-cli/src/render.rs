@@ -10,6 +10,18 @@ fn label(status: CheckStatus) -> &'static str {
     }
 }
 
+fn terminal_safe(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_control() {
+            escaped.extend(character.escape_default());
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
+}
+
 /// Pretty JSON with a trailing newline.
 pub fn render_json(report: &DoctorReport) -> String {
     let mut out =
@@ -20,32 +32,35 @@ pub fn render_json(report: &DoctorReport) -> String {
 
 pub fn render_text(report: &DoctorReport) -> String {
     let mut out = String::from("pickforge doctor\n");
-    out.push_str(&format!("project: {}\n", report.project.path));
+    out.push_str(&format!(
+        "project: {}\n",
+        terminal_safe(&report.project.path)
+    ));
     out.push_str(&format!(
         "framework: {}\n",
-        report.project.framework.as_deref().unwrap_or("unknown")
+        terminal_safe(report.project.framework.as_deref().unwrap_or("unknown"))
     ));
     out.push_str(&format!(
         "project id: {}\n",
-        report.project.project_id.as_deref().unwrap_or("unknown")
+        terminal_safe(report.project.project_id.as_deref().unwrap_or("unknown"))
     ));
     out.push_str(&format!(
         "state dir: {}\n\n",
-        report.project.state_dir.as_deref().unwrap_or("unresolved")
+        terminal_safe(report.project.state_dir.as_deref().unwrap_or("unresolved"))
     ));
 
     for check in &report.checks {
         out.push_str(&format!(
             "[{}] {}: {}\n",
             label(check.status),
-            check.id,
-            check.summary
+            terminal_safe(&check.id),
+            terminal_safe(&check.summary)
         ));
         if let Some(detail) = &check.detail {
-            out.push_str(&format!("       {detail}\n"));
+            out.push_str(&format!("       {}\n", terminal_safe(detail)));
         }
         if let Some(remediation) = &check.remediation {
-            out.push_str(&format!("       fix: {remediation}\n"));
+            out.push_str(&format!("       fix: {}\n", terminal_safe(remediation)));
         }
     }
 

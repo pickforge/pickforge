@@ -8,6 +8,17 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+fn normalize_key(key: String) -> String {
+    #[cfg(windows)]
+    {
+        key.to_ascii_uppercase()
+    }
+    #[cfg(not(windows))]
+    {
+        key
+    }
+}
+
 /// The ambient inputs `doctor` is allowed to read: environment variables and
 /// the user's home directory.
 #[derive(Debug, Clone, Default)]
@@ -21,7 +32,7 @@ impl Environment {
     pub fn from_process() -> Self {
         Self {
             vars: std::env::vars_os()
-                .filter_map(|(key, value)| Some((key.into_string().ok()?, value)))
+                .filter_map(|(key, value)| Some((normalize_key(key.into_string().ok()?), value)))
                 .collect(),
             home_dir: directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()),
         }
@@ -34,7 +45,7 @@ impl Environment {
 
     #[must_use]
     pub fn with_var(mut self, key: impl Into<String>, value: impl Into<OsString>) -> Self {
-        self.vars.insert(key.into(), value.into());
+        self.vars.insert(normalize_key(key.into()), value.into());
         self
     }
 
@@ -45,7 +56,7 @@ impl Environment {
     }
 
     pub fn var(&self, key: &str) -> Option<&OsString> {
-        self.vars.get(key)
+        self.vars.get(&normalize_key(key.to_string()))
     }
 
     /// `PATH` as searched for executables; `None` when unset.

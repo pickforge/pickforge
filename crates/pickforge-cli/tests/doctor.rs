@@ -21,12 +21,20 @@ fn fake_bin(root: &Path, tools: &[&str]) -> PathBuf {
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     for tool in tools {
-        let path = bin.join(tool);
-        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
-        #[cfg(unix)]
+        #[cfg(windows)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let path = bin.join(format!("{tool}.EXE"));
+            std::fs::copy(std::env::current_exe().unwrap(), path).unwrap();
+        }
+        #[cfg(not(windows))]
+        {
+            let path = bin.join(tool);
+            std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
         }
     }
     bin
@@ -35,9 +43,12 @@ fn fake_bin(root: &Path, tools: &[&str]) -> PathBuf {
 fn env_with(root: &Path, tools: &[&str]) -> Environment {
     let home = root.join("home");
     std::fs::create_dir_all(&home).unwrap();
-    Environment::empty()
+    let env = Environment::empty()
         .with_var("PATH", fake_bin(root, tools))
-        .with_home_dir(home)
+        .with_home_dir(home);
+    #[cfg(windows)]
+    let env = env.with_var("PATHEXT", ".EXE");
+    env
 }
 
 fn all_tools() -> Vec<&'static str> {
@@ -131,9 +142,15 @@ fn a_flutter_named_dependency_without_the_sdk_entry_is_not_flutter() {
 
     let report = diagnose(&project_dir, &env_with(temp.path(), &all_tools()));
 
-    assert_eq!(
-        check(&report, "project.framework").status,
-        CheckStatus::Fail
+    let framework = check(&report, "project.framework");
+    assert_eq!(framework.status, CheckStatus::Fail);
+    assert!(
+        framework
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("no dependencies.flutter.sdk: flutter entry"),
+        "{framework:?}"
     );
 }
 
@@ -368,7 +385,7 @@ fn doctor_never_creates_the_state_directories() {
 fn project_id_matches_the_picklab_algorithm() {
     // Cross-checked against PickLab's TypeScript `deriveProjectId`.
     assert_eq!(
-        project::derive_project_id(Path::new("/tmp/My App")),
+        project::derive_project_id(Path::new("/tmp/My App")).unwrap(),
         "my-app-a2b5d505f3ca90ae"
     );
 }
@@ -376,12 +393,12 @@ fn project_id_matches_the_picklab_algorithm() {
 #[test]
 fn long_and_unslugabble_basenames_stay_within_the_id_contract() {
     let long = format!("/tmp/{}", "a".repeat(80));
-    let id = project::derive_project_id(Path::new(&long));
+    let id = project::derive_project_id(Path::new(&long)).unwrap();
     let (slug, hash) = id.rsplit_once('-').unwrap();
     assert_eq!(slug.len(), 40);
     assert_eq!(hash.len(), 16);
 
-    let fallback = project::derive_project_id(Path::new("/tmp/___"));
+    let fallback = project::derive_project_id(Path::new("/tmp/___")).unwrap();
     assert!(fallback.starts_with("project-"), "{fallback}");
 }
 
@@ -400,6 +417,102 @@ fn a_symlinked_project_path_derives_the_same_id() {
 
     assert_eq!(direct.project.project_id, through_link.project.project_id);
     assert_eq!(direct.project.path, through_link.project.path);
+}
+
+#[cfg(unix)]
+#[test]
+fn dot_segments_are_resolved_before_symlinks_to_match_typescript() {
+    let temp = TempDir::new().unwrap();
+    let nested = temp.path().join("nested");
+    let symlink_target = nested.join("real");
+    let nested_other = nested.join("other");
+    let expected_project = temp.path().join("other");
+    write_project(&symlink_target, Some(FLUTTER_PUBSPEC));
+    write_project(&nested_other, Some(FLUTTER_PUBSPEC));
+    write_project(&expected_project, Some(FLUTTER_PUBSPEC));
+    let link = temp.path().join("link");
+    std::os::unix::fs::symlink(&symlink_target, &link).unwrap();
+
+    let env = env_with(temp.path(), &all_tools());
+    let through_dot_segment = diagnose(&link.join("..").join("other"), &env);
+    let expected = diagnose(&expected_project, &env);
+
+    assert_eq!(through_dot_segment.project.path, expected.project.path);
+    assert_eq!(
+        through_dot_segment.project.project_id,
+        expected.project.project_id
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_project_paths_cannot_collide_in_state_storage() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let temp = TempDir::new().unwrap();
+    let first = temp.path().join(OsString::from_vec(b"app-\xfe".to_vec()));
+    let second = temp.path().join(OsString::from_vec(b"app-\xff".to_vec()));
+    write_project(&first, Some(FLUTTER_PUBSPEC));
+    write_project(&second, Some(FLUTTER_PUBSPEC));
+    let env = env_with(temp.path(), &all_tools());
+
+    let first_report = diagnose(&first, &env);
+    let second_report = diagnose(&second, &env);
+
+    for report in [first_report, second_report] {
+        assert!(!report.ready);
+        assert_eq!(report.project.project_id, None);
+        assert_eq!(report.project.state_dir, None);
+        let storage = check(&report, "storage.state");
+        assert_eq!(storage.status, CheckStatus::Fail);
+        assert!(storage.detail.as_deref().unwrap().contains("valid UTF-8"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn text_output_escapes_path_control_characters() {
+    let temp = TempDir::new().unwrap();
+    let project_dir = temp.path().join("app-\u{1b}]0;spoof\u{7}");
+    write_project(&project_dir, Some(FLUTTER_PUBSPEC));
+
+    let report = diagnose(&project_dir, &env_with(temp.path(), &all_tools()));
+    let text = pickforge_cli::render::render_text(&report);
+
+    assert!(!text.contains('\u{1b}'), "{text:?}");
+    assert!(!text.contains('\u{7}'), "{text:?}");
+    assert!(text.contains("\\u{1b}"), "{text:?}");
+    assert!(text.contains("\\u{7}"), "{text:?}");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_canonical_paths_match_node_without_a_verbatim_prefix() {
+    let temp = TempDir::new().unwrap();
+    let canonical = project::canonical_project_path(temp.path());
+
+    assert!(!canonical.to_string_lossy().starts_with(r"\\?\"));
+    assert!(project::derive_project_id(&canonical).is_ok());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_environment_keys_are_case_insensitive() {
+    let temp = TempDir::new().unwrap();
+    let project_dir = temp.path().join("app");
+    write_project(&project_dir, Some(FLUTTER_PUBSPEC));
+    let state_root = temp.path().join("state");
+    let env = Environment::empty()
+        .with_var("Path", fake_bin(temp.path(), &all_tools()))
+        .with_var("pathext", ".EXE")
+        .with_var("pickforge_home", &state_root)
+        .with_home_dir(temp.path().join("unused-home"));
+
+    let report = diagnose(&project_dir, &env);
+
+    assert!(report.ready, "{report:?}");
+    assert!(Path::new(report.project.state_dir.as_deref().unwrap()).starts_with(state_root));
 }
 
 #[test]

@@ -7,7 +7,9 @@
 use std::path::Path;
 
 use crate::env::Environment;
-use crate::project::{canonical_project_path, derive_project_id, detect_flutter, FrameworkError};
+use crate::project::{
+    canonical_project_path, derive_project_id, detect_flutter, FrameworkError, ProjectIdentityError,
+};
 use crate::report::{Check, CheckStatus, DoctorReport, ProjectInfo};
 use crate::state::{project_state_dir, state_root, StateError, HOME_ENV_VAR};
 
@@ -54,17 +56,20 @@ pub fn diagnose(project_dir: &Path, env: &Environment) -> DoctorReport {
     let root = state_root(env);
     checks.push(state_check(&root, &project_id));
 
-    let state_dir = root.as_ref().ok().map(|root| {
-        project_state_dir(root, &project_id)
-            .to_string_lossy()
-            .to_string()
-    });
+    let state_dir = match (&root, &project_id) {
+        (Ok(root), Ok(project_id)) => Some(
+            project_state_dir(root, project_id)
+                .to_string_lossy()
+                .to_string(),
+        ),
+        _ => None,
+    };
 
     DoctorReport::new(
         ProjectInfo {
             path: canonical.to_string_lossy().to_string(),
             framework: framework.is_ok().then(|| "flutter".to_string()),
-            project_id: Some(project_id),
+            project_id: project_id.ok(),
             state_dir,
         },
         checks,
@@ -88,10 +93,10 @@ fn directory_check(canonical: &Path, error: Option<&std::io::Error>, is_director
         (Some(error), _) => Check::new(
             "project.directory",
             CheckStatus::Fail,
-            format!("project directory not found: {display}"),
+            format!("project directory could not be accessed: {display}"),
         )
         .with_detail(error.to_string())
-        .with_remediation("point --project-dir at an existing Flutter project directory"),
+        .with_remediation("point --project-dir at an accessible Flutter project directory"),
     }
 }
 
@@ -171,9 +176,19 @@ fn harness_aggregate_check(found: &[&str]) -> Check {
     }
 }
 
-fn state_check(root: &Result<std::path::PathBuf, StateError>, project_id: &str) -> Check {
-    match root {
-        Ok(root) => Check::new(
+fn state_check(
+    root: &Result<std::path::PathBuf, StateError>,
+    project_id: &Result<String, ProjectIdentityError>,
+) -> Check {
+    match (root, project_id) {
+        (_, Err(error)) => Check::new(
+            "storage.state",
+            CheckStatus::Fail,
+            "project state directory could not be resolved",
+        )
+        .with_detail(error.to_string())
+        .with_remediation("move or rename the project to a path that is valid UTF-8"),
+        (Ok(root), Ok(project_id)) => Check::new(
             "storage.state",
             CheckStatus::Pass,
             format!(
@@ -182,7 +197,7 @@ fn state_check(root: &Result<std::path::PathBuf, StateError>, project_id: &str) 
             ),
         )
         .with_detail("not created; doctor never writes"),
-        Err(error @ StateError::RelativeOverride(_)) => Check::new(
+        (Err(error @ StateError::RelativeOverride(_)), Ok(_)) => Check::new(
             "storage.state",
             CheckStatus::Fail,
             "project state directory could not be resolved",
@@ -191,7 +206,7 @@ fn state_check(root: &Result<std::path::PathBuf, StateError>, project_id: &str) 
         .with_remediation(format!(
             "set {HOME_ENV_VAR} to an absolute path, or unset it"
         )),
-        Err(error @ StateError::NoHomeDirectory) => Check::new(
+        (Err(error @ StateError::NoHomeDirectory), Ok(_)) => Check::new(
             "storage.state",
             CheckStatus::Fail,
             "project state directory could not be resolved",

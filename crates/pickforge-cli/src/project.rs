@@ -2,7 +2,6 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -32,12 +31,54 @@ fn lexically_absolute(path: &Path) -> PathBuf {
     resolved
 }
 
+#[cfg(windows)]
+fn normalize_windows_canonical_path(path: PathBuf) -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    const VERBATIM_PREFIX: &[u16] = &[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+    const VERBATIM_UNC_PREFIX: &[u16] = &[
+        b'\\' as u16,
+        b'\\' as u16,
+        b'?' as u16,
+        b'\\' as u16,
+        b'U' as u16,
+        b'N' as u16,
+        b'C' as u16,
+        b'\\' as u16,
+    ];
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let normalized = if wide.starts_with(VERBATIM_UNC_PREFIX) {
+        [vec![b'\\' as u16, b'\\' as u16], wide[8..].to_vec()].concat()
+    } else if wide.starts_with(VERBATIM_PREFIX)
+        && wide.get(4).is_some_and(|unit| {
+            (*unit >= u16::from(b'A') && *unit <= u16::from(b'Z'))
+                || (*unit >= u16::from(b'a') && *unit <= u16::from(b'z'))
+        })
+        && wide.get(5) == Some(&u16::from(b':'))
+    {
+        wide[4..].to_vec()
+    } else {
+        return path;
+    };
+
+    PathBuf::from(OsString::from_wide(&normalized))
+}
+
+#[cfg(not(windows))]
+fn normalize_windows_canonical_path(path: PathBuf) -> PathBuf {
+    path
+}
+
 /// Canonical form of a project path used for stable project-id derivation.
-/// Resolves symlinks so a project reached through different paths keeps one
-/// identity; falls back to the lexically resolved path when the directory does
-/// not exist, so id derivation never fails.
+/// Resolves `.`/`..` before symlinks to match TypeScript's
+/// `realpath(path.resolve(projectDir))`, then removes Windows' verbatim prefix.
+/// Falls back to the lexical path when the directory does not exist.
 pub fn canonical_project_path(project_dir: &Path) -> PathBuf {
-    std::fs::canonicalize(project_dir).unwrap_or_else(|_| lexically_absolute(project_dir))
+    let absolute = lexically_absolute(project_dir);
+    let canonical = std::fs::canonicalize(&absolute).unwrap_or(absolute);
+    normalize_windows_canonical_path(canonical)
 }
 
 fn sanitize_slug(name: &str) -> String {
@@ -54,20 +95,30 @@ fn sanitize_slug(name: &str) -> String {
     slug.chars().take(PROJECT_ID_SLUG_LENGTH).collect()
 }
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ProjectIdentityError {
+    #[error("project path is not valid UTF-8 and cannot match the TypeScript project-id contract")]
+    NonUtf8Path,
+}
+
 /// Stable per-project id: a readable slug of the directory basename plus the
 /// leading hex of a SHA-256 digest over the canonical path. Must stay
-/// byte-identical to PickLab's TypeScript `deriveProjectId`.
-pub fn derive_project_id(canonical_path: &Path) -> String {
-    let digest = Sha256::digest(canonical_path.to_string_lossy().as_bytes());
+/// byte-identical to PickLab's TypeScript `deriveProjectId`. Paths that cannot
+/// be represented by that string-based contract fail instead of colliding.
+pub fn derive_project_id(canonical_path: &Path) -> Result<String, ProjectIdentityError> {
+    let canonical = canonical_path
+        .to_str()
+        .ok_or(ProjectIdentityError::NonUtf8Path)?;
+    let digest = Sha256::digest(canonical.as_bytes());
     let hash: String = format!("{digest:x}")
         .chars()
         .take(PROJECT_ID_HASH_LENGTH)
         .collect();
     let basename = canonical_path
         .file_name()
-        .map(|name| name.to_string_lossy().to_string())
+        .and_then(|name| name.to_str())
         .unwrap_or_default();
-    format!("{}-{hash}", sanitize_slug(&basename))
+    Ok(format!("{}-{hash}", sanitize_slug(basename)))
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -82,24 +133,6 @@ pub enum FrameworkError {
     NotFlutter,
 }
 
-#[derive(Debug, Deserialize)]
-struct Pubspec {
-    #[serde(default)]
-    dependencies: Option<Dependencies>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Dependencies {
-    #[serde(default)]
-    flutter: Option<FlutterDependency>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FlutterDependency {
-    #[serde(default)]
-    sdk: Option<String>,
-}
-
 /// Detect a Flutter project by parsing `pubspec.yaml` structurally: only a
 /// `dependencies.flutter.sdk: flutter` entry counts.
 pub fn detect_flutter(project_dir: &Path) -> Result<(), FrameworkError> {
@@ -112,15 +145,15 @@ pub fn detect_flutter(project_dir: &Path) -> Result<(), FrameworkError> {
         Err(error) => return Err(FrameworkError::PubspecUnreadable(error.to_string())),
     };
 
-    let pubspec: Pubspec = serde_yaml_ng::from_str(&raw)
+    let pubspec: serde_yaml_ng::Value = serde_yaml_ng::from_str(&raw)
         .map_err(|error| FrameworkError::PubspecMalformed(error.to_string()))?;
-
     let sdk = pubspec
-        .dependencies
-        .and_then(|dependencies| dependencies.flutter)
-        .and_then(|flutter| flutter.sdk);
+        .get("dependencies")
+        .and_then(|dependencies| dependencies.get("flutter"))
+        .and_then(|flutter| flutter.get("sdk"))
+        .and_then(serde_yaml_ng::Value::as_str);
 
-    if sdk.as_deref() == Some("flutter") {
+    if sdk == Some("flutter") {
         Ok(())
     } else {
         Err(FrameworkError::NotFlutter)

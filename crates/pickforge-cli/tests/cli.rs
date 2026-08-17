@@ -11,12 +11,20 @@ fn fake_bin(root: &Path, tools: &[&str]) -> PathBuf {
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     for tool in tools {
-        let path = bin.join(tool);
-        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
-        #[cfg(unix)]
+        #[cfg(windows)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let path = bin.join(format!("{tool}.EXE"));
+            std::fs::copy(std::env::current_exe().unwrap(), path).unwrap();
+        }
+        #[cfg(not(windows))]
+        {
+            let path = bin.join(tool);
+            std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
         }
     }
     bin
@@ -30,6 +38,8 @@ fn pickforge(root: &Path, tools: &[&str]) -> Command {
         .env_clear()
         .env("PATH", fake_bin(root, tools))
         .env("PICKFORGE_HOME", root.join("state"));
+    #[cfg(windows)]
+    command.env("PATHEXT", ".EXE");
     command
 }
 
