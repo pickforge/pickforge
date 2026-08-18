@@ -272,8 +272,9 @@ fn every_supported_secret_shape_is_absent_from_both_outputs() {
         std::fs::read_to_string(result.evidence_path).unwrap(),
         std::fs::read_to_string(result.report_path).unwrap(),
     ];
+    assert!(outputs[0].contains("[REDACTED]"), "{}", outputs[0]);
+    assert!(outputs[1].contains("\\[REDACTED\\]"), "{}", outputs[1]);
     for output in &outputs {
-        assert!(output.contains("[REDACTED]"), "{output}");
         assert!(
             output.contains("safe-before") && output.contains("safe-after"),
             "{output}"

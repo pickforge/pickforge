@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::{format_description, OffsetDateTime};
 
-use crate::{adapters::Harness, project, state, Environment};
+use crate::{adapters::Harness, init::INIT_SCHEMA_VERSION, project, state, Environment};
 
 pub const EVIDENCE_SCHEMA_VERSION: u32 = 1;
 pub const MAX_INPUT_BYTES: u64 = 1024 * 1024;
@@ -263,8 +263,10 @@ pub fn record_at(
             format!("{base_id}-{collision}")
         };
         let final_dir = runs.join(&run_id);
-        if final_dir.exists() {
-            continue;
+        match fs::symlink_metadata(&final_dir) {
+            Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(EvidenceError::Io(error.to_string())),
         }
         let temp_dir = runs.join(format!(
             ".pickforge-evidence-{run_id}-{}",
@@ -301,7 +303,8 @@ pub fn record_at(
                     if matches!(
                         e.kind(),
                         io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty
-                    ) =>
+                    ) || (e.kind() == io::ErrorKind::PermissionDenied
+                        && fs::symlink_metadata(&final_dir).is_ok()) =>
                 {
                     let _ = fs::remove_dir_all(&temp_dir);
                     continue;
@@ -364,7 +367,7 @@ fn validate_receipt(
     }
     let receipt: Receipt =
         serde_json::from_slice(&bytes).map_err(|e| receipt_error(e.to_string()))?;
-    if receipt.schema_version != EVIDENCE_SCHEMA_VERSION
+    if receipt.schema_version != INIT_SCHEMA_VERSION
         || receipt.project_path != project_path
         || receipt.project_id != project_id
         || receipt.pack.name != "pickforge-flutter"
@@ -528,7 +531,7 @@ fn redact_secrets(value: &str) -> String {
         Regex::new(r#"(?i)(\bauthorization\b\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|(?:bearer\s+)?[^\s,;\"']+)"#).unwrap(),
         Regex::new(r#"(?i)(\b(?:set-cookie|cookie)\b\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\r\n]+)"#).unwrap(),
         Regex::new(r#"(?i)(\b(?:api[_-]?key|token|secret|password|passwd)\b\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;\"']+)"#).unwrap(),
-        Regex::new(r#"(?i)(\"(?:api[_-]?key|token|secret|password|authorization|cookie|set-cookie)\"\s*:\s*\")[^\"]*(\")"#).unwrap(),
+        Regex::new(r#"(?i)(\"(?:api[_-]?key|token|secret|password|passwd|authorization|cookie|set-cookie)\"\s*:\s*\")[^\"]*(\")"#).unwrap(),
         Regex::new(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b").unwrap(),
         Regex::new(r"\b(?:gh[pousr]_[A-Za-z0-9]{8,}|sk-[A-Za-z0-9_-]{8,}|AKIA[A-Z0-9]{16})\b").unwrap(),
     ]);
@@ -812,7 +815,7 @@ fn normalize_markdown(value: &str) -> String {
         }
         escaped.push(character);
     }
-    escaped.replace("\\[REDACTED\\]", "[REDACTED]")
+    escaped
 }
 fn render_report(doc: &EvidenceDocument<'_>) -> String {
     let outcome = match doc.outcome {
@@ -984,6 +987,17 @@ mod tests {
 
         let header = redact_secrets("Cookie: first=secret; second=also-secret");
         assert!(!header.contains("secret"), "{header}");
+
+        let json = redact_secrets(r#"{"passwd":"json-secret"}"#);
+        assert!(!json.contains("json-secret"), "{json}");
+    }
+
+    #[test]
+    fn redaction_marker_cannot_become_a_markdown_link() {
+        assert_eq!(
+            normalize_markdown("[REDACTED](https://evil.example)"),
+            "\\[REDACTED\\](https://evil.example)"
+        );
     }
 
     #[test]
