@@ -31,8 +31,8 @@ fn home_from_vars(vars: &BTreeMap<String, OsString>) -> Option<PathBuf> {
     })
 }
 
-/// The ambient inputs `doctor` is allowed to read: environment variables and
-/// the user's home directory.
+/// The ambient inputs CLI commands are allowed to read: environment variables
+/// and the user's home directory.
 #[derive(Debug, Clone, Default)]
 pub struct Environment {
     vars: BTreeMap<String, OsString>,
@@ -105,9 +105,23 @@ mod tests {
         let profile = PathBuf::from(r"C:\profile");
         let home = PathBuf::from(r"D:\home");
         let vars = BTreeMap::from([
-            ("USERPROFILE".into(), profile.clone().into()),
-            ("HOME".into(), home.into()),
+            (normalize_key("UserProfile".into()), profile.clone().into()),
+            (normalize_key("Home".into()), home.into()),
         ]);
         assert_eq!(home_from_vars(&vars), Some(profile));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn relative_userprofile_falls_through_to_home() {
+        let home = PathBuf::from(r"D:\home");
+        let vars = BTreeMap::from([
+            (
+                normalize_key("UserProfile".into()),
+                OsString::from("relative"),
+            ),
+            (normalize_key("Home".into()), home.clone().into()),
+        ]);
+        assert_eq!(home_from_vars(&vars), Some(home));
     }
 }
