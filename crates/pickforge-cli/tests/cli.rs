@@ -435,6 +435,7 @@ fn evidence_record_supports_stdin_path_human_json_and_errors() {
         "{stderr}"
     );
 
+    std::fs::create_dir_all(temp.path().join("home")).unwrap();
     pickforge(temp.path(), &["dart"])
         .args([
             "init",
