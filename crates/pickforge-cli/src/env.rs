@@ -19,6 +19,14 @@ fn normalize_key(key: String) -> String {
     }
 }
 
+fn collect_vars(
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+) -> BTreeMap<String, OsString> {
+    vars.into_iter()
+        .filter_map(|(key, value)| Some((normalize_key(key.into_string().ok()?), value)))
+        .collect()
+}
+
 fn home_from_vars(vars: &BTreeMap<String, OsString>) -> Option<PathBuf> {
     #[cfg(windows)]
     const HOME_KEYS: [&str; 2] = ["USERPROFILE", "HOME"];
@@ -42,9 +50,7 @@ pub struct Environment {
 impl Environment {
     /// The real process environment.
     pub fn from_process() -> Self {
-        let vars = std::env::vars_os()
-            .filter_map(|(key, value)| Some((normalize_key(key.into_string().ok()?), value)))
-            .collect();
+        let vars = collect_vars(std::env::vars_os());
         let home_dir = home_from_vars(&vars)
             .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()));
         Self { vars, home_dir }
@@ -104,9 +110,9 @@ mod tests {
     fn userprofile_precedes_home_on_windows() {
         let profile = PathBuf::from(r"C:\profile");
         let home = PathBuf::from(r"D:\home");
-        let vars = BTreeMap::from([
-            (normalize_key("UserProfile".into()), profile.clone().into()),
-            (normalize_key("Home".into()), home.into()),
+        let vars = collect_vars([
+            (OsString::from("UserProfile"), profile.clone().into()),
+            (OsString::from("Home"), home.into()),
         ]);
         assert_eq!(home_from_vars(&vars), Some(profile));
     }
@@ -115,12 +121,9 @@ mod tests {
     #[test]
     fn relative_userprofile_falls_through_to_home() {
         let home = PathBuf::from(r"D:\home");
-        let vars = BTreeMap::from([
-            (
-                normalize_key("UserProfile".into()),
-                OsString::from("relative"),
-            ),
-            (normalize_key("Home".into()), home.clone().into()),
+        let vars = collect_vars([
+            (OsString::from("UserProfile"), OsString::from("relative")),
+            (OsString::from("Home"), home.clone().into()),
         ]);
         assert_eq!(home_from_vars(&vars), Some(home));
     }
