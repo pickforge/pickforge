@@ -40,9 +40,10 @@ GitHub release description, then reset it after the release is published.
   Flutter workflow skill into Claude's skill root and/or the shared Codex/Pi
   agent-skill root. It requires discoverable `dart` but never executes it; the
   default base pack and every release surface remain unchanged.
-- Raised the vulnerable `fast-uri` and `hono` overrides, plus lockfile
-  resolutions for both `brace-expansion` majors, `fast-uri`, `hono`,
-  `ip-address`, and `nanoid`, to patched releases.
+- Raised lockfile resolutions for both `brace-expansion` majors,
+  `ip-address`, and `nanoid` to patched releases. The SDK v2 migration removes
+  the former Express/Hono dependency stack, so the obsolete `body-parser`,
+  `fast-uri`, and `hono` overrides and Hono advisory suppression are gone.
 - Added a Cargo workspace (`crates/pickforge-cli`, `Cargo.lock` committed) and
   a `rust` CI matrix for `ubuntu-latest` and `windows-latest` (fmt, clippy `-D
   warnings`, tests). The Bun job, its pinned Bun version, and all release
@@ -75,7 +76,7 @@ GitHub release description, then reset it after the release is published.
 ### Not tested yet
 
 - MCP v2 validation uses protocol fixtures, not proprietary client binaries.
-  The full normal suite reached 1,092 passing tests with 44 skipped, but eight
+  The full normal suite reached 1,097 passing tests with 44 skipped, but eight
   desktop CLI tests could not start Xvfb in this environment; coverage has the
   same Xvfb limitation and did not complete.
 - macOS for the Rust binary.

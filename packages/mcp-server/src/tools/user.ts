@@ -28,6 +28,22 @@ const MODERN_RELAY_GUIDANCE =
   "the question to the user in your conversation, then retry this tool " +
   "after receiving the answer.";
 
+function toolDescription(era: ServerContext["era"]): string {
+  return (
+    (era === "modern"
+      ? "Prepare a question for the human user. This modern MCP path " +
+        "returns relay-and-retry guidance instead of waiting for an answer. "
+      : "Ask the human user a question and wait for the answer. ") +
+    "Use this when you are blocked on something only a human can provide: " +
+    "a judgment call, a license acceptance, a click you cannot perform, " +
+    "or confirmation that an out-of-band step is done. SECURITY: never " +
+    "request passwords, API keys, or tokens through this tool — ask " +
+    "the user to enter them directly through an explicit writable VNC " +
+    "control session, or into the environment, then confirm with kind " +
+    '"confirm".'
+  );
+}
+
 export function registerUserTools(
   server: McpServer,
   serverContext: ServerContext,
@@ -36,15 +52,7 @@ export function registerUserTools(
     "request_user_input",
     {
       title: "Ask the user",
-      description:
-        "Ask the human user a question and wait for the answer. Use this " +
-        "when you are blocked on something only a human can provide: a " +
-        "judgment call, a license acceptance, a click you cannot perform, " +
-        "or confirmation that an out-of-band step is done. SECURITY: never " +
-        "request passwords, API keys, or tokens through this tool — ask " +
-        "the user to enter them directly through an explicit writable VNC " +
-        "control session, or into the environment, then confirm with kind " +
-        '"confirm".',
+      description: toolDescription(serverContext.era),
       inputSchema: {
         question: z.string().min(1).describe("The question to put to the user"),
         kind: z

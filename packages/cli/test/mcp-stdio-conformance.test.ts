@@ -53,6 +53,7 @@ async function runWire(messages: readonly Record<string, unknown>[]): Promise<{
     { resolve: (response: RpcResponse) => void; reject: (error: Error) => void }
   >();
   let stderr = "";
+  let stdoutError: Error | undefined;
   child.stderr.on("data", (chunk: Buffer) => {
     stderr += chunk.toString();
   });
@@ -61,8 +62,8 @@ async function runWire(messages: readonly Record<string, unknown>[]): Promise<{
       const response = JSON.parse(line) as RpcResponse;
       pending.get(response.id)?.resolve(response);
     } catch (error) {
-      const parseError = error instanceof Error ? error : new Error(String(error));
-      for (const waiter of pending.values()) waiter.reject(parseError);
+      stdoutError = error instanceof Error ? error : new Error(String(error));
+      for (const waiter of pending.values()) waiter.reject(stdoutError);
     }
   });
 
@@ -105,6 +106,7 @@ async function runWire(messages: readonly Record<string, unknown>[]): Promise<{
       "MCP process did not exit after EOF",
     );
     expect(status).toBe(0);
+    if (stdoutError !== undefined) throw stdoutError;
     return { responses, stderr, elapsedMs: Date.now() - started };
   } catch (error) {
     await terminate(child);

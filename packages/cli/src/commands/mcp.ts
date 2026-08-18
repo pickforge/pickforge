@@ -5,6 +5,7 @@ import {
 } from "@modelcontextprotocol/server/stdio";
 import { createMcpServer } from "@pickforge/picklab-mcp-server";
 
+// serveStdio owns `onclose`, so observe shutdown by wrapping close instead.
 class ClosingStdioServerTransport extends StdioServerTransport {
   constructor(private readonly onClosed: () => void) {
     super();
