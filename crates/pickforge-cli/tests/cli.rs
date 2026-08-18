@@ -424,7 +424,9 @@ fn evidence_record_supports_stdin_path_human_json_and_errors() {
         .assert()
         .code(1);
     let stderr = String::from_utf8_lossy(&missing_receipt.get_output().stderr);
-    let expected_receipt = temp.path().join("state/projects");
+    let expected_receipt = std::fs::canonicalize(temp.path())
+        .unwrap()
+        .join("state/projects");
     assert!(
         stderr.contains(&expected_receipt.to_string_lossy().into_owned())
             && stderr.contains("project.json"),
