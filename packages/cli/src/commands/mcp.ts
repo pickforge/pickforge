@@ -1,23 +1,36 @@
 import {
   serveStdio,
   StdioServerTransport,
+  type StdioServerHandle,
 } from "@modelcontextprotocol/server/stdio";
 import { createMcpServer } from "@pickforge/picklab-mcp-server";
 
 class ClosingStdioServerTransport extends StdioServerTransport {
-  onClosed?: () => void;
+  constructor(private readonly onClosed: () => void) {
+    super();
+  }
 
   override async close(): Promise<void> {
     await super.close();
-    this.onClosed?.();
+    this.onClosed();
   }
 }
 
 export async function runMcpServe(): Promise<number> {
   return new Promise<number>((resolve) => {
-    const transport = new ClosingStdioServerTransport();
     let settled = false;
-    const handle = serveStdio(
+    let handle: StdioServerHandle | undefined;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      process.stdin.off("end", finish);
+      process.stdin.off("close", finish);
+      void (handle?.close() ?? Promise.resolve()).catch(() => {}).then(() => resolve(0));
+    };
+    const transport = new ClosingStdioServerTransport(finish);
+    process.stdin.on("end", finish);
+    process.stdin.on("close", finish);
+    handle = serveStdio(
       ({ era }) => createMcpServer({ era }),
       {
         legacy: "serve",
@@ -25,16 +38,7 @@ export async function runMcpServe(): Promise<number> {
         onerror: (error) => console.error("picklab mcp server:", error),
       },
     );
-    const finish = (): void => {
-      if (settled) return;
-      settled = true;
-      process.stdin.off("end", finish);
-      process.stdin.off("close", finish);
-      void handle.close().catch(() => {}).then(() => resolve(0));
-    };
-    transport.onClosed = finish;
-    process.stdin.on("end", finish);
-    process.stdin.on("close", finish);
+    if (settled) void handle.close().catch(() => {});
     console.error("picklab mcp server: listening on stdio");
   });
 }

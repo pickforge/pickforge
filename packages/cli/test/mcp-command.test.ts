@@ -1,20 +1,23 @@
 import { EventEmitter } from "node:events";
 import { afterEach, expect, it, vi } from "vitest";
 
-const { close, serveStdio, StdioServerTransport } = vi.hoisted(() => {
+const { close, closeDuringStartup, serveStdio, StdioServerTransport } = vi.hoisted(() => {
   const closeHandle = vi.fn(async () => {});
+  const closeSynchronously = { value: false };
   class FakeTransport {
-    onClosed?: () => void;
+    constructor(private readonly onClosed: () => void) {}
     async close(): Promise<void> {
-      this.onClosed?.();
+      this.onClosed();
     }
   }
   return {
     close: closeHandle,
+    closeDuringStartup: closeSynchronously,
     serveStdio: vi.fn(
-      (_factory: unknown, _options: { transport: FakeTransport }) => ({
-        close: closeHandle,
-      }),
+      (_factory: unknown, options: { transport: FakeTransport }) => {
+        if (closeSynchronously.value) void options.transport.close();
+        return { close: closeHandle };
+      },
     ),
     StdioServerTransport: FakeTransport,
   };
@@ -33,6 +36,7 @@ import { runMcpServe } from "../src/commands/mcp.js";
 afterEach(() => {
   vi.restoreAllMocks();
   close.mockClear();
+  closeDuringStartup.value = false;
   serveStdio.mockClear();
 });
 
@@ -55,4 +59,17 @@ it("closes the stdio serve handle once and logs readiness to stderr", async () =
     onerror: expect.any(Function),
   });
   expect(stderr).toHaveBeenCalledWith("picklab mcp server: listening on stdio");
+});
+
+it("closes the handle when the transport closes synchronously during startup", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  closeDuringStartup.value = true;
+  const endListeners = process.stdin.listenerCount("end");
+  const closeListeners = process.stdin.listenerCount("close");
+
+  await expect(runMcpServe()).resolves.toBe(0);
+
+  expect(close).toHaveBeenCalledTimes(1);
+  expect(process.stdin.listenerCount("end")).toBe(endListeners);
+  expect(process.stdin.listenerCount("close")).toBe(closeListeners);
 });

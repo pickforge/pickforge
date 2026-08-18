@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { EventEmitter } from "node:events";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -16,8 +17,23 @@ interface RpcResponse {
 }
 
 function waitForExit(child: ChildProcessWithoutNullStreams): Promise<number | null> {
-  if (child.exitCode !== null) return Promise.resolve(child.exitCode);
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve(child.exitCode);
+  }
   return new Promise((resolve) => child.once("exit", resolve));
+}
+
+async function terminate(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill("SIGTERM");
+  const exited = await Promise.race([
+    waitForExit(child).then(() => true),
+    new Promise<false>((resolve) => setTimeout(() => resolve(false), 250)),
+  ]);
+  if (!exited && child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGKILL");
+    await waitForExit(child);
+  }
 }
 
 async function runWire(messages: readonly Record<string, unknown>[]): Promise<{
@@ -87,16 +103,12 @@ async function runWire(messages: readonly Record<string, unknown>[]): Promise<{
     expect(status).toBe(0);
     return { responses, stderr, elapsedMs: Date.now() - started };
   } catch (error) {
-    child.kill();
-    await waitForExit(child);
+    await terminate(child);
     throw error;
   } finally {
     pending.clear();
     lines.close();
-    if (child.exitCode === null) {
-      child.kill();
-      await waitForExit(child);
-    }
+    await terminate(child);
   }
 }
 
@@ -125,7 +137,37 @@ const modernMeta = {
   "io.modelcontextprotocol/clientCapabilities": { elicitation: {} },
 };
 
+const clientApproximationFixtures = [
+  {
+    label: "Claude Code representative approximation",
+    protocolVersion: "2025-11-25",
+    clientInfo: { name: "claude-code-representative", version: "config-era" },
+    capabilities: { sampling: {}, elicitation: {} },
+  },
+  {
+    label: "Codex representative approximation",
+    protocolVersion: "2025-03-26",
+    clientInfo: { name: "codex-representative", version: "config-era" },
+    capabilities: { roots: { listChanged: true }, sampling: {} },
+  },
+  {
+    label: "Pi/pi-mcp-adapter approximation",
+    protocolVersion: "2025-06-18",
+    clientInfo: { name: "pi-mcp-adapter-approximation", version: "config-era" },
+    capabilities: {},
+  },
+] as const;
+
 beforeAll(ensureCliBuilt);
+
+it("waitForExit returns after an already-emitted signaled exit", async () => {
+  const child = Object.assign(new EventEmitter(), {
+    exitCode: null,
+    signalCode: "SIGTERM",
+  }) as ChildProcessWithoutNullStreams;
+
+  await expect(waitForExit(child)).resolves.toBeNull();
+});
 
 describe("MCP stdio protocol fixtures (not proprietary client binaries)", () => {
   it.each([
@@ -150,6 +192,24 @@ describe("MCP stdio protocol fixtures (not proprietary client binaries)", () => 
     expect(stderr).toContain("listening on stdio");
     expect(elapsedMs).toBeLessThan(TIMEOUT_MS);
   });
+
+  it.each(clientApproximationFixtures)(
+    "$label raw-wire contract smoke (proprietary binary not run)",
+    async ({ protocolVersion, clientInfo, capabilities }) => {
+      const { responses } = await runWire([
+        request(1, "initialize", { protocolVersion, clientInfo, capabilities }),
+        { jsonrpc: "2.0", method: "notifications/initialized", params: {} },
+        request(2, "tools/list", {}),
+      ]);
+
+      expect(responses).toHaveLength(2);
+      expect(responses[0]?.error).toBeUndefined();
+      expect(responses[0]?.result?.protocolVersion).toBe(protocolVersion);
+      expect(responses[1]?.result?.tools).toEqual(
+        expect.arrayContaining([expect.objectContaining({ name: "artifact_list" })]),
+      );
+    },
+  );
 
   it("counter-offers the latest legacy revision for an unsupported version", async () => {
     const { responses } = await runWire([
@@ -207,8 +267,7 @@ describe("MCP stdio protocol fixtures (not proprietary client binaries)", () => 
       expect(status).toBe(0);
     } finally {
       if (timer !== undefined) clearTimeout(timer);
-      if (child.exitCode === null) child.kill();
-      await waitForExit(child);
+      await terminate(child);
     }
   });
 });
