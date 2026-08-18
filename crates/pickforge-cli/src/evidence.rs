@@ -525,9 +525,8 @@ fn sanitize_phase(phase: &mut PhaseInput) {
 fn redact_secrets(value: &str) -> String {
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     let patterns = PATTERNS.get_or_init(|| vec![
-        Regex::new(r#"(?i)(\b(?:authorization|set-cookie|cookie)\b\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*')"#).unwrap(),
-        Regex::new(r#"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;\"']+"#).unwrap(),
-        Regex::new(r#"(?i)((?:set-cookie|cookie)\s*[:=]\s*)[^\s,;\"']+"#).unwrap(),
+        Regex::new(r#"(?i)(\bauthorization\b\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|(?:bearer\s+)?[^\s,;\"']+)"#).unwrap(),
+        Regex::new(r#"(?i)(\b(?:set-cookie|cookie)\b\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\r\n]+)"#).unwrap(),
         Regex::new(r#"(?i)(\b(?:api[_-]?key|token|secret|password|passwd)\b\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;\"']+)"#).unwrap(),
         Regex::new(r#"(?i)(\"(?:api[_-]?key|token|secret|password|authorization|cookie|set-cookie)\"\s*:\s*\")[^\"]*(\")"#).unwrap(),
         Regex::new(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b").unwrap(),
@@ -535,9 +534,9 @@ fn redact_secrets(value: &str) -> String {
     ]);
     let mut output = value.to_owned();
     for (index, pattern) in patterns.iter().enumerate() {
-        output = if index == 4 {
+        output = if index == 3 {
             pattern.replace_all(&output, "$1[REDACTED]$2").into_owned()
-        } else if index < 4 {
+        } else if index < 3 {
             pattern.replace_all(&output, "$1[REDACTED]").into_owned()
         } else {
             pattern.replace_all(&output, "[REDACTED]").into_owned()
@@ -982,6 +981,9 @@ mod tests {
         assert!(!clean.contains("planted-cookie-secret"), "{clean}");
         assert!(clean.contains("safe-yaml"), "{clean}");
         assert!(clean.contains("safe-toml"), "{clean}");
+
+        let header = redact_secrets("Cookie: first=secret; second=also-secret");
+        assert!(!header.contains("secret"), "{header}");
     }
 
     #[test]
