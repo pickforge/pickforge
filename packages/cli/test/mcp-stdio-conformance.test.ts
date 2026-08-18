@@ -26,10 +26,14 @@ function waitForExit(child: ChildProcessWithoutNullStreams): Promise<number | nu
 async function terminate(child: ChildProcessWithoutNullStreams): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
   child.kill("SIGTERM");
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const exited = await Promise.race([
     waitForExit(child).then(() => true),
-    new Promise<false>((resolve) => setTimeout(() => resolve(false), 250)),
+    new Promise<false>((resolve) => {
+      timer = setTimeout(() => resolve(false), 250);
+    }),
   ]);
+  if (timer !== undefined) clearTimeout(timer);
   if (!exited && child.exitCode === null && child.signalCode === null) {
     child.kill("SIGKILL");
     await waitForExit(child);
