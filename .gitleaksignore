@@ -1,4 +1,5 @@
 # Synthetic secret fixtures retained in Git history; tracked in pickforge/picklab#60.
+01c7e60369b9e3a415218a6b23a397c2eeb9abd4:crates/pickforge-cli/tests/evidence.rs:generic-api-key:184
 de467fbd14d00d4afa4946f610d05d724a6fa777:packages/browser/test/evidence-integration.test.ts:jwt:27
 d3e4353d8fbd470deaaab30c61c7fdb0c5b14727:packages/browser/test/evidence-integration.test.ts:jwt:27
 596c7c21cd5472c99db0f516988b5483354e2fe7:packages/core/test/redact.test.ts:jwt:258
