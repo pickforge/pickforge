@@ -25,6 +25,13 @@ GitHub release description, then reset it after the release is published.
   completed writes while retaining backups. There is deliberately no durable
   journal or daemon: a process interruption can leave a partially applied set;
   owned temporary/backup artifacts are recognized so a later rerun converges it.
+- Migrated the stdio MCP server to SDK v2 with stable dual-era handling:
+  supported 2024/2025 protocol revisions keep the legacy tool, resource, prompt,
+  and elicitation behavior, while modern MCP uses discovery and per-request
+  metadata. Modern clients cannot use interactive push elicitation here;
+  `request_user_input` returns relay-and-retry guidance instead. Tasks and MRTR
+  are intentionally not adopted; `tasks/list` remains method-not-found.
+
 ## Internal/release changes
 
 - Added an unpublished, default-off Flutter integration alpha for `pickforge
@@ -46,6 +53,9 @@ GitHub release description, then reset it after the release is published.
 
 ### Tested
 
+- MCP v2 focused validation passes: frozen install, root typecheck/lint/build,
+  protocol wire fixtures (including real transport self-close), CLI close-once,
+  user-input, evidence, and server tests.
 - Pinned Bun 1.3.12 CI: frozen install, typecheck, lint, 1,133 tests pass,
   one skips, coverage passes at 82.48% lines, and build passes.
 - The pinned OSV Scanner v2.3.8 image reports no unfiltered advisories.
@@ -64,6 +74,10 @@ GitHub release description, then reset it after the release is published.
 
 ### Not tested yet
 
+- MCP v2 validation uses protocol fixtures, not proprietary client binaries.
+  The full normal suite reached 1,092 passing tests with 44 skipped, but eight
+  desktop CLI tests could not start Xvfb in this environment; coverage has the
+  same Xvfb limitation and did not complete.
 - macOS for the Rust binary.
 - No packaging, installer, or distribution path for `pickforge` yet.
 

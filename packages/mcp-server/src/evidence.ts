@@ -18,6 +18,8 @@ import {
 } from "@pickforge/picklab-core";
 import type { ServerContext, ToolReport } from "./context.js";
 
+type EvidenceServerContext = Pick<ServerContext, "projectDir" | "env">;
+
 export interface EvidenceOperationContext {
   actionId: string;
   run?: RunHandle;
@@ -48,7 +50,7 @@ function reportEvidenceFailure(tool: string, error: unknown): void {
 }
 
 async function evidenceRun(
-  ctx: ServerContext,
+  ctx: EvidenceServerContext,
   sessionId: string,
 ): Promise<RunHandle | undefined> {
   const config = await loadConfig(ctx.projectDir, ctx.env);
@@ -126,7 +128,7 @@ function sanitizedTarget(
 
 // eslint-disable-next-line complexity -- Legacy gate debt: pickforge/picklab#60
 export async function withMcpEvidence<T extends ToolReport>(
-  ctx: ServerContext,
+  ctx: EvidenceServerContext,
   options: McpEvidenceOptions<T>,
   operation: (evidence: EvidenceOperationContext) => Promise<T>,
 ): Promise<T> {

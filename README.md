@@ -175,8 +175,9 @@ tool (`desktop_click`/`move`/`scroll`/`drag`/`double_click`/`type`/`key`),
 `desktop_launch` (a newly launched client could otherwise grab input focus),
 and every DevTools relay request fail closed with a stable busy error —
 `takeover_status` (MCP) / `picklab takeover status` (CLI) let an agent check
-before retrying, and `request_user_input` is the recommended way to ask a
-human to run it. `desktop_screenshot` is the only desktop tool left ungated
+before retrying. Use `request_user_input` to ask a human to run it: legacy
+clients use MCP elicitation when supported, while modern clients receive guidance
+to relay the question in conversation and retry afterward. `desktop_screenshot` is the only desktop tool left ungated
 (read-only).
 
 The lease is a 30-second TTL, heartbeat-renewed-every-5-seconds record in the
@@ -302,7 +303,7 @@ reported as suppressed for an explicitly writable `--vnc-control` session.
 - Android: `android_start`, `android_install_apk`, `android_launch_app`, `android_screenshot`, `android_tap`, `android_type`, `android_back`, `android_home`, `android_get_ui_tree`, `android_logcat`, `android_run_adb`
 - Artifacts: `artifact_list`, `artifact_report`
 - Takeover: `takeover_status` — check whether a session is under human control (see [Supervised pause and human takeover](#supervised-pause-and-human-takeover)); read-only, always safe to call
-- User: `request_user_input` — ask the human a question (via MCP elicitation when the client supports it) and wait for the answer; never used for secrets
+- User: `request_user_input` — ask the human a question; supported legacy clients use MCP elicitation, while modern clients receive relay-and-retry guidance; never used for secrets
 
 Resources, addressable as `picklab://` URIs:
 

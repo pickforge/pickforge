@@ -1,5 +1,7 @@
-import type { McpServer } from "@modelcontextprotocol/server";
-import type { ServerContext as McpRequestContext } from "@modelcontextprotocol/server";
+import type {
+  McpServer,
+  ServerContext as SdkToolContext,
+} from "@modelcontextprotocol/server";
 import { z } from "zod";
 import {
   createAndroidSession,
@@ -44,7 +46,7 @@ export interface SessionLifecycle extends LocalSessionLifecycle {
 }
 
 export function progressReporter(
-  extra: McpRequestContext,
+  extra: SdkToolContext,
 ): ((message: string) => void) | undefined {
   const progressToken = extra.mcpReq._meta?.progressToken;
   if (progressToken === undefined) {

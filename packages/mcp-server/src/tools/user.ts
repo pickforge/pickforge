@@ -1,5 +1,7 @@
-import type { McpServer } from "@modelcontextprotocol/server";
-import type { ElicitRequestFormParams } from "@modelcontextprotocol/server";
+import type {
+  ElicitRequestFormParams,
+  McpServer,
+} from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { runTool, type ServerContext } from "../context.js";
 
