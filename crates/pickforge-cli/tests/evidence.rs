@@ -201,6 +201,40 @@ fn rejects_receipt_schema_paths_controls_unknown_fields_and_limits() {
         record_at(&project, &env, &valid, UNIX_EPOCH),
         Err(EvidenceError::Receipt(_))
     ));
+    receipt["schemaVersion"] = 1.into();
+    receipt["harnesses"] = serde_json::json!(["future-harness"]);
+    std::fs::write(
+        state.join("project.json"),
+        serde_json::to_vec(&receipt).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        record_at(&project, &env, &valid, UNIX_EPOCH),
+        Err(EvidenceError::Receipt(_))
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_refuses_hardlinked_receipts_and_source_images() {
+    let (_temp, project, env, state) = fixture();
+    let receipt = state.join("project.json");
+    std::fs::hard_link(&receipt, state.join("receipt-link.json")).unwrap();
+    let error = record_at(&project, &env, &envelope(&[], &[]), UNIX_EPOCH).unwrap_err();
+    assert!(error.to_string().contains("hardlinked"), "{error}");
+
+    std::fs::remove_file(state.join("receipt-link.json")).unwrap();
+    let image = project.join("source.png");
+    std::fs::write(&image, b"\x89PNG\r\n\x1a\nimage").unwrap();
+    std::fs::hard_link(&image, project.join("source-link.png")).unwrap();
+    let error = record_at(
+        &project,
+        &env,
+        &envelope(&[("hardlink", &image)], &[]),
+        UNIX_EPOCH,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("hardlinked"), "{error}");
 }
 
 #[test]

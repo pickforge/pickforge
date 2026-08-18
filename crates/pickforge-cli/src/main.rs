@@ -123,13 +123,13 @@ fn main() -> ExitCode {
                     File::open(&input)
                         .map_err(|error| {
                             pickforge_cli::EvidenceError::Io(format!(
-                                "could not read evidence input file {input}: {error}; verify the path and run `pickforge init --mobile-integration-alpha` if this is a first run or the wrong pack was initialized"
+                                "could not read evidence input file {input}: {error}; verify or fix `--input`"
                             ))
                         })
                         .and_then(|file| {
                             pickforge_cli::evidence::read_bounded(file).map_err(|error| {
                                 pickforge_cli::EvidenceError::Io(format!(
-                                    "could not read evidence input file {input}: {error}; verify the path and run `pickforge init --mobile-integration-alpha` if this is a first run or the wrong pack was initialized"
+                                    "could not read evidence input file {input}: {error}; verify or fix `--input`"
                                 ))
                             })
                         })

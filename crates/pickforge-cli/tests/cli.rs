@@ -459,10 +459,8 @@ fn evidence_record_supports_stdin_path_human_json_and_errors() {
         stderr.contains(&missing_input.to_string_lossy().into_owned()),
         "{stderr}"
     );
-    assert!(
-        stderr.contains("pickforge init --mobile-integration-alpha"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("verify or fix `--input`"), "{stderr}");
+    assert!(!stderr.contains("pickforge init"), "{stderr}");
 
     let human = pickforge(temp.path(), &[])
         .args(["evidence", "record", "--project-dir"])

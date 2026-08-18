@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::{format_description, OffsetDateTime};
 
-use crate::{project, state, Environment};
+use crate::{adapters::Harness, project, state, Environment};
 
 pub const EVIDENCE_SCHEMA_VERSION: u32 = 1;
 pub const MAX_INPUT_BYTES: u64 = 1024 * 1024;
@@ -168,7 +168,7 @@ struct Receipt {
     project_path: String,
     project_id: String,
     pack: ReceiptPack,
-    harnesses: Vec<serde_json::Value>,
+    harnesses: Vec<Harness>,
 }
 #[derive(Deserialize)]
 struct ReceiptPack {
@@ -340,25 +340,26 @@ fn validate_receipt(
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(receipt_error("receipt is not a regular file".into()));
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if metadata.nlink() > 1 {
-            return Err(receipt_error("receipt is hardlinked".into()));
-        }
-    }
     let mut file = File::open(path).map_err(|e| receipt_error(e.to_string()))?;
     let opened = file.metadata().map_err(|e| receipt_error(e.to_string()))?;
     if !same_file(&metadata, &opened) {
         return Err(receipt_error("receipt changed while opening".into()));
+    }
+    let opened_identity = file_identity(&file).map_err(|e| receipt_error(e.to_string()))?;
+    if opened_identity.link_count > 1 {
+        return Err(receipt_error("receipt is hardlinked".into()));
     }
     let bytes = read_bounded(&mut file).map_err(|e| receipt_error(e.to_string()))?;
     let path_after = fs::symlink_metadata(path).map_err(|e| receipt_error(e.to_string()))?;
     if path_after.file_type().is_symlink()
         || !path_after.is_file()
         || !same_file(&opened, &path_after)
-        || link_count(&path_after) > 1
     {
+        return Err(receipt_error("receipt path changed while reading".into()));
+    }
+    let reopened = File::open(path).map_err(|e| receipt_error(e.to_string()))?;
+    let reopened_identity = file_identity(&reopened).map_err(|e| receipt_error(e.to_string()))?;
+    if opened_identity != reopened_identity || reopened_identity.link_count > 1 {
         return Err(receipt_error("receipt path changed while reading".into()));
     }
     let receipt: Receipt =
@@ -524,8 +525,9 @@ fn sanitize_phase(phase: &mut PhaseInput) {
 fn redact_secrets(value: &str) -> String {
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     let patterns = PATTERNS.get_or_init(|| vec![
+        Regex::new(r#"(?i)(\b(?:authorization|set-cookie|cookie)\b\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*')"#).unwrap(),
         Regex::new(r#"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;\"']+"#).unwrap(),
-        Regex::new(r#"(?i)((?:set-cookie|cookie)\s*[:=]\s*)[^\r\n]+"#).unwrap(),
+        Regex::new(r#"(?i)((?:set-cookie|cookie)\s*[:=]\s*)[^\s,;\"']+"#).unwrap(),
         Regex::new(r#"(?i)(\b(?:api[_-]?key|token|secret|password|passwd)\b\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;\"']+)"#).unwrap(),
         Regex::new(r#"(?i)(\"(?:api[_-]?key|token|secret|password|authorization|cookie|set-cookie)\"\s*:\s*\")[^\"]*(\")"#).unwrap(),
         Regex::new(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b").unwrap(),
@@ -533,9 +535,9 @@ fn redact_secrets(value: &str) -> String {
     ]);
     let mut output = value.to_owned();
     for (index, pattern) in patterns.iter().enumerate() {
-        output = if index == 3 {
+        output = if index == 4 {
             pattern.replace_all(&output, "$1[REDACTED]$2").into_owned()
-        } else if index < 3 {
+        } else if index < 4 {
             pattern.replace_all(&output, "$1[REDACTED]").into_owned()
         } else {
             pattern.replace_all(&output, "[REDACTED]").into_owned()
@@ -651,13 +653,6 @@ fn read_image(path: &Path) -> Result<(Vec<u8>, &'static str, &'static str, Strin
     if before.file_type().is_symlink() || !before.is_file() {
         return Err(fail("source must be a non-symlink regular file"));
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if before.nlink() > 1 {
-            return Err(fail("hardlinked source is refused"));
-        }
-    }
     if before.len() > MAX_IMAGE_BYTES {
         return Err(fail("image exceeds 8 MiB"));
     }
@@ -665,6 +660,10 @@ fn read_image(path: &Path) -> Result<(Vec<u8>, &'static str, &'static str, Strin
     let opened = file.metadata().map_err(|e| fail(&e.to_string()))?;
     if !same_file(&before, &opened) {
         return Err(fail("source changed while opening"));
+    }
+    let opened_identity = file_identity(&file).map_err(|e| fail(&e.to_string()))?;
+    if opened_identity.link_count > 1 {
+        return Err(fail("hardlinked source is refused"));
     }
     let mut bytes = Vec::with_capacity((opened.len().min(MAX_IMAGE_BYTES + 1)) as usize);
     Read::by_ref(&mut file)
@@ -685,7 +684,12 @@ fn read_image(path: &Path) -> Result<(Vec<u8>, &'static str, &'static str, Strin
     {
         return Err(fail("source path was replaced while copying"));
     }
-    if link_count(&path_after) > 1 {
+    let reopened = File::open(path).map_err(|e| fail(&e.to_string()))?;
+    let reopened_identity = file_identity(&reopened).map_err(|e| fail(&e.to_string()))?;
+    if opened_identity != reopened_identity {
+        return Err(fail("source path was replaced while copying"));
+    }
+    if reopened_identity.link_count > 1 {
         return Err(fail("hardlinked source is refused"));
     }
     let (media, ext) =
@@ -714,18 +718,56 @@ fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
 fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
     a.len() == b.len() && a.modified().ok() == b.modified().ok()
 }
+#[derive(Debug, PartialEq, Eq)]
+struct FileIdentity {
+    volume: u64,
+    index: u64,
+    link_count: u64,
+}
+
 #[cfg(unix)]
-fn link_count(metadata: &fs::Metadata) -> u64 {
+fn file_identity(file: &File) -> io::Result<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
-    metadata.nlink()
+    let metadata = file.metadata()?;
+    Ok(FileIdentity {
+        volume: metadata.dev(),
+        index: metadata.ino(),
+        link_count: metadata.nlink(),
+    })
 }
+
 #[cfg(windows)]
-fn link_count(_metadata: &fs::Metadata) -> u64 {
-    1
+fn file_identity(file: &File) -> io::Result<FileIdentity> {
+    use std::mem::MaybeUninit;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+    // SAFETY: the handle is owned by `file`, and Windows initializes `information` on success.
+    let succeeded =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) };
+    if succeeded == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: GetFileInformationByHandle succeeded and initialized the structure.
+    let information = unsafe { information.assume_init() };
+    Ok(FileIdentity {
+        volume: information.dwVolumeSerialNumber as u64,
+        index: ((information.nFileIndexHigh as u64) << 32) | information.nFileIndexLow as u64,
+        link_count: information.nNumberOfLinks as u64,
+    })
 }
+
 #[cfg(not(any(unix, windows)))]
-fn link_count(_metadata: &fs::Metadata) -> u64 {
-    1
+fn file_identity(file: &File) -> io::Result<FileIdentity> {
+    let metadata = file.metadata()?;
+    Ok(FileIdentity {
+        volume: 0,
+        index: 0,
+        link_count: 1,
+    })
 }
 fn image_type(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
@@ -930,6 +972,18 @@ mod tests {
             assert!(!clean.contains(secret), "{clean}");
         }
     }
+
+    #[test]
+    fn quoted_authorization_and_cookie_keep_safe_trailing_text() {
+        let clean = redact_secrets(
+            "authorization: \"planted-auth-secret\" safe-yaml cookie = 'planted-cookie-secret' safe-toml",
+        );
+        assert!(!clean.contains("planted-auth-secret"), "{clean}");
+        assert!(!clean.contains("planted-cookie-secret"), "{clean}");
+        assert!(clean.contains("safe-yaml"), "{clean}");
+        assert!(clean.contains("safe-toml"), "{clean}");
+    }
+
     #[test]
     fn recognizes_image_magic() {
         assert_eq!(

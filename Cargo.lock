@@ -372,6 +372,7 @@ dependencies = [
  "time",
  "toml",
  "which",
+ "windows-sys",
 ]
 
 [[package]]

@@ -28,5 +28,8 @@ tempfile = "3"
 toml = { version = "1.1", default-features = false, features = ["parse", "serde", "std"] }
 which = "8"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 assert_cmd = "2"

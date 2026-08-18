@@ -20,7 +20,8 @@ GitHub release description, then reset it after the release is published.
   copies validated screenshots into an external private run directory, and writes
   canonical `evidence.json` plus Markdown `report.md`. Text secrets are redacted,
   Markdown is escaped without changing canonical JSON strings, and the command
-  fails closed when the pack-v2 Flutter receipt is missing or belongs elsewhere.
+  accepts a valid owned Flutter receipt v1 or newer and fails closed when it is
+  missing or belongs elsewhere; the Flutter integration pack itself is now v2.
 - Experimental, unpublished `pickforge init` foundation adds read-only planning,
   dry-run/JSON reports, deterministic external project receipts, and
   transactional adapter config writes for Claude Code, Codex, and Pi. The base
