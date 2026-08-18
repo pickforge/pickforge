@@ -19,6 +19,7 @@ pub const EVIDENCE_SCHEMA_VERSION: u32 = 1;
 pub const MAX_INPUT_BYTES: u64 = 1024 * 1024;
 const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_TOTAL_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_RUN_ID_ATTEMPTS: usize = 1024;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -161,7 +162,7 @@ pub enum EvidenceError {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct Receipt {
     schema_version: u32,
     project_path: String,
@@ -170,7 +171,6 @@ struct Receipt {
     harnesses: Vec<serde_json::Value>,
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ReceiptPack {
     name: String,
     version: u32,
@@ -256,7 +256,7 @@ pub fn record_at(
     let runs = project_state.join("runs");
     create_private_dirs(&runs).map_err(|e| EvidenceError::Io(e.to_string()))?;
 
-    for collision in 1usize.. {
+    for collision in 1..=MAX_RUN_ID_ATTEMPTS {
         let run_id = if collision == 1 {
             base_id.clone()
         } else {
@@ -287,7 +287,7 @@ pub fn record_at(
             Ok(()) => match fs::rename(&temp_dir, &final_dir) {
                 Ok(()) => {
                     return Ok(RecordResult {
-                        schema_version: 1,
+                        schema_version: EVIDENCE_SCHEMA_VERSION,
                         changed: true,
                         run_id,
                         evidence_path: final_dir
@@ -317,7 +317,10 @@ pub fn record_at(
             }
         }
     }
-    unreachable!()
+    Err(EvidenceError::Io(format!(
+        "could not allocate an evidence run id after {MAX_RUN_ID_ATTEMPTS} attempts; retry with a later timestamp or inspect {}",
+        runs.to_string_lossy()
+    )))
 }
 
 fn validate_receipt(
@@ -325,31 +328,49 @@ fn validate_receipt(
     project_path: &str,
     project_id: &str,
 ) -> Result<(), EvidenceError> {
-    let metadata = fs::symlink_metadata(path).map_err(|e| EvidenceError::Receipt(e.to_string()))?;
+    let remediation =
+        "run `pickforge init --mobile-integration-alpha` for this project and selected harnesses";
+    let receipt_error = |reason: String| {
+        EvidenceError::Receipt(format!(
+            "{}: {reason}; {remediation}",
+            path.to_string_lossy()
+        ))
+    };
+    let metadata = fs::symlink_metadata(path).map_err(|e| receipt_error(e.to_string()))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(EvidenceError::Receipt(
-            "receipt is not a regular file".into(),
-        ));
+        return Err(receipt_error("receipt is not a regular file".into()));
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         if metadata.nlink() > 1 {
-            return Err(EvidenceError::Receipt("receipt is hardlinked".into()));
+            return Err(receipt_error("receipt is hardlinked".into()));
         }
     }
-    let bytes = read_bounded(File::open(path).map_err(|e| EvidenceError::Receipt(e.to_string()))?)
-        .map_err(|e| EvidenceError::Receipt(e.to_string()))?;
+    let mut file = File::open(path).map_err(|e| receipt_error(e.to_string()))?;
+    let opened = file.metadata().map_err(|e| receipt_error(e.to_string()))?;
+    if !same_file(&metadata, &opened) {
+        return Err(receipt_error("receipt changed while opening".into()));
+    }
+    let bytes = read_bounded(&mut file).map_err(|e| receipt_error(e.to_string()))?;
+    let path_after = fs::symlink_metadata(path).map_err(|e| receipt_error(e.to_string()))?;
+    if path_after.file_type().is_symlink()
+        || !path_after.is_file()
+        || !same_file(&opened, &path_after)
+        || link_count(&path_after) > 1
+    {
+        return Err(receipt_error("receipt path changed while reading".into()));
+    }
     let receipt: Receipt =
-        serde_json::from_slice(&bytes).map_err(|e| EvidenceError::Receipt(e.to_string()))?;
-    if receipt.schema_version != 1
+        serde_json::from_slice(&bytes).map_err(|e| receipt_error(e.to_string()))?;
+    if receipt.schema_version != EVIDENCE_SCHEMA_VERSION
         || receipt.project_path != project_path
         || receipt.project_id != project_id
         || receipt.pack.name != "pickforge-flutter"
         || receipt.pack.version < 1
         || receipt.harnesses.is_empty()
     {
-        return Err(EvidenceError::Receipt(
+        return Err(receipt_error(
             "receipt does not identify this initialized Flutter project".into(),
         ));
     }
@@ -357,8 +378,8 @@ fn validate_receipt(
 }
 
 fn validate_input(input: &EvidenceInput) -> Result<(), EvidenceError> {
-    if input.schema_version != 1 {
-        return bad("schemaVersion must be 1");
+    if input.schema_version != EVIDENCE_SCHEMA_VERSION {
+        return bad(&format!("schemaVersion must be {EVIDENCE_SCHEMA_VERSION}"));
     }
     bounded_line(&input.scenario, 120, "scenario")?;
     validate_phase(&input.before, "before")?;
@@ -401,11 +422,34 @@ fn validate_phase(phase: &PhaseInput, name: &str) -> Result<(), EvidenceError> {
         if !artifact.source.is_absolute() {
             return bad("artifact source must be absolute");
         }
+        if artifact
+            .source
+            .to_string_lossy()
+            .chars()
+            .any(|character| character.is_control() || is_bidi_control(character))
+        {
+            return bad("artifact source contains a control or bidi-control character");
+        }
     }
     Ok(())
 }
+fn is_bidi_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+    )
+}
 fn bounded_line(value: &str, max: usize, name: &str) -> Result<(), EvidenceError> {
-    if value.is_empty() || value.chars().count() > max || value.chars().any(char::is_control) {
+    if value.is_empty()
+        || value.chars().count() > max
+        || value
+            .chars()
+            .any(|character| character.is_control() || is_bidi_control(character))
+    {
         bad(&format!(
             "{name} must be nonempty, single-line, control-free, and at most {max} characters"
         ))
@@ -415,9 +459,9 @@ fn bounded_line(value: &str, max: usize, name: &str) -> Result<(), EvidenceError
 }
 fn bounded_text(value: &str, max: usize, name: &str) -> Result<(), EvidenceError> {
     if value.chars().count() > max
-        || value
-            .chars()
-            .any(|c| c == '\0' || (c.is_control() && !matches!(c, '\n' | '\r' | '\t')))
+        || value.chars().any(|c| {
+            is_bidi_control(c) || c == '\0' || (c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+        })
     {
         bad(&format!(
             "{name} contains controls or exceeds {max} characters"
@@ -427,8 +471,12 @@ fn bounded_text(value: &str, max: usize, name: &str) -> Result<(), EvidenceError
     }
 }
 fn validate_relative_path(value: &str) -> Result<(), EvidenceError> {
-    if value.is_empty() || value.chars().any(char::is_control) {
-        return bad("sourceChanges contains an empty or control-character path");
+    if value.is_empty()
+        || value
+            .chars()
+            .any(|character| character.is_control() || is_bidi_control(character))
+    {
+        return bad("sourceChanges contains an empty, control-character, or bidi-control path");
     }
     let path = Path::new(value);
     if path.is_absolute()
@@ -473,16 +521,12 @@ fn sanitize_phase(phase: &mut PhaseInput) {
     }
 }
 
-/// Deliberately evidence-specific redaction. Screenshot pixels are outside this boundary.
-pub fn redact_evidence_secrets(value: &str) -> String {
-    redact_secrets(value)
-}
 fn redact_secrets(value: &str) -> String {
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     let patterns = PATTERNS.get_or_init(|| vec![
         Regex::new(r#"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;\"']+"#).unwrap(),
         Regex::new(r#"(?i)((?:set-cookie|cookie)\s*[:=]\s*)[^\r\n]+"#).unwrap(),
-        Regex::new(r#"(?i)(\b(?:api[_-]?key|token|secret|password|passwd)\b\s*[=:]\s*)[^\s,;\"']+"#).unwrap(),
+        Regex::new(r#"(?i)(\b(?:api[_-]?key|token|secret|password|passwd)\b\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;\"']+)"#).unwrap(),
         Regex::new(r#"(?i)(\"(?:api[_-]?key|token|secret|password|authorization|cookie|set-cookie)\"\s*:\s*\")[^\"]*(\")"#).unwrap(),
         Regex::new(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b").unwrap(),
         Regex::new(r"\b(?:gh[pousr]_[A-Za-z0-9]{8,}|sk-[A-Za-z0-9_-]{8,}|AKIA[A-Z0-9]{16})\b").unwrap(),
@@ -521,7 +565,7 @@ fn build_run(
     )?;
     let after = materialize_phase(input.after, "after", &artifacts_dir, &mut total, &mut known)?;
     let doc = EvidenceDocument {
-        schema_version: 1,
+        schema_version: EVIDENCE_SCHEMA_VERSION,
         run_id,
         project_id,
         project_path,
@@ -549,7 +593,7 @@ fn materialize_phase(
 ) -> Result<Phase, EvidenceError> {
     let mut artifacts = Vec::new();
     for source in input.artifacts {
-        let _kind = source.kind;
+        let ArtifactKind::Screenshot = source.kind;
         let (bytes, media, ext, hash) = read_image(&source.source)?;
         let artifact = if let Some(existing) = known.get(&hash) {
             existing.clone()
@@ -593,15 +637,8 @@ fn materialize_phase(
         artifacts.push(artifact);
     }
     Ok(Phase {
-        summary: normalize_markdown(&input.summary),
-        observations: input
-            .observations
-            .into_iter()
-            .map(|o| Observation {
-                label: normalize_markdown(&o.label),
-                value: normalize_markdown(&o.value),
-            })
-            .collect(),
+        summary: input.summary,
+        observations: input.observations,
         artifacts,
     })
 }
@@ -641,6 +678,16 @@ fn read_image(path: &Path) -> Result<(Vec<u8>, &'static str, &'static str, Strin
     if !same_file(&opened, &after) || after.len() != bytes.len() as u64 {
         return Err(fail("source changed while copying"));
     }
+    let path_after = fs::symlink_metadata(path).map_err(|e| fail(&e.to_string()))?;
+    if path_after.file_type().is_symlink()
+        || !path_after.is_file()
+        || !same_file(&opened, &path_after)
+    {
+        return Err(fail("source path was replaced while copying"));
+    }
+    if link_count(&path_after) > 1 {
+        return Err(fail("hardlinked source is refused"));
+    }
     let (media, ext) =
         image_type(&bytes).ok_or_else(|| fail("source is not a PNG, JPEG, or WebP image"))?;
     let hash = format!("{:x}", Sha256::digest(&bytes));
@@ -655,14 +702,35 @@ fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
         && a.mtime() == b.mtime()
         && a.mtime_nsec() == b.mtime_nsec()
 }
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    a.file_attributes() == b.file_attributes()
+        && a.creation_time() == b.creation_time()
+        && a.last_write_time() == b.last_write_time()
+        && a.file_size() == b.file_size()
+}
+#[cfg(not(any(unix, windows)))]
 fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
     a.len() == b.len() && a.modified().ok() == b.modified().ok()
+}
+#[cfg(unix)]
+fn link_count(metadata: &fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.nlink()
+}
+#[cfg(windows)]
+fn link_count(_metadata: &fs::Metadata) -> u64 {
+    1
+}
+#[cfg(not(any(unix, windows)))]
+fn link_count(_metadata: &fs::Metadata) -> u64 {
+    1
 }
 fn image_type(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some(("image/png", "png"))
-    } else if bytes.starts_with(b"\xff\xd8\xff") && bytes.ends_with(b"\xff\xd9") {
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
         Some(("image/jpeg", "jpg"))
     } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         Some(("image/webp", "webp"))
@@ -703,19 +771,23 @@ fn normalize_markdown(value: &str) -> String {
         }
         escaped.push(character);
     }
-    escaped
+    escaped.replace("\\[REDACTED\\]", "[REDACTED]")
 }
 fn render_report(doc: &EvidenceDocument<'_>) -> String {
+    let outcome = match doc.outcome {
+        Outcome::Passed => "passed",
+        Outcome::Failed => "failed",
+        Outcome::Inconclusive => "inconclusive",
+    };
     let mut out = format!(
-        "# Flutter evidence: {}\n\n**Outcome:** {:?}\n\n## Outcome\n\n{}\n\n## Before\n\n{}\n",
+        "# Flutter evidence: {}\n\n**Outcome:** {outcome}\n\n## Before\n\n{}\n",
         normalize_markdown(doc.scenario),
-        doc.outcome,
-        normalize_markdown(doc.scenario),
-        doc.before.summary
+        normalize_markdown(&doc.before.summary)
     );
     render_observations(&mut out, &doc.before.observations);
     out.push_str("\n## After\n\n");
-    out.push_str(&doc.after.summary);
+    out.push_str(&normalize_markdown(&doc.after.summary));
+    out.push('\n');
     render_observations(&mut out, &doc.after.observations);
     out.push_str("\n## Source changes\n\n");
     render_list(
@@ -749,7 +821,7 @@ fn render_report(doc: &EvidenceDocument<'_>) -> String {
             out.push_str(&format!(
                 "- [{}]({}) ({} bytes, `{}`)\n",
                 normalize_markdown(&a.label),
-                a.path,
+                normalize_markdown(&a.path),
                 a.bytes,
                 a.sha256
             ));
@@ -766,7 +838,11 @@ fn render_observations(out: &mut String, items: &[Observation]) {
     if !items.is_empty() {
         out.push('\n');
         for item in items {
-            out.push_str(&format!("- **{}:** {}\n", item.label, item.value));
+            out.push_str(&format!(
+                "- **{}:** {}\n",
+                normalize_markdown(&item.label),
+                normalize_markdown(&item.value)
+            ));
         }
     }
 }
@@ -791,7 +867,20 @@ fn create_private_dirs(path: &Path) -> io::Result<()> {
         Err(error) => return Err(error),
     }
     create_private_dirs(path.parent().ok_or_else(|| io::Error::other("no parent"))?)?;
-    create_private_dir(path)
+    match create_private_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(path)?;
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                Ok(())
+            } else {
+                Err(io::Error::other(
+                    "concurrently created state path is not a real directory",
+                ))
+            }
+        }
+        Err(error) => Err(error),
+    }
 }
 fn create_private_dir(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
@@ -824,10 +913,12 @@ mod tests {
     use super::*;
     #[test]
     fn redacts_supported_secret_shapes() {
-        let raw = "api_key=abc123 JSON {\"token\":\"xyz\"} Authorization: Bearer hello Cookie: sid=secret eyJabc.def.ghi ghp_123456789 sk-123456789 AKIA1234567890123456";
-        let clean = redact_evidence_secrets(raw);
+        let raw = "api_key=abc123 token: \"quoted\" password='single' JSON {\"token\":\"xyz\"} Authorization: Bearer hello Cookie: sid=secret eyJabc.def.ghi ghp_123456789 sk-123456789 AKIA1234567890123456";
+        let clean = redact_secrets(raw);
         for secret in [
             "abc123",
+            "quoted",
+            "single",
             "xyz",
             "hello",
             "sid=secret",
@@ -845,6 +936,25 @@ mod tests {
             image_type(b"\x89PNG\r\n\x1a\nrest"),
             Some(("image/png", "png"))
         );
+        assert_eq!(
+            image_type(b"\xff\xd8\xffwithout-eoi"),
+            Some(("image/jpeg", "jpg"))
+        );
         assert_eq!(image_type(b"suffix.png"), None);
+    }
+
+    #[test]
+    fn concurrent_private_directory_creation_is_safe() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("one/two/three");
+        std::thread::scope(|scope| {
+            for _ in 0..16 {
+                let path = &path;
+                scope.spawn(move || create_private_dirs(path).unwrap());
+            }
+        });
+        let metadata = fs::symlink_metadata(path).unwrap();
+        assert!(metadata.is_dir());
+        assert!(!metadata.file_type().is_symlink());
     }
 }

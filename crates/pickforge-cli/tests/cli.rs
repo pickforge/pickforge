@@ -416,6 +416,25 @@ fn evidence_record_supports_stdin_path_human_json_and_errors() {
     );
     let status_before = git(&project_dir, &["status", "--porcelain=v1"]);
     let project_before = snapshot_without_git(&project_dir);
+    let input = serde_json::json!({"schemaVersion":1,"scenario":"Smoke","outcome":"passed","before":{"summary":"Before","observations":[],"artifacts":[]},"after":{"summary":"After","observations":[],"artifacts":[]},"sourceChanges":[],"checks":[],"limitations":[]}).to_string();
+    let missing_receipt = pickforge(temp.path(), &[])
+        .args(["evidence", "record", "--project-dir"])
+        .arg(&project_dir)
+        .write_stdin(input.as_bytes())
+        .assert()
+        .code(1);
+    let stderr = String::from_utf8_lossy(&missing_receipt.get_output().stderr);
+    let expected_receipt = temp.path().join("state/projects");
+    assert!(
+        stderr.contains(&expected_receipt.to_string_lossy().into_owned())
+            && stderr.contains("project.json"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("pickforge init --mobile-integration-alpha"),
+        "{stderr}"
+    );
+
     pickforge(temp.path(), &["dart"])
         .args([
             "init",
@@ -427,7 +446,24 @@ fn evidence_record_supports_stdin_path_human_json_and_errors() {
         .arg(&project_dir)
         .assert()
         .success();
-    let input = serde_json::json!({"schemaVersion":1,"scenario":"Smoke","outcome":"passed","before":{"summary":"Before","observations":[],"artifacts":[]},"after":{"summary":"After","observations":[],"artifacts":[]},"sourceChanges":[],"checks":[],"limitations":[]}).to_string();
+    let missing_input = temp.path().join("missing-input.json");
+    let input_error = pickforge(temp.path(), &[])
+        .args(["evidence", "record", "--input"])
+        .arg(&missing_input)
+        .arg("--project-dir")
+        .arg(&project_dir)
+        .assert()
+        .code(1);
+    let stderr = String::from_utf8_lossy(&input_error.get_output().stderr);
+    assert!(
+        stderr.contains(&missing_input.to_string_lossy().into_owned()),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("pickforge init --mobile-integration-alpha"),
+        "{stderr}"
+    );
+
     let human = pickforge(temp.path(), &[])
         .args(["evidence", "record", "--project-dir"])
         .arg(&project_dir)

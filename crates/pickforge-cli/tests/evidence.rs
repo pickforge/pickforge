@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
 use pickforge_cli::adapters::{Harness, IntegrationPack};
-use pickforge_cli::evidence::{record_at, EvidenceError};
+use pickforge_cli::evidence::{record_at, EvidenceError, EVIDENCE_SCHEMA_VERSION};
+use pickforge_cli::project::{canonical_project_path, derive_project_id};
 use pickforge_cli::{apply_init, plan_init, Environment, InitRequest};
 use tempfile::TempDir;
 
@@ -63,31 +64,47 @@ fn golden_documents_are_byte_exact_and_aliases_dedupe() {
     let alias = state.parent().unwrap().join("alias.jpg");
     std::fs::write(&first, PNG).unwrap();
     std::fs::write(&alias, PNG).unwrap();
+    let mut input: serde_json::Value = serde_json::from_slice(&envelope(
+        &[("Initial *shot*", &first)],
+        &[("Final [shot]", &alias)],
+    ))
+    .unwrap();
+    input["scenario"] = "Counter *increments*".into();
+    input["before"]["summary"] = "Counter was **zero**.\nSecond line.".into();
+    input["before"]["observations"][0]["label"] = "Counter_[raw]".into();
+    input["before"]["observations"][0]["value"] = "0\nstill zero".into();
     let result = record_at(
         &project,
         &env,
-        &envelope(&[("Initial", &first)], &[("Final", &alias)]),
+        &serde_json::to_vec(&input).unwrap(),
         UNIX_EPOCH + Duration::from_secs(1_704_067_200),
     )
     .unwrap();
     assert_eq!(result.run_id, "20240101-000000-flutter");
     let json = std::fs::read_to_string(&result.evidence_path).unwrap();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(value["schemaVersion"], 1);
+    assert_eq!(value["schemaVersion"], EVIDENCE_SCHEMA_VERSION);
     assert_eq!(value["createdAt"], "2024-01-01T00:00:00Z");
     assert_eq!(value["sourceChanges"], serde_json::json!(["lib/main.dart"]));
     assert_eq!(
         value["before"]["artifacts"][0]["path"],
         value["after"]["artifacts"][0]["path"]
     );
-    let artifact = value["before"]["artifacts"][0].clone();
+    let canonical_project = canonical_project_path(&project);
+    let project_id = derive_project_id(&canonical_project).unwrap();
+    let artifact = serde_json::json!({
+        "kind":"screenshot","label":"Initial *shot*",
+        "path":"artifacts/before-initial-shot-bd54b02fae14.png",
+        "sha256":"bd54b02fae14b6b9ed73887ded339b8ef846fbcba0d4e5f9d95470ac23ade242",
+        "bytes":15,"mediaType":"image/png"
+    });
     let mut final_artifact = artifact.clone();
-    final_artifact["label"] = "Final".into();
+    final_artifact["label"] = "Final [shot]".into();
     let expected = serde_json::json!({
-        "schemaVersion":1,"runId":"20240101-000000-flutter","projectId":value["projectId"],
-        "projectPath":project.to_str().unwrap(),"createdAt":"2024-01-01T00:00:00Z",
-        "scenario":"Counter increments","outcome":"passed",
-        "before":{"summary":"Counter was zero.","observations":[{"label":"Counter","value":"0"}],"artifacts":[artifact]},
+        "schemaVersion":EVIDENCE_SCHEMA_VERSION,"runId":"20240101-000000-flutter","projectId":project_id,
+        "projectPath":canonical_project.to_str().unwrap(),"createdAt":"2024-01-01T00:00:00Z",
+        "scenario":"Counter *increments*","outcome":"passed",
+        "before":{"summary":"Counter was **zero**.\nSecond line.","observations":[{"label":"Counter_[raw]","value":"0\nstill zero"}],"artifacts":[artifact]},
         "after":{"summary":"Counter is one.","observations":[{"label":"Counter","value":"1"}],"artifacts":[final_artifact]},
         "sourceChanges":["lib/main.dart"],"checks":[{"name":"flutter test","status":"passed","summary":"Passed."}],
         "limitations":["Pixel review was manual."]
@@ -102,7 +119,7 @@ fn golden_documents_are_byte_exact_and_aliases_dedupe() {
         .join("artifacts");
     assert_eq!(std::fs::read_dir(artifact_dir).unwrap().count(), 1);
     let report = std::fs::read_to_string(&result.report_path).unwrap();
-    assert_eq!(report, format!("# Flutter evidence: Counter increments\n\n**Outcome:** Passed\n\n## Outcome\n\nCounter increments\n\n## Before\n\nCounter was zero.\n\n- **Counter:** 0\n\n## After\n\nCounter is one.\n- **Counter:** 1\n\n## Source changes\n\n- lib/main.dart\n\n## Checks\n\n- **flutter test** (Passed): Passed.\n\n## Artifacts\n\n- [Initial]({0}) (15 bytes, `{1}`)\n- [Final]({0}) (15 bytes, `{1}`)\n\n## Limitations\n\n- Pixel review was manual.\n", value["before"]["artifacts"][0]["path"].as_str().unwrap(), value["before"]["artifacts"][0]["sha256"].as_str().unwrap()));
+    assert_eq!(report, "# Flutter evidence: Counter \\*increments\\*\n\n**Outcome:** passed\n\n## Before\n\nCounter was \\*\\*zero\\*\\*. Second line.\n\n- **Counter\\_\\[raw\\]:** 0 still zero\n\n## After\n\nCounter is one.\n\n- **Counter:** 1\n\n## Source changes\n\n- lib/main.dart\n\n## Checks\n\n- **flutter test** (Passed): Passed.\n\n## Artifacts\n\n- [Initial \\*shot\\*](artifacts/before-initial-shot-bd54b02fae14.png) (15 bytes, `bd54b02fae14b6b9ed73887ded339b8ef846fbcba0d4e5f9d95470ac23ade242`)\n- [Final \\[shot\\]](artifacts/before-initial-shot-bd54b02fae14.png) (15 bytes, `bd54b02fae14b6b9ed73887ded339b8ef846fbcba0d4e5f9d95470ac23ade242`)\n\n## Limitations\n\n- Pixel review was manual.\n");
 }
 
 #[test]
@@ -142,6 +159,8 @@ fn rejects_receipt_schema_paths_controls_unknown_fields_and_limits() {
         serde_json::json!({"schemaVersion":2,"scenario":"x","outcome":"passed","before":{"summary":"","observations":[],"artifacts":[]},"after":{"summary":"","observations":[],"artifacts":[]}}),
         serde_json::json!({"schemaVersion":1,"scenario":"x\n# fake","outcome":"passed","before":{"summary":"","observations":[],"artifacts":[]},"after":{"summary":"","observations":[],"artifacts":[]}}),
         serde_json::json!({"schemaVersion":1,"scenario":"x","outcome":"passed","before":{"summary":"","observations":[],"artifacts":[]},"after":{"summary":"","observations":[],"artifacts":[]},"sourceChanges":["../secret"]}),
+        serde_json::json!({"schemaVersion":1,"scenario":"x","outcome":"passed","before":{"summary":"safe\u{202e}spoof","observations":[],"artifacts":[]},"after":{"summary":"","observations":[] ,"artifacts":[]}}),
+        serde_json::json!({"schemaVersion":1,"scenario":"x","outcome":"passed","before":{"summary":"","observations":[],"artifacts":[]},"after":{"summary":"","observations":[],"artifacts":[]},"sourceChanges":["lib/safe\u{2066}spoof.dart"]}),
         serde_json::json!({"schemaVersion":1,"scenario":"x","outcome":"passed","before":{"summary":"","observations":[],"artifacts":[],"unknown":1},"after":{"summary":"","observations":[],"artifacts":[]}}),
     ];
     for case in cases {
@@ -156,6 +175,12 @@ fn rejects_receipt_schema_paths_controls_unknown_fields_and_limits() {
             "{case}"
         );
     }
+    let bidi_artifact = project.join("image\u{202e}.png");
+    let bidi_input = envelope(&[("image", &bidi_artifact)], &[]);
+    assert!(matches!(
+        record_at(&project, &env, &bidi_input, UNIX_EPOCH),
+        Err(EvidenceError::Input(_))
+    ));
     assert!(matches!(
         record_at(&project, &env, &[b'x'; 1024 * 1024 + 1], UNIX_EPOCH),
         Err(EvidenceError::InputTooLarge)
@@ -179,17 +204,50 @@ fn rejects_receipt_schema_paths_controls_unknown_fields_and_limits() {
 }
 
 #[test]
+fn v1_flutter_receipt_remains_compatible_with_pack_v2_and_future_fields() {
+    let (_temp, project, env, state) = fixture();
+    let receipt_path = state.join("project.json");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+    assert_eq!(receipt["pack"]["version"], 2);
+    receipt["pack"]["version"] = 1.into();
+    receipt["futureReceiptField"] = serde_json::json!({"ignored": true});
+    receipt["pack"]["futurePackField"] = "ignored".into();
+    std::fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+
+    let result = record_at(&project, &env, &envelope(&[], &[]), UNIX_EPOCH).unwrap();
+    assert!(Path::new(&result.evidence_path).is_file());
+
+    let mut request = InitRequest::new(&project);
+    request.pack = IntegrationPack::flutter();
+    request.harnesses = vec![Harness::Codex];
+    let update = plan_init(&request, &env).unwrap();
+    assert!(apply_init(&update, "pack-v2-update").changed);
+    let updated: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(receipt_path).unwrap()).unwrap();
+    assert_eq!(updated["pack"]["version"], 2);
+}
+
+#[test]
 fn every_supported_secret_shape_is_absent_from_both_outputs() {
     let (_temp, project, env, _state) = fixture();
-    let secrets = "api_key=abc123 {\"token\":\"jsonsecret\"} Authorization: Bearer authsecret Cookie: sid=cookiesecret eyJabc.def.ghi ghp_123456789 sk-123456789 AKIA1234567890123456";
+    let secrets = "safe-before token: \"quotedsecret\" safe-middle password='singlesecret' api_key=abc123 {\"token\":\"jsonsecret\"} Authorization: Bearer authsecret safe-after eyJabc.def.ghi ghp_123456789 sk-123456789 AKIA1234567890123456 Cookie: sid=cookiesecret";
     let input = serde_json::to_vec(&serde_json::json!({"schemaVersion":1,"scenario":"Secrets test","outcome":"inconclusive","before":{"summary":secrets,"observations":[{"label":"safe","value":secrets}],"artifacts":[]},"after":{"summary":secrets,"observations":[],"artifacts":[]},"sourceChanges":[],"checks":[{"name":"check","status":"skipped","summary":secrets}],"limitations":[secrets]})).unwrap();
     let result = record_at(&project, &env, &input, UNIX_EPOCH).unwrap();
-    let persisted = format!(
-        "{}{}",
+    let outputs = [
         std::fs::read_to_string(result.evidence_path).unwrap(),
-        std::fs::read_to_string(result.report_path).unwrap()
-    );
+        std::fs::read_to_string(result.report_path).unwrap(),
+    ];
+    for output in &outputs {
+        assert!(output.contains("[REDACTED]"), "{output}");
+        assert!(
+            output.contains("safe-before") && output.contains("safe-after"),
+            "{output}"
+        );
+    }
     for secret in [
+        "quotedsecret",
+        "singlesecret",
         "abc123",
         "jsonsecret",
         "authsecret",
@@ -199,7 +257,9 @@ fn every_supported_secret_shape_is_absent_from_both_outputs() {
         "sk-123456789",
         "AKIA1234567890123456",
     ] {
-        assert!(!persisted.contains(secret), "{secret} leaked");
+        for output in &outputs {
+            assert!(!output.contains(secret), "{secret} leaked in {output}");
+        }
     }
 }
 

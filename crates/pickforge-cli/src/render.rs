@@ -13,7 +13,16 @@ fn label(status: CheckStatus) -> &'static str {
 pub fn terminal_safe(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
-        if character.is_control() {
+        if character.is_control()
+            || matches!(
+                character,
+                '\u{061c}'
+                    | '\u{200e}'
+                    | '\u{200f}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2066}'..='\u{2069}'
+            )
+        {
             escaped.extend(character.escape_default());
         } else {
             escaped.push(character);
@@ -158,4 +167,15 @@ pub fn render_text(report: &DoctorReport) -> String {
         if report.ready { "yes" } else { "no" }
     ));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_safe;
+
+    #[test]
+    fn terminal_output_escapes_bidi_controls() {
+        let safe = terminal_safe("before\u{202e}spoof\u{2066}after");
+        assert_eq!(safe, "before\\u{202e}spoof\\u{2066}after");
+    }
 }

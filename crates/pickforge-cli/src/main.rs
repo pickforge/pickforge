@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use pickforge_cli::adapters::{Harness, IntegrationPack};
+use pickforge_cli::evidence::EVIDENCE_SCHEMA_VERSION;
 use pickforge_cli::init::{ApplyState, InitRequest};
 use pickforge_cli::{apply_init, diagnose, plan_init, render, Environment};
 use serde::Serialize;
@@ -120,8 +121,18 @@ fn main() -> ExitCode {
                     pickforge_cli::evidence::read_bounded(io::stdin().lock())
                 } else {
                     File::open(&input)
-                        .map_err(|error| pickforge_cli::EvidenceError::Io(error.to_string()))
-                        .and_then(pickforge_cli::evidence::read_bounded)
+                        .map_err(|error| {
+                            pickforge_cli::EvidenceError::Io(format!(
+                                "could not read evidence input file {input}: {error}; verify the path and run `pickforge init --mobile-integration-alpha` if this is a first run or the wrong pack was initialized"
+                            ))
+                        })
+                        .and_then(|file| {
+                            pickforge_cli::evidence::read_bounded(file).map_err(|error| {
+                                pickforge_cli::EvidenceError::Io(format!(
+                                    "could not read evidence input file {input}: {error}; verify the path and run `pickforge init --mobile-integration-alpha` if this is a first run or the wrong pack was initialized"
+                                ))
+                            })
+                        })
                 };
                 let outcome = bytes.and_then(|bytes| {
                     pickforge_cli::record(&project_dir, &Environment::from_process(), &bytes)
@@ -143,7 +154,7 @@ fn main() -> ExitCode {
                             print!(
                                 "{}",
                                 json_line(&ErrorOutput {
-                                    schema_version: 1,
+                                    schema_version: EVIDENCE_SCHEMA_VERSION,
                                     error: &message
                                 })
                             );

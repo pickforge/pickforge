@@ -156,62 +156,6 @@ fn validate_existing_receipt(
     Ok(())
 }
 
-fn recoverable_runs(runs: &Path, expected_path: &str, expected_id: &str) -> Result<bool, String> {
-    for entry in std::fs::read_dir(runs).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let metadata = entry.metadata().map_err(|error| error.to_string())?;
-        if entry
-            .file_type()
-            .map_err(|error| error.to_string())?
-            .is_symlink()
-            || !metadata.is_dir()
-            || entry
-                .file_name()
-                .to_str()
-                .is_none_or(|name| !name.ends_with("-flutter") && !name.contains("-flutter-"))
-        {
-            return Ok(false);
-        }
-        let evidence = entry.path().join("evidence.json");
-        let (_, bytes) =
-            transaction::inspect_file(evidence, true).map_err(|error| error.to_string())?;
-        let Some(bytes) = bytes else { return Ok(false) };
-        let value: serde_json::Value =
-            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-        if value
-            .get("schemaVersion")
-            .and_then(serde_json::Value::as_u64)
-            != Some(1)
-            || value.get("projectPath").and_then(serde_json::Value::as_str) != Some(expected_path)
-            || value.get("projectId").and_then(serde_json::Value::as_str) != Some(expected_id)
-        {
-            return Ok(false);
-        }
-        let report = entry.path().join("report.md");
-        let (_, report_bytes) =
-            transaction::inspect_file(report, true).map_err(|error| error.to_string())?;
-        if report_bytes.is_none() {
-            return Ok(false);
-        }
-        for child in std::fs::read_dir(entry.path()).map_err(|error| error.to_string())? {
-            let child = child.map_err(|error| error.to_string())?;
-            let name = child.file_name();
-            if name != "evidence.json" && name != "report.md" && name != "artifacts" {
-                return Ok(false);
-            }
-            if name == "artifacts"
-                && (!child
-                    .file_type()
-                    .map_err(|error| error.to_string())?
-                    .is_dir())
-            {
-                return Ok(false);
-            }
-        }
-    }
-    Ok(true)
-}
-
 fn recoverable_state_artifacts(
     state_dir: &Path,
     expected_path: &str,
@@ -249,12 +193,6 @@ fn recoverable_state_artifacts(
         let Some(name) = name.to_str() else {
             return Ok(false);
         };
-        if name == "runs" && metadata.is_dir() {
-            if recoverable_runs(&entry.path(), expected_path, expected_id)? {
-                continue;
-            }
-            return Ok(false);
-        }
         if name.starts_with(".pickforge-tmp-")
             && metadata.is_file()
             && metadata.len() <= MAX_STATE_ARTIFACT_BYTES

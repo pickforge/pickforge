@@ -15,6 +15,12 @@ GitHub release description, then reset it after the release is published.
   only) overrides the state root, which defaults to
   `~/.pickforge/pickforge`. Project paths that cannot satisfy the shared
   UTF-8 project-id contract fail closed without resolving a state directory.
+- Experimental, unpublished `pickforge evidence record` accepts a bounded JSON
+  document from stdin or `--input`, verifies the existing Flutter init receipt,
+  copies validated screenshots into an external private run directory, and writes
+  canonical `evidence.json` plus Markdown `report.md`. Text secrets are redacted,
+  Markdown is escaped without changing canonical JSON strings, and the command
+  fails closed when the pack-v2 Flutter receipt is missing or belongs elsewhere.
 - Experimental, unpublished `pickforge init` foundation adds read-only planning,
   dry-run/JSON reports, deterministic external project receipts, and
   transactional adapter config writes for Claude Code, Codex, and Pi. The base
@@ -49,15 +55,17 @@ GitHub release description, then reset it after the release is published.
 - Pinned Bun 1.3.12 CI: frozen install, typecheck, lint, 1,133 tests pass,
   one skips, coverage passes at 82.48% lines, and build passes.
 - The pinned OSV Scanner v2.3.8 image reports no unfiltered advisories.
-- `cargo fmt --check`, `cargo clippy --workspace --all-targets --locked -- -D
-  warnings`, and `cargo test --workspace --locked` pass with 65 tests covering
+- `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D
+  warnings`, and `cargo test --workspace --locked` pass with 78 tests covering
   project/framework detection, tool and harness discovery, state and project-id
   boundaries, adapter preservation/refusal, transaction rollback and drift,
   dry-run, receipt ownership, file modes, idempotency, Git-tree cleanliness,
   JSON/text safety, CLI exits, owned Flutter MCP configuration, per-harness
-  arguments, workflow targeting/deduplication, and alpha tool preconditions. The
-  Windows MSVC target also passes cross-target check and clippy; Windows-native
-  tests run in the CI matrix.
+  arguments, workflow targeting/deduplication, alpha tool preconditions, evidence
+  storage/redaction, receipt compatibility, and concurrent first use. Exact local
+  validation also includes `cargo check --workspace --all-targets --locked
+  --target x86_64-pc-windows-msvc` and target-specific clippy with `-D warnings`.
+  Windows-native tests run in the CI matrix.
 - Manual smoke runs of `pickforge doctor` and `pickforge doctor --json`
   against temporary fake Flutter and non-Flutter projects with an isolated
   `PATH`/`PICKFORGE_HOME`.
