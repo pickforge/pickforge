@@ -205,9 +205,12 @@ fn oversized_artifact_gets_one_bounded_preview_and_keeps_its_source_bytes() {
     let report = std::fs::read_to_string(result.report_path).unwrap();
     let preview_relative = before["preview"]["path"].as_str().unwrap();
     let artifact_relative = before["path"].as_str().unwrap();
+    // The report offers the preview but must never replace the primary evidence with it: a
+    // reader of the Markdown alone still has to reach and verify the full capture.
     assert!(report.contains(preview_relative), "{report}");
     assert!(report.contains("1568x784"), "{report}");
-    assert!(!report.contains(artifact_relative), "{report}");
+    assert!(report.contains(artifact_relative), "{report}");
+    assert!(report.contains("2000x1000"), "{report}");
 }
 
 #[test]

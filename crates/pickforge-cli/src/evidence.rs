@@ -968,22 +968,28 @@ fn render_report(doc: &EvidenceDocument<'_>) -> String {
         out.push_str("- None\n");
     } else {
         for a in all {
-            let (path, width, height, bytes, sha256) = if let Some(preview) = &a.preview {
-                (
-                    &preview.path,
+            // The full capture is the evidence and is always what the entry links and hashes.
+            // A preview is a derivative offered alongside it, never in place of it: a reader
+            // of this report alone must still be able to reach and verify the original.
+            out.push_str(&format!(
+                "- [{}]({}) ({}x{}, {} bytes, `{}`)\n",
+                normalize_markdown(&a.label),
+                normalize_markdown(&a.path),
+                a.width,
+                a.height,
+                a.bytes,
+                &a.sha256,
+            ));
+            if let Some(preview) = &a.preview {
+                out.push_str(&format!(
+                    "  - [preview]({}) ({}x{}, {} bytes, `{}`)\n",
+                    normalize_markdown(&preview.path),
                     preview.width,
                     preview.height,
                     preview.bytes,
                     &preview.sha256,
-                )
-            } else {
-                (&a.path, a.width, a.height, a.bytes, &a.sha256)
-            };
-            out.push_str(&format!(
-                "- [{}]({}) ({width}x{height}, {bytes} bytes, `{sha256}`)\n",
-                normalize_markdown(&a.label),
-                normalize_markdown(path),
-            ));
+                ));
+            }
         }
     }
     out.push_str("\n## Limitations\n\n");
