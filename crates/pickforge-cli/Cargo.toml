@@ -18,12 +18,13 @@ path = "src/lib.rs"
 clap = { version = "4", features = ["derive"] }
 directories = "6"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml_ng = "0.10"
 sha2 = "0.10"
 thiserror = "2"
+tempfile = "3"
+toml = { version = "1.1", default-features = false, features = ["parse", "serde", "std"] }
 which = "8"
 
 [dev-dependencies]
 assert_cmd = "2"
-tempfile = "3"

@@ -15,6 +15,16 @@ GitHub release description, then reset it after the release is published.
   only) overrides the state root, which defaults to
   `~/.pickforge/pickforge`. Project paths that cannot satisfy the shared
   UTF-8 project-id contract fail closed without resolving a state directory.
+- Experimental, unpublished `pickforge init` foundation adds read-only planning,
+  dry-run/JSON reports, deterministic external project receipts, and
+  transactional adapter config writes for Claude Code, Codex, and Pi. The base
+  pack is intentionally empty in this slice, so normal init only writes the
+  receipt; real Flutter integration content follows separately. Pi MCP config
+  requires `pi-mcp-adapter` because core Pi has no built-in MCP support.
+  Individual files use atomic replacement and in-process failures roll back
+  completed writes while retaining backups. There is deliberately no durable
+  journal or daemon: a process interruption can leave a partially applied set;
+  owned temporary/backup artifacts are recognized so a later rerun converges it.
 
 ## Internal/release changes
 
@@ -35,11 +45,12 @@ GitHub release description, then reset it after the release is published.
   one skips, coverage passes at 82.48% lines, and build passes.
 - The pinned OSV Scanner v2.3.8 image reports no unfiltered advisories.
 - `cargo fmt --check`, `cargo clippy --workspace --all-targets --locked -- -D
-  warnings`, `cargo test --workspace --locked` (29 tests: project/framework
-  detection, tool and harness discovery on a fake `PATH`, `PICKFORGE_HOME`
-  handling, project-id parity and path boundary cases, JSON/text safety, and CLI
-  exit codes). The Windows target also passes cross-target check and clippy;
-  Windows-native tests run in the CI matrix.
+  warnings`, and `cargo test --workspace --locked` pass with 56 tests covering
+  project/framework detection, tool and harness discovery, state and project-id
+  boundaries, adapter preservation/refusal, transaction rollback and drift,
+  dry-run, receipt ownership, file modes, idempotency, Git-tree cleanliness,
+  JSON/text safety, and CLI exits. The Windows MSVC target also passes
+  cross-target check and clippy; Windows-native tests run in the CI matrix.
 - Manual smoke runs of `pickforge doctor` and `pickforge doctor --json`
   against temporary fake Flutter and non-Flutter projects with an isolated
   `PATH`/`PICKFORGE_HOME`.
