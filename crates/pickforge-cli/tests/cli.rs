@@ -38,6 +38,8 @@ fn pickforge(root: &Path, tools: &[&str]) -> Command {
     command
         .env_clear()
         .env("PATH", fake_bin(root, tools))
+        .env("HOME", root.join("home"))
+        .env("USERPROFILE", root.join("home"))
         .env("PICKFORGE_HOME", root.join("state"));
     #[cfg(windows)]
     command.env("PATHEXT", ".EXE");
@@ -290,6 +292,88 @@ fn init_human_output_escapes_path_control_characters() {
     let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
     assert!(stdout.contains("state\\nunsafe"), "{stdout:?}");
     assert!(!stdout.contains(&unsafe_state.to_string_lossy().into_owned()));
+}
+
+#[test]
+fn mobile_alpha_flag_is_hidden_and_missing_dart_fails_without_writing() {
+    let temp = TempDir::new().unwrap();
+    let project_dir = flutter_project(temp.path());
+    let help = pickforge(temp.path(), &[])
+        .args(["init", "--help"])
+        .assert()
+        .success();
+    assert!(
+        !String::from_utf8_lossy(&help.get_output().stdout).contains("mobile-integration-alpha")
+    );
+
+    let missing = pickforge(temp.path(), &[])
+        .args(["init", "--mobile-integration-alpha", "--project-dir"])
+        .arg(&project_dir)
+        .assert()
+        .code(1);
+    assert!(String::from_utf8_lossy(&missing.get_output().stdout).contains("requires dart on PATH"));
+    assert!(!temp.path().join("state").exists());
+    assert!(!temp.path().join("home").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn mobile_alpha_never_executes_dart_and_keeps_the_project_clean() {
+    let temp = TempDir::new().unwrap();
+    let project_dir = flutter_project(temp.path());
+    git(&project_dir, &["init", "--quiet"]);
+    git(&project_dir, &["add", "pubspec.yaml"]);
+    git(
+        &project_dir,
+        &[
+            "-c",
+            "user.name=Pickforge Test",
+            "-c",
+            "user.email=test@invalid.example",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+    );
+    let status_before = git(&project_dir, &["status", "--porcelain=v1"]);
+    let tree_before = snapshot_without_git(&project_dir);
+    let marker = temp.path().join("dart-ran");
+    let bin = fake_bin(temp.path(), &["dart"]);
+    let dart = bin.join("dart");
+    std::fs::write(&dart, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+
+    let output = pickforge(temp.path(), &[])
+        .env("PATH", bin)
+        .args([
+            "init",
+            "--mobile-integration-alpha",
+            "--harness",
+            "codex",
+            "--json",
+            "--project-dir",
+        ])
+        .arg(&project_dir)
+        .assert()
+        .success();
+    assert!(!marker.exists());
+    let value: serde_json::Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    assert_eq!(value["plan"]["pack"]["name"], "pickforge-flutter");
+    assert_eq!(value["plan"]["harnesses"], serde_json::json!(["codex"]));
+    assert_eq!(value["plan"]["actions"].as_array().unwrap().len(), 3);
+    assert!(temp.path().join("home/.codex/config.toml").is_file());
+    assert!(temp
+        .path()
+        .join("home/.agents/skills/pickforge-flutter/SKILL.md")
+        .is_file());
+    assert!(!temp.path().join("home/.claude.json").exists());
+    assert!(!temp.path().join("home/.claude/skills").exists());
+    assert!(!temp.path().join("home/.config/mcp/mcp.json").exists());
+    assert_eq!(
+        git(&project_dir, &["status", "--porcelain=v1"]),
+        status_before
+    );
+    assert_eq!(snapshot_without_git(&project_dir), tree_before);
 }
 
 #[test]

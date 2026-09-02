@@ -2,8 +2,11 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use pickforge_cli::adapters::{
-    codex_config, json_config, AdapterError, Harness, IntegrationPack, McpServerSpec,
+    codex_config, json_config, AdapterError, Harness, HarnessArgsSpec, IntegrationPack,
+    McpServerSpec, WorkflowRoot,
 };
+#[cfg(unix)]
+use pickforge_cli::adapters::{WorkflowSpec, WorkflowTargetSpec};
 #[cfg(windows)]
 use pickforge_cli::init::ActionKind;
 use pickforge_cli::init::{ApplyReport, ApplyState};
@@ -20,8 +23,27 @@ fn pack() -> IntegrationPack {
             name: "pickforge-helper".into(),
             command: "pickforge".into(),
             args: vec!["serve".into(), "a b".into()],
+            harness_args: vec![],
         }],
+        required_tools: vec![],
+        workflows: vec![],
     }
+}
+
+fn fake_tool(root: &Path, name: &str) -> std::path::PathBuf {
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    #[cfg(windows)]
+    let tool = bin.join(format!("{name}.EXE"));
+    #[cfg(not(windows))]
+    let tool = bin.join(name);
+    std::fs::write(&tool, "not executed").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
 }
 
 fn fixture() -> (TempDir, std::path::PathBuf, Environment) {
@@ -155,7 +177,9 @@ fn symlinked_home_and_state_roots_are_resolved_safely() {
 
 #[test]
 fn json_adapters_create_merge_validate_and_are_equivalent_and_idempotent() {
-    let created = json_config(None, &pack(), "config").unwrap().unwrap();
+    let created = json_config(None, &pack(), Harness::ClaudeCode, "config")
+        .unwrap()
+        .unwrap();
     let created_value: serde_json::Value = serde_json::from_slice(&created).unwrap();
     assert_eq!(
         created_value["mcpServers"]["pickforge-helper"]["command"],
@@ -163,10 +187,15 @@ fn json_adapters_create_merge_validate_and_are_equivalent_and_idempotent() {
     );
 
     let input = r#"{"root":1,"mcpServers":{"foreign":{"command":"x"}}}"#;
-    let claude = json_config(Some(input), &pack(), "Claude Code config")
-        .unwrap()
-        .unwrap();
-    let pi = json_config(Some(input), &pack(), "Pi MCP config")
+    let claude = json_config(
+        Some(input),
+        &pack(),
+        Harness::ClaudeCode,
+        "Claude Code config",
+    )
+    .unwrap()
+    .unwrap();
+    let pi = json_config(Some(input), &pack(), Harness::Pi, "Pi MCP config")
         .unwrap()
         .unwrap();
     assert_eq!(claude, pi);
@@ -174,6 +203,7 @@ fn json_adapters_create_merge_validate_and_are_equivalent_and_idempotent() {
         json_config(
             Some(std::str::from_utf8(&claude).unwrap()),
             &pack(),
+            Harness::ClaudeCode,
             "Claude Code config"
         )
         .unwrap()
@@ -183,16 +213,22 @@ fn json_adapters_create_merge_validate_and_are_equivalent_and_idempotent() {
     let value: serde_json::Value = serde_json::from_slice(&claude).unwrap();
     assert_eq!(value["root"], 1);
     assert_eq!(value["mcpServers"]["foreign"]["command"], "x");
-    assert!(json_config(Some("[]"), &pack(), "config").is_err());
-    assert!(json_config(Some("{"), &pack(), "config").is_err());
-    assert!(json_config(Some(r#"{"mcpServers":1}"#), &pack(), "config").is_err());
+    assert!(json_config(Some("[]"), &pack(), Harness::ClaudeCode, "config").is_err());
+    assert!(json_config(Some("{"), &pack(), Harness::ClaudeCode, "config").is_err());
+    assert!(json_config(
+        Some(r#"{"mcpServers":1}"#),
+        &pack(),
+        Harness::ClaudeCode,
+        "config",
+    )
+    .is_err());
 
     let mut invalid = pack();
     invalid.mcp_servers[0].name = "pickforge-invalid.name".into();
-    assert!(json_config(None, &invalid, "config").is_err());
+    assert!(json_config(None, &invalid, Harness::ClaudeCode, "config").is_err());
     let mut duplicate = pack();
     duplicate.mcp_servers.push(duplicate.mcp_servers[0].clone());
-    assert!(json_config(None, &duplicate, "config").is_err());
+    assert!(json_config(None, &duplicate, Harness::ClaudeCode, "config").is_err());
     let mut control = pack();
     control.mcp_servers[0].args.push("bad\u{7f}".into());
     assert!(codex_config(None, &control).is_err());
@@ -245,6 +281,303 @@ fn codex_managed_block_creates_and_preserves_surroundings_and_newline_style() {
         String::from_utf8(codex_config(Some(mixed), &pack()).unwrap().unwrap()).unwrap();
     assert!(mixed_output.starts_with("title = \"foreign\"\r\n# >>> pickforge >>>"));
     assert!(mixed_output.ends_with("\n[other]\r\nx = 1\r\n"));
+}
+
+#[test]
+fn flutter_pack_plans_owned_harness_configs_and_deduplicated_workflows_in_order() {
+    let (temp, project, env) = fixture();
+    let bin = fake_tool(temp.path(), "dart");
+    let env = env.with_var("PATH", &bin).with_var("PATHEXT", ".EXE");
+    let mut request = InitRequest::new(&project);
+    request.pack = IntegrationPack::flutter();
+
+    let before = std::fs::read(project.join("pubspec.yaml")).unwrap();
+    let plan = plan_init(&request, &env).unwrap();
+    assert_eq!(plan.report.pack.name, "pickforge-flutter");
+    assert_eq!(plan.report.actions.len(), 6);
+    assert!(plan.report.actions[0].target.ends_with(".claude.json"));
+    assert!(plan.report.actions[1].target.ends_with("config.toml"));
+    assert!(plan.report.actions[2].target.ends_with("mcp.json"));
+    assert!(Path::new(&plan.report.actions[3].target)
+        .ends_with(Path::new(".claude/skills/pickforge-flutter/SKILL.md")));
+    assert!(Path::new(&plan.report.actions[4].target)
+        .ends_with(Path::new(".agents/skills/pickforge-flutter/SKILL.md")));
+    assert!(plan.report.actions[5].target.ends_with("project.json"));
+    assert!(plan.report.actions[2].warning.is_some());
+    assert!(!temp.path().join("home").exists());
+    assert_eq!(std::fs::read(project.join("pubspec.yaml")).unwrap(), before);
+
+    assert!(apply_init(&plan, "flutter").changed);
+    let asset = include_bytes!("../assets/skills/pickforge-flutter/SKILL.md");
+    assert_eq!(
+        std::fs::read(
+            temp.path()
+                .join("home/.claude/skills/pickforge-flutter/SKILL.md")
+        )
+        .unwrap(),
+        asset
+    );
+    assert_eq!(
+        std::fs::read(
+            temp.path()
+                .join("home/.agents/skills/pickforge-flutter/SKILL.md")
+        )
+        .unwrap(),
+        asset
+    );
+    let claude: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(temp.path().join("home/.claude.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        claude["mcpServers"]["pickforge-dart"],
+        serde_json::json!({"command":"dart","args":["mcp-server"]})
+    );
+    let pi: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(temp.path().join("home/.config/mcp/mcp.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        pi["mcpServers"]["pickforge-dart"]["args"],
+        serde_json::json!(["mcp-server", "--force-roots-fallback"])
+    );
+    let codex = std::fs::read_to_string(temp.path().join("home/.codex/config.toml")).unwrap();
+    assert!(codex.contains("args = [\"mcp-server\", \"--force-roots-fallback\"]"));
+
+    let snapshots = plan
+        .report
+        .actions
+        .iter()
+        .map(|action| {
+            let path = std::path::PathBuf::from(&action.target);
+            (
+                path.clone(),
+                std::fs::read(&path).unwrap(),
+                std::fs::metadata(&path).unwrap().modified().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let second = plan_init(&request, &env).unwrap();
+    let outcome = apply_init(&second, "flutter-second");
+    assert!(!outcome.changed);
+    assert!(outcome.backup_paths.is_empty());
+    for (path, bytes, mtime) in snapshots {
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(std::fs::metadata(path).unwrap().modified().unwrap(), mtime);
+    }
+}
+
+#[test]
+fn flutter_pack_requires_dart_only_when_a_harness_is_selected() {
+    let (temp, project, env) = fixture();
+    let mut request = InitRequest::new(&project);
+    request.pack = IntegrationPack::flutter();
+    let error = plan_init(&request, &env).unwrap_err().to_string();
+    assert!(error.contains("requires dart on PATH"), "{error}");
+    assert!(error.contains("pickforge doctor"), "{error}");
+    assert!(!temp.path().join("state").exists());
+    assert!(!temp.path().join("home").exists());
+
+    request.harnesses.clear();
+    let plan = plan_init(&request, &env).unwrap();
+    assert_eq!(plan.report.actions.len(), 1);
+}
+
+#[test]
+fn pack_validation_rejects_invalid_harness_tool_and_workflow_policy() {
+    let mut pack = pack();
+    pack.mcp_servers[0].harness_args = vec![
+        HarnessArgsSpec {
+            harness: Harness::Pi,
+            extra_args: vec!["one".into()],
+        },
+        HarnessArgsSpec {
+            harness: Harness::Pi,
+            extra_args: vec!["two".into()],
+        },
+    ];
+    assert!(matches!(
+        pack.validate(),
+        Err(AdapterError::DuplicateHarnessPolicy(_))
+    ));
+    pack.mcp_servers[0].harness_args.truncate(1);
+    pack.mcp_servers[0].harness_args[0].extra_args.clear();
+    assert!(matches!(
+        pack.validate(),
+        Err(AdapterError::InvalidHarnessPolicy(_))
+    ));
+
+    let mut invalid = IntegrationPack::flutter();
+    invalid.required_tools = vec!["".into()];
+    assert!(matches!(
+        invalid.validate(),
+        Err(AdapterError::InvalidRequiredTool(_))
+    ));
+    let mut invalid = IntegrationPack::flutter();
+    invalid.workflows[0].name = "../foreign".into();
+    assert!(matches!(
+        invalid.validate(),
+        Err(AdapterError::InvalidWorkflowName(_))
+    ));
+    let mut invalid = IntegrationPack::flutter();
+    invalid.workflows.push(invalid.workflows[0].clone());
+    assert!(matches!(
+        invalid.validate(),
+        Err(AdapterError::DuplicateWorkflowName(_))
+    ));
+    let mut invalid = IntegrationPack::flutter();
+    invalid.workflows[0].content.clear();
+    assert!(matches!(
+        invalid.validate(),
+        Err(AdapterError::InvalidWorkflowContent(_))
+    ));
+    for marker in ["", "bad\nmarker", "foreign"] {
+        let mut invalid = IntegrationPack::flutter();
+        invalid.workflows[0].ownership_marker = marker.into();
+        assert!(matches!(
+            invalid.validate(),
+            Err(AdapterError::InvalidWorkflowOwnership(_))
+        ));
+    }
+    let mut invalid = IntegrationPack::flutter();
+    invalid.workflows[0].targets[0].root = WorkflowRoot::SharedAgentSkills;
+    assert!(matches!(
+        invalid.validate(),
+        Err(AdapterError::InvalidWorkflowTarget(_))
+    ));
+}
+
+#[test]
+fn foreign_workflow_is_refused_while_owned_updates_receive_backups() {
+    let (temp, project, env) = fixture();
+    let bin = fake_tool(temp.path(), "dart");
+    let env = env.with_var("PATH", &bin).with_var("PATHEXT", ".EXE");
+    let mut request = InitRequest::new(&project);
+    request.pack = IntegrationPack::flutter();
+    request.harnesses = vec![Harness::Codex];
+    let workflow = temp
+        .path()
+        .join("home/.agents/skills/pickforge-flutter/SKILL.md");
+    std::fs::create_dir_all(workflow.parent().unwrap()).unwrap();
+    std::fs::write(&workflow, "user-owned\n").unwrap();
+
+    let error = plan_init(&request, &env).unwrap_err().to_string();
+    assert!(error.contains("not managed by Pickforge"), "{error}");
+    assert_eq!(std::fs::read_to_string(&workflow).unwrap(), "user-owned\n");
+    assert!(!temp.path().join("home/.codex/config.toml").exists());
+    assert!(!temp.path().join("state").exists());
+
+    let owned = "<!-- pickforge-managed: pickforge-flutter -->\nold\n";
+    std::fs::write(&workflow, owned).unwrap();
+    let plan = plan_init(&request, &env).unwrap();
+    let outcome = apply_init(&plan, "owned-update");
+    assert_eq!(outcome.outcome, ApplyState::Success);
+    assert!(outcome
+        .backup_paths
+        .iter()
+        .any(|path| path.ends_with("SKILL.md.pickforge-backup-owned-update")));
+    assert_eq!(
+        std::fs::read(&workflow).unwrap(),
+        include_bytes!("../assets/skills/pickforge-flutter/SKILL.md")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn physically_shared_workflow_roots_are_planned_and_written_once() {
+    use std::os::unix::fs::symlink;
+
+    let (temp, project, env) = fixture();
+    let bin = fake_tool(temp.path(), "dart");
+    let env = env.with_var("PATH", &bin);
+    let claude_skills = temp.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&claude_skills).unwrap();
+    std::fs::create_dir_all(temp.path().join("home/.agents")).unwrap();
+    symlink(&claude_skills, temp.path().join("home/.agents/skills")).unwrap();
+    let mut request = InitRequest::new(&project);
+    request.pack = IntegrationPack::flutter();
+    request.harnesses = vec![Harness::ClaudeCode, Harness::Codex];
+
+    let plan = plan_init(&request, &env).unwrap();
+    let workflow_actions = plan
+        .report
+        .actions
+        .iter()
+        .filter(|action| action.summary.contains("workflow"))
+        .count();
+    assert_eq!(workflow_actions, 1);
+    assert_eq!(
+        apply_init(&plan, "shared-root").outcome,
+        ApplyState::Success
+    );
+    assert!(claude_skills.join("pickforge-flutter/SKILL.md").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn physically_shared_workflow_targets_with_different_contents_conflict() {
+    use std::os::unix::fs::symlink;
+
+    let (temp, project, env) = fixture();
+    let first_dir = temp.path().join("home/.claude/skills/pickforge-first");
+    std::fs::create_dir_all(&first_dir).unwrap();
+    let shared_skills = temp.path().join("home/.agents/skills");
+    std::fs::create_dir_all(&shared_skills).unwrap();
+    symlink(&first_dir, shared_skills.join("pickforge-second")).unwrap();
+    let mut request = InitRequest::new(&project);
+    request.harnesses = vec![Harness::ClaudeCode, Harness::Codex];
+    request.pack = IntegrationPack {
+        name: "fixture".into(),
+        version: 1,
+        mcp_servers: vec![],
+        required_tools: vec![],
+        workflows: vec![
+            WorkflowSpec {
+                name: "pickforge-first".into(),
+                content: b"<!-- first-owned -->\nfirst\n".to_vec(),
+                ownership_marker: "<!-- first-owned -->".into(),
+                targets: vec![WorkflowTargetSpec {
+                    harness: Harness::ClaudeCode,
+                    root: WorkflowRoot::ClaudeSkills,
+                }],
+            },
+            WorkflowSpec {
+                name: "pickforge-second".into(),
+                content: b"<!-- second-owned -->\nsecond\n".to_vec(),
+                ownership_marker: "<!-- second-owned -->".into(),
+                targets: vec![WorkflowTargetSpec {
+                    harness: Harness::Codex,
+                    root: WorkflowRoot::SharedAgentSkills,
+                }],
+            },
+        ],
+    };
+
+    let error = plan_init(&request, &env).unwrap_err().to_string();
+    assert!(
+        error.contains("workflow targets resolve to") && error.contains("with different contents"),
+        "{error}"
+    );
+    assert!(!first_dir.join("SKILL.md").exists());
+    assert!(!temp.path().join("state").exists());
+}
+
+#[test]
+fn repeated_missing_home_conflicts_are_reported_once() {
+    let (temp, project, _) = fixture();
+    let bin = fake_tool(temp.path(), "dart");
+    let env = Environment::empty()
+        .with_var("PATH", &bin)
+        .with_var("PATHEXT", ".EXE")
+        .with_var("PICKFORGE_HOME", temp.path().join("state"));
+    let mut request = InitRequest::new(&project);
+    request.pack = IntegrationPack::flutter();
+
+    let error = plan_init(&request, &env).unwrap_err().to_string();
+    assert_eq!(
+        error.matches("no home directory could be resolved").count(),
+        1
+    );
+    assert!(!temp.path().join("state").exists());
 }
 
 #[test]

@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
-use pickforge_cli::adapters::Harness;
+use pickforge_cli::adapters::{Harness, IntegrationPack};
 use pickforge_cli::init::{ApplyState, InitRequest};
 use pickforge_cli::{apply_init, diagnose, plan_init, render, Environment};
 use serde::Serialize;
@@ -39,6 +39,8 @@ enum Command {
         dry_run: bool,
         #[arg(long)]
         json: bool,
+        #[arg(long, hide = true)]
+        mobile_integration_alpha: bool,
     },
 }
 
@@ -90,11 +92,15 @@ fn main() -> ExitCode {
             harness,
             dry_run,
             json,
+            mobile_integration_alpha,
         } => {
             let project_dir = project_dir
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_else(|| PathBuf::from("."));
             let mut request = InitRequest::new(project_dir);
+            if mobile_integration_alpha {
+                request.pack = IntegrationPack::flutter();
+            }
             if !harness.is_empty() {
                 request.harnesses = harness
                     .iter()

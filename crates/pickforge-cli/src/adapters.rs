@@ -8,7 +8,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Harness {
     ClaudeCode,
@@ -45,10 +45,41 @@ impl FromStr for Harness {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct HarnessArgsSpec {
+    pub harness: Harness,
+    pub extra_args: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct McpServerSpec {
     pub name: String,
     pub command: String,
     pub args: Vec<String>,
+    pub harness_args: Vec<HarnessArgsSpec>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkflowRoot {
+    ClaudeSkills,
+    SharedAgentSkills,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowTargetSpec {
+    pub harness: Harness,
+    pub root: WorkflowRoot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowSpec {
+    pub name: String,
+    pub content: Vec<u8>,
+    pub ownership_marker: String,
+    pub targets: Vec<WorkflowTargetSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -57,6 +88,8 @@ pub struct IntegrationPack {
     pub name: String,
     pub version: u32,
     pub mcp_servers: Vec<McpServerSpec>,
+    pub required_tools: Vec<String>,
+    pub workflows: Vec<WorkflowSpec>,
 }
 
 impl IntegrationPack {
@@ -65,6 +98,50 @@ impl IntegrationPack {
             name: "pickforge-base".into(),
             version: 1,
             mcp_servers: Vec::new(),
+            required_tools: Vec::new(),
+            workflows: Vec::new(),
+        }
+    }
+
+    pub fn flutter() -> Self {
+        Self {
+            name: "pickforge-flutter".into(),
+            version: 1,
+            mcp_servers: vec![McpServerSpec {
+                name: "pickforge-dart".into(),
+                command: "dart".into(),
+                args: vec!["mcp-server".into()],
+                harness_args: vec![
+                    HarnessArgsSpec {
+                        harness: Harness::Codex,
+                        extra_args: vec!["--force-roots-fallback".into()],
+                    },
+                    HarnessArgsSpec {
+                        harness: Harness::Pi,
+                        extra_args: vec!["--force-roots-fallback".into()],
+                    },
+                ],
+            }],
+            required_tools: vec!["dart".into()],
+            workflows: vec![WorkflowSpec {
+                name: "pickforge-flutter".into(),
+                content: include_bytes!("../assets/skills/pickforge-flutter/SKILL.md").to_vec(),
+                ownership_marker: "<!-- pickforge-managed: pickforge-flutter -->".into(),
+                targets: vec![
+                    WorkflowTargetSpec {
+                        harness: Harness::ClaudeCode,
+                        root: WorkflowRoot::ClaudeSkills,
+                    },
+                    WorkflowTargetSpec {
+                        harness: Harness::Codex,
+                        root: WorkflowRoot::SharedAgentSkills,
+                    },
+                    WorkflowTargetSpec {
+                        harness: Harness::Pi,
+                        root: WorkflowRoot::SharedAgentSkills,
+                    },
+                ],
+            }],
         }
     }
 
@@ -87,9 +164,67 @@ impl IntegrationPack {
             }
             if std::iter::once(&server.command)
                 .chain(&server.args)
+                .chain(
+                    server
+                        .harness_args
+                        .iter()
+                        .flat_map(|policy| policy.extra_args.iter()),
+                )
                 .any(|value| value.chars().any(char::is_control))
             {
                 return Err(AdapterError::ControlCharacter(server.name.clone()));
+            }
+            let mut harnesses = BTreeSet::new();
+            for policy in &server.harness_args {
+                if !harnesses.insert(policy.harness) {
+                    return Err(AdapterError::DuplicateHarnessPolicy(server.name.clone()));
+                }
+                if policy.extra_args.is_empty() {
+                    return Err(AdapterError::InvalidHarnessPolicy(server.name.clone()));
+                }
+            }
+        }
+        let mut tools = BTreeSet::new();
+        for tool in &self.required_tools {
+            if tool.is_empty() || tool.chars().any(char::is_control) || !tools.insert(tool) {
+                return Err(AdapterError::InvalidRequiredTool(tool.clone()));
+            }
+        }
+        let mut workflows = BTreeSet::new();
+        for workflow in &self.workflows {
+            if !workflow.name.starts_with("pickforge-")
+                || !workflow
+                    .name
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
+            {
+                return Err(AdapterError::InvalidWorkflowName(workflow.name.clone()));
+            }
+            if !workflows.insert(&workflow.name) {
+                return Err(AdapterError::DuplicateWorkflowName(workflow.name.clone()));
+            }
+            if workflow.content.is_empty() || std::str::from_utf8(&workflow.content).is_err() {
+                return Err(AdapterError::InvalidWorkflowContent(workflow.name.clone()));
+            }
+            if workflow.ownership_marker.is_empty()
+                || workflow.ownership_marker.chars().any(char::is_control)
+                || !workflow
+                    .content
+                    .windows(workflow.ownership_marker.len())
+                    .any(|window| window == workflow.ownership_marker.as_bytes())
+            {
+                return Err(AdapterError::InvalidWorkflowOwnership(
+                    workflow.name.clone(),
+                ));
+            }
+            let mut harnesses = BTreeSet::new();
+            for target in &workflow.targets {
+                if !harnesses.insert(target.harness)
+                    || matches!(target.harness, Harness::ClaudeCode)
+                        != matches!(target.root, WorkflowRoot::ClaudeSkills)
+                {
+                    return Err(AdapterError::InvalidWorkflowTarget(workflow.name.clone()));
+                }
             }
         }
         Ok(())
@@ -106,6 +241,22 @@ pub enum AdapterError {
     EmptyServerCommand(String),
     #[error("MCP server command and arguments must not contain control characters: {0}")]
     ControlCharacter(String),
+    #[error("MCP server has duplicate per-harness argument policy: {0}")]
+    DuplicateHarnessPolicy(String),
+    #[error("MCP server per-harness argument policy must add at least one argument: {0}")]
+    InvalidHarnessPolicy(String),
+    #[error("required tool must be nonempty, unique, and contain no control characters: {0}")]
+    InvalidRequiredTool(String),
+    #[error("workflow name must begin with 'pickforge-' and contain only ASCII letters, digits, or '-': {0}")]
+    InvalidWorkflowName(String),
+    #[error("workflow name is duplicated: {0}")]
+    DuplicateWorkflowName(String),
+    #[error("workflow content must be nonempty UTF-8: {0}")]
+    InvalidWorkflowContent(String),
+    #[error("workflow content must contain its nonempty, control-free ownership marker: {0}")]
+    InvalidWorkflowOwnership(String),
+    #[error("workflow has a duplicate or incompatible harness target: {0}")]
+    InvalidWorkflowTarget(String),
     #[error("{0} must contain a JSON object")]
     JsonObject(&'static str),
     #[error("{0} contains malformed JSON: {1}")]
@@ -128,9 +279,22 @@ pub enum AdapterError {
     ManagedTableOutsideBlock(String),
 }
 
+fn server_args(server: &McpServerSpec, harness: Harness) -> Vec<String> {
+    let mut args = server.args.clone();
+    if let Some(policy) = server
+        .harness_args
+        .iter()
+        .find(|policy| policy.harness == harness)
+    {
+        args.extend(policy.extra_args.clone());
+    }
+    args
+}
+
 pub fn json_config(
     existing: Option<&str>,
     pack: &IntegrationPack,
+    harness: Harness,
     label: &'static str,
 ) -> Result<Option<Vec<u8>>, AdapterError> {
     pack.validate()?;
@@ -155,7 +319,7 @@ pub fn json_config(
     for server in &pack.mcp_servers {
         servers.insert(
             server.name.clone(),
-            serde_json::json!({"command": server.command, "args": server.args}),
+            serde_json::json!({"command": server.command, "args": server_args(server, harness)}),
         );
     }
     let mut rendered = serde_json::to_vec_pretty(&root).expect("JSON values serialize");
@@ -271,8 +435,7 @@ pub fn codex_config(
         block.push(format!("command = {}", toml_string(&server.command)));
         block.push(format!(
             "args = [{}]",
-            server
-                .args
+            server_args(server, Harness::Codex)
                 .iter()
                 .map(|arg| toml_string(arg))
                 .collect::<Vec<_>>()
@@ -311,6 +474,21 @@ pub fn codex_config(
         return Err(AdapterError::MarkerScope);
     }
     Ok(Some(output.into_bytes()))
+}
+
+pub(crate) fn workflow_target(
+    root: WorkflowRoot,
+    name: &str,
+    env: &crate::Environment,
+) -> Result<PathBuf, String> {
+    let home = env
+        .home_dir()
+        .ok_or_else(|| "no home directory could be resolved".to_string())?;
+    let skills = match root {
+        WorkflowRoot::ClaudeSkills => home.join(".claude").join("skills"),
+        WorkflowRoot::SharedAgentSkills => home.join(".agents").join("skills"),
+    };
+    Ok(skills.join(name).join("SKILL.md"))
 }
 
 pub(crate) fn target_for(harness: Harness, env: &crate::Environment) -> Result<PathBuf, String> {
