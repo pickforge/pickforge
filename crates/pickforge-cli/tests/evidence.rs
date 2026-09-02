@@ -1,14 +1,40 @@
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
+use image::{DynamicImage, GenericImageView, ImageBuffer, ImageFormat, Rgb, RgbImage};
 use pickforge_cli::adapters::{Harness, IntegrationPack};
 use pickforge_cli::evidence::{record_at, EvidenceError, EVIDENCE_SCHEMA_VERSION};
 use pickforge_cli::project::{canonical_project_path, derive_project_id};
 use pickforge_cli::{apply_init, plan_init, Environment, InitRequest};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 const PUBSPEC: &str = "name: app\ndependencies:\n  flutter:\n    sdk: flutter\n";
-const PNG: &[u8] = b"\x89PNG\r\n\x1a\nfixture";
+
+fn encode_png(image: RgbImage) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    DynamicImage::ImageRgb8(image)
+        .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+        .unwrap();
+    bytes
+}
+
+fn solid_png(width: u32, height: u32) -> Vec<u8> {
+    encode_png(ImageBuffer::from_pixel(width, height, Rgb([17, 83, 149])))
+}
+
+fn noisy_png(width: u32, height: u32, seed: u32) -> Vec<u8> {
+    let mut state = seed;
+    let mut pixels = vec![0; width as usize * height as usize * 3];
+    for byte in &mut pixels {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        *byte = state as u8;
+    }
+    encode_png(ImageBuffer::from_raw(width, height, pixels).unwrap())
+}
 
 fn fixture() -> (TempDir, PathBuf, Environment, PathBuf) {
     let temp = TempDir::new().unwrap();
@@ -46,7 +72,7 @@ fn envelope(before: &[(&str, &Path)], after: &[(&str, &Path)]) -> Vec<u8> {
         items.iter().map(|(label, path)| serde_json::json!({"kind":"screenshot","label":label,"source":path})).collect::<Vec<_>>()
     };
     serde_json::to_vec(&serde_json::json!({
-        "schemaVersion":1,
+        "schemaVersion":EVIDENCE_SCHEMA_VERSION,
         "scenario":"Counter increments",
         "outcome":"passed",
         "before":{"summary":"Counter was zero.","observations":[{"label":"Counter","value":"0"}],"artifacts":artifacts(before)},
@@ -62,8 +88,9 @@ fn golden_documents_are_byte_exact_and_aliases_dedupe() {
     let (_temp, project, env, state) = fixture();
     let first = state.parent().unwrap().join("first.any");
     let alias = state.parent().unwrap().join("alias.jpg");
-    std::fs::write(&first, PNG).unwrap();
-    std::fs::write(&alias, PNG).unwrap();
+    let source_bytes = solid_png(1, 1);
+    std::fs::write(&first, &source_bytes).unwrap();
+    std::fs::write(&alias, &source_bytes).unwrap();
     let mut input: serde_json::Value = serde_json::from_slice(&envelope(
         &[("Initial *shot*", &first)],
         &[("Final [shot]", &alias)],
@@ -92,12 +119,16 @@ fn golden_documents_are_byte_exact_and_aliases_dedupe() {
     );
     let canonical_project = canonical_project_path(&project);
     let project_id = derive_project_id(&canonical_project).unwrap();
+    let hash = format!("{:x}", Sha256::digest(&source_bytes));
+    let artifact_path = format!("artifacts/before-initial-shot-{}.png", &hash[..12]);
     let artifact = serde_json::json!({
         "kind":"screenshot","label":"Initial *shot*",
-        "path":"artifacts/before-initial-shot-bd54b02fae14.png",
-        "sha256":"bd54b02fae14b6b9ed73887ded339b8ef846fbcba0d4e5f9d95470ac23ade242",
-        "bytes":15,"mediaType":"image/png"
+        "path":artifact_path.clone(),
+        "width":1,"height":1,
+        "sha256":hash.clone(),
+        "bytes":source_bytes.len(),"mediaType":"image/png"
     });
+    assert!(value["before"]["artifacts"][0].get("preview").is_none());
     let mut final_artifact = artifact.clone();
     final_artifact["label"] = "Final [shot]".into();
     let expected = serde_json::json!({
@@ -119,14 +150,100 @@ fn golden_documents_are_byte_exact_and_aliases_dedupe() {
         .join("artifacts");
     assert_eq!(std::fs::read_dir(artifact_dir).unwrap().count(), 1);
     let report = std::fs::read_to_string(&result.report_path).unwrap();
-    assert_eq!(report, "# Flutter evidence: Counter \\*increments\\*\n\n**Outcome:** passed\n\n## Before\n\nCounter was \\*\\*zero\\*\\*. Second line.\n\n- **Counter\\_\\[raw\\]:** 0 still zero\n\n## After\n\nCounter is one.\n\n- **Counter:** 1\n\n## Source changes\n\n- lib/main.dart\n\n## Checks\n\n- **flutter test** (Passed): Passed.\n\n## Artifacts\n\n- [Initial \\*shot\\*](artifacts/before-initial-shot-bd54b02fae14.png) (15 bytes, `bd54b02fae14b6b9ed73887ded339b8ef846fbcba0d4e5f9d95470ac23ade242`)\n- [Final \\[shot\\]](artifacts/before-initial-shot-bd54b02fae14.png) (15 bytes, `bd54b02fae14b6b9ed73887ded339b8ef846fbcba0d4e5f9d95470ac23ade242`)\n\n## Limitations\n\n- Pixel review was manual.\n");
+    let expected_report = format!("# Flutter evidence: Counter \\*increments\\*\n\n**Outcome:** passed\n\n## Before\n\nCounter was \\*\\*zero\\*\\*. Second line.\n\n- **Counter\\_\\[raw\\]:** 0 still zero\n\n## After\n\nCounter is one.\n\n- **Counter:** 1\n\n## Source changes\n\n- lib/main.dart\n\n## Checks\n\n- **flutter test** (Passed): Passed.\n\n## Artifacts\n\n- [Initial \\*shot\\*]({artifact_path}) (1x1, {} bytes, `{hash}`)\n- [Final \\[shot\\]]({artifact_path}) (1x1, {} bytes, `{hash}`)\n\n## Limitations\n\n- Pixel review was manual.\n", source_bytes.len(), source_bytes.len());
+    assert_eq!(report, expected_report);
+}
+
+#[test]
+fn oversized_artifact_gets_one_bounded_preview_and_keeps_its_source_bytes() {
+    let (_temp, project, env, state) = fixture();
+    let source = state.parent().unwrap().join("wide.png");
+    let source_bytes = solid_png(2000, 1000);
+    std::fs::write(&source, &source_bytes).unwrap();
+
+    let result = record_at(
+        &project,
+        &env,
+        &envelope(&[("Wide before", &source)], &[("Wide after", &source)]),
+        UNIX_EPOCH,
+    )
+    .unwrap();
+    let document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&result.evidence_path).unwrap()).unwrap();
+    let before = &document["before"]["artifacts"][0];
+    let after = &document["after"]["artifacts"][0];
+    assert_eq!(before["path"], after["path"]);
+    assert_eq!(before["preview"], after["preview"]);
+    assert_eq!(before["width"], 2000);
+    assert_eq!(before["height"], 1000);
+    assert_eq!(before["preview"]["width"], 1568);
+    assert_eq!(before["preview"]["height"], 784);
+
+    let run_dir = Path::new(&result.evidence_path).parent().unwrap();
+    let artifact_path = run_dir.join(before["path"].as_str().unwrap());
+    let preview_path = run_dir.join(before["preview"]["path"].as_str().unwrap());
+    assert_eq!(std::fs::read(&artifact_path).unwrap(), source_bytes);
+    let preview_bytes = std::fs::read(&preview_path).unwrap();
+    assert_eq!(
+        before["preview"]["sha256"],
+        format!("{:x}", Sha256::digest(&preview_bytes))
+    );
+    assert_eq!(before["preview"]["bytes"], preview_bytes.len() as u64);
+    assert_eq!(
+        image::load_from_memory(&preview_bytes)
+            .unwrap()
+            .dimensions(),
+        (1568, 784)
+    );
+    assert_eq!(
+        std::fs::read_dir(run_dir.join("artifacts"))
+            .unwrap()
+            .count(),
+        2
+    );
+
+    let report = std::fs::read_to_string(result.report_path).unwrap();
+    let preview_relative = before["preview"]["path"].as_str().unwrap();
+    let artifact_relative = before["path"].as_str().unwrap();
+    assert!(report.contains(preview_relative), "{report}");
+    assert!(report.contains("1568x784"), "{report}");
+    assert!(!report.contains(artifact_relative), "{report}");
+}
+
+#[test]
+fn preview_bytes_count_toward_the_total_budget() {
+    let (_temp, project, env, state) = fixture();
+    let mut paths = Vec::new();
+    for seed in 1..=5 {
+        let path = state.parent().unwrap().join(format!("noise-{seed}.png"));
+        let bytes = noisy_png(1569, 1569, seed);
+        assert!(bytes.len() < 8 * 1024 * 1024, "{}", bytes.len());
+        std::fs::write(&path, bytes).unwrap();
+        paths.push(path);
+    }
+    let artifacts = paths
+        .iter()
+        .map(|path| ("noise", path.as_path()))
+        .collect::<Vec<_>>();
+
+    let error = record_at(&project, &env, &envelope(&artifacts, &[]), UNIX_EPOCH).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("artifacts and previews exceed 64 MiB total"),
+        "{error}"
+    );
+    assert!(std::fs::read_dir(state.join("runs"))
+        .unwrap()
+        .next()
+        .is_none());
 }
 
 #[test]
 fn collision_suffixing_and_atomic_failure_cleanup() {
     let (_temp, project, env, state) = fixture();
     let image = state.parent().unwrap().join("image");
-    std::fs::write(&image, PNG).unwrap();
+    std::fs::write(&image, solid_png(1, 1)).unwrap();
     let now = UNIX_EPOCH + Duration::from_secs(1_704_067_200);
     let first = record_at(&project, &env, &envelope(&[], &[("Image", &image)]), now).unwrap();
     let second = record_at(&project, &env, &envelope(&[], &[]), now).unwrap();
@@ -156,12 +273,15 @@ fn rejects_receipt_schema_paths_controls_unknown_fields_and_limits() {
     let (_temp, project, env, state) = fixture();
     let valid = envelope(&[], &[]);
     let cases = [
-        serde_json::json!({"schemaVersion":2,"scenario":"x","outcome":"passed","before":{"summary":"","observations":[],"artifacts":[]},"after":{"summary":"","observations":[],"artifacts":[]}}),
-        serde_json::json!({"schemaVersion":1,"scenario":"x\n# fake","outcome":"passed","before":{"summary":"","observations":[],"artifacts":[]},"after":{"summary":"","observations":[],"artifacts":[]}}),
-        serde_json::json!({"schemaVersion":1,"scenario":"x","outcome":"passed","before":{"summary":"","observations":[],"artifacts":[]},"after":{"summary":"","observations":[],"artifacts":[]},"sourceChanges":["../secret"]}),
-        serde_json::json!({"schemaVersion":1,"scenario":"x","outcome":"passed","before":{"summary":"safe\u{202e}spoof","observations":[],"artifacts":[]},"after":{"summary":"","observations":[] ,"artifacts":[]}}),
-        serde_json::json!({"schemaVersion":1,"scenario":"x","outcome":"passed","before":{"summary":"","observations":[],"artifacts":[]},"after":{"summary":"","observations":[],"artifacts":[]},"sourceChanges":["lib/safe\u{2066}spoof.dart"]}),
-        serde_json::json!({"schemaVersion":1,"scenario":"x","outcome":"passed","before":{"summary":"","observations":[],"artifacts":[],"unknown":1},"after":{"summary":"","observations":[],"artifacts":[]}}),
+        // Version 0 is below the accepted range and a future version is above it. Version 1 is
+        // still valid input: the new fields are derived, so the input shape never changed.
+        serde_json::json!({"schemaVersion":0,"scenario":"x","outcome":"passed","before":{"summary":"","observations":[],"artifacts":[]},"after":{"summary":"","observations":[],"artifacts":[]}}),
+        serde_json::json!({"schemaVersion":EVIDENCE_SCHEMA_VERSION + 1,"scenario":"x","outcome":"passed","before":{"summary":"","observations":[],"artifacts":[]},"after":{"summary":"","observations":[],"artifacts":[]}}),
+        serde_json::json!({"schemaVersion":EVIDENCE_SCHEMA_VERSION,"scenario":"x\n# fake","outcome":"passed","before":{"summary":"","observations":[],"artifacts":[]},"after":{"summary":"","observations":[],"artifacts":[]}}),
+        serde_json::json!({"schemaVersion":EVIDENCE_SCHEMA_VERSION,"scenario":"x","outcome":"passed","before":{"summary":"","observations":[],"artifacts":[]},"after":{"summary":"","observations":[],"artifacts":[]},"sourceChanges":["../secret"]}),
+        serde_json::json!({"schemaVersion":EVIDENCE_SCHEMA_VERSION,"scenario":"x","outcome":"passed","before":{"summary":"safe\u{202e}spoof","observations":[],"artifacts":[]},"after":{"summary":"","observations":[] ,"artifacts":[]}}),
+        serde_json::json!({"schemaVersion":EVIDENCE_SCHEMA_VERSION,"scenario":"x","outcome":"passed","before":{"summary":"","observations":[],"artifacts":[]},"after":{"summary":"","observations":[],"artifacts":[]},"sourceChanges":["lib/safe\u{2066}spoof.dart"]}),
+        serde_json::json!({"schemaVersion":EVIDENCE_SCHEMA_VERSION,"scenario":"x","outcome":"passed","before":{"summary":"","observations":[],"artifacts":[],"unknown":1},"after":{"summary":"","observations":[],"artifacts":[]}}),
     ];
     for case in cases {
         assert!(
@@ -175,6 +295,19 @@ fn rejects_receipt_schema_paths_controls_unknown_fields_and_limits() {
             "{case}"
         );
     }
+    // A caller written against version 1 keeps working; the recorded document carries the
+    // current version because the added fields are derived here, not submitted.
+    let mut legacy: serde_json::Value = serde_json::from_slice(&valid).unwrap();
+    legacy["schemaVersion"] = serde_json::json!(1);
+    let recorded = record_at(
+        &project,
+        &env,
+        &serde_json::to_vec(&legacy).unwrap(),
+        UNIX_EPOCH,
+    )
+    .expect("a version 1 document still records");
+    assert_eq!(recorded.schema_version, EVIDENCE_SCHEMA_VERSION);
+
     let bidi_artifact = project.join("image\u{202e}.png");
     let bidi_input = envelope(&[("image", &bidi_artifact)], &[]);
     assert!(matches!(
@@ -225,7 +358,7 @@ fn windows_refuses_hardlinked_receipts_and_source_images() {
 
     std::fs::remove_file(state.join("receipt-link.json")).unwrap();
     let image = project.join("source.png");
-    std::fs::write(&image, b"\x89PNG\r\n\x1a\nimage").unwrap();
+    std::fs::write(&image, solid_png(1, 1)).unwrap();
     std::fs::hard_link(&image, project.join("source-link.png")).unwrap();
     let error = record_at(
         &project,
@@ -266,7 +399,7 @@ fn v1_flutter_receipt_remains_compatible_with_pack_v2_and_future_fields() {
 fn every_supported_secret_shape_is_absent_from_both_outputs() {
     let (_temp, project, env, _state) = fixture();
     let secrets = "safe-before token: \"quotedsecret\" safe-middle password='singlesecret' api_key=abc123 {\"token\":\"jsonsecret\"} Authorization: Bearer authsecret safe-after eyJabc.def.ghi ghp_123456789 sk-123456789 AKIA1234567890123456 Cookie: sid=cookiesecret";
-    let input = serde_json::to_vec(&serde_json::json!({"schemaVersion":1,"scenario":"Secrets test","outcome":"inconclusive","before":{"summary":secrets,"observations":[{"label":"safe","value":secrets}],"artifacts":[]},"after":{"summary":secrets,"observations":[],"artifacts":[]},"sourceChanges":[],"checks":[{"name":"check","status":"skipped","summary":secrets}],"limitations":[secrets]})).unwrap();
+    let input = serde_json::to_vec(&serde_json::json!({"schemaVersion":EVIDENCE_SCHEMA_VERSION,"scenario":"Secrets test","outcome":"inconclusive","before":{"summary":secrets,"observations":[{"label":"safe","value":secrets}],"artifacts":[]},"after":{"summary":secrets,"observations":[],"artifacts":[]},"sourceChanges":[],"checks":[{"name":"check","status":"skipped","summary":secrets}],"limitations":[secrets]})).unwrap();
     let result = record_at(&project, &env, &input, UNIX_EPOCH).unwrap();
     let outputs = [
         std::fs::read_to_string(result.evidence_path).unwrap(),
@@ -314,7 +447,7 @@ fn enforces_image_magic_size_count_and_total_limits() {
     .is_err());
 
     let small = state.parent().unwrap().join("small");
-    std::fs::write(&small, PNG).unwrap();
+    std::fs::write(&small, solid_png(1, 1)).unwrap();
     let too_many = (0..9)
         .map(|_| ("image", small.as_path()))
         .collect::<Vec<_>>();
@@ -346,7 +479,7 @@ fn refuses_symlink_hardlink_and_nonregular_artifacts() {
     use std::os::unix::fs::symlink;
     let (_temp, project, env, state) = fixture();
     let image = state.parent().unwrap().join("image");
-    std::fs::write(&image, PNG).unwrap();
+    std::fs::write(&image, solid_png(1, 1)).unwrap();
     let symlink_path = state.parent().unwrap().join("link");
     symlink(&image, &symlink_path).unwrap();
     let hardlink = state.parent().unwrap().join("hard");

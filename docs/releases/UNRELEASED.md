@@ -17,9 +17,12 @@ GitHub release description, then reset it after the release is published.
   UTF-8 project-id contract fail closed without resolving a state directory.
 - Experimental, unpublished `pickforge evidence record` accepts a bounded JSON
   document from stdin or `--input`, verifies the existing Flutter init receipt,
-  copies validated screenshots into an external private run directory, and writes
-  canonical `evidence.json` plus Markdown `report.md`. Text secrets are redacted,
-  Markdown is escaped without changing canonical JSON strings, and the command
+  copies validated screenshots byte-for-byte into an external private run directory,
+  and writes canonical `evidence.json` plus Markdown `report.md`. Evidence schema v2
+  records source dimensions and adds a 1568px bounded PNG preview for oversized
+  screenshots; reports use the preview while preserving the original artifact. Text
+  secrets are redacted, Markdown is escaped without changing canonical JSON strings,
+  and the command
   accepts a valid owned Flutter receipt v1 or newer and fails closed when it is
   missing or belongs elsewhere; the Flutter integration pack itself is now v2.
 - Experimental, unpublished `pickforge init` foundation adds read-only planning,
@@ -63,8 +66,9 @@ GitHub release description, then reset it after the release is published.
   dry-run, receipt ownership, file modes, idempotency, Git-tree cleanliness,
   JSON/text safety, CLI exits, owned Flutter MCP configuration, per-harness
   arguments, workflow targeting/deduplication, alpha tool preconditions, evidence
-  storage/redaction, receipt compatibility, and concurrent first use. Exact local
-  validation also includes `cargo check --workspace --all-targets --locked
+  storage/redaction, bounded screenshot previews, byte-identical source retention,
+  preview deduplication and budgeting, receipt compatibility, and concurrent first
+  use. Exact local validation also includes `cargo check --workspace --all-targets --locked
   --target x86_64-pc-windows-msvc` and target-specific clippy with `-D warnings`.
   Windows-native tests run in the CI matrix.
 - Manual smoke runs of `pickforge doctor` and `pickforge doctor --json`

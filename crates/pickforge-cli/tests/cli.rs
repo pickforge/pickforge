@@ -485,7 +485,8 @@ fn evidence_record_supports_stdin_path_human_json_and_errors() {
         .assert()
         .success();
     let value: serde_json::Value = serde_json::from_slice(&json.get_output().stdout).unwrap();
-    assert_eq!(value["schemaVersion"], 1);
+    // A v1 input still records; the document it produces carries the current version.
+    assert_eq!(value["schemaVersion"], 2);
     assert_eq!(value["changed"], true);
     assert!(value["evidencePath"]
         .as_str()
@@ -499,7 +500,7 @@ fn evidence_record_supports_stdin_path_human_json_and_errors() {
         .assert()
         .code(1);
     let value: serde_json::Value = serde_json::from_slice(&error.get_output().stdout).unwrap();
-    assert_eq!(value["schemaVersion"], 1);
+    assert_eq!(value["schemaVersion"], 2);
     assert!(value["error"]
         .as_str()
         .unwrap()

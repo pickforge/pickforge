@@ -27,6 +27,7 @@ time = { version = "0.3", features = ["formatting", "macros"] }
 tempfile = "3"
 toml = { version = "1.1", default-features = false, features = ["parse", "serde", "std"] }
 which = "8"
+image = { version = "0.25.10", default-features = false, features = ["png", "webp"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
