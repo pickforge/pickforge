@@ -1,67 +1,20 @@
-# AGENTS
+# PickLab
 
-Repo-local guide for agents working in PickLab.
+TypeScript monorepo behind `@pickforge/picklab`: a CLI and MCP server that drives Xvfb desktop sessions, Android emulators and headed Chrome for coding agents. Linux only.
 
-## Commands
+```
+bun install --frozen-lockfile
+bun run typecheck
+bun run lint                 # eslint gates complexity 15, depth 4, 100-line functions
+bun run test                 # add a path to run one file
+bun run test:coverage        # thresholds are a gate, don't lower them
+bun run test:live:android    # needs a real emulator
+bun run build
+```
 
-- Install: `bun install --frozen-lockfile`
-- Typecheck: `bun run typecheck`
-- Test (deterministic): `bun run test`
-- Test coverage: `bun run test:coverage`
-- Test live Android/emulator: `bun run test:live:android`
-- Test (one file): `bun run test <path/to/file.test.ts>`
-- Build bundles: `bun run build`
-- Write tests in the same PR as behavior changes. For bugs, start with a
-  failing regression test when practical. For risky refactors, add
-  characterization tests first.
-- Do not lower coverage thresholds without explicit maintainer approval.
+Things you wouldn't guess:
 
-## Layout
-
-- `packages/core` — sessions, runs, config, redaction, screenshot target resolution.
-- `packages/desktop-linux` — Xvfb, VNC, window, input, screenshot builders.
-- `packages/android` — adb, emulator/AVD, session lifecycle.
-- `packages/cli` — `picklab` CLI commands.
-- `packages/mcp-server` — MCP tools and resources over stdio.
-- `packages/agent-installers` — agent config installers.
-
-## Invariants
-
-- Never interpolate user input into shell strings; spawn argument arrays.
-- Redact secrets (`redactSecrets`) before returning or persisting logs/ui-trees/logcat.
-- VNC binds loopback-only (`x11vnc -localhost`) by default.
-- MCP resources stay inside run dirs: lexical safe-name checks plus realpath/lstat symlink protection.
-- MCP screenshot `out` is confined under the project dir; the CLI `--out` stays unrestricted.
-- `android adb` only falls back to a raw, untargeted call when there is no running android session; ambiguous sessions fail closed (exit 1).
-- MCP tools never invoke sudo.
-- Provisioning planners emit raw commands; the executor owns consent, dry-run,
-  privileged routing, and redacted public plans.
-
-## Testing notes
-
-- Tests use `vitest`; CLI tests build the CLI once and spawn it with fake `adb`/SDK scripts on `PATH`.
-- Prefer asserting exact argv passed to adb and that planted tokens never leak.
-- Keep durable business/domain behavior in existing core/lib packages, not UI
-  command wrappers. Do not add DDD ceremony.
-
-## Releasing
-
-- Keep [`docs/releases/UNRELEASED.md`](docs/releases/UNRELEASED.md) current on
-  PRs with user-facing or release-relevant changes. Track user-facing changes,
-  internal/release changes, what was tested, what was not tested yet, and known
-  blockers. At release time, use it to polish the generated GitHub release
-  description, then reset the draft.
-- Bump every workspace package manifest and `bun.lock` to the new version, land
-  on `main`, tag `vX.Y.Z`, and push the tag. CI validates the tag/package match,
-  runs the full suite, publishes `@pickforge/picklab` to npm, and creates a draft
-  GitHub release. Make sure `main` is truly ready before tagging because npm goes
-  live without a manual gate.
-- The GitHub release description is the single source of release notes. A human
-  polishes the generated draft from `docs/releases/UNRELEASED.md` and publishes
-  it; pickforge.dev/picklab then shows it via the GitHub API. Reset UNRELEASED
-  after publication. No website change is needed for a normal release.
-- Only touch `landing-page` (`src/pages/products.ts`) when the install story
-  or positioning changes.
-## Workspace policy
-
-For substantial work, read `../AGENTS.md` (workspace root) and use the `plan-issue` workflow — GitHub Issues are the canonical plan/progress tracker.
+- Desktop and browser tests need Xvfb, xdotool, ImageMagick, x11vnc, xterm and a Chrome or Chromium on PATH. Missing ones make browser tests skip quietly. CI sets `PICKLAB_REQUIRE_BROWSER=1` so they fail instead, plus `PICKLAB_CHROME_NO_SANDBOX=1`, which is a CI-only concession.
+- CLI tests build the CLI once into `packages/cli/dist` and spawn it with fake `adb` and SDK scripts on PATH, so a stale build looks like a strange test failure.
+- `test/security` pins the guarantees we advertise: argv arrays instead of shell strings, secrets redacted before anything is stored or returned, MCP never calls sudo, VNC loopback-only and read-only. MCP screenshot `out` stays under the project dir; the CLI's `--out` is deliberately unrestricted.
+- Releasing: bump every `packages/*/package.json` and `bun.lock` together. CI compares the tag to `packages/cli/package.json`, and only that package is published.
