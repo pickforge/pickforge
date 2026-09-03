@@ -235,7 +235,7 @@ describe("install.sh", () => {
       const result = await run("/bin/sh", [installScript], {
         cwd: dir,
         env: baseEnv(home, {
-          PATH: [fakeBin, "/usr/bin", "/bin"].join(path.delimiter),
+          PATH: [fakeBin, process.env.PATH ?? ""].join(path.delimiter),
           PICKFORGE_INSTALL_FROM_TARBALL: tarball,
           PICKFORGE_INSTALL_RUNTIME: "npm",
           npm_config_prefix: prefix,
