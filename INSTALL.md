@@ -99,8 +99,10 @@ picklab session destroy --all
 ```
 
 For a desktop development runner that launches its own GUI, do not set only
-`DISPLAY`. Use the session environment so GTK, Qt, SDL, and winit cannot prefer
-the user's real Wayland desktop:
+`DISPLAY`. Use the session environment so `WAYLAND_DISPLAY` points at the
+non-existent `picklab-no-wayland` socket, other inherited `WAYLAND_*` variables
+are removed, and GTK, Qt, SDL, and winit use X11. The poison value is required
+because libwayland falls back to `wayland-0` when `WAYLAND_DISPLAY` is unset:
 
 ```sh
 picklab desktop exec --session <id> -- flutter run -d linux

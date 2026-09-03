@@ -1,7 +1,8 @@
 import type { EnvLike } from "@pickforge/picklab-core";
 import { parseDisplayNumber } from "./display.js";
 
-const WAYLAND_VARIABLES = ["WAYLAND_DISPLAY", "WAYLAND_SOCKET"] as const;
+const WAYLAND_DISPLAY_POISON = "picklab-no-wayland";
+const WAYLAND_VARIABLES_TO_UNSET = ["WAYLAND_SOCKET"] as const;
 
 const X11_BACKEND_HINTS = {
   GDK_BACKEND: "x11",
@@ -30,7 +31,15 @@ export function createIsolatedDesktopEnvironment(
       delete env[name];
     }
   }
-  return { ...env, DISPLAY: display, ...X11_BACKEND_HINTS };
+  return {
+    ...env,
+    DISPLAY: display,
+    ...X11_BACKEND_HINTS,
+    // Merely unsetting WAYLAND_DISPLAY is not enough: libwayland then falls
+    // back to the default "wayland-0" socket, so point it at a socket that
+    // cannot exist to force the X11 fallback.
+    WAYLAND_DISPLAY: WAYLAND_DISPLAY_POISON,
+  };
 }
 
 export interface DesktopEnvironmentRecipe {
@@ -51,11 +60,17 @@ export function desktopEnvironmentRecipe(
   const environment = createIsolatedDesktopEnvironment(display, source);
   const unset = [
     ...new Set([
-      ...WAYLAND_VARIABLES,
-      ...Object.keys(source).filter(isWaylandVariable),
+      ...WAYLAND_VARIABLES_TO_UNSET,
+      ...Object.keys(source).filter(
+        (name) => isWaylandVariable(name) && name !== "WAYLAND_DISPLAY",
+      ),
     ]),
   ].sort();
-  const exportNames = ["DISPLAY", ...Object.keys(X11_BACKEND_HINTS)];
+  const exportNames = [
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    ...Object.keys(X11_BACKEND_HINTS),
+  ];
   const exports = Object.fromEntries(
     exportNames.map((name) => [name, environment[name] as string]),
   );

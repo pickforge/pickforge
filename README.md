@@ -64,9 +64,12 @@ Every screenshot, log, and action lands in a run directory with a manifest, so a
 ### Running development commands in a desktop session
 
 Use `desktop exec` for commands that build and start their own GUI process, such
-as Flutter. It starts a separate process group with Wayland disabled and X11
-backend hints for GTK, Qt, SDL, and winit, then waits up to 30 seconds for a
-client window on the lab display:
+as Flutter. It starts a separate process group with `WAYLAND_DISPLAY` pointed
+at the non-existent `picklab-no-wayland` socket, removes other inherited
+`WAYLAND_*` variables, and sets X11 backend hints for GTK, Qt, SDL, and winit.
+The poison value matters because libwayland falls back to `wayland-0` when
+`WAYLAND_DISPLAY` is unset. PickLab then waits up to 30 seconds for a client
+window on the lab display:
 
 ```sh
 picklab desktop exec --session <id> -- flutter run -d linux

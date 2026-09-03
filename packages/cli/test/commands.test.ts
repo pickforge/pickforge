@@ -666,13 +666,10 @@ describe("picklab desktop", () => {
     );
     expect(json.code).toBe(0);
     const report = parseJson(json);
-    expect(report.unset).toEqual([
-      "WAYLAND_DEBUG",
-      "WAYLAND_DISPLAY",
-      "WAYLAND_SOCKET",
-    ]);
+    expect(report.unset).toEqual(["WAYLAND_DEBUG", "WAYLAND_SOCKET"]);
     expect(report.exports).toEqual({
       DISPLAY: ":98",
+      WAYLAND_DISPLAY: "picklab-no-wayland",
       GDK_BACKEND: "x11",
       QT_QPA_PLATFORM: "xcb",
       SDL_VIDEODRIVER: "x11",
@@ -701,7 +698,7 @@ describe("picklab desktop", () => {
       { env, encoding: "utf8" },
     );
     expect(evaluated.status).toBe(0);
-    expect(evaluated.stdout).toBe(":98\nunset\nx11\nxcb\n");
+    expect(evaluated.stdout).toBe(":98\npicklab-no-wayland\nx11\nxcb\n");
   });
 
   it("executes argv in the isolated environment and reports its process group", async () => {
@@ -758,7 +755,7 @@ describe("picklab desktop", () => {
       ]);
       expect(fs.readFileSync(capture, "utf8")).toBe(
         "DISPLAY=:97\n" +
-          "WAYLAND_DISPLAY=unset\nWAYLAND_SOCKET=unset\n" +
+          "WAYLAND_DISPLAY=picklab-no-wayland\nWAYLAND_SOCKET=unset\n" +
           "GDK_BACKEND=x11\nQT_QPA_PLATFORM=xcb\n" +
           "SDL_VIDEODRIVER=x11\nWINIT_UNIX_BACKEND=x11\n" +
           "XDG_SESSION_TYPE=x11\n" +

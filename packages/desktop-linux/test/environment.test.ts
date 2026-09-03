@@ -5,7 +5,7 @@ import {
 } from "../src/environment.js";
 
 describe("createIsolatedDesktopEnvironment", () => {
-  it("removes every Wayland variable and sets the X11 contract", () => {
+  it("poisons the Wayland display, removes other Wayland variables, and sets X11", () => {
     const source = {
       PATH: "/custom/bin",
       KEEP_ME: "unchanged",
@@ -26,13 +26,16 @@ describe("createIsolatedDesktopEnvironment", () => {
       PATH: "/custom/bin",
       KEEP_ME: "unchanged",
       DISPLAY: ":90",
+      WAYLAND_DISPLAY: "picklab-no-wayland",
       GDK_BACKEND: "x11",
       QT_QPA_PLATFORM: "xcb",
       SDL_VIDEODRIVER: "x11",
       WINIT_UNIX_BACKEND: "x11",
       XDG_SESSION_TYPE: "x11",
     });
-    expect(Object.keys(result).filter((name) => name.startsWith("WAYLAND_"))).toEqual([]);
+    expect(Object.keys(result).filter((name) => name.startsWith("WAYLAND_"))).toEqual([
+      "WAYLAND_DISPLAY",
+    ]);
     expect(source).toMatchObject({
       DISPLAY: ":0",
       WAYLAND_DISPLAY: "wayland-1",
@@ -60,13 +63,10 @@ describe("desktopEnvironmentRecipe", () => {
       WAYLAND_DEBUG: "1",
     });
 
-    expect(recipe.unset).toEqual([
-      "WAYLAND_DEBUG",
-      "WAYLAND_DISPLAY",
-      "WAYLAND_SOCKET",
-    ]);
+    expect(recipe.unset).toEqual(["WAYLAND_DEBUG", "WAYLAND_SOCKET"]);
     expect(recipe.exports).toEqual({
       DISPLAY: ":92",
+      WAYLAND_DISPLAY: "picklab-no-wayland",
       GDK_BACKEND: "x11",
       QT_QPA_PLATFORM: "xcb",
       SDL_VIDEODRIVER: "x11",

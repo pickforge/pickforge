@@ -291,7 +291,7 @@ describe("launchApp display isolation", () => {
     try {
       expect(fs.readFileSync(outFile, "utf8")).toBe(
         `DISPLAY=${DEAD_DISPLAY}\n` +
-          "WAYLAND_DISPLAY=unset\nWAYLAND_SOCKET=unset\n" +
+          "WAYLAND_DISPLAY=picklab-no-wayland\nWAYLAND_SOCKET=unset\n" +
           "GDK_BACKEND=x11\nQT_QPA_PLATFORM=xcb\n" +
           "SDL_VIDEODRIVER=x11\nWINIT_UNIX_BACKEND=x11\n" +
           "XDG_SESSION_TYPE=x11\n",
@@ -580,7 +580,7 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
       writeExecutable(
         guardedZenity,
         "#!/bin/sh\n" +
-          '[ "${WAYLAND_DISPLAY+set}" != set ] || exit 20\n' +
+          '[ "$WAYLAND_DISPLAY" = picklab-no-wayland ] || exit 20\n' +
           '[ "${WAYLAND_SOCKET+set}" != set ] || exit 21\n' +
           '[ "$GDK_BACKEND" = x11 ] || exit 22\n' +
           '[ "$QT_QPA_PLATFORM" = xcb ] || exit 23\n' +
