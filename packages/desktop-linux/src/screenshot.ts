@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { runCommand, type EnvLike } from "@pickforge/picklab-core";
+import { listWindows } from "./apps.js";
 import { parseDisplayNumber } from "./display.js";
 import { findOnPath } from "./util.js";
 
@@ -26,6 +27,7 @@ export interface ScreenshotOptions {
 export interface ScreenshotResult {
   path: string;
   tool: ScreenshotTool;
+  windowCount: number;
 }
 
 export function detectScreenshotTool(
@@ -166,5 +168,6 @@ export async function screenshot(
   }
 
   await assertPngFile(opts.outPath, tool);
-  return { path: opts.outPath, tool };
+  const windows = await listWindows(opts.display, opts.env);
+  return { path: opts.outPath, tool, windowCount: windows.length };
 }

@@ -1,16 +1,18 @@
 import {
-  isPidAlive,
+  isProcessGroupAlive,
   runCommand,
   startDaemon,
   type EnvLike,
   type RunCommandResult,
 } from "@pickforge/picklab-core";
 import { parseDisplayNumber } from "./display.js";
+import { createIsolatedDesktopEnvironment } from "./environment.js";
 import { sleep } from "./util.js";
 
 const XDOTOOL_TIMEOUT_MS = 5_000;
 const WINDOW_POLL_INTERVAL_MS = 100;
 const DEFAULT_WAIT_TIMEOUT_MS = 10_000;
+export const DEFAULT_EXEC_WINDOW_TIMEOUT_MS = 30_000;
 const LAUNCH_GRACE_MS = 300;
 const LAUNCH_POLL_INTERVAL_MS = 50;
 
@@ -28,6 +30,15 @@ export interface AppHandle {
   logPath: string;
 }
 
+export interface ExecAppOptions extends LaunchAppOptions {
+  windowTimeoutMs?: number;
+}
+
+export interface ExecAppHandle extends AppHandle {
+  processGroupId: number;
+  windows: WindowInfo[];
+}
+
 export interface WindowInfo {
   id: string;
   name: string;
@@ -38,21 +49,15 @@ export async function launchApp(opts: LaunchAppOptions): Promise<AppHandle> {
   const daemon = await startDaemon(opts.command, opts.args ?? [], {
     logDir: opts.logDir,
     cwd: opts.cwd,
-    env: {
+    env: createIsolatedDesktopEnvironment(opts.display, {
+      ...process.env,
       ...opts.env,
-      DISPLAY: opts.display,
-      // Toolkits (GTK, Qt, Electron, Flutter) try Wayland first, which would
-      // open the app on the user's real desktop instead of the isolated lab
-      // display. Merely unsetting WAYLAND_DISPLAY is not enough: libwayland
-      // then falls back to the default "wayland-0" socket, so point it at a
-      // socket that cannot exist to force the X11 fallback.
-      WAYLAND_DISPLAY: "picklab-no-wayland",
-      WAYLAND_SOCKET: undefined,
-    },
+    }),
+    cleanEnv: true,
   });
   const graceDeadline = Date.now() + LAUNCH_GRACE_MS;
   while (Date.now() < graceDeadline) {
-    if (!isPidAlive(daemon.pid)) {
+    if (!isProcessGroupAlive(daemon.pid)) {
       throw new Error(
         `${opts.command} exited immediately after launch on ${opts.display}; ` +
           `check the log at ${daemon.logPath}`,
@@ -61,6 +66,52 @@ export async function launchApp(opts: LaunchAppOptions): Promise<AppHandle> {
     await sleep(LAUNCH_POLL_INTERVAL_MS);
   }
   return { pid: daemon.pid, logPath: daemon.logPath };
+}
+
+export async function execApp(opts: ExecAppOptions): Promise<ExecAppHandle> {
+  const existingWindowIds = new Set(
+    (await listWindows(opts.display, opts.env)).map((window) => window.id),
+  );
+  const app = await launchApp(opts);
+  const timeoutMs = opts.windowTimeoutMs ?? DEFAULT_EXEC_WINDOW_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const windows = (await listWindows(opts.display, opts.env)).filter(
+      (window) => !existingWindowIds.has(window.id),
+    );
+    if (windows.length > 0) {
+      return { ...app, processGroupId: app.pid, windows };
+    }
+    if (!isProcessGroupAlive(app.pid)) {
+      throw new Error(
+        `${opts.command} process group exited before opening a client window on ${opts.display}; ` +
+          `check the log at ${app.logPath}`,
+      );
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `No new client window appeared on ${opts.display} within ${timeoutMs}ms ` +
+          `while ${opts.command} is still running. The app may have escaped ` +
+          "the lab and opened on your real desktop. Stop it before continuing " +
+          `with \`kill -- -${app.pid}\`, check that it supports X11, and use ` +
+          "the environment from `picklab desktop env --session <id>`. " +
+          `Log: ${app.logPath}`,
+      );
+    }
+    await sleep(WINDOW_POLL_INTERVAL_MS);
+  }
+}
+
+export function noClientWindowsWarning(
+  display: string,
+  sessionId: string,
+): string {
+  return (
+    `No client windows are visible on ${display}. If the screenshot is black, ` +
+    "the app may have escaped the lab and opened on your real desktop. " +
+    `Start it with \`picklab desktop exec --session ${sessionId} -- <command>\` ` +
+    `or run \`eval "$(picklab desktop env --session ${sessionId})"\` before launching it.`
+  );
 }
 
 async function runXdotoolQuery(
