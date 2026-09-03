@@ -1,6 +1,6 @@
 #!/bin/sh
 # Pickforge installer: curl -fsSL https://pickforge.dev/install.sh | sh
-# Installs pickforge globally with bun (preferred) or npm.
+# Installs the pickforge npm package and matching Rust binary side by side.
 # Never uses sudo.
 set -eu
 
@@ -16,7 +16,7 @@ warn_legacy_env() {
 }
 
 resolve_package_spec() {
-  package_spec="pickforge"
+  package_spec="pickforge@next"
   tarball="${PICKFORGE_INSTALL_FROM_TARBALL:-}"
   if [ "${PICKFORGE_INSTALL_FROM_TARBALL+set}" != "set" ] && [ "${PICKLAB_INSTALL_FROM_TARBALL+set}" = "set" ]; then
     warn_legacy_env PICKLAB_INSTALL_FROM_TARBALL PICKFORGE_INSTALL_FROM_TARBALL
@@ -120,26 +120,128 @@ install_with_npm() {
   bin_dir="$(npm prefix --global)/bin"
 }
 
-verify_install() {
+verify_typescript_install() {
   pickforge_lab_bin="${bin_dir}/pickforge-lab"
-  if [ ! -x "${pickforge_lab_bin}" ]; then
-    echo "error: install finished but ${pickforge_lab_bin} was not found or is not executable" >&2
+  pickforge_mcp_bin="${bin_dir}/pickforge-mcp"
+  if [ ! -x "${pickforge_lab_bin}" ] || [ ! -x "${pickforge_mcp_bin}" ]; then
+    echo "error: install finished but the pickforge-lab and pickforge-mcp binaries were not both found in ${bin_dir}" >&2
     exit 1
   fi
   version="$("${pickforge_lab_bin}" --version)"
-  echo "pickforge-lab ${version} installed."
+  case "${version}" in
+    ""|*[!0-9A-Za-z.+-]*)
+      echo "error: installed pickforge-lab returned an invalid version: ${version}" >&2
+      exit 1
+      ;;
+  esac
+  echo "pickforge-lab ${version} and pickforge-mcp installed."
+}
+
+resolve_rust_target() {
+  kernel="$(uname -s)"
+  machine="$(uname -m)"
+  case "${kernel}:${machine}" in
+    Linux:x86_64|Linux:amd64)
+      rust_target="linux-x86_64"
+      ;;
+    Darwin:arm64|Darwin:aarch64)
+      rust_target="macos-arm64"
+      ;;
+    *)
+      echo "error: the Rust pickforge binary is not available for ${kernel} ${machine}." >&2
+      echo "pickforge-lab and pickforge-mcp were installed and still work on this target." >&2
+      return 1
+      ;;
+  esac
+}
+
+download_file() {
+  url="$1"
+  destination="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "${url}" -o "${destination}"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q "${url}" -O "${destination}"
+  else
+    echo "error: downloading the Rust binary needs curl or wget" >&2
+    return 1
+  fi
+}
+
+sha256_file() {
+  file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "${file}" | cut -d' ' -f1
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "${file}" | cut -d' ' -f1
+  else
+    echo "error: verifying the Rust binary needs sha256sum or shasum" >&2
+    return 1
+  fi
+}
+
+verify_checksum() {
+  file="$1"
+  checksum_file="$2"
+  expected="$(sed -n '1{s/[[:space:]].*$//;p;}' "${checksum_file}")"
+  if [ "${#expected}" -ne 64 ]; then
+    echo "error: release checksum is not a valid SHA-256 value" >&2
+    return 1
+  fi
+  case "${expected}" in
+    *[!0-9A-Fa-f]*)
+      echo "error: release checksum is not a valid SHA-256 value" >&2
+      return 1
+      ;;
+  esac
+  actual="$(sha256_file "${file}")" || return 1
+  expected="$(printf '%s' "${expected}" | tr 'A-F' 'a-f')"
+  if [ "${actual}" != "${expected}" ]; then
+    echo "error: checksum verification failed for the Rust pickforge binary" >&2
+    return 1
+  fi
+}
+
+install_rust_binary() {
+  resolve_rust_target || return 1
+  asset="pickforge-${rust_target}"
+  default_base_url="https://github.com/pickforge/pickforge/releases/download/v${version}"
+  release_base_url="${PICKFORGE_INSTALL_RELEASE_BASE_URL:-${default_base_url}}"
+  temp_dir="$(mktemp -d "${bin_dir}/.pickforge-install.XXXXXX")"
+  trap 'rm -rf "${temp_dir}"' EXIT HUP INT TERM
+
+  echo "Installing Rust pickforge ${version} for ${rust_target}..."
+  download_file "${release_base_url}/${asset}" "${temp_dir}/${asset}"
+  download_file "${release_base_url}/${asset}.sha256" "${temp_dir}/${asset}.sha256"
+  verify_checksum "${temp_dir}/${asset}" "${temp_dir}/${asset}.sha256"
+  chmod 0755 "${temp_dir}/${asset}"
+  rust_version="$("${temp_dir}/${asset}" --version 2>/dev/null || true)"
+  if [ "${rust_version}" != "pickforge ${version}" ]; then
+    echo "error: downloaded Rust binary reported \"${rust_version}\"; expected \"pickforge ${version}\"" >&2
+    return 1
+  fi
+  mv "${temp_dir}/${asset}" "${bin_dir}/pickforge"
+  rm -rf "${temp_dir}"
+  trap - EXIT HUP INT TERM
+  echo "pickforge ${version} installed at ${bin_dir}/pickforge."
+}
+
+print_path_note() {
   resolved="$(command -v pickforge-lab 2>/dev/null || true)"
   if [ "${resolved}" = "" ]; then
-    echo "note: ${bin_dir} is not on your PATH; add it to run \"pickforge-lab\" directly."
+    echo "note: ${bin_dir} is not on your PATH; add it to run Pickforge directly."
   elif [ "${resolved}" != "${pickforge_lab_bin}" ]; then
     echo "note: \"pickforge-lab\" on PATH is ${resolved}; this install wrote ${pickforge_lab_bin}."
     echo "note: if those differ, remove the other install or reorder PATH."
   fi
+}
+
+print_next_steps() {
   echo "Next steps:"
-  echo "  1. pickforge-lab agents install <codex|claude-code|cursor|pi>  # register the MCP server"
-  echo "  2. pickforge-lab init --profile <flutter-desktop|android|desktop+android>  # inside your project"
-  echo "  3. pickforge-lab doctor  # verify dependencies; --fix repairs what it can"
-  echo "Agent-driven setup guide: https://github.com/pickforge/pickforge/blob/main/INSTALL.md"
+  echo "  1. pickforge doctor"
+  echo "  2. pickforge init"
+  echo "  3. pickforge-lab agents install <codex|claude-code|cursor|pi>"
+  echo "Flutter quickstart: https://github.com/pickforge/pickforge#quickstart"
 }
 
 main() {
@@ -160,7 +262,10 @@ main() {
       ;;
   esac
 
-  verify_install
+  verify_typescript_install
+  install_rust_binary
+  print_path_note
+  print_next_steps
 }
 
 main "$@"
