@@ -1,0 +1,29 @@
+# gitleaks configuration. CI scans the whole history of every branch on the remote.
+#
+# Test fixtures need secret-shaped strings so the redaction code has something to catch.
+# Each one is listed here by its exact value, so the allowlist follows the string rather
+# than the commit: a rebase, squash-merge, or cherry-pick keeps the scan green without a
+# new fingerprint. Anything that is not one of these literal values is still reported,
+# including a real secret in a test file.
+#
+# Adding a fixture: choose an obviously fake value (a published sample, a counting
+# pattern), then add its exact anchored regex below. Never allowlist a rule or a path.
+
+title = "picklab"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Synthetic secret fixtures used by redaction tests"
+regexTarget = "secret"
+regexes = [
+  # jwt.io HS256 sample token, signature truncated (packages/core tests)
+  '''^eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.SflKxwRJSMeKKF2QT4fwpM$''',
+  # {"sub":"picklab"} with a placeholder signature (packages/browser tests)
+  '''^eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiJwaWNrbGFiIn0\.signature-value$''',
+  # counting-pattern GitHub PAT (packages/cli telemetry test)
+  '''^ghp_0123456789012345678901234567890abcde$''',
+  # placeholder key in the CLI secret-shape sweep (crates/pickforge-cli tests)
+  '''^api_key=abc123$''',
+]
