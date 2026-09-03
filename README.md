@@ -14,8 +14,9 @@ Local-first. Open source. Built for people who ship.
 
 The npm package is now `pickforge`. The TypeScript CLI is `pickforge-lab`, and
 the MCP stdio binary is `pickforge-mcp`. Agent config uses the
-`pickforge-lab` MCP server name. An owned legacy `picklab` entry is replaced
-on the next `pickforge-lab agents link`.
+`pickforge-lab` MCP server name. Run `pickforge-lab agents link <agent>` to
+replace owned legacy `picklab` entries. `pickforge-lab init` does not change
+Claude Code, Codex, Cursor, or Pi configuration.
 
 All `PICKFORGE_*` environment variables fall back to their matching
 `PICKLAB_*` name for one release. Using an old name prints one deprecation
