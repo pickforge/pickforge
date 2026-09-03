@@ -79,9 +79,12 @@ picklab desktop exec --session <id> --window-timeout 120000 -- flutter run -d li
 
 If no client window appears while the command is still alive, PickLab stops
 its process group and reports that the app may have escaped to the real desktop
-instead of leaving a silent black frame. Increase `--window-timeout` for a slow
-first build. `desktop launch` uses the same isolated environment and remains
-the shorter path for an already-built app.
+instead of leaving a silent black frame. Process-group stopping does not contain
+daemonising apps that double-fork or start a new session. Check the real desktop
+and stop any stray process if the original group exits without a lab window.
+Full containment is tracked in [#85](https://github.com/pickforge/picklab/issues/85).
+Increase `--window-timeout` for a slow first build. `desktop launch` uses the
+same isolated environment and remains the shorter path for an already-built app.
 
 When a shell or another parent process must launch the app itself, apply the
 same environment first:

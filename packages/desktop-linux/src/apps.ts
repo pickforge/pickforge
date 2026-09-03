@@ -144,8 +144,12 @@ export async function execApp(opts: ExecAppOptions): Promise<ExecAppHandle> {
       }
       if (!isProcessGroupAlive(app.pid)) {
         throw new Error(
-          `${opts.command} process group exited before opening a client window on ${opts.display}; ` +
-            `check the log at ${app.logPath}`,
+          `${opts.command} process group exited before opening a client window on ${opts.display}, ` +
+            "but a daemonising child may have escaped the lab and opened on your real desktop. " +
+            "Check your real desktop, find any stray process with `pgrep -af <app-name>`, " +
+            "and stop it with `kill <pid>`. " +
+            "Containment is tracked at https://github.com/pickforge/picklab/issues/85. " +
+            `Log: ${app.logPath}`,
         );
       }
       if (Date.now() >= deadline) {
