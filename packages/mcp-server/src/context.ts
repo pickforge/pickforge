@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
+  resolveConfinedPath,
   resolveRunnableSession,
   resolveScreenshotTarget as resolveTarget,
   type EnvLike,
@@ -122,6 +123,18 @@ export async function resolveSessionRecord(
     consumerLabel: "tool",
     createHint: `create one with the session_create tool (type "${type}")`,
     selectHint: 'pick one with the "session" argument',
+  });
+}
+
+export async function resolveProjectPath(
+  ctx: ServerContext,
+  requestedPath: string,
+): Promise<string> {
+  return resolveConfinedPath({
+    baseDir: ctx.projectDir,
+    requestedPath,
+    errorMessage:
+      `Refusing to use a working directory outside the project directory: ${requestedPath}`,
   });
 }
 

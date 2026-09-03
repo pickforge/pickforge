@@ -145,10 +145,12 @@ export {
 export {
   captureToTarget,
   requireDisplay,
+  resolveConfinedPath,
   resolveDesktopCapableSession,
   resolveRunnableSession,
   resolveScreenshotTarget,
   sessionHasCapability,
+  type ResolveConfinedPathOptions,
   type ResolveDesktopCapableSessionOptions,
   type ResolveRunnableSessionOptions,
   type ResolveScreenshotTargetOptions,

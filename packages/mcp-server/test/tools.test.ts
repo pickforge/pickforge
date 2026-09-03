@@ -289,6 +289,23 @@ describe("artifact report", () => {
 });
 
 describe("desktop isolation tools", () => {
+  it.each(["desktop_launch", "desktop_exec"])(
+    "confines %s cwd to the project directory",
+    async (tool) => {
+      const id = writeDesktopSessionRecord(dirs.home, dirs.projectDir);
+      for (const cwd of ["/etc", "../"]) {
+        const result = await lab.client.callTool({
+          name: tool,
+          arguments: { session: id, command: "true", cwd },
+        });
+        expect(result.isError).toBe(true);
+        expect(parseToolJson(result).errors.join("\n")).toContain(
+          "working directory outside the project directory",
+        );
+      }
+    },
+  );
+
   it("executes a command as an argv array and waits for its client window", async () => {
     const id = writeDesktopSessionRecord(dirs.home, dirs.projectDir);
     const searchMarker = path.join(dirs.root, "xdotool-searched");

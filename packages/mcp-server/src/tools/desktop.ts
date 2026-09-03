@@ -24,6 +24,7 @@ import {
   captureToTarget,
   imageContent,
   requireDisplay,
+  resolveProjectPath,
   resolveScreenshotTarget,
   resolveSessionRecord,
   runTool,
@@ -103,6 +104,10 @@ function registerLaunchTool(server: McpServer, ctx: ServerContext): void {
             // A newly launched client on the shared display can grab input
             // focus — gated the same as direct input, so it can never land
             // while a human holds the takeover lease (pickforge/picklab#21 P1-E).
+            const cwd =
+              args.cwd === undefined
+                ? undefined
+                : await resolveProjectPath(ctx, args.cwd);
             const app = await withAgentPermit(id, ctx.env, () =>
               launchApp({
                 display,
@@ -110,10 +115,7 @@ function registerLaunchTool(server: McpServer, ctx: ServerContext): void {
                 args: args.args ?? [],
                 env: ctx.env,
                 logDir: desktopSessionLogDir(id, ctx.env),
-                cwd:
-                  args.cwd === undefined
-                    ? undefined
-                    : path.resolve(ctx.projectDir, args.cwd),
+                cwd,
               }),
             );
             const data: Record<string, unknown> = {
@@ -169,6 +171,10 @@ function registerExecTool(server: McpServer, ctx: ServerContext): void {
             target: { name: args.command },
           },
           async () => {
+            const cwd =
+              args.cwd === undefined
+                ? undefined
+                : await resolveProjectPath(ctx, args.cwd);
             const app = await withAgentPermit(id, ctx.env, () =>
               execApp({
                 display,
@@ -176,10 +182,7 @@ function registerExecTool(server: McpServer, ctx: ServerContext): void {
                 args: args.args ?? [],
                 env: ctx.env,
                 logDir: desktopSessionLogDir(id, ctx.env),
-                cwd:
-                  args.cwd === undefined
-                    ? undefined
-                    : path.resolve(ctx.projectDir, args.cwd),
+                cwd,
                 windowTimeoutMs: args.windowTimeoutMs,
               }),
             );
