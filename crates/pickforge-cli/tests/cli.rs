@@ -195,7 +195,7 @@ fn init_dry_run_preserves_clean_and_dirty_git_trees_byte_for_byte() {
         if dirty {
             std::fs::write(project_dir.join("dirty.txt"), "user work\n").unwrap();
         }
-        let mut command = pickforge(temp.path(), &[]);
+        let mut command = pickforge(temp.path(), &["dart"]);
         let status_before = git(&project_dir, &["status", "--porcelain=v1"]);
         let tree_before = snapshot_without_git(temp.path());
         let output = command
@@ -238,7 +238,7 @@ fn init_apply_and_noop_use_success_exit_codes_and_leave_dirty_project_untouched(
     let status_before = git(&project_dir, &["status", "--porcelain=v1"]);
     let tree_before = snapshot_without_git(&project_dir);
     for _ in 0..2 {
-        pickforge(temp.path(), &[])
+        pickforge(temp.path(), &["dart"])
             .args(["init", "--project-dir"])
             .arg(&project_dir)
             .assert()
@@ -255,18 +255,19 @@ fn init_apply_and_noop_use_success_exit_codes_and_leave_dirty_project_untouched(
 fn init_success_and_noop_output_contracts_are_stable() {
     let temp = TempDir::new().unwrap();
     let project_dir = flutter_project(temp.path());
-    let first = pickforge(temp.path(), &[])
+    let first = pickforge(temp.path(), &["dart"])
         .args(["init", "--json", "--project-dir"])
         .arg(&project_dir)
         .assert()
         .success();
     let first: serde_json::Value = serde_json::from_slice(&first.get_output().stdout).unwrap();
     assert_eq!(first["plan"]["schemaVersion"], 1);
+    assert_eq!(first["plan"]["pack"]["name"], "pickforge-flutter");
     assert_eq!(first["plan"]["actions"][0]["action"], "create");
     assert_eq!(first["outcome"]["outcome"], "success");
     assert_eq!(first["outcome"]["changed"], true);
 
-    let second = pickforge(temp.path(), &[])
+    let second = pickforge(temp.path(), &["dart"])
         .args(["init", "--project-dir"])
         .arg(&project_dir)
         .assert()
@@ -283,7 +284,7 @@ fn init_human_output_escapes_path_control_characters() {
     let temp = TempDir::new().unwrap();
     let project_dir = flutter_project(temp.path());
     let unsafe_state = temp.path().join("state\nunsafe");
-    let output = pickforge(temp.path(), &[])
+    let output = pickforge(temp.path(), &["dart"])
         .env("PICKFORGE_HOME", &unsafe_state)
         .args(["init", "--dry-run", "--project-dir"])
         .arg(&project_dir)
@@ -295,19 +296,17 @@ fn init_human_output_escapes_path_control_characters() {
 }
 
 #[test]
-fn mobile_alpha_flag_is_hidden_and_missing_dart_fails_without_writing() {
+fn mobile_alpha_flag_is_visible_and_prerelease_default_requires_dart() {
     let temp = TempDir::new().unwrap();
     let project_dir = flutter_project(temp.path());
     let help = pickforge(temp.path(), &[])
         .args(["init", "--help"])
         .assert()
         .success();
-    assert!(
-        !String::from_utf8_lossy(&help.get_output().stdout).contains("mobile-integration-alpha")
-    );
+    assert!(String::from_utf8_lossy(&help.get_output().stdout).contains("mobile-integration-alpha"));
 
     let missing = pickforge(temp.path(), &[])
-        .args(["init", "--mobile-integration-alpha", "--project-dir"])
+        .args(["init", "--project-dir"])
         .arg(&project_dir)
         .assert()
         .code(1);

@@ -11,6 +11,8 @@ use pickforge_cli::init::{ApplyState, InitRequest};
 use pickforge_cli::{apply_init, diagnose, plan_init, render, Environment};
 use serde::Serialize;
 
+const MOBILE_INTEGRATION_ALPHA_DEFAULT: bool = !env!("CARGO_PKG_VERSION_PRE").is_empty();
+
 #[derive(Parser)]
 #[command(
     name = "pickforge",
@@ -47,7 +49,8 @@ enum Command {
         dry_run: bool,
         #[arg(long)]
         json: bool,
-        #[arg(long, hide = true)]
+        /// Enable the Flutter integration pack (default for prerelease builds).
+        #[arg(long)]
         mobile_integration_alpha: bool,
     },
 }
@@ -180,7 +183,7 @@ fn main() -> ExitCode {
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_else(|| PathBuf::from("."));
             let mut request = InitRequest::new(project_dir);
-            if mobile_integration_alpha {
+            if mobile_integration_alpha || MOBILE_INTEGRATION_ALPHA_DEFAULT {
                 request.pack = IntegrationPack::flutter();
             }
             if !harness.is_empty() {
