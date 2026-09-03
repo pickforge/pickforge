@@ -1,7 +1,9 @@
-# Pickforge rename runbook
+# Pickforge rename and alpha runbook
 
-Run these steps only after this PR is approved and the rename wave is ready.
-This PR merges immediately after the repository renames below.
+Run these steps only after the relevant PRs are approved and the rename wave is
+ready. The rename PR merges immediately after the repository renames below.
+The alpha-gate PR merges after the rename and ends at a draft release until its
+owner-only checks pass.
 
 ## 1. Rename the GitHub repositories
 
@@ -63,9 +65,20 @@ a GitHub Actions trusted publisher with these exact values:
 - Environment: leave empty
 
 Confirm the publisher before creating the release tag. The workflow at
-`.github/workflows/release.yml` publishes with provenance and the `next` tag.
+`.github/workflows/release.yml` publishes with provenance and adds the `next`
+tag because `0.4.0-alpha.1` is a prerelease.
 
-## 6. Deprecate the old package later
+## 6. Cut and verify the alpha
+
+Follow [docs/releases/CHECKLIST.md](docs/releases/CHECKLIST.md) exactly. It is
+the authoritative sequence for local gates, the opt-in live Flutter test, the
+real-device vision pass, tag creation, workflow monitoring, draft asset checks,
+the clean-machine installer smoke, and final prerelease publication.
+
+Do not publish the GitHub draft until every checklist gate is green. The owner
+creates and pushes the tag; no implementation or review agent does so.
+
+## 7. Deprecate the old package later
 
 Do this only after the new package and install path have been verified.
 
@@ -73,7 +86,7 @@ Do this only after the new package and install path have been verified.
 npm deprecate @pickforge/picklab@'*' 'Renamed to pickforge'
 ```
 
-## 7. Verification checklist
+## 8. Verification checklist
 
 ```sh
 gh repo view pickforge/pickforge --json nameWithOwner,url
@@ -82,7 +95,8 @@ npm view pickforge@next version
 npm view pickforge@next dist-tags --json
 npm view pickforge@next bin --json
 npm exec --yes --package=pickforge@next -- pickforge-lab --version
-curl -fsSL https://pickforge.dev/install.sh | grep -F 'package_spec="pickforge"'
+curl -fsSL https://pickforge.dev/install.sh | grep -F 'package_spec="pickforge@next"'
+gh release view v0.4.0-alpha.1 --repo pickforge/pickforge --json isDraft,isPrerelease,assets,url
 npm view @pickforge/picklab deprecated
 ```
 
@@ -93,6 +107,7 @@ Check all of the following:
 - `pickforge@next` resolves to `0.4.0-alpha.1`.
 - The package exposes `pickforge-lab` and `pickforge-mcp`.
 - The release workflow names `pickforge` as its trusted-publisher package.
+- The GitHub prerelease has both Rust target binaries and both `.sha256` files.
 - `pickforge-lab doctor` prints the active state directory.
 - Linking Claude Code, Codex, or Pi writes `pickforge-lab` and replaces an
   owned legacy `picklab` entry.
