@@ -157,7 +157,11 @@ export async function removeCustomAgent(
   name: string,
   env: EnvLike = process.env,
 ): Promise<ChangeResult> {
-  const configPath = customAgentConfigPath(validateCustomAgentName(name), env);
+  const validName = validateCustomAgentName(name);
+  const listed = (await listCustomAgents(env)).find(
+    (agent) => agent.name === validName,
+  );
+  const configPath = listed?.configPath ?? customAgentConfigPath(validName, env);
   try {
     await fs.promises.unlink(configPath);
   } catch (error) {
