@@ -50,7 +50,7 @@ describe.skipIf(!ready)("real Chrome through the exact upstream relay", () => {
     "navigates and exposes accessibility, console, and network metadata",
     { timeout: 60_000, retry: 1 },
     async () => {
-      const root = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-relay-real-"));
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "pf-relay-real-"));
       temporaryDirectories.push(root);
       const projectDir = path.join(root, "project");
       const home = path.join(root, "home");

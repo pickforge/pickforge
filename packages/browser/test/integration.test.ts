@@ -31,7 +31,7 @@ let registryEnv: EnvLike;
 let spawnEnv: EnvLike;
 
 beforeEach(() => {
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-browser-int-"));
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pf-browser-int-"));
   home = path.join(tmp, "home");
   projectDir = path.join(tmp, "project");
   fs.mkdirSync(home, { recursive: true });
