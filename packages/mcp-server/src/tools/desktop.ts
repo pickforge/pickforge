@@ -61,11 +61,7 @@ async function resolveDesktop(
   return { id: record.id, display: requireDisplay(record) };
 }
 
-// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/picklab#60
-export function registerDesktopTools(
-  server: McpServer,
-  ctx: ServerContext,
-): void {
+function registerLaunchTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "desktop_launch",
     {
@@ -134,7 +130,9 @@ export function registerDesktopTools(
         );
       }),
   );
+}
 
+function registerExecTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "desktop_exec",
     {
@@ -200,7 +198,9 @@ export function registerDesktopTools(
         );
       }),
   );
+}
 
+function registerScreenshotTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "desktop_screenshot",
     {
@@ -249,6 +249,7 @@ export function registerDesktopTools(
                 : await resolveScreenshotTarget(ctx, args, "desktop", id);
             let tool: string | undefined;
             let windowCount: number | undefined;
+            let warnings: string[] = [];
             const data = await captureToTarget(target, async () => {
               const result = await screenshot({
                 display,
@@ -257,13 +258,17 @@ export function registerDesktopTools(
               });
               tool = result.tool;
               windowCount = result.windowCount;
+              warnings = result.warnings;
             });
             data.sessionId = id;
             data.display = display;
             data.tool = tool;
             data.windowCount = windowCount;
             if (windowCount === 0) {
-              data.warnings = [noClientWindowsWarning(display, id)];
+              warnings.push(noClientWindowsWarning(display, id));
+            }
+            if (warnings.length > 0) {
+              data.warnings = warnings;
             }
             if (run !== undefined && target.run === undefined) {
               data.runId = run.runId;
@@ -276,7 +281,9 @@ export function registerDesktopTools(
         );
       }),
   );
+}
 
+function registerClickTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "desktop_click",
     {
@@ -321,7 +328,9 @@ export function registerDesktopTools(
         );
       }),
   );
+}
 
+function registerMoveTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "desktop_move",
     {
@@ -354,7 +363,9 @@ export function registerDesktopTools(
         );
       }),
   );
+}
 
+function registerScrollTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "desktop_scroll",
     {
@@ -423,7 +434,9 @@ export function registerDesktopTools(
         );
       }),
   );
+}
 
+function registerDragTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "desktop_drag",
     {
@@ -484,7 +497,9 @@ export function registerDesktopTools(
         );
       }),
   );
+}
 
+function registerDoubleClickTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "desktop_double_click",
     {
@@ -537,7 +552,9 @@ export function registerDesktopTools(
         );
       }),
   );
+}
 
+function registerTypeTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "desktop_type",
     {
@@ -567,7 +584,9 @@ export function registerDesktopTools(
         );
       }),
   );
+}
 
+function registerKeyTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "desktop_key",
     {
@@ -597,4 +616,20 @@ export function registerDesktopTools(
         );
       }),
   );
+}
+
+export function registerDesktopTools(
+  server: McpServer,
+  ctx: ServerContext,
+): void {
+  registerLaunchTool(server, ctx);
+  registerExecTool(server, ctx);
+  registerScreenshotTool(server, ctx);
+  registerClickTool(server, ctx);
+  registerMoveTool(server, ctx);
+  registerScrollTool(server, ctx);
+  registerDragTool(server, ctx);
+  registerDoubleClickTool(server, ctx);
+  registerTypeTool(server, ctx);
+  registerKeyTool(server, ctx);
 }

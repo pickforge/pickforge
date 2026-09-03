@@ -801,10 +801,46 @@ describe("picklab desktop", () => {
     expect(isProcessGroupAlive(processGroupId)).toBe(false);
   });
 
+  it("screenshots without xdotool and reports that window counting is unavailable", async () => {
+    const projectDir = makeProjectDir();
+    const env = makeEnv({
+      bins: {
+        import:
+          'for arg in "$@"; do out="$arg"; done\nprintf "\\211PNG\\r\\n\\032\\n" > "$out"',
+      },
+    });
+    const id = writeDesktopSessionRecord(env, projectDir, ":95");
+    const out = path.join(tmpDir, "without-xdotool.png");
+
+    const json = await runCli(
+      ["desktop", "screenshot", "--session", id, "--out", out, "--json"],
+      env,
+      projectDir,
+    );
+    expect(json.code).toBe(0);
+    const report = parseJson(json);
+    expect(report.windowCount).toBeUndefined();
+    expect(report.warnings).toEqual([expect.stringContaining("xdotool")]);
+    expect(report.warnings[0]).toContain("missing");
+    expect(report.warnings[0]).not.toContain("escaped the lab");
+
+    const text = await runCli(
+      ["desktop", "screenshot", "--session", id, "--out", out],
+      env,
+      projectDir,
+    );
+    expect(text.code).toBe(0);
+    expect(text.stdout).toContain("warning: xdotool is missing");
+    expect(text.stdout).not.toContain("escaped the lab");
+  });
+
   it(
     "screenshots into a run directory with a manifest entry",
     async () => {
-      const env = makeEnv({ realPath: true });
+      const env = makeEnv({
+        realPath: true,
+        bins: { xdotool: "exit 1" },
+      });
       cleanupEnvs.push(env);
       const projectDir = makeProjectDir();
       await runCli(

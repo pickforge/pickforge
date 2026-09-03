@@ -260,6 +260,24 @@ describe("screenshot output validation", () => {
       }),
     ).rejects.toThrow(/PNG signature/);
   });
+
+  it("captures without xdotool and warns that the window count is unavailable", async () => {
+    const fakeBin = path.join(tmpRoot, "fake-import-without-xdotool");
+    writeExecutable(
+      path.join(fakeBin, "import"),
+      '#!/bin/sh\nfor a in "$@"; do out="$a"; done\nprintf "\\211PNG\\r\\n\\032\\n" > "$out"\n',
+    );
+
+    const result = await screenshot({
+      display: DEAD_DISPLAY,
+      outPath: path.join(tmpRoot, "without-xdotool.png"),
+      env: { PATH: fakeBin },
+    });
+
+    expect(result.windowCount).toBeUndefined();
+    expect(result.warnings).toEqual([expect.stringContaining("xdotool")]);
+    expect(result.warnings[0]).toContain("missing");
+  });
 });
 
 describe("launchApp display isolation", () => {

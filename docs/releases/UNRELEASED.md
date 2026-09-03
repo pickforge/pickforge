@@ -16,7 +16,9 @@ GitHub release description, then reset it after the release is published.
   escape and suggests `--window-timeout` for slow first builds. `picklab desktop env`
   prints the same recipe for parent shells, with JSON output available.
   Desktop screenshots now include the client-window count and warn when it is
-  zero instead of leaving a black frame unexplained.
+  zero instead of leaving a black frame unexplained. Without `xdotool`, capture
+  still succeeds and warns that the count is unavailable without raising the
+  zero-window escape warning.
 - Experimental `pickforge doctor` (new Rust binary, not yet released or
   published): read-only readiness diagnostics for a Flutter project —
   `pickforge doctor [--project-dir <path>] [--json]`. Reports the resolved

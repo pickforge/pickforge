@@ -94,6 +94,8 @@ flutter run -d linux
 `desktop env --json` returns the same `exports`, `unset`, and `script` recipe
 without including unrelated environment variables or secrets. Desktop
 screenshots report the visible client-window count and warn when it is zero.
+If `xdotool` is missing, capture still succeeds and warns that the count is
+unavailable instead of reporting a possible escape.
 
 ### Run storage
 
@@ -333,7 +335,7 @@ reported as suppressed for an explicitly writable `--vnc-control` session.
 `picklab mcp serve` exposes 28 tools over stdio:
 
 - Sessions: `session_create`, `session_status`, `session_destroy`
-- Desktop: `desktop_launch`, `desktop_exec`, `desktop_screenshot`, `desktop_click`, `desktop_move`, `desktop_scroll`, `desktop_drag`, `desktop_double_click`, `desktop_type`, `desktop_key` — all fail closed with a busy error while a human lease is active except `desktop_screenshot` (read-only). `desktop_launch` and `desktop_exec` are gated too: a newly launched client can grab input focus on the shared display, which is exactly what the lease protects against. `desktop_exec` applies the isolated X11 environment and waits for a client window; `desktop_screenshot` reports the client-window count and warns when it is zero.
+- Desktop: `desktop_launch`, `desktop_exec`, `desktop_screenshot`, `desktop_click`, `desktop_move`, `desktop_scroll`, `desktop_drag`, `desktop_double_click`, `desktop_type`, `desktop_key` — all fail closed with a busy error while a human lease is active except `desktop_screenshot` (read-only). `desktop_launch` and `desktop_exec` are gated too: a newly launched client can grab input focus on the shared display, which is exactly what the lease protects against. `desktop_exec` applies the isolated X11 environment and waits for a client window; `desktop_screenshot` reports the client-window count and warns when it is zero, or reports that the count is unavailable when `xdotool` is missing.
 - Android: `android_start`, `android_install_apk`, `android_launch_app`, `android_screenshot`, `android_tap`, `android_type`, `android_back`, `android_home`, `android_get_ui_tree`, `android_logcat`, `android_run_adb`
 - Artifacts: `artifact_list`, `artifact_report`
 - Takeover: `takeover_status` — check whether a session is under human control (see [Supervised pause and human takeover](#supervised-pause-and-human-takeover)); read-only, always safe to call

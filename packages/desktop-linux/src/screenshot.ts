@@ -27,7 +27,8 @@ export interface ScreenshotOptions {
 export interface ScreenshotResult {
   path: string;
   tool: ScreenshotTool;
-  windowCount: number;
+  windowCount: number | undefined;
+  warnings: string[];
 }
 
 export function detectScreenshotTool(
@@ -168,6 +169,16 @@ export async function screenshot(
   }
 
   await assertPngFile(opts.outPath, tool);
-  const windows = await listWindows(opts.display, opts.env);
-  return { path: opts.outPath, tool, windowCount: windows.length };
+  if (findOnPath("xdotool", env) === null) {
+    return {
+      path: opts.outPath,
+      tool,
+      windowCount: undefined,
+      warnings: [
+        "xdotool is missing from PATH; the client-window count is unavailable",
+      ],
+    };
+  }
+  const windows = await listWindows(opts.display, env);
+  return { path: opts.outPath, tool, windowCount: windows.length, warnings: [] };
 }

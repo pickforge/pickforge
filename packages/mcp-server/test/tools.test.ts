@@ -360,6 +360,25 @@ describe("desktop isolation tools", () => {
     expect(isProcessGroupAlive(processGroupId)).toBe(false);
   });
 
+  it("screenshots without xdotool and returns only the missing-tool warning", async () => {
+    const id = writeDesktopSessionRecord(dirs.home, dirs.projectDir);
+    writeScript(
+      path.join(dirs.binDir, "import"),
+      'for arg in "$@"; do out="$arg"; done\nprintf "\\211PNG\\r\\n\\032\\n" > "$out"',
+    );
+
+    const result = await lab.client.callTool({
+      name: "desktop_screenshot",
+      arguments: { session: id, out: "shot.png" },
+    });
+    const report = parseToolJson(result);
+    expect(report.ok).toBe(true);
+    expect(report.windowCount).toBeUndefined();
+    expect(report.warnings).toEqual([expect.stringContaining("xdotool")]);
+    expect(report.warnings[0]).toContain("missing");
+    expect(report.warnings[0]).not.toContain("escaped the lab");
+  });
+
   it("reports a zero-window screenshot with the shared escape warning", async () => {
     const id = writeDesktopSessionRecord(dirs.home, dirs.projectDir);
     writeScript(path.join(dirs.binDir, "xdotool"), "exit 1");

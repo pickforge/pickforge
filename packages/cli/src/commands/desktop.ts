@@ -163,23 +163,27 @@ export async function runDesktopScreenshot(
     const target = await resolveScreenshotTarget(opts, "desktop", id);
     let tool: string | undefined;
     let windowCount: number | undefined;
+    let warnings: string[] = [];
     const data = await captureToTarget(target, async () => {
       const result = await screenshot({ display, outPath: target.outPath });
       tool = result.tool;
       windowCount = result.windowCount;
+      warnings = result.warnings;
     });
     data.sessionId = id;
     data.display = display;
     data.tool = tool;
     data.windowCount = windowCount;
-    const lines = [
-      `screenshot saved to ${target.outPath}`,
-      `client windows: ${windowCount}`,
-    ];
+    const lines = [`screenshot saved to ${target.outPath}`];
+    if (windowCount !== undefined) {
+      lines.push(`client windows: ${windowCount}`);
+    }
     if (windowCount === 0) {
-      const warning = noClientWindowsWarning(display, id);
-      data.warnings = [warning];
-      lines.push(`warning: ${warning}`);
+      warnings.push(noClientWindowsWarning(display, id));
+    }
+    if (warnings.length > 0) {
+      data.warnings = warnings;
+      lines.push(...warnings.map((warning) => `warning: ${warning}`));
     }
     if (data.runId !== undefined) {
       lines.push(`run: ${data.runId}`);
