@@ -81,6 +81,7 @@ function baseEnv(home: string, extra: Record<string, string> = {}): Record<strin
     PICKFORGE_INSTALL_RELEASE_BASE_URL: releaseBaseUrl,
     PATH: process.env.PATH ?? "",
     npm_config_cache: npmCache,
+    npm_config_prefer_offline: "true",
     ...extra,
   };
 }
@@ -531,7 +532,15 @@ describe("packed tarball execution", () => {
       const { home, dir } = makeCase("npx");
       const result = await run(
         "npm",
-        ["exec", "--yes", `--package=${tarball}`, "--", "pickforge-lab", "--version"],
+        [
+          "exec",
+          "--yes",
+          "--offline",
+          `--package=${tarball}`,
+          "--",
+          "pickforge-lab",
+          "--version",
+        ],
         { cwd: dir, env: baseEnv(home) },
       );
       expect(result.code, describeFailure(result)).toBe(0);
@@ -551,6 +560,7 @@ describe("packed tarball execution", () => {
         [
           "exec",
           "--yes",
+          "--offline",
           `--package=${tarball}`,
           "--",
           "pickforge-lab",
