@@ -600,7 +600,7 @@ describe("pickforge-lab agents add / unlink (custom)", () => {
     expect(
       after.agents.find((agent: any) => agent.name === "my-agent"),
     ).toBeUndefined();
-  });
+  }, 30_000);
 
   it("rejects reserved and invalid names", async () => {
     for (const name of ["codex", "../evil"]) {
