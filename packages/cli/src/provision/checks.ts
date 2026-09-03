@@ -97,19 +97,16 @@ function homeChecks(s: DetectionSnapshot): DoctorCheck[] {
       detail: s.pickforgeHome.path,
     };
   }
-  if (s.legacyHome === null) return [home];
-  return [
-    home,
-    {
-      id: "legacy-home",
-      title: "Legacy Pickforge home",
-      status: "warn",
-      detail: `${s.legacyHome.path} still exists (earlier default)`,
-      hint:
-        "config, agent state, sessions, and runs there are still read " +
-        "non-destructively as a fallback; nothing was moved or deleted",
-    },
-  ];
+  const legacyChecks: DoctorCheck[] = s.legacyHomes.map((legacyHome) => ({
+    id: "legacy-home",
+    title: "Legacy Pickforge home",
+    status: "warn",
+    detail: `${legacyHome.path} still exists (earlier default)`,
+    hint:
+      "config, agent state, sessions, and runs there are still read " +
+      "non-destructively as a fallback; nothing was moved or deleted",
+  }));
+  return [home, ...legacyChecks];
 }
 
 function storageCheck(s: DetectionSnapshot): DoctorCheck[] {

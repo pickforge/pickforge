@@ -25,10 +25,8 @@ import {
 
 export interface DetectionSnapshot {
   pickforgeHome: { path: string; exists: boolean; writable: boolean };
-  /** Present only when the pre-#34 `~/.picklab` root still exists and
-   * differs from the current default (never when `PICKFORGE_HOME` is set
-   * explicitly — that is the user's own root, not a legacy one). */
-  legacyHome: { path: string } | null;
+  /** Existing earlier default roots, excluding an explicit PICKFORGE_HOME. */
+  legacyHomes: { path: string }[];
   config: { ok: boolean; error: string | null; profile: PickforgeProfile | null };
   /** Present when the project-committed `.picklab/config.json` requested
    * `storage.mode: "custom"` and the resolver rejected it (repo config
@@ -126,14 +124,13 @@ async function detectConfig(
   }
 }
 
-function detectLegacyHome(
+function detectLegacyHomes(
   homePath: string,
   env: EnvLike,
-): { path: string } | null {
-  const legacyPath = legacyPickforgeHomes(env).find(
-    (candidate) => candidate !== homePath && dirExists(candidate),
-  );
-  return legacyPath === undefined ? null : { path: legacyPath };
+): { path: string }[] {
+  return legacyPickforgeHomes(env)
+    .filter((candidate) => candidate !== homePath && dirExists(candidate))
+    .map((legacyPath) => ({ path: legacyPath }));
 }
 
 async function detectRejectedProjectCustom(
@@ -168,7 +165,7 @@ export async function collectSnapshot(
 
   const homePath = pickforgeHome(env);
   const homeExists = dirExists(homePath);
-  const legacyHome = detectLegacyHome(homePath, env);
+  const legacyHomes = detectLegacyHomes(homePath, env);
   const rejectedProjectCustom = await detectRejectedProjectCustom(
     projectDir,
     env,
@@ -187,7 +184,7 @@ export async function collectSnapshot(
       exists: homeExists,
       writable: homeExists && isWritable(homePath),
     },
-    legacyHome,
+    legacyHomes,
     config,
     storage: { rejectedProjectCustom },
     desktop: {
