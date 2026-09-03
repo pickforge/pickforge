@@ -65,7 +65,7 @@ describe("addCustomAgent / listCustomAgents / removeCustomAgent", () => {
     ]);
   });
 
-  it("reads custom agents from the former state root without moving them", async () => {
+  it("reads and removes custom agents from the former state root", async () => {
     const home = path.join(tmpDir, "home");
     vi.spyOn(os, "homedir").mockReturnValue(home);
     const legacyDir = path.join(home, ".pickforge", "picklab", "agents");
@@ -87,6 +87,11 @@ describe("addCustomAgent / listCustomAgents / removeCustomAgent", () => {
         entry: { command: "picklab", args: ["mcp", "serve"] },
       },
     ]);
+    expect(fs.existsSync(path.join(home, ".pickforge", "lab"))).toBe(false);
+
+    const removed = await removeCustomAgent("legacy-agent", {});
+    expect(removed).toEqual({ configPath, changed: true });
+    expect(fs.existsSync(configPath)).toBe(false);
     expect(fs.existsSync(path.join(home, ".pickforge", "lab"))).toBe(false);
   });
 

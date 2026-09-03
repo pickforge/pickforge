@@ -78,6 +78,20 @@ function ownedLegacyEntryNames(servers: JsonObject): string[] {
     .map(([name]) => name);
 }
 
+export async function ownedLegacyMcpServerNamesInJsonFile(
+  filePath: string,
+): Promise<string[]> {
+  let config: JsonObject | undefined;
+  try {
+    config = await readJsonObject(filePath);
+  } catch {
+    return [];
+  }
+  return config !== undefined && isPlainObject(config.mcpServers)
+    ? ownedLegacyEntryNames(config.mcpServers)
+    : [];
+}
+
 function normalizedEntry(entry: McpServerEntry): McpServerEntry {
   return { command: entry.command, args: entry.args };
 }

@@ -227,7 +227,11 @@ export async function runAgentsUnlink(
             configPath: result.configPath,
             changed: result.changed,
           },
-          lines: [`Removed custom agent "${name}" (${result.configPath})`],
+          lines: [
+            result.changed
+              ? `Removed custom agent "${name}" (${result.configPath})`
+              : `Custom agent "${name}" was not removed (${result.configPath})`,
+          ],
         };
       }
       return unknownAgentError(name, env);

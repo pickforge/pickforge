@@ -15,7 +15,7 @@ import {
   readHumanLease,
   readHumanLeaseRaw,
   recordTakeoverEvidence,
-  sessionsDir,
+  sessionDataDir,
   stopPid,
   stopProcessGroupVerified,
   updateSession,
@@ -76,7 +76,7 @@ export function desktopSessionLogDir(
   id: string,
   registryEnv: EnvLike = process.env,
 ): string {
-  return path.join(sessionsDir(registryEnv), id);
+  return sessionDataDir(id, registryEnv);
 }
 
 // eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/pickforge#60
@@ -326,7 +326,7 @@ async function acquireSessionVncLock(
   id: string,
   registryEnv: EnvLike,
 ): Promise<() => Promise<void>> {
-  const registryDir = sessionsDir(registryEnv);
+  const registryDir = path.dirname(sessionDataDir(id, registryEnv));
   await fs.promises.mkdir(registryDir, { recursive: true });
   const lockPath = path.join(registryDir, `${id}.ensure-vnc.lock`);
   const owner = { pid: process.pid, token: randomUUID() };

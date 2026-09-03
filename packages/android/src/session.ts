@@ -1,4 +1,3 @@
-import path from "node:path";
 import {
   createSession,
   destroySessionRecord,
@@ -6,7 +5,7 @@ import {
   isPidAlive,
   reapDeadRunningSessions,
   REAPER_CLEANUP_PENDING_META_KEY,
-  sessionsDir,
+  sessionDataDir,
   updateSession,
   type AndroidSessionInfo,
   type EnvLike,
@@ -57,7 +56,7 @@ export function androidSessionLogDir(
   id: string,
   registryEnv: EnvLike = process.env,
 ): string {
-  return path.join(sessionsDir(registryEnv), id);
+  return sessionDataDir(id, registryEnv);
 }
 
 export async function createAndroidSession(

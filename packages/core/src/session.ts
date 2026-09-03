@@ -7,7 +7,6 @@ import {
   ensureDir,
   legacySessionsDirs,
   listDirSafe,
-  resolveReadablePath,
   sessionsDir,
   writeFileAtomic,
   type EnvLike,
@@ -100,17 +99,25 @@ function sessionPath(id: string, env: EnvLike): string {
   return path.join(sessionsDir(env), `${id}.json`);
 }
 
-function serialize(record: SessionRecord): string {
-  return `${JSON.stringify(record, null, 2)}\n`;
+function sessionPathForRead(id: string, env: EnvLike): string {
+  const primary = sessionPath(id, env);
+  const candidates = [
+    primary,
+    ...legacySessionsDirs(env).map((dir) => path.join(dir, `${id}.json`)),
+  ];
+  return candidates.find((candidate) => fs.existsSync(candidate)) ?? primary;
 }
 
-async function writeSession(
-  record: SessionRecord,
-  env: EnvLike,
-): Promise<void> {
-  const dir = await ensureDir(sessionsDir(env));
-  const target = path.join(dir, `${record.id}.json`);
-  await writeFileAtomic(target, serialize(record));
+/** Directory for logs, leases, permits, and runtime data beside a session record. */
+export function sessionDataDir(
+  id: string,
+  env: EnvLike = process.env,
+): string {
+  return path.join(path.dirname(sessionPathForRead(id, env)), id);
+}
+
+function serialize(record: SessionRecord): string {
+  return `${JSON.stringify(record, null, 2)}\n`;
 }
 
 export async function createSession(
@@ -154,10 +161,7 @@ export async function getSession(
   if (!isValidSessionId(id)) {
     return undefined;
   }
-  const legacyPaths = legacySessionsDirs(env).map((dir) =>
-    path.join(dir, `${id}.json`),
-  );
-  const filePath = await resolveReadablePath(sessionPath(id, env), legacyPaths);
+  const filePath = sessionPathForRead(id, env);
   let raw: string;
   try {
     raw = await fs.promises.readFile(filePath, "utf8");
@@ -289,7 +293,7 @@ export async function updateSession(
     type: existing.type,
     createdAt: existing.createdAt,
   };
-  await writeSession(updated, env);
+  await writeFileAtomic(sessionPathForRead(id, env), serialize(updated));
   return updated;
 }
 
@@ -317,12 +321,9 @@ export async function destroySessionRecord(
       ).catch(() => {});
     }
   }
-  // Remove BOTH the new-home and legacy copies unconditionally, not just
-  // whichever `resolveReadablePath` would currently pick for a read. A
-  // session created under the legacy home and later updated (writes always
-  // target the new home) leaves stale copies at both locations; removing
-  // only the new-home one would let it resurrect via the legacy read
-  // fallback in getSession/listSessions.
+  // Remove BOTH the new-home and legacy copies unconditionally. This also
+  // cleans up duplicate records left by older releases that wrote updates to
+  // the new home after reading a session from a legacy home.
   const legacyPaths = legacySessionsDirs(env).map((dir) =>
     path.join(dir, `${id}.json`),
   );

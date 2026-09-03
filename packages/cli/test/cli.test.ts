@@ -173,6 +173,32 @@ describe("pickforge-lab doctor", () => {
     expect(byId["lab-user"]).toBe("warn");
   });
 
+  it("warns for every existing legacy state root", async () => {
+    const env = makeEnv(tmpDir);
+    delete env.PICKFORGE_HOME;
+    const legacyHomes = [
+      path.join(env.HOME, ".pickforge", "picklab"),
+      path.join(env.HOME, ".picklab"),
+    ];
+    for (const legacyHome of legacyHomes) {
+      fs.mkdirSync(legacyHome, { recursive: true });
+    }
+
+    const result = await runCli(["doctor", "--json"], env, tmpDir);
+
+    expect(result.code).toBe(0);
+    const report = parseJson(result);
+    const warnings = (
+      report.checks as Array<{ id: string; status: string; detail: string }>
+    ).filter((check) => check.id === "legacy-home");
+    expect(warnings.map((check) => check.detail)).toEqual(
+      legacyHomes.map((legacyHome) =>
+        expect.stringContaining(`${legacyHome} still exists`),
+      ),
+    );
+    expect(warnings.every((check) => check.status === "warn")).toBe(true);
+  });
+
   it("exits 0 when the only non-ok finding is the optional lab user", async () => {
     const sdk = makeFakeSdk(path.join(tmpDir, "sdk"), {
       images: [IMAGE],

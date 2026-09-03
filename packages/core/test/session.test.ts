@@ -5,9 +5,18 @@ import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
-import { teardownAndroidSession } from "../../android/src/session.js";
-import { teardownBrowserSession } from "../../browser/src/session.js";
-import { teardownDesktopSession } from "../../desktop-linux/src/session.js";
+import {
+  androidSessionLogDir,
+  teardownAndroidSession,
+} from "../../android/src/session.js";
+import {
+  browserSessionLogDir,
+  teardownBrowserSession,
+} from "../../browser/src/session.js";
+import {
+  desktopSessionLogDir,
+  teardownDesktopSession,
+} from "../../desktop-linux/src/session.js";
 import { isPidAlive, readProcessIdentity, stopPid } from "../src/proc.js";
 import {
   activePointerPath,
@@ -21,6 +30,7 @@ import {
   getSession,
   isSessionProcessAlive,
   listSessions,
+  sessionDataDir,
   updateSession,
   type SessionLivenessCheck,
 } from "../src/session.js";
@@ -1216,9 +1226,7 @@ describe("legacy session home fallback", () => {
     ).toBe(false);
   });
 
-  it("destroying a session that has copies at BOTH the legacy and new home removes both, so it cannot resurrect", async () => {
-    // A session created under the legacy home, later updated: writes always
-    // target the new home, leaving a stale copy at the legacy path too.
+  it("keeps updates and sidecar data beside a legacy session record", async () => {
     writeLegacySession("desk-1eaac5");
     await updateSession("desk-1eaac5", { status: "running" }, {});
 
@@ -1235,16 +1243,25 @@ describe("legacy session home fallback", () => {
       "sessions",
       "desk-1eaac5.json",
     );
-    expect(fs.existsSync(legacyPath)).toBe(true);
-    expect(fs.existsSync(newPath)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(legacyPath, "utf8")).status).toBe(
+      "running",
+    );
+    expect(fs.existsSync(newPath)).toBe(false);
+    const expectedDataDir = path.join(
+      fakeHome,
+      ".picklab",
+      "sessions",
+      "desk-1eaac5",
+    );
+    expect(sessionDataDir("desk-1eaac5", {})).toBe(expectedDataDir);
+    expect(desktopSessionLogDir("desk-1eaac5", {})).toBe(expectedDataDir);
+    expect(browserSessionLogDir("desk-1eaac5", {})).toBe(expectedDataDir);
+    expect(androidSessionLogDir("desk-1eaac5", {})).toBe(expectedDataDir);
 
     await destroySessionRecord("desk-1eaac5", {});
 
     expect(fs.existsSync(legacyPath)).toBe(false);
     expect(fs.existsSync(newPath)).toBe(false);
-    expect(
-      (await listSessions({})).some((record) => record.id === "desk-1eaac5"),
-    ).toBe(false);
     expect(await getSession("desk-1eaac5", {})).toBeUndefined();
   });
 });

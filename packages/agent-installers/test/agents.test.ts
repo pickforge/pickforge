@@ -184,29 +184,58 @@ describe("linkClaudeCode with the claude binary on PATH", () => {
     expect(fs.existsSync(env.CLAUDE_ARGS_FILE)).toBe(false);
   });
 
-  it("atomically migrates owned legacy entries without shelling out", async () => {
+  it("migrates owned legacy entries through the claude binary", async () => {
     const env = installFakeClaude(RECORDING_CLAUDE);
     const configPath = path.join(home, ".claude.json");
-    fs.writeFileSync(
-      configPath,
-      JSON.stringify({
-        mcpServers: {
-          picklab: { command: "picklab", args: ["mcp", "serve"] },
+    const original = JSON.stringify({
+      mcpServers: {
+        picklab: { command: "picklab", args: ["mcp", "serve"] },
+        "picklab-browser": {
+          command: "picklab",
+          args: ["browser", "devtools-mcp"],
         },
-      }),
-    );
+      },
+    });
+    fs.writeFileSync(configPath, original);
 
     const result = await linkClaudeCode(configPath, env);
 
-    expect(result.migratedLegacyEntries).toEqual(["picklab"]);
-    expect(result.warning).toContain("replaced atomically");
-    expect(fs.existsSync(env.CLAUDE_ARGS_FILE)).toBe(false);
-    const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
-    expect(config.mcpServers.picklab).toBeUndefined();
-    expect(config.mcpServers["pickforge-lab"]).toEqual({
-      command: "pickforge-lab",
-      args: ["mcp", "serve"],
-    });
+    expect(result.migratedLegacyEntries).toEqual([
+      "picklab",
+      "picklab-browser",
+    ]);
+    expect(result.warning).toBeUndefined();
+    expect(recordedArgs(env)).toEqual([
+      "mcp",
+      "remove",
+      "--scope",
+      "user",
+      "picklab",
+      "mcp",
+      "remove",
+      "--scope",
+      "user",
+      "picklab-browser",
+      "mcp",
+      "add",
+      "--scope",
+      "user",
+      "pickforge-lab",
+      "--",
+      "pickforge-lab",
+      "mcp",
+      "serve",
+      "mcp",
+      "add",
+      "--scope",
+      "user",
+      "pickforge-lab-browser",
+      "--",
+      "pickforge-lab",
+      "browser",
+      "devtools-mcp",
+    ]);
+    expect(fs.readFileSync(configPath, "utf8")).toBe(original);
   });
 
   it("updates a stale ~/.claude.json while adding both servers", async () => {

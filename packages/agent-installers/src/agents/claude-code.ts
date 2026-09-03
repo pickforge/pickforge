@@ -4,6 +4,7 @@ import { runCommand, type EnvLike } from "@pickforge/lab-core";
 import {
   jsonFileMcpServerState,
   mergeMcpServerIntoJsonFile,
+  ownedLegacyMcpServerNamesInJsonFile,
   removeMcpServerFromJsonFile,
   replaceOwnedLegacyMcpServersInJsonFile,
 } from "../jsonConfig.js";
@@ -164,38 +165,46 @@ export async function claudeCodeIsRegistered(
   return jsonFileMcpServerState(configPath);
 }
 
+async function linkClaudeCodeWithBinary(
+  claudeBin: string,
+  configPath: string,
+  env: EnvLike,
+): Promise<ChangeResult> {
+  const migratedLegacyEntries =
+    await ownedLegacyMcpServerNamesInJsonFile(configPath);
+  if (
+    migratedLegacyEntries.length === 0 &&
+    (await claudeCodeIsRegistered(configPath)) === true
+  ) {
+    return { configPath, changed: false };
+  }
+  let changed = false;
+  for (const name of migratedLegacyEntries) {
+    changed = (await removeClaudeMcpServer(claudeBin, env, name)) || changed;
+  }
+  for (const server of CLAUDE_SERVERS) {
+    changed =
+      (await addClaudeMcpServerOrRepair(claudeBin, configPath, env, server)) ||
+      changed;
+  }
+  return {
+    configPath,
+    changed,
+    ...(migratedLegacyEntries.length === 0 ? {} : { migratedLegacyEntries }),
+  };
+}
+
 export async function linkClaudeCode(
   configPath: string,
   env: EnvLike = process.env,
 ): Promise<ChangeResult> {
   const claudeBin = findClaudeBinary(env);
+  if (claudeBin !== undefined) {
+    return linkClaudeCodeWithBinary(claudeBin, configPath, env);
+  }
   const migration = await replaceOwnedLegacyMcpServersInJsonFile(configPath);
   if (migration.changed) {
-    return {
-      ...migration,
-      warning:
-        claudeBin === undefined
-          ? DIRECT_EDIT_WARNING
-          : "the owned legacy MCP entries were replaced atomically by editing " +
-            "the config directly; close Claude Code while linking, or it may " +
-            "overwrite the change",
-    };
-  }
-  if (claudeBin !== undefined) {
-    if ((await claudeCodeIsRegistered(configPath)) === true) {
-      return { configPath, changed: false };
-    }
-    let changed = false;
-    for (const server of CLAUDE_SERVERS) {
-      changed =
-        (await addClaudeMcpServerOrRepair(
-          claudeBin,
-          configPath,
-          env,
-          server,
-        )) || changed;
-    }
-    return { configPath, changed };
+    return { ...migration, warning: DIRECT_EDIT_WARNING };
   }
   let exists = false;
   try {

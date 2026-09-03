@@ -222,6 +222,7 @@ export {
   isDisplaySocketAlive,
   isSessionProcessAlive,
   listSessions,
+  sessionDataDir,
   updateSession,
   type AndroidSessionInfo,
   type BrowserSessionInfo,

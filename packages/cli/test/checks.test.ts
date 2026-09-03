@@ -9,7 +9,7 @@ import type { DetectionSnapshot } from "../src/provision/detect.js";
 function snapshot(
   overrides: {
     pickforgeHome?: Partial<DetectionSnapshot["pickforgeHome"]>;
-    legacyHome?: DetectionSnapshot["legacyHome"];
+    legacyHomes?: DetectionSnapshot["legacyHomes"];
     storage?: DetectionSnapshot["storage"];
     config?: Partial<DetectionSnapshot["config"]>;
     desktop?: Partial<DetectionSnapshot["desktop"]>;
@@ -25,7 +25,7 @@ function snapshot(
       writable: true,
       ...overrides.pickforgeHome,
     },
-    legacyHome: overrides.legacyHome ?? null,
+    legacyHomes: overrides.legacyHomes ?? [],
     storage: overrides.storage ?? { rejectedProjectCustom: null },
     config: { ok: true, error: null, profile: null, ...overrides.config },
     desktop: {
@@ -103,14 +103,24 @@ describe("evaluateChecks", () => {
     expect(checks.some((check) => check.id === "legacy-home")).toBe(false);
   });
 
-  it("surfaces a detected legacy ~/.picklab home as a non-blocking warning", () => {
-    const check = checkById(
-      snapshot({ legacyHome: { path: "/home/u/.picklab" } }),
-      "legacy-home",
-    );
-    expect(check.status).toBe("warn");
-    expect(check.detail).toContain("/home/u/.picklab");
-    expect(check.hint).toContain("non-destructively");
+  it("surfaces every detected legacy home as a non-blocking warning", () => {
+    const checks = evaluateChecks(
+      snapshot({
+        legacyHomes: [
+          { path: "/home/u/.pickforge/picklab" },
+          { path: "/home/u/.picklab" },
+        ],
+      }),
+    ).filter((check) => check.id === "legacy-home");
+
+    expect(checks).toHaveLength(2);
+    expect(checks.map((check) => check.detail)).toEqual([
+      expect.stringContaining("/home/u/.pickforge/picklab"),
+      expect.stringContaining("/home/u/.picklab"),
+    ]);
+    expect(checks.every((check) => check.status === "warn")).toBe(true);
+    expect(checks.every((check) => check.hint?.includes("non-destructively")))
+      .toBe(true);
   });
 
   it("omits the storage-custom-rejected check when nothing was rejected", () => {

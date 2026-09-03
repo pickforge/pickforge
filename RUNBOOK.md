@@ -72,6 +72,7 @@ npm view pickforge@next dist-tags --json
 npm view pickforge@next bin --json
 npm exec --yes --package=pickforge@next -- pickforge-lab --version
 curl -fsSL https://pickforge.dev/install.sh | grep -F 'package_spec="pickforge@next"'
+curl -fsSL https://pickforge.dev/picklab/install.sh | grep -F 'package_spec="pickforge@next"'
 gh release view v0.4.0-alpha.1 --repo pickforge/pickforge --json isDraft,isPrerelease,assets,url
 npm view @pickforge/picklab deprecated
 ```
@@ -84,6 +85,8 @@ Check all of the following:
 - The package exposes `pickforge-lab` and `pickforge-mcp`.
 - The release workflow names `pickforge` as its trusted-publisher package.
 - The GitHub prerelease has both Rust target binaries and both `.sha256` files.
+- The old `https://pickforge.dev/picklab/install.sh` URL still installs
+  `pickforge@next` during the alpha.
 - `pickforge-lab doctor` prints the active state directory.
 - Linking Claude Code, Codex, or Pi writes `pickforge-lab` and replaces an
   owned legacy `picklab` entry.
