@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   HumanControlActiveError,
   HumanLeaseDrainTimeoutError,
@@ -123,6 +123,29 @@ describe("acquireHumanLease", () => {
     // The lease created for the failed attempt must not linger.
     expect(await readHumanLease("desk-a6", env)).toBeUndefined();
     await releaseAgentPermit(permit);
+  });
+
+  it("stores leases and permits beside a legacy session record", async () => {
+    const fakeHome = path.join(tmpRoot, "legacy-home");
+    vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
+    const id = "desk-a1b2c3";
+    const legacySessions = path.join(fakeHome, ".picklab", "sessions");
+    fs.mkdirSync(legacySessions, { recursive: true });
+    fs.writeFileSync(path.join(legacySessions, `${id}.json`), "{}\n");
+
+    const lease = await acquireHumanLease(id, {});
+    const permit = await acquireAgentPermit(id, {});
+    const sidecarDir = path.join(legacySessions, id);
+
+    expect(permit.path).toBe(
+      path.join(sidecarDir, "permits", `${permit.permitId}.json`),
+    );
+    expect(fs.existsSync(path.join(sidecarDir, "human.lease.json"))).toBe(true);
+    expect(lease.sessionId).toBe(id);
+    expect(fs.existsSync(path.join(fakeHome, ".pickforge", "lab"))).toBe(false);
+
+    await releaseAgentPermit(permit);
+    await releaseHumanLease(id, lease.leaseId, {});
   });
 
   it("sweeps a permit owned by a dead process instead of blocking the drain", async () => {

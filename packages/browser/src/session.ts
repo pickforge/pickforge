@@ -13,7 +13,7 @@ import {
   reapDeadRunningSessions,
   readProcessIdentity,
   readPickforgeEnv,
-  sessionsDir,
+  sessionDataDir,
   startDaemon,
   stopProcessGroupVerified,
   updateSession,
@@ -102,7 +102,7 @@ export function browserSessionLogDir(
   id: string,
   registryEnv: EnvLike = process.env,
 ): string {
-  return path.join(sessionsDir(registryEnv), id);
+  return sessionDataDir(id, registryEnv);
 }
 
 async function makeRuntimeDirs(layout: BrowserRuntimeLayout): Promise<void> {

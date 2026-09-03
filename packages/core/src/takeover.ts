@@ -4,8 +4,9 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { isEvidenceEnabled, loadConfig } from "./config.js";
 import { appendAction, beginEvidenceRun } from "./evidence.js";
-import { ensureDir, sessionsDir, writeFileAtomic, type EnvLike } from "./paths.js";
+import { ensureDir, writeFileAtomic, type EnvLike } from "./paths.js";
 import { isPidAlive, processIdentityMatches, readProcessStartTicks } from "./proc.js";
+import { sessionDataDir } from "./session.js";
 
 /**
  * Supervised pause / human takeover (pickforge/pickforge#21).
@@ -61,16 +62,12 @@ function identityIsAlive(pid: number, startTicks?: number): boolean {
   return isPidAlive(pid);
 }
 
-function sessionStateDir(sessionId: string, env: EnvLike): string {
-  return path.join(sessionsDir(env), sessionId);
-}
-
 function humanLeasePath(sessionId: string, env: EnvLike): string {
-  return path.join(sessionStateDir(sessionId, env), HUMAN_LEASE_FILE);
+  return path.join(sessionDataDir(sessionId, env), HUMAN_LEASE_FILE);
 }
 
 function agentPermitsDir(sessionId: string, env: EnvLike): string {
-  return path.join(sessionStateDir(sessionId, env), AGENT_PERMITS_DIR);
+  return path.join(sessionDataDir(sessionId, env), AGENT_PERMITS_DIR);
 }
 
 /** Atomically-published record of who holds human control of a session. */
@@ -340,7 +337,7 @@ export async function acquireHumanLease(
   opts: AcquireHumanLeaseOptions = {},
 ): Promise<HumanLease> {
   assertSafeSessionId(sessionId);
-  const dir = await ensureDir(sessionStateDir(sessionId, env));
+  const dir = await ensureDir(sessionDataDir(sessionId, env));
   const leasePath = path.join(dir, HUMAN_LEASE_FILE);
   const ttlMs = opts.ttlMs ?? HUMAN_LEASE_TTL_MS;
   const heartbeatMs = opts.heartbeatMs ?? HUMAN_LEASE_HEARTBEAT_MS;
