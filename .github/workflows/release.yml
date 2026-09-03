@@ -14,7 +14,54 @@ permissions:
   id-token: write
 
 jobs:
+  rust-binaries:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rust-target: x86_64-unknown-linux-gnu
+            asset-target: linux-x86_64
+          - os: macos-14
+            rust-target: aarch64-apple-darwin
+            asset-target: macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.rust-target }}
+
+      - name: Build Rust binary
+        run: cargo build --release --locked --target "${{ matrix.rust-target }}" -p pickforge-cli
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          asset="pickforge-${{ matrix.asset-target }}"
+          cp "target/${{ matrix.rust-target }}/release/pickforge" "release-assets/$asset"
+          strip "release-assets/$asset"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd release-assets && sha256sum "$asset" > "$asset.sha256")
+          else
+            (cd release-assets && shasum -a 256 "$asset" > "$asset.sha256")
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pickforge-${{ matrix.asset-target }}
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 7
+
   release:
+    needs: rust-binaries
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -101,9 +148,19 @@ jobs:
         run: |
           if npm view "pickforge@$RELEASE_VERSION" version >/dev/null 2>&1; then
             echo "pickforge@$RELEASE_VERSION is already published; skipping"
-          else
+          elif [[ "$RELEASE_VERSION" == *-* ]]; then
             npm publish --access public --provenance --tag next
+          else
+            npm publish --access public --provenance
           fi
+
+      - name: Download Rust release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pickforge-*
+          path: release-assets
+          merge-multiple: true
 
       - name: Create GitHub release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -112,7 +169,10 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "GitHub release $RELEASE_TAG already exists; skipping"
-          else
+            echo "GitHub release $RELEASE_TAG already exists; reusing"
+          elif [[ "$RELEASE_TAG" == *-* ]]; then
             gh release create "$RELEASE_TAG" --draft --prerelease --generate-notes
+          else
+            gh release create "$RELEASE_TAG" --draft --generate-notes
           fi
+          gh release upload "$RELEASE_TAG" release-assets/* --clobber
