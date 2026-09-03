@@ -2,11 +2,12 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
+use image::GenericImageView;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -15,8 +16,13 @@ use time::{format_description, OffsetDateTime};
 
 use crate::{adapters::Harness, init::INIT_SCHEMA_VERSION, project, state, Environment};
 
-pub const EVIDENCE_SCHEMA_VERSION: u32 = 1;
+// Version 2 adds source dimensions and optional bounded preview metadata to the recorded
+// document. Those fields are derived, never submitted, so the input shape is unchanged and a
+// v1 document still records — only the document this writes carries the new version.
+pub const EVIDENCE_SCHEMA_VERSION: u32 = 2;
+const EVIDENCE_INPUT_MIN_VERSION: u32 = 1;
 pub const MAX_INPUT_BYTES: u64 = 1024 * 1024;
+const PREVIEW_MAX_EDGE: u32 = 1568;
 const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_TOTAL_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_RUN_ID_ATTEMPTS: usize = 1024;
@@ -122,9 +128,22 @@ struct Artifact {
     kind: &'static str,
     label: String,
     path: String,
+    width: u32,
+    height: u32,
     sha256: String,
     bytes: u64,
     media_type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview: Option<ArtifactPreview>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ArtifactPreview {
+    path: String,
+    width: u32,
+    height: u32,
+    bytes: u64,
+    sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -382,8 +401,10 @@ fn validate_receipt(
 }
 
 fn validate_input(input: &EvidenceInput) -> Result<(), EvidenceError> {
-    if input.schema_version != EVIDENCE_SCHEMA_VERSION {
-        return bad(&format!("schemaVersion must be {EVIDENCE_SCHEMA_VERSION}"));
+    if !(EVIDENCE_INPUT_MIN_VERSION..=EVIDENCE_SCHEMA_VERSION).contains(&input.schema_version) {
+        return bad(&format!(
+            "schemaVersion must be between {EVIDENCE_INPUT_MIN_VERSION} and {EVIDENCE_SCHEMA_VERSION}"
+        ));
     }
     bounded_line(&input.scenario, 120, "scenario")?;
     validate_phase(&input.before, "before")?;
@@ -598,40 +619,55 @@ fn materialize_phase(
     let mut artifacts = Vec::new();
     for source in input.artifacts {
         let ArtifactKind::Screenshot = source.kind;
-        let (bytes, media, ext, hash) = read_image(&source.source)?;
+        let (bytes, media, ext, hash, image) = read_image(&source.source)?;
         let artifact = if let Some(existing) = known.get(&hash) {
             existing.clone()
         } else {
-            *total = total
-                .checked_add(bytes.len() as u64)
-                .ok_or_else(|| EvidenceError::Input("artifact byte total overflow".into()))?;
-            if *total > MAX_TOTAL_IMAGE_BYTES {
+            let (width, height) = image.dimensions();
+            if width == 0 || height == 0 {
                 return Err(EvidenceError::Artifact {
                     path: source.source,
-                    reason: "copied artifacts exceed 64 MiB total".into(),
+                    reason: "image dimensions must be nonzero".into(),
                 });
             }
             let slug = slug(&source.label);
-            let relative = format!("artifacts/{phase}-{slug}-{}.{ext}", &hash[..12]);
-            let target = dir.parent().unwrap().join(&relative);
-            if target.exists() {
-                let existing = fs::read(&target).map_err(|e| EvidenceError::Io(e.to_string()))?;
-                if existing != bytes {
-                    return Err(EvidenceError::Artifact {
-                        path: target,
-                        reason: "content-addressed filename collision".into(),
-                    });
-                }
-            } else {
-                write_private(&target, &bytes)?;
+            let basename = format!("{phase}-{slug}-{}", &hash[..12]);
+            let relative = format!("artifacts/{basename}.{ext}");
+            let preview = make_preview(&source.source, &image, &basename)?;
+            let preview_bytes = preview.as_ref().map_or(0, |(_, bytes)| bytes.len() as u64);
+            // Derived previews count against the same 64 MiB run budget as source images.
+            let added = (bytes.len() as u64)
+                .checked_add(preview_bytes)
+                .ok_or_else(|| EvidenceError::Input("artifact byte total overflow".into()))?;
+            let next_total = total
+                .checked_add(added)
+                .ok_or_else(|| EvidenceError::Input("artifact byte total overflow".into()))?;
+            if next_total > MAX_TOTAL_IMAGE_BYTES {
+                return Err(EvidenceError::Artifact {
+                    path: source.source,
+                    reason: "copied artifacts and previews exceed 64 MiB total".into(),
+                });
             }
+            let target = dir.parent().unwrap().join(&relative);
+            write_content_addressed(&target, &bytes)?;
+            let preview = if let Some((metadata, preview_bytes)) = preview {
+                let target = dir.parent().unwrap().join(&metadata.path);
+                write_content_addressed(&target, &preview_bytes)?;
+                Some(metadata)
+            } else {
+                None
+            };
+            *total = next_total;
             let artifact = Artifact {
                 kind: "screenshot",
                 label: source.label.clone(),
                 path: relative,
+                width,
+                height,
                 sha256: hash.clone(),
                 bytes: bytes.len() as u64,
                 media_type: media,
+                preview,
             };
             known.insert(hash.clone(), artifact.clone());
             artifact
@@ -646,7 +682,18 @@ fn materialize_phase(
         artifacts,
     })
 }
-fn read_image(path: &Path) -> Result<(Vec<u8>, &'static str, &'static str, String), EvidenceError> {
+fn read_image(
+    path: &Path,
+) -> Result<
+    (
+        Vec<u8>,
+        &'static str,
+        &'static str,
+        String,
+        image::DynamicImage,
+    ),
+    EvidenceError,
+> {
     let fail = |reason: &str| EvidenceError::Artifact {
         path: path.into(),
         reason: reason.into(),
@@ -696,9 +743,68 @@ fn read_image(path: &Path) -> Result<(Vec<u8>, &'static str, &'static str, Strin
     }
     let (media, ext) =
         image_type(&bytes).ok_or_else(|| fail("source is not a PNG, JPEG, or WebP image"))?;
+    let image = image::load_from_memory(&bytes)
+        .map_err(|error| fail(&format!("could not decode image: {error}")))?;
     let hash = format!("{:x}", Sha256::digest(&bytes));
-    Ok((bytes, media, ext, hash))
+    Ok((bytes, media, ext, hash, image))
 }
+
+fn make_preview(
+    source: &Path,
+    image: &image::DynamicImage,
+    basename: &str,
+) -> Result<Option<(ArtifactPreview, Vec<u8>)>, EvidenceError> {
+    let (width, height) = image.dimensions();
+    let longest = width.max(height);
+    if longest <= PREVIEW_MAX_EDGE {
+        return Ok(None);
+    }
+    let scaled = |side: u32| {
+        ((u64::from(side) * u64::from(PREVIEW_MAX_EDGE) + u64::from(longest) / 2)
+            / u64::from(longest))
+        .clamp(1, u64::from(PREVIEW_MAX_EDGE)) as u32
+    };
+    let preview_width = scaled(width);
+    let preview_height = scaled(height);
+    let preview = image.resize_exact(
+        preview_width,
+        preview_height,
+        image::imageops::FilterType::Lanczos3,
+    );
+    let mut bytes = Vec::new();
+    preview
+        .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .map_err(|error| EvidenceError::Artifact {
+            path: source.into(),
+            reason: format!("could not encode preview: {error}"),
+        })?;
+    Ok(Some((
+        ArtifactPreview {
+            path: format!("artifacts/{basename}-preview.png"),
+            width: preview_width,
+            height: preview_height,
+            bytes: bytes.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(&bytes)),
+        },
+        bytes,
+    )))
+}
+
+fn write_content_addressed(path: &Path, bytes: &[u8]) -> Result<(), EvidenceError> {
+    if path.exists() {
+        let existing = fs::read(path).map_err(|error| EvidenceError::Io(error.to_string()))?;
+        if existing != bytes {
+            return Err(EvidenceError::Artifact {
+                path: path.into(),
+                reason: "content-addressed filename collision".into(),
+            });
+        }
+        Ok(())
+    } else {
+        write_private(path, bytes)
+    }
+}
+
 #[cfg(unix)]
 fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
@@ -862,13 +968,28 @@ fn render_report(doc: &EvidenceDocument<'_>) -> String {
         out.push_str("- None\n");
     } else {
         for a in all {
+            // The full capture is the evidence and is always what the entry links and hashes.
+            // A preview is a derivative offered alongside it, never in place of it: a reader
+            // of this report alone must still be able to reach and verify the original.
             out.push_str(&format!(
-                "- [{}]({}) ({} bytes, `{}`)\n",
+                "- [{}]({}) ({}x{}, {} bytes, `{}`)\n",
                 normalize_markdown(&a.label),
                 normalize_markdown(&a.path),
+                a.width,
+                a.height,
                 a.bytes,
-                a.sha256
+                a.sha256,
             ));
+            if let Some(preview) = &a.preview {
+                out.push_str(&format!(
+                    "  - [preview]({}) ({}x{}, {} bytes, `{}`)\n",
+                    normalize_markdown(&preview.path),
+                    preview.width,
+                    preview.height,
+                    preview.bytes,
+                    preview.sha256,
+                ));
+            }
         }
     }
     out.push_str("\n## Limitations\n\n");
