@@ -22,6 +22,8 @@ regexes = [
   '''^eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.SflKxwRJSMeKKF2QT4fwpM$''',
   # {"sub":"picklab"} with a placeholder signature (packages/browser tests)
   '''^eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiJwaWNrbGFiIn0\.signature-value$''',
+  # synthetic PAT planted by the opt-in live Flutter test (rename-wave branch)
+  '''^ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII$''',
   # counting-pattern GitHub PAT (packages/cli telemetry test)
   '''^ghp_0123456789012345678901234567890abcde$''',
   # placeholder key in the CLI secret-shape sweep (crates/pickforge-cli tests)

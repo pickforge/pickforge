@@ -4,6 +4,15 @@
     "lib": ["ES2022"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+    "baseUrl": ".",
+    "paths": {
+      "@pickforge/lab-agent-installers": ["packages/agent-installers/src/index.ts"],
+      "@pickforge/lab-android": ["packages/android/src/index.ts"],
+      "@pickforge/lab-browser": ["packages/browser/src/index.ts"],
+      "@pickforge/lab-core": ["packages/core/src/index.ts"],
+      "@pickforge/lab-desktop-linux": ["packages/desktop-linux/src/index.ts"],
+      "@pickforge/lab-mcp-server": ["packages/mcp-server/src/index.ts"]
+    },
     "types": ["node"],
     "strict": true,
     "noUnusedLocals": true,
