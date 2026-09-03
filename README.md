@@ -47,42 +47,88 @@ Or install by hand:
 curl -fsSL https://pickforge.dev/install.sh | sh
 ```
 
-Or without installing:
+For the alpha, the npm-only forms use the `next` dist-tag and install the
+TypeScript commands without the Rust CLI:
 
 ```sh
-npx --yes --package pickforge pickforge-lab doctor
-bunx --package pickforge pickforge-lab doctor
+npx --yes --package pickforge@next pickforge-lab doctor
+bunx --package pickforge@next pickforge-lab doctor
+npm install -g pickforge@next
+bun add -g pickforge@next
 ```
 
-Or globally:
-
-```sh
-npm install -g pickforge
-bun add -g pickforge
-```
-
-This ships two binaries: `pickforge-lab` (CLI) and `pickforge-mcp` (MCP stdio server). The installer never uses sudo.
+The installer adds three commands side by side: `pickforge` (Rust),
+`pickforge-lab` (TypeScript lab CLI), and `pickforge-mcp` (MCP stdio server).
+It verifies the Rust binary's SHA-256 checksum and never uses sudo. The lab is
+Linux-only; the Rust CLI also ships for Apple silicon macOS.
 
 The Chrome DevTools relay requires Node.js `^20.19.0`, `^22.12.0`, or `>=23.0.0`.
 
 ## Quickstart
 
+This is the Flutter loop proven for the alpha. Start in a Flutter project and
+run the Rust readiness and integration steps first:
+
 ```sh
-cd your-app
-pickforge-lab init --profile desktop+android   # write project config and provision the AVD (lab user is opt-in: --create-lab-user)
-pickforge-lab doctor                           # verify dependencies; --fix repairs what it can
-pickforge-lab session create --type desktop+android
-pickforge-lab desktop launch ./build/your-app
-pickforge-lab watch                              # attach a read-only host viewer
-pickforge-lab desktop screenshot
-pickforge-lab android install-apk build/app-release.apk
-pickforge-lab android launch-app com.example.app
-pickforge-lab android screenshot
-pickforge-lab artifacts report                 # render the latest run
+cd your-flutter-app
+pickforge doctor
+pickforge init
+```
+
+`init` enables the Flutter integration by default in this prerelease. It
+configures the official Dart/Flutter MCP server and installs the
+`pickforge-flutter` workflow for Claude Code, Codex, and Pi. Register the lab
+MCP with the agent you use, initialize a Linux desktop profile, and start the
+app inside an isolated lab session:
+
+```sh
+pickforge-lab agents install codex   # use claude-code or pi when appropriate
+pickforge-lab init --profile flutter-desktop --yes
+pickforge-lab session create --type desktop
+pickforge-lab desktop exec -- flutter run -d linux
+```
+
+`desktop exec` is the isolation-safe alias of `desktop launch`. It detaches the
+process and writes its output to the session log. Restart the coding agent if
+it did not already have the Pickforge MCP servers loaded.
+
+Now inspect the running widget tree and runtime with the official Dart/Flutter
+MCP tools. Capture the initial screen, inspect the image, and click the target
+coordinate you found:
+
+```sh
+before_png="${TMPDIR:-/tmp}/pickforge-before.png"
+pickforge-lab desktop screenshot --out "$before_png"
+pickforge-lab desktop click 760 520
+```
+
+Edit the relevant Dart source, run a scoped analysis or test, then use the
+official Dart/Flutter MCP hot-reload tool. Repeat the same scenario and inspect
+the new screenshot. Do not claim success until the runtime state and pixels
+match the intended change.
+
+```sh
+flutter analyze lib/main.dart
+after_png="${TMPDIR:-/tmp}/pickforge-after.png"
+pickforge-lab desktop screenshot --out "$after_png"
+```
+
+Record the verified before/after result outside the project. Adjust the
+scenario, observations, source file, and checks to match the work you actually
+did:
+
+```sh
+evidence_input="${TMPDIR:-/tmp}/pickforge-evidence.json"
+cat >"$evidence_input" <<JSON
+{"schemaVersion":1,"scenario":"Counter updates after hot reload","outcome":"passed","before":{"summary":"Counter showed zero.","observations":[{"label":"Counter","value":"0"}],"artifacts":[{"kind":"screenshot","label":"Before","source":"$before_png"}]},"after":{"summary":"Counter showed one.","observations":[{"label":"Counter","value":"1"}],"artifacts":[{"kind":"screenshot","label":"After","source":"$after_png"}]},"sourceChanges":["lib/main.dart"],"checks":[{"name":"flutter analyze lib/main.dart","status":"passed","summary":"No issues found."}],"limitations":[]}
+JSON
+pickforge evidence record --project-dir "$PWD" --input "$evidence_input"
 pickforge-lab session destroy --all
 ```
 
-Every screenshot, log, and action lands in a run directory with a manifest, so a run is inspectable and reproducible after the fact. By default that run directory lives outside your project — see [Run storage](#run-storage) below.
+Every screenshot, log, and action lands in a run directory with a manifest, so
+a run is inspectable and reproducible after the fact. By default that run
+directory lives outside your project. See [Run storage](#run-storage) below.
 
 ### Run storage
 
@@ -272,7 +318,7 @@ pickforge-lab agents add --name my-agent --mcp-command "pickforge-lab mcp serve"
 | Sessions | `session create`, `session status [id]`, `session destroy <id\|--all>` |
 | Watch | `watch [--session <id>] [--control]` |
 | Takeover | `takeover status [--session <id>]` |
-| Desktop | `desktop launch <cmd>`, `desktop screenshot`, `desktop click <x> <y>`, `desktop move <x> <y>`, `desktop scroll <deltaX> <deltaY>`, `desktop drag <fromX> <fromY> <toX> <toY>`, `desktop double-click <x> <y>`, `desktop type <text>`, `desktop key <keys>` |
+| Desktop | `desktop exec <cmd>` (`desktop launch` is equivalent), `desktop screenshot`, `desktop click <x> <y>`, `desktop move <x> <y>`, `desktop scroll <deltaX> <deltaY>`, `desktop drag <fromX> <fromY> <toX> <toY>`, `desktop double-click <x> <y>`, `desktop type <text>`, `desktop key <keys>` |
 | Android | `android start`, `android install-apk <apk>`, `android launch-app <pkg>`, `android screenshot`, `android tap <x> <y>`, `android type <text>`, `android back`, `android home`, `android ui-tree`, `android logcat`, `android adb [args...]` |
 | Artifacts | `artifacts list`, `artifacts open <runId>`, `artifacts report [runId]` |
 | Agents | `agents list`, `agents install <agent>`, `agents link <agent>`, `agents unlink <agent>`, `agents doctor`, `agents add` |

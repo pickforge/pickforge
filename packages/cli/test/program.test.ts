@@ -8,6 +8,13 @@ describe("pickforge", () => {
     expect(program.version()).toBe("0.4.0-alpha.1");
   });
 
+  it("exposes desktop exec as the isolation-safe launch alias", () => {
+    const program = buildProgram();
+    const desktop = program.commands.find((command) => command.name() === "desktop");
+    const launch = desktop?.commands.find((command) => command.name() === "launch");
+    expect(launch?.aliases()).toContain("exec");
+  });
+
   it("exposes only project scope on the static browser relay command", () => {
     const program = buildProgram();
     const browser = program.commands.find((command) => command.name() === "browser");

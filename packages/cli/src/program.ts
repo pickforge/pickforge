@@ -273,6 +273,7 @@ function registerDesktopLaunchCommands(desktop: Command): void {
     withDesktopSession(
       desktop
         .command("launch")
+        .alias("exec")
         .description("Launch an app inside the desktop session")
         .argument("<command>", "executable to launch")
         .argument("[args...]", "arguments for the executable (use -- before flags)")
