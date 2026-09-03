@@ -978,7 +978,7 @@ fn render_report(doc: &EvidenceDocument<'_>) -> String {
                 a.width,
                 a.height,
                 a.bytes,
-                &a.sha256,
+                a.sha256,
             ));
             if let Some(preview) = &a.preview {
                 out.push_str(&format!(
@@ -987,7 +987,7 @@ fn render_report(doc: &EvidenceDocument<'_>) -> String {
                     preview.width,
                     preview.height,
                     preview.bytes,
-                    &preview.sha256,
+                    preview.sha256,
                 ));
             }
         }
