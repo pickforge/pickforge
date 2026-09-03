@@ -5,6 +5,14 @@ GitHub release description, then reset it after the release is published.
 
 ## User-facing changes
 
+- Desktop commands now share one isolated X11 environment that removes
+  Wayland variables and sets GTK, Qt, SDL, winit, and session backend hints.
+  New `picklab desktop exec` (also available as MCP `desktop_exec`) starts a
+  command in its own process group and reports a possible real-desktop escape
+  when no client window appears within a bounded wait. `picklab desktop env`
+  prints the same recipe for parent shells, with JSON output available.
+  Desktop screenshots now include the client-window count and warn when it is
+  zero instead of leaving a black frame unexplained.
 - Experimental `pickforge doctor` (new Rust binary, not yet released or
   published): read-only readiness diagnostics for a Flutter project —
   `pickforge doctor [--project-dir <path>] [--json]`. Reports the resolved

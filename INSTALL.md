@@ -98,6 +98,21 @@ picklab desktop screenshot
 picklab session destroy --all
 ```
 
+For a desktop development runner that launches its own GUI, do not set only
+`DISPLAY`. Use the session environment so GTK, Qt, SDL, and winit cannot prefer
+the user's real Wayland desktop:
+
+```sh
+picklab desktop exec --session <id> -- flutter run -d linux
+# Or, when the current shell must be the parent:
+eval "$(picklab desktop env --session <id>)"
+flutter run -d linux
+```
+
+`desktop exec` waits a bounded time for a client window and reports a possible
+real-desktop escape if none appears while the command is alive. Desktop
+screenshots also report the client-window count and warn when it is zero.
+
 Finally, remind the user to restart the agent so the `picklab` MCP tools load, and that `session_status` over MCP is the quickest end-to-end check.
 
 ## Report back
