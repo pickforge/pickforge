@@ -16,7 +16,7 @@ let env: Record<string, string>;
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-custom-"));
-  env = { PICKFORGE_HOME: path.join(tmpDir, ".picklab") };
+  env = { PICKFORGE_HOME: path.join(tmpDir, "state") };
 });
 
 afterEach(() => {

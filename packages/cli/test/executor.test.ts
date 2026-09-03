@@ -76,7 +76,7 @@ describe("classifyPlan", () => {
 
 describe("executeProvisioning", () => {
   it("only logs redacted plan details in dry-run mode", async () => {
-    const target = path.join(tmpDir, "home", ".picklab");
+    const target = path.join(tmpDir, "home", "state");
     const lines: string[] = [];
     let adapterCalls = 0;
     const result = await executeProvisioning(
@@ -87,7 +87,7 @@ describe("executeProvisioning", () => {
             steps: [
               {
                 id: "pickforge-home",
-                title: "Create PickLab home",
+                title: "Create Pickforge home",
                 kind: "mkdir",
                 privileged: false,
                 dir: target,
@@ -496,7 +496,7 @@ describe("executeProvisioning", () => {
   });
 
   it("merges global and project config through the local adapter", async () => {
-    const home = path.join(tmpDir, ".picklab");
+    const home = path.join(tmpDir, "state");
     const projectDir = path.join(tmpDir, "project");
     fs.mkdirSync(home, { recursive: true });
     fs.mkdirSync(projectDir);
@@ -547,7 +547,7 @@ describe("executeProvisioning", () => {
 
 // pickforge/pickforge#27 — "Shared graphical sudo (askpass) security contract
 // — locked v1". These tests cover the contract's verification list for the
-// PickLab side: available/missing/headless preflight, cancellation, env
+// Pickforge side: available/missing/headless preflight, cancellation, env
 // propagation, arg-array safety, and redaction.
 describe("privileged execution via graphical sudo (askpass)", () => {
   const sudoPath = "/usr/bin/sudo";

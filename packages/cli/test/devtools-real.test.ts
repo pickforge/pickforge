@@ -65,7 +65,7 @@ describe.skipIf(!ready)("real Chrome through the exact upstream relay", () => {
         }
         response.writeHead(200, { "content-type": "text/html" });
         response.end(
-          '<!doctype html><title>PickLab Relay</title><button>Relay Ready</button>' +
+          '<!doctype html><title>Pickforge Relay</title><button>Relay Ready</button>' +
             '<script>console.log("pickforge-lab-relay-console");fetch("/data")</script>',
         );
       });

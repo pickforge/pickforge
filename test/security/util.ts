@@ -123,7 +123,7 @@ export const cliDistPath = path.join(
   packagesDir,
   "cli",
   "dist",
-  "picklab.js",
+  "pickforge-lab.js",
 );
 
 export function runBuiltCli(

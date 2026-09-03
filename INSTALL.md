@@ -1,60 +1,69 @@
-# PickLab agent install guide
+# Pickforge agent install guide
 
-You are an AI coding agent, and your user asked you to install and configure PickLab: a CLI + MCP server that gives you a reproducible lab for native desktop apps (Xvfb) and Android emulators — screenshots, input, logs, and run artifacts. Linux only for now.
+You are an AI coding agent, and your user asked you to install and configure Pickforge: a CLI + MCP server that gives you a reproducible lab for native desktop apps (Xvfb) and Android emulators — screenshots, input, logs, and run artifacts. Linux only for now.
 
 Follow the steps in order. Verify each one before moving on. Rules:
 
 - Never run sudo without telling the user first what the command does.
-- Install globally, not into the project. The MCP entry runs `picklab` from PATH.
+- Install globally, not into the project. The MCP entry runs `pickforge-lab` from PATH.
 - If a step fails, stop and show the user the real error — do not improvise workarounds.
 
 ## 1. Install the CLI globally
 
 ```sh
-curl -fsSL https://pickforge.dev/picklab/install.sh | sh
+curl -fsSL https://pickforge.dev/install.sh | sh
 ```
 
-Or directly: `npm install -g @pickforge/picklab` (needs Node >= 20) or `bun add -g @pickforge/picklab`. Never with sudo.
+Or directly: `npm install -g pickforge` (needs Node >= 20) or `bun add -g pickforge`. Never with sudo.
 
 Verify:
 
 ```sh
-command -v picklab && picklab --version
+command -v pickforge-lab && pickforge-lab --version
 ```
 
-If `picklab` is not on PATH, the global bin dir (`npm prefix -g`/bin or `~/.bun/bin`) is missing from PATH — fix the user's shell profile or tell them, don't fall back to a local install.
+If `pickforge-lab` is not on PATH, the global bin dir (`npm prefix -g`/bin or `~/.bun/bin`) is missing from PATH — fix the user's shell profile or tell them, don't fall back to a local install.
 
-On fatal errors the CLI and MCP server report the error message and stack trace — the message can reference the failing command and its output, with secrets redacted — plus OS, Node.js, and app versions to Sentry; nothing else is collected. Tell the user they can disable this with `PICKLAB_TELEMETRY=0`.
+On fatal errors the CLI and MCP server report the error message and stack trace — the message can reference the failing command and its output, with secrets redacted — plus OS, Node.js, and app versions to Sentry; nothing else is collected. Tell the user they can disable this with `PICKFORGE_TELEMETRY=0`.
+
+For one release, old `PICKLAB_*` environment variables still work and print a
+deprecation warning to stderr. New TypeScript state goes under
+`~/.pickforge/lab/`; existing `~/.pickforge/picklab/` and `~/.picklab/` state
+is read in place without silent migration or deletion.
 
 ## 2. Register the MCP server with the agent the user uses
 
 That is probably you. Built-in support:
 
 ```sh
-picklab agents install codex          # ~/.codex/config.toml
-picklab agents install claude-code    # Claude Code
-picklab agents install cursor         # Cursor
+pickforge-lab agents install codex          # ~/.codex/config.toml
+pickforge-lab agents install claude-code    # Claude Code
+pickforge-lab agents install cursor         # Cursor
+pickforge-lab agents install pi             # ~/.config/mcp/mcp.json
 ```
 
-Any other agent gets a stdio server with `command: picklab`, `args: ["mcp", "serve"]`:
+Core Pi has no built-in MCP support, so its config requires
+`pi-mcp-adapter`.
+
+Any other agent gets a stdio server with `command: pickforge-lab`, `args: ["mcp", "serve"]`:
 
 ```json
-{ "mcpServers": { "picklab": { "command": "picklab", "args": ["mcp", "serve"] } } }
+{ "mcpServers": { "pickforge-lab": { "command": "pickforge-lab", "args": ["mcp", "serve"] } } }
 ```
 
-Verify with `picklab agents list` — the agent must show `registered`.
+Verify with `pickforge-lab agents list` — the agent must show `registered`.
 
-Important: a running agent session only picks up new MCP servers after a restart. Tell the user the `picklab` tools appear in the *next* session; don't report failure when they are absent from the current one.
+Important: a running agent session only picks up new MCP servers after a restart. Tell the user the `pickforge-lab` tools appear in the *next* session; don't report failure when they are absent from the current one.
 
 ## 3. Install system packages (desktop profiles)
 
 Check what is missing:
 
 ```sh
-picklab doctor
+pickforge-lab doctor
 ```
 
-For desktop sessions PickLab needs `Xvfb`, `xdotool`, and one screenshot path: `import` from ImageMagick, `scrot`, or `xwd` plus `convert`. `x11vnc` is optional but recommended — it lets the user watch lab sessions live. These come from the distro package manager and need sudo, so show the user the command and ask before running it:
+For desktop sessions Pickforge needs `Xvfb`, `xdotool`, and one screenshot path: `import` from ImageMagick, `scrot`, or `xwd` plus `convert`. `x11vnc` is optional but recommended — it lets the user watch lab sessions live. These come from the distro package manager and need sudo, so show the user the command and ask before running it:
 
 | Distro | Command |
 | --- | --- |
@@ -62,43 +71,43 @@ For desktop sessions PickLab needs `Xvfb`, `xdotool`, and one screenshot path: `
 | Arch | `sudo pacman -S --needed xorg-server-xvfb xdotool imagemagick x11vnc` |
 | Fedora | `sudo dnf install xorg-x11-server-Xvfb xdotool ImageMagick x11vnc` |
 
-For Android profiles the user needs an Android SDK with `cmdline-tools`, `platform-tools`, `emulator`, and a system image. `picklab doctor` prints exact `sdkmanager` commands for missing SDK pieces, and exact `export` commands when the SDK root is unset.
+For Android profiles the user needs an Android SDK with `cmdline-tools`, `platform-tools`, `emulator`, and a system image. `pickforge-lab doctor` prints exact `sdkmanager` commands for missing SDK pieces, and exact `export` commands when the SDK root is unset.
 
 ## 4. Initialize the project
 
 Ask the user which profile fits the app, then run inside the project:
 
 ```sh
-picklab init --profile <flutter-desktop|android|desktop+android|generic> --yes
+pickforge-lab init --profile <flutter-desktop|android|desktop+android|generic> --yes
 ```
 
 Without `--profile`, init defaults to `generic`; it prompts only before privileged provisioning steps. In agent or other non-interactive contexts, use `--yes`. This writes the project config and plans the provisioning for that profile. Privileged lab-user creation happens only with explicit `--yes --create-lab-user`; it is optional for every profile.
 
 ## 5. Provision lab resources
 
-PickLab can provision two lab resources:
+Pickforge can provision two lab resources:
 
-- **Lab user** (`picklab-lab`, desktop profiles) — optional, created with sudo after explicit user approval. It will isolate desktop sessions once run-as-lab-user isolation ships; sessions currently run as the invoking user. If the user wants it: `picklab setup lab-user`
-- **AVD** (`picklab-avd`, Android profiles) — dedicated emulator image, no sudo: `picklab setup android --create-avd`. PickLab auto-allocates emulator ports from 5556, so the user's own emulator on 5554 is untouched.
+- **Lab user** (`pickforge-lab`, desktop profiles) — optional, created with sudo after explicit user approval. It will isolate desktop sessions once run-as-lab-user isolation ships; sessions currently run as the invoking user. If the user wants it: `pickforge-lab setup lab-user`
+- **AVD** (`pickforge-avd`, Android profiles) — dedicated emulator image, no sudo: `pickforge-lab setup android --create-avd`. Pickforge auto-allocates emulator ports from 5556, so the user's own emulator on 5554 is untouched.
 
-`picklab init` plans the AVD automatically for Android profiles and the lab user only with `--create-lab-user`; `picklab doctor --fix` offers both.
+`pickforge-lab init` plans the AVD automatically for Android profiles and the lab user only with `--create-lab-user`; `pickforge-lab doctor --fix` offers both.
 
 ## 6. Verify everything
 
 ```sh
-picklab doctor
+pickforge-lab doctor
 ```
 
 Checks required by the chosen profile must be `[ok]`. `[warn]` entries are acceptable for optional items like x11vnc, KVM, and the lab user. Then smoke-test a session:
 
 ```sh
-picklab session create --type desktop   # or android / desktop+android
-picklab session status
-picklab desktop screenshot
-picklab session destroy --all
+pickforge-lab session create --type desktop   # or android / desktop+android
+pickforge-lab session status
+pickforge-lab desktop screenshot
+pickforge-lab session destroy --all
 ```
 
-Finally, remind the user to restart the agent so the `picklab` MCP tools load, and that `session_status` over MCP is the quickest end-to-end check.
+Finally, remind the user to restart the agent so the `pickforge-lab` MCP tools load, and that `session_status` over MCP is the quickest end-to-end check.
 
 ## Report back
 

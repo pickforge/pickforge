@@ -212,7 +212,7 @@ describe("install.sh", () => {
     });
 
     expect(result.code).toBe(1);
-    expect(result.stderr).toContain("PickLab needs Node.js ^20.19, ^22.12, or >=23");
+    expect(result.stderr).toContain("Pickforge needs Node.js ^20.19, ^22.12, or >=23");
     expect(result.stderr).toContain("Install a supported Node.js version");
     expect(result.stdout).not.toContain("Installing");
     expect(fs.existsSync(bunCalled)).toBe(false);
@@ -246,7 +246,7 @@ describe("install.sh", () => {
       });
       expect(result.code).toBe(1);
       expect(result.stderr).toContain(
-        `PickLab needs Node.js ^20.19, ^22.12, or >=23 (found v${version})`,
+        `Pickforge needs Node.js ^20.19, ^22.12, or >=23 (found v${version})`,
       );
       expect(fs.existsSync(bunCalled)).toBe(false);
     },
@@ -273,7 +273,7 @@ describe("install.sh", () => {
       expect(result.stderr).toContain(
         'unsupported PICKFORGE_INSTALL_RUNTIME "invalid"',
       );
-      expect(result.stderr).not.toContain("PickLab needs Node.js");
+      expect(result.stderr).not.toContain("Pickforge needs Node.js");
     },
   );
 
@@ -436,7 +436,7 @@ describe("packed tarball execution", () => {
   );
 
   it(
-    "runs pickforge-lab init via npm exec from the tarball (npx -y pickforge init)",
+    "runs pickforge-lab init via npm exec from the tarball (npx package form)",
     async () => {
       const { home, dir } = makeCase("npx-init");
       const project = path.join(dir, "project");

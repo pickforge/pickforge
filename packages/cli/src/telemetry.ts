@@ -28,7 +28,7 @@ export function initTelemetry(env: EnvLike = process.env): void {
   const { version } = require("../package.json") as { version: string };
   Sentry.init({
     dsn: DSN,
-    release: `picklab@${version}`,
+    release: `pickforge@${version}`,
     tracesSampleRate: 0,
     defaultIntegrations: false,
     integrations: [

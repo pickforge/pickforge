@@ -184,12 +184,12 @@ describe("run manifest hygiene (planted env secrets)", () => {
     expect(report.ok).toBe(true);
     expect(report.runId).toBeDefined();
 
-    const picklabDir = path.join(dirs.projectDir, ".picklab");
-    const files = listFilesRecursive(picklabDir);
+    const projectStateDir = path.join(dirs.projectDir, ".picklab");
+    const files = listFilesRecursive(projectStateDir);
     expect(files.length).toBeGreaterThan(0);
 
     const manifestPath = path.join(
-      picklabDir,
+      projectStateDir,
       "runs",
       report.runId as string,
       "manifest.json",

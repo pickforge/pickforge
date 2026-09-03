@@ -74,17 +74,13 @@ function targetData(target: AndroidTarget): Record<string, unknown> {
   return data;
 }
 
-// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/pickforge#60
-export function registerAndroidTools(
-  server: McpServer,
-  ctx: ServerContext,
-): void {
+function registerAndroidTool1(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "android_start",
     {
       title: "Start Android session",
       description:
-        "Start an Android emulator session (boots the dedicated PickLab AVD).",
+        "Start an Android emulator session (boots the dedicated Pickforge AVD).",
       inputSchema: {
         avdName: z.string().min(1).optional().describe("Android AVD name"),
       },
@@ -100,7 +96,9 @@ export function registerAndroidTools(
         return { data: { sessions } };
       }),
   );
+}
 
+function registerAndroidTool2(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "android_install_apk",
     {
@@ -130,7 +128,9 @@ export function registerAndroidTools(
         );
       }),
   );
+}
 
+function registerAndroidTool3(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "android_launch_app",
     {
@@ -173,7 +173,9 @@ export function registerAndroidTools(
         );
       }),
   );
+}
 
+function registerAndroidTool4(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "android_screenshot",
     {
@@ -244,7 +246,9 @@ export function registerAndroidTools(
         );
       }),
   );
+}
 
+function registerAndroidTool5(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "android_tap",
     {
@@ -278,7 +282,9 @@ export function registerAndroidTools(
         );
       }),
   );
+}
 
+function registerAndroidTool6(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "android_type",
     {
@@ -310,7 +316,9 @@ export function registerAndroidTools(
         );
       }),
   );
+}
 
+function registerAndroidTool7(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "android_back",
     {
@@ -331,7 +339,9 @@ export function registerAndroidTools(
         );
       }),
   );
+}
 
+function registerAndroidTool8(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "android_home",
     {
@@ -352,7 +362,9 @@ export function registerAndroidTools(
         );
       }),
   );
+}
 
+function registerAndroidTool9(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "android_get_ui_tree",
     {
@@ -377,7 +389,9 @@ export function registerAndroidTools(
         );
       }),
   );
+}
 
+function registerAndroidTool10(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "android_logcat",
     {
@@ -432,7 +446,9 @@ export function registerAndroidTools(
         );
       }),
   );
+}
 
+function registerAndroidTool11(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "android_run_adb",
     {
@@ -499,4 +515,18 @@ export function registerAndroidTools(
         );
       }),
   );
+}
+
+export function registerAndroidTools(server: McpServer, ctx: ServerContext): void {
+  registerAndroidTool1(server, ctx);
+  registerAndroidTool2(server, ctx);
+  registerAndroidTool3(server, ctx);
+  registerAndroidTool4(server, ctx);
+  registerAndroidTool5(server, ctx);
+  registerAndroidTool6(server, ctx);
+  registerAndroidTool7(server, ctx);
+  registerAndroidTool8(server, ctx);
+  registerAndroidTool9(server, ctx);
+  registerAndroidTool10(server, ctx);
+  registerAndroidTool11(server, ctx);
 }

@@ -2,7 +2,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { browserRuntimeLayout, buildBrowserEnv } from "../src/env.js";
 
-const SESSION_DIR = "/home/lab/.picklab/sessions/brow-abcdef01";
+const SESSION_DIR = "/home/lab/.pickforge/lab/sessions/brow-abcdef01";
 
 describe("browserRuntimeLayout", () => {
   it("confines every runtime path under the session directory", () => {

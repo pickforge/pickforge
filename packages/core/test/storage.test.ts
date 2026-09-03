@@ -76,7 +76,7 @@ describe("projectId / canonicalProjectPath", () => {
 });
 
 describe("resolveRunStorage", () => {
-  it("defaults to home mode under the resolved PickLab home", async () => {
+  it("defaults to home mode under the resolved Pickforge home", async () => {
     const home = path.join(root, "home");
     const project = path.join(root, "project");
     await fs.promises.mkdir(project, { recursive: true });

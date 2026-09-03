@@ -112,7 +112,7 @@ function registerProvisioningCommands(program: Command): void {
 
   program
     .command("init")
-    .description("Initialize a PickLab project and provision lab resources")
+    .description("Initialize a Pickforge project and provision lab resources")
     .addOption(
       new Option("--profile <profile>", "project profile").choices(PROFILES),
     )
@@ -128,7 +128,7 @@ function registerProvisioningCommands(program: Command): void {
 
   const setup = program
     .command("setup")
-    .description("Provision dedicated PickLab lab resources");
+    .description("Provision dedicated Pickforge lab resources");
 
   setup
     .command("lab-user")
@@ -257,7 +257,7 @@ function registerWatchAndBrowserCommands(program: Command): void {
 
   const browser = program
     .command("browser")
-    .description("Connect agent browser tooling to the active PickLab browser");
+    .description("Connect agent browser tooling to the active Pickforge browser");
 
   browser
     .command("devtools-mcp")
@@ -649,7 +649,7 @@ function registerAgentDoctorCommands(agents: Command): void {
   withJson(
     agents
       .command("add")
-      .description("Store a custom agent MCP config snippet under the PickLab home's agents dir")
+      .description("Store a custom agent MCP config snippet under the Pickforge home's agents dir")
       .requiredOption("--name <name>", "custom agent name")
       .requiredOption(
         "--mcp-command <command>",
@@ -664,7 +664,7 @@ function registerAgentDoctorCommands(agents: Command): void {
 function registerAgentCommands(program: Command): void {
   const agents = program
     .command("agents")
-    .description("Register the PickLab MCP server with coding agents");
+    .description("Register the Pickforge MCP server with coding agents");
   registerAgentListCommands(agents);
   registerAgentLinkCommands(agents);
   registerAgentDoctorCommands(agents);
@@ -677,7 +677,7 @@ function registerMcpCommands(program: Command): void {
 
   mcp
     .command("serve")
-    .description("Serve PickLab tools over MCP (stdio)")
+    .description("Serve Pickforge tools over MCP (stdio)")
     .action(async () => {
       process.exitCode = await runMcpServe();
     });

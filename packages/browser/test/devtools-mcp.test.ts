@@ -261,7 +261,7 @@ describe("createTakeoverBusyIntercept", () => {
       error: {
         code: TAKEOVER_BUSY_ERROR_CODE,
         message:
-          "PickLab: human control is active; agent input is paused until control returns",
+          "Pickforge: human control is active; agent input is paused until control returns",
       },
     });
 

@@ -17,15 +17,14 @@ const HUMAN_BLOCKER_GUIDELINE =
   "for the answer. Never guess credentials and never abandon the session; " +
   "report what you need.";
 
-// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/pickforge#60
-export function registerPrompts(server: McpServer): void {
+function registerPrompt1(server: McpServer): void {
   server.registerPrompt(
     "test-flutter-desktop-visually",
     {
       title: "Test a desktop app visually",
       description:
         "Build a Flutter (or any Linux) desktop app, run it in an isolated " +
-        "PickLab desktop session, and verify it visually with screenshots.",
+        "Pickforge desktop session, and verify it visually with screenshots.",
       argsSchema: {
         appCommand: z
           .string()
@@ -42,7 +41,7 @@ export function registerPrompts(server: McpServer): void {
     ({ appCommand, windowTitle }) =>
       userMessage(
         [
-          "Visually test the desktop app in an isolated PickLab session:",
+          "Visually test the desktop app in an isolated Pickforge session:",
           "",
           "1. Build the app first (for Flutter: `flutter build linux`). Fix any build errors before continuing.",
           '2. Create an isolated display with the `session_create` tool (type "desktop"). Note the returned session id.',
@@ -60,18 +59,20 @@ export function registerPrompts(server: McpServer): void {
           "6. If something looks wrong, fix the code, rebuild, relaunch inside the same session, and re-verify with new screenshots.",
           "7. When finished, destroy the session with `session_destroy` and summarize what you verified. Use `artifact_report` to reference the captured screenshots.",
           "",
-          "Never run the app on the user's real display; always work inside the PickLab session.",
+          "Never run the app on the user's real display; always work inside the Pickforge session.",
           HUMAN_BLOCKER_GUIDELINE,
         ].join("\n"),
       ),
   );
+}
 
+function registerPrompt2(server: McpServer): void {
   server.registerPrompt(
     "debug-android-apk",
     {
       title: "Debug an Android APK",
       description:
-        "Install an APK in the PickLab Android emulator, drive its UI, and " +
+        "Install an APK in the Pickforge Android emulator, drive its UI, and " +
         "debug it with logcat and UI-tree dumps.",
       argsSchema: {
         apkPath: z.string().describe("Path to the APK to debug"),
@@ -84,7 +85,7 @@ export function registerPrompts(server: McpServer): void {
     ({ apkPath, packageName }) =>
       userMessage(
         [
-          "Debug the Android app inside the PickLab emulator lab:",
+          "Debug the Android app inside the Pickforge emulator lab:",
           "",
           "1. Start an emulator session with the `android_start` tool (or `session_create` with type \"android\"). Wait for it to report a device serial.",
           `2. Install the APK with \`android_install_apk\` using apkPath \`${apkPath}\`.`,
@@ -105,13 +106,15 @@ export function registerPrompts(server: McpServer): void {
         ].join("\n"),
       ),
   );
+}
 
+function registerPrompt3(server: McpServer): void {
   server.registerPrompt(
     "run-visual-regression-check",
     {
       title: "Run a visual regression check",
       description:
-        "Capture fresh screenshots of the app in a PickLab session and " +
+        "Capture fresh screenshots of the app in a Pickforge session and " +
         "compare them against a baseline directory.",
       argsSchema: {
         baselineDir: z
@@ -143,4 +146,10 @@ export function registerPrompts(server: McpServer): void {
         ].join("\n"),
       ),
   );
+}
+
+export function registerPrompts(server: McpServer): void {
+  registerPrompt1(server);
+  registerPrompt2(server);
+  registerPrompt3(server);
 }

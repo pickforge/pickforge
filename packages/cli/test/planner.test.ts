@@ -272,14 +272,14 @@ describe("planCreateAvd", () => {
 
 describe("planPickforgeHome", () => {
   it("plans a mkdir when the home is missing", () => {
-    const plan = planPickforgeHome({ path: "/tmp/x/.picklab", exists: false });
+    const plan = planPickforgeHome({ path: "/tmp/x/lab-state", exists: false });
     expect(plan.steps).toEqual([
       {
         id: "pickforge-home",
-        title: "Create PickLab home /tmp/x/.picklab",
+        title: "Create Pickforge home /tmp/x/lab-state",
         kind: "mkdir",
         privileged: false,
-        dir: "/tmp/x/.picklab",
+        dir: "/tmp/x/lab-state",
       },
     ]);
   });

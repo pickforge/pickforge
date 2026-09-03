@@ -145,11 +145,11 @@ describe("evaluateChecks", () => {
 
   it("flags a broken config with its parse error", () => {
     const check = checkById(
-      snapshot({ config: { ok: false, error: "Invalid PickLab config" } }),
+      snapshot({ config: { ok: false, error: "Invalid Pickforge config" } }),
       "config",
     );
     expect(check.status).toBe("missing");
-    expect(check.detail).toContain("Invalid PickLab config");
+    expect(check.detail).toContain("Invalid Pickforge config");
   });
 
   it("treats x11vnc as optional (warn, not missing)", () => {

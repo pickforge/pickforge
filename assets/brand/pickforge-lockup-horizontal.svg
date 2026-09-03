@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 180" fill="none" role="img" aria-label="PickLab horizontal lockup">
-  <title>PickLab horizontal lockup</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 180" fill="none" role="img" aria-label="Pickforge horizontal lockup">
+  <title>Pickforge horizontal lockup</title>
   <rect width="720" height="180" rx="24" fill="#0A0A0B"/>
   <g transform="translate(40 50) scale(0.625)">
     <rect width="128" height="128" rx="24" fill="#0F0F11" stroke="#F2F2F3" stroke-opacity="0.08"/>
@@ -14,6 +14,6 @@
   <line x1="48" y1="58" x2="80" y2="58" stroke="#F2F2F3" stroke-width="1.5" opacity="0.3"/>
   <circle cx="70" cy="68" r="6" fill="#FF7A1A"/>
   </g>
-  <text x="160" y="106" fill="#F2F2F3" font-family="Geist, Inter, Arial, sans-serif" font-size="52" font-weight="750" letter-spacing="-0.02em">PickLab</text>
+  <text x="160" y="106" fill="#F2F2F3" font-family="Geist, Inter, Arial, sans-serif" font-size="52" font-weight="750" letter-spacing="-0.02em">Pickforge</text>
   <text x="164" y="140" fill="#6E6E75" font-family="Geist Mono, JetBrains Mono, monospace" font-size="14" font-weight="500" letter-spacing="0.18em">DESKTOP · ANDROID · AGENT LAB</text>
 </svg>

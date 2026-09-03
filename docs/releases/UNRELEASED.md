@@ -1,7 +1,22 @@
 # Unreleased
 
-Working draft for the next PickLab release. Use this to polish the generated
+Working draft for the next Pickforge release. Use this to polish the generated
 GitHub release description, then reset it after the release is published.
+
+## PickLab is now Pickforge
+
+- The npm package is now `pickforge` at version `0.4.0-alpha.1`.
+- The TypeScript commands are now `pickforge-lab` and `pickforge-mcp`.
+- Agent config uses `pickforge-lab`. Linking replaces an owned legacy
+  `picklab` MCP entry in the same config update.
+- `PICKFORGE_*` environment variables fall back to `PICKLAB_*` for one
+  release and print one deprecation warning to stderr per process.
+- New TypeScript state is written under `~/.pickforge/lab/`, or
+  `PICKFORGE_HOME`. State under `~/.pickforge/picklab/` and `~/.picklab/`
+  remains readable in place. Nothing is silently migrated or deleted.
+- After installing `pickforge`, remove the old package with
+  `npm uninstall -g @pickforge/picklab` or
+  `bun remove -g @pickforge/picklab`.
 
 ## User-facing changes
 
@@ -56,11 +71,13 @@ GitHub release description, then reset it after the release is published.
 
 ### Tested
 
-- Pinned Bun 1.3.12 CI: frozen install, typecheck, lint, 1,133 tests pass,
-  one skips, coverage passes at 82.48% lines, and build passes.
+- Local Bun validation: install, typecheck, lint, and build pass. The full test
+  run has 1,141 passing and four skipped tests. Four live desktop/browser tests
+  fail on this host because `xterm` is absent and its Chromium exits during
+  startup; CI installs `xterm` and uses its documented Chrome runner setting.
 - The pinned OSV Scanner v2.3.8 image reports no unfiltered advisories.
-- `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D
-  warnings`, and `cargo test --workspace --locked` pass with 78 tests covering
+- `cargo check --workspace` and `cargo test -p pickforge-cli` pass with 83 tests
+  covering
   project/framework detection, tool and harness discovery, state and project-id
   boundaries, adapter preservation/refusal, transaction rollback and drift,
   dry-run, receipt ownership, file modes, idempotency, Git-tree cleanliness,
@@ -78,7 +95,8 @@ GitHub release description, then reset it after the release is published.
 ### Not tested yet
 
 - macOS for the Rust binary.
-- No packaging, installer, or distribution path for `pickforge` yet.
+- No npm publish, repository rename, package deprecation, or other external
+  runbook step was executed.
 
 ### Release blockers
 

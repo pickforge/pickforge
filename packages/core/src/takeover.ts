@@ -106,7 +106,7 @@ export class HumanControlActiveError extends Error {
   readonly lease: HumanLease;
   constructor(lease: HumanLease) {
     super(
-      "PickLab: human control is active " +
+      "Pickforge: human control is active " +
         `(lease ${lease.leaseId}, held since ${lease.createdAt}); ` +
         "agent input is paused until control returns",
     );

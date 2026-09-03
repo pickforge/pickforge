@@ -5,7 +5,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
-const distEntry = path.join(repoRoot, "packages", "cli", "dist", "picklab.js");
+const distEntry = path.join(repoRoot, "packages", "cli", "dist", "pickforge-lab.js");
 const lockDir = path.join(repoRoot, ".cli-build.lock");
 
 const LOCK_STALE_MS = 300_000;

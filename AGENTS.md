@@ -1,6 +1,6 @@
-# PickLab
+# Pickforge
 
-TypeScript monorepo behind `@pickforge/picklab`: a CLI and MCP server that drives Xvfb desktop sessions, Android emulators and headed Chrome for coding agents. Linux only.
+TypeScript monorepo behind `pickforge`: a CLI and MCP server that drives Xvfb desktop sessions, Android emulators and headed Chrome for coding agents. Linux only.
 
 ```
 bun install --frozen-lockfile
@@ -14,7 +14,7 @@ bun run build
 
 Things you wouldn't guess:
 
-- Desktop and browser tests need Xvfb, xdotool, ImageMagick, x11vnc, xterm and a Chrome or Chromium on PATH. Missing ones make browser tests skip quietly. CI sets `PICKLAB_REQUIRE_BROWSER=1` so they fail instead, plus `PICKLAB_CHROME_NO_SANDBOX=1`, which is a CI-only concession.
+- Desktop and browser tests need Xvfb, xdotool, ImageMagick, x11vnc, xterm and a Chrome or Chromium on PATH. Missing ones make browser tests skip quietly. CI sets `PICKFORGE_REQUIRE_BROWSER=1` so they fail instead, plus `PICKFORGE_CHROME_NO_SANDBOX=1`, which is a CI-only concession.
 - CLI tests build the CLI once into `packages/cli/dist` and spawn it with fake `adb` and SDK scripts on PATH, so a stale build looks like a strange test failure.
 - `test/security` pins the guarantees we advertise: argv arrays instead of shell strings, secrets redacted before anything is stored or returned, MCP never calls sudo, VNC loopback-only and read-only. MCP screenshot `out` stays under the project dir; the CLI's `--out` is deliberately unrestricted.
 - Releasing: bump every `packages/*/package.json` and `bun.lock` together. CI compares the tag to `packages/cli/package.json`, and only that package is published.

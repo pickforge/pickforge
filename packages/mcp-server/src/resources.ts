@@ -208,13 +208,12 @@ async function listRunFiles(
   return entries;
 }
 
-// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/pickforge#60
-export function registerResources(server: McpServer, ctx: ServerContext): void {
+function registerResource1(server: McpServer, ctx: ServerContext): void {
   server.registerResource(
     "runs",
     "pickforge://runs",
     {
-      title: "PickLab runs",
+      title: "Pickforge runs",
       description: "Index of recorded runs (see pickforge-lab doctor for the resolved storage path)",
       mimeType: "application/json",
     },
@@ -238,7 +237,9 @@ export function registerResources(server: McpServer, ctx: ServerContext): void {
       };
     },
   );
+}
 
+function registerResource2(server: McpServer, ctx: ServerContext): void {
   server.registerResource(
     "run-manifest",
     new ResourceTemplate("pickforge://runs/{runId}/manifest", {
@@ -275,7 +276,9 @@ export function registerResources(server: McpServer, ctx: ServerContext): void {
       };
     },
   );
+}
 
+function registerResource3(server: McpServer, ctx: ServerContext): void {
   server.registerResource(
     "run-actions",
     new ResourceTemplate("pickforge://runs/{runId}/actions", {
@@ -328,7 +331,9 @@ export function registerResources(server: McpServer, ctx: ServerContext): void {
       };
     },
   );
+}
 
+function registerResource4(server: McpServer, ctx: ServerContext): void {
   server.registerResource(
     "run-report",
     new ResourceTemplate("pickforge://runs/{runId}/report", {
@@ -371,7 +376,9 @@ export function registerResources(server: McpServer, ctx: ServerContext): void {
       };
     },
   );
+}
 
+function registerResource5(server: McpServer, ctx: ServerContext): void {
   server.registerResource(
     "run-screenshot",
     new ResourceTemplate("pickforge://runs/{runId}/screenshots/{name}", {
@@ -444,7 +451,9 @@ export function registerResources(server: McpServer, ctx: ServerContext): void {
       };
     },
   );
+}
 
+function registerResource6(server: McpServer, ctx: ServerContext): void {
   server.registerResource(
     "run-log",
     new ResourceTemplate("pickforge://runs/{runId}/logs/{name}", {
@@ -509,7 +518,9 @@ export function registerResources(server: McpServer, ctx: ServerContext): void {
       };
     },
   );
+}
 
+function registerResource7(server: McpServer, ctx: ServerContext): void {
   server.registerResource(
     "session-status",
     new ResourceTemplate("pickforge://sessions/{sessionId}/status", {
@@ -544,4 +555,14 @@ export function registerResources(server: McpServer, ctx: ServerContext): void {
       };
     },
   );
+}
+
+export function registerResources(server: McpServer, ctx: ServerContext): void {
+  registerResource1(server, ctx);
+  registerResource2(server, ctx);
+  registerResource3(server, ctx);
+  registerResource4(server, ctx);
+  registerResource5(server, ctx);
+  registerResource6(server, ctx);
+  registerResource7(server, ctx);
 }

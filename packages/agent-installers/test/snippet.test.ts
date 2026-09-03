@@ -74,13 +74,13 @@ describe("renderTomlSnippet", () => {
 
 describe("writeSharedSnippets", () => {
   it("writes both snippet files into the agents dir", async () => {
-    const env = { PICKFORGE_HOME: path.join(tmpDir, ".picklab") };
+    const env = { PICKFORGE_HOME: path.join(tmpDir, "state") };
     const snippets = await writeSharedSnippets(env);
     expect(snippets.jsonPath).toBe(
-      path.join(tmpDir, ".picklab", "agents", "pickforge-mcp.json"),
+      path.join(tmpDir, "state", "agents", "pickforge-mcp.json"),
     );
     expect(snippets.tomlPath).toBe(
-      path.join(tmpDir, ".picklab", "agents", "pickforge-mcp.toml"),
+      path.join(tmpDir, "state", "agents", "pickforge-mcp.toml"),
     );
     expect(fs.readFileSync(snippets.jsonPath, "utf8")).toBe(
       renderJsonSnippet(),

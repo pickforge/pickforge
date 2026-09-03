@@ -1,5 +1,5 @@
 #!/bin/sh
-# PickLab installer: curl -fsSL https://pickforge.dev/pickforge-lab/install.sh | sh
+# Pickforge installer: curl -fsSL https://pickforge.dev/install.sh | sh
 # Installs pickforge globally with bun (preferred) or npm.
 # Never uses sudo.
 set -eu
@@ -43,7 +43,7 @@ resolve_runtime() {
     elif command -v npm >/dev/null 2>&1; then
       runtime="npm"
     else
-      echo "error: PickLab needs bun or Node.js >= 20 with npm." >&2
+      echo "error: Pickforge needs bun or Node.js >= 20 with npm." >&2
       echo "Install one of them and re-run this script." >&2
       exit 1
     fi
@@ -52,7 +52,7 @@ resolve_runtime() {
 
 check_node_version() {
   if ! command -v node >/dev/null 2>&1; then
-    echo "error: PickLab needs Node.js ^20.19, ^22.12, or >=23, but node is not on PATH." >&2
+    echo "error: Pickforge needs Node.js ^20.19, ^22.12, or >=23, but node is not on PATH." >&2
     echo "Install a supported Node.js version (with or without bun) and re-run this script." >&2
     exit 1
   fi
@@ -74,7 +74,7 @@ check_node_version() {
     supported=1
   fi
   if [ "${supported}" -ne 1 ]; then
-    echo "error: PickLab needs Node.js ^20.19, ^22.12, or >=23 (found ${node_version})." >&2
+    echo "error: Pickforge needs Node.js ^20.19, ^22.12, or >=23 (found ${node_version})." >&2
     echo "Install a supported Node.js version (with or without bun) and re-run this script." >&2
     exit 1
   fi
@@ -136,7 +136,7 @@ verify_install() {
     echo "note: if those differ, remove the other install or reorder PATH."
   fi
   echo "Next steps:"
-  echo "  1. pickforge-lab agents install <codex|claude-code|cursor>  # register the MCP server"
+  echo "  1. pickforge-lab agents install <codex|claude-code|cursor|pi>  # register the MCP server"
   echo "  2. pickforge-lab init --profile <flutter-desktop|android|desktop+android>  # inside your project"
   echo "  3. pickforge-lab doctor  # verify dependencies; --fix repairs what it can"
   echo "Agent-driven setup guide: https://github.com/pickforge/pickforge/blob/main/INSTALL.md"

@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" fill="none" role="img" aria-label="PickLab social card">
-  <title>PickLab social card</title>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" fill="none" role="img" aria-label="Pickforge social card">
+  <title>Pickforge social card</title>
   <defs>
     <radialGradient id="glow" cx="52%" cy="54%" r="58%">
       <stop offset="0%" stop-color="#FF7A1A" stop-opacity="0.34"/>
@@ -30,10 +30,10 @@
   <line x1="48" y1="58" x2="80" y2="58" stroke="#F2F2F3" stroke-width="1.5" opacity="0.3"/>
   <circle cx="70" cy="68" r="6" fill="#FF7A1A"/>
   </g>
-  <text x="180" y="132" font-family="Geist, Inter, Arial, sans-serif" font-size="38" font-weight="750" fill="#F2F2F3" letter-spacing="-0.02em">PickLab</text>
-  <text x="80" y="310" font-family="Geist, Inter, Arial, sans-serif" font-size="72" font-weight="760" fill="url(#titleGradient)" letter-spacing="-0.025em">PickLab</text>
+  <text x="180" y="132" font-family="Geist, Inter, Arial, sans-serif" font-size="38" font-weight="750" fill="#F2F2F3" letter-spacing="-0.02em">Pickforge</text>
+  <text x="80" y="310" font-family="Geist, Inter, Arial, sans-serif" font-size="72" font-weight="760" fill="url(#titleGradient)" letter-spacing="-0.025em">Pickforge</text>
   <text x="80" y="384" font-family="Geist, Inter, Arial, sans-serif" font-size="44" font-weight="700" fill="#F2F2F3" fill-opacity="0.88" letter-spacing="-0.02em">Playwright for native apps</text>
   <text x="80" y="438" font-family="Geist, Inter, Arial, sans-serif" font-size="44" font-weight="700" fill="#F2F2F3" fill-opacity="0.88" letter-spacing="-0.02em">and Android emulators.</text>
   <text x="80" y="505" font-family="Geist Mono, JetBrains Mono, monospace" font-size="19" font-weight="500" fill="#6E6E75" letter-spacing="0.18em">DESKTOP · ANDROID · AGENT LAB</text>
-  <text x="80" y="565" font-family="Geist Mono, JetBrains Mono, monospace" font-size="20" font-weight="500" fill="#FF7A1A">pickforge.dev/picklab</text>
+  <text x="80" y="565" font-family="Geist Mono, JetBrains Mono, monospace" font-size="20" font-weight="500" fill="#FF7A1A">pickforge.dev</text>
 </svg>

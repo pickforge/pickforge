@@ -2,7 +2,7 @@
   "name": "@pickforge/lab-desktop-linux",
   "version": "0.4.0-alpha.1",
   "private": true,
-  "description": "Xvfb, VNC, window, input, and screenshot automation for PickLab",
+  "description": "Xvfb, VNC, window, input, and screenshot automation for Pickforge",
   "type": "module",
   "engines": {
     "node": ">=20"

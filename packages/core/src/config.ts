@@ -106,7 +106,7 @@ export async function readConfigFile(filePath: string): Promise<PickforgeConfig>
     return parsed as PickforgeConfig;
   } catch (error) {
     throw new Error(
-      `Invalid PickLab config at ${filePath}: ${(error as Error).message}`,
+      `Invalid Pickforge config at ${filePath}: ${(error as Error).message}`,
     );
   }
 }

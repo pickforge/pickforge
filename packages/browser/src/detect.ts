@@ -3,7 +3,7 @@ import { readPickforgeEnv, type EnvLike } from "@pickforge/lab-core";
 import { findOnPath } from "@pickforge/lab-desktop-linux";
 
 /**
- * Chrome/Chromium binaries PickLab knows how to drive, in preference order.
+ * Chrome/Chromium binaries Pickforge knows how to drive, in preference order.
  * Stable Google Chrome first, then Chromium variants. Firefox/WebKit are out
  * of scope for v1.
  */
@@ -77,7 +77,7 @@ export function requireChromeBinary(opts: DetectChromeOptions = {}): string {
     );
   }
   throw new Error(
-    "No Chrome or Chromium binary found on PATH. PickLab looked for " +
+    "No Chrome or Chromium binary found on PATH. Pickforge looked for " +
       `${SUPPORTED_CHROME_BINARIES.join(", ")}. Install Google Chrome or ` +
       "Chromium, or set PICKFORGE_CHROME_BIN to the browser binary path.",
   );

@@ -301,7 +301,7 @@ export async function startEmulator(
     if (!tryReserveConsolePort(opts.port, registryEnv)) {
       throw new Error(
         `Console port ${opts.port} is already reserved by another ` +
-          `PickLab emulator (${consolePortLockPath(opts.port, registryEnv)})`,
+          `Pickforge emulator (${consolePortLockPath(opts.port, registryEnv)})`,
       );
     }
     port = opts.port;

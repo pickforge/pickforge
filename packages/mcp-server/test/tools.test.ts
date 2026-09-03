@@ -63,7 +63,7 @@ afterEach(async () => {
 });
 
 describe("tool inventory", () => {
-  it("lists every PickLab tool with an input schema and description", async () => {
+  it("lists every Pickforge tool with an input schema and description", async () => {
     const { tools } = await lab.client.listTools();
     const names = tools.map((tool) => tool.name);
     for (const expected of EXPECTED_TOOLS) {

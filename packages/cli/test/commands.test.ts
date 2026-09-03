@@ -81,7 +81,7 @@ function makeEnv(opts: EnvOptions = {}): Record<string, string> {
   }
   return {
     HOME: home,
-    PICKFORGE_HOME: path.join(home, ".picklab"),
+    PICKFORGE_HOME: path.join(home, "state"),
     // Default new runs to the pre-#34 project-local layout so existing
     // fixtures/assertions in this file keep working; tests that exercise the
     // new "home" default explicitly override this via opts.extra.
@@ -1446,7 +1446,7 @@ describe("pickforge-lab artifacts", () => {
       env,
     );
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain("# PickLab run 20260609-120000-synthetic");
+    expect(result.stdout).toContain("# Pickforge run 20260609-120000-synthetic");
     expect(result.stdout).toContain("- Status: completed");
     expect(result.stdout).toContain("- Session: desk-12345678");
     expect(result.stdout).toContain(
@@ -1725,7 +1725,10 @@ describe("pickforge-lab mcp serve", () => {
 
     expect(exitCode).toBe(0);
     const init = responses.get(1);
-    expect(init?.result?.serverInfo?.name).toBe("pickforge-lab");
+    expect(init?.result?.serverInfo).toMatchObject({
+      name: "pickforge-lab",
+      version: "0.4.0-alpha.1",
+    });
     const tools = responses.get(2)?.result?.tools as Array<{ name: string }>;
     const names = tools.map((tool) => tool.name);
     expect(names).toContain("session_create");

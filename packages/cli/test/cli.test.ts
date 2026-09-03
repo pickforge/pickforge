@@ -94,7 +94,7 @@ interface FakeEnvOptions {
   sdk?: string;
   /** Stand in for a real graphical session + resolvable askpass helper
    * (locked v1 contract) so privileged steps materialize into `sudo -A`
-   * instead of failing preflight. PickLab never ships its own helper, so
+   * instead of failing preflight. Pickforge never ships its own helper, so
    * tests that need one point SUDO_ASKPASS at a fake executable — none of
    * the fake `sudo` stand-ins below actually invoke it. */
   graphicalSudo?: boolean;
@@ -113,7 +113,7 @@ function makeEnv(
   }
   const env: Record<string, string> = {
     HOME: home,
-    PICKFORGE_HOME: path.join(home, ".picklab"),
+    PICKFORGE_HOME: path.join(home, "state"),
     PATH: bin,
     PICKFORGE_KVM_PATH: path.join(tmp, "no-kvm"),
   };

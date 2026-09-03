@@ -270,7 +270,7 @@ function emit(report: InitReport, opts: InitCliOptions): void {
     console.log(
       report.dryRun
         ? `[dry-run] init complete for profile ${report.profile} (no changes made)`
-        : `Initialized PickLab project (profile: ${report.profile}) in ${report.projectDir}`,
+        : `Initialized Pickforge project (profile: ${report.profile}) in ${report.projectDir}`,
     );
     if (!report.dryRun) {
       console.log(

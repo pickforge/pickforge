@@ -35,7 +35,7 @@ import {
 /** JSON-RPC error code for the stable "human control is active" busy response. */
 export const TAKEOVER_BUSY_ERROR_CODE = -32050;
 const TAKEOVER_BUSY_MESSAGE =
-  "PickLab: human control is active; agent input is paused until control returns";
+  "Pickforge: human control is active; agent input is paused until control returns";
 
 function jsonRpcRequestId(message: JsonRpcMessage): string | number | undefined {
   return typeof message.id === "string" || typeof message.id === "number"

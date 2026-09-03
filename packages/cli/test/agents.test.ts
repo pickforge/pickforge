@@ -61,7 +61,7 @@ beforeEach(() => {
   fs.mkdirSync(home, { recursive: true });
   env = {
     HOME: home,
-    PICKFORGE_HOME: path.join(home, ".picklab"),
+    PICKFORGE_HOME: path.join(home, "state"),
     PATH: path.join(tmpDir, "empty-bin"),
   };
 });

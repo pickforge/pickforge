@@ -76,7 +76,7 @@ function homeChecks(s: DetectionSnapshot): DoctorCheck[] {
   if (!s.pickforgeHome.exists) {
     home = {
       id: "pickforge-home",
-      title: "PickLab home",
+      title: "Pickforge home",
       status: "missing",
       detail: `${s.pickforgeHome.path} does not exist`,
       hint: "run `pickforge-lab doctor --fix` or `pickforge-lab init` to create it",
@@ -84,7 +84,7 @@ function homeChecks(s: DetectionSnapshot): DoctorCheck[] {
   } else if (!s.pickforgeHome.writable) {
     home = {
       id: "pickforge-home",
-      title: "PickLab home",
+      title: "Pickforge home",
       status: "missing",
       detail: `${s.pickforgeHome.path} is not writable`,
       hint: `fix ownership/permissions of ${s.pickforgeHome.path}`,
@@ -92,7 +92,7 @@ function homeChecks(s: DetectionSnapshot): DoctorCheck[] {
   } else {
     home = {
       id: "pickforge-home",
-      title: "PickLab home",
+      title: "Pickforge home",
       status: "ok",
       detail: s.pickforgeHome.path,
     };
@@ -102,7 +102,7 @@ function homeChecks(s: DetectionSnapshot): DoctorCheck[] {
     home,
     {
       id: "legacy-home",
-      title: "Legacy PickLab home",
+      title: "Legacy Pickforge home",
       status: "warn",
       detail: `${s.legacyHome.path} still exists (earlier default)`,
       hint:
@@ -136,7 +136,7 @@ function configCheck(s: DetectionSnapshot): DoctorCheck {
   if (s.config.ok) {
     return {
       id: "config",
-      title: "PickLab config",
+      title: "Pickforge config",
       status: "ok",
       detail:
         s.config.profile === null
@@ -146,7 +146,7 @@ function configCheck(s: DetectionSnapshot): DoctorCheck {
   }
   return {
     id: "config",
-    title: "PickLab config",
+    title: "Pickforge config",
     status: "missing",
     detail: s.config.error ?? "unreadable",
     hint: "fix or remove the broken config file",
@@ -213,12 +213,12 @@ function kvmCheck(s: DetectionSnapshot): DoctorCheck {
 function avdCheck(s: DetectionSnapshot): DoctorCheck {
   if (s.android.avdExists) {
     return {
-      id: "avd", title: "Dedicated PickLab AVD", status: "ok",
+      id: "avd", title: "Dedicated Pickforge AVD", status: "ok",
       detail: s.android.avdName,
     };
   }
   return {
-    id: "avd", title: "Dedicated PickLab AVD", status: "missing",
+    id: "avd", title: "Dedicated Pickforge AVD", status: "missing",
     detail: `AVD "${s.android.avdName}" not found`,
     hint: `create it with: pickforge-lab setup android --create-avd --avd-name ${s.android.avdName}`,
   };

@@ -111,7 +111,7 @@ describe.skipIf(!hasXvfb)("built browser relay command exit", () => {
 
       const child = spawn(
         process.execPath,
-        [path.join(isolatedDist, "picklab.js"), "browser", "devtools-mcp"],
+        [path.join(isolatedDist, "pickforge-lab.js"), "browser", "devtools-mcp"],
         {
           cwd: projectDir,
           env: {

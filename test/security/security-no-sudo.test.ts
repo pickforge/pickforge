@@ -2,7 +2,7 @@
 //
 // Proven three ways:
 //   1. Statically: the mcp-server source tree contains no "sudo" and never
-//      imports the CLI provisioning code (the only sudo user in PickLab).
+//      imports the CLI provisioning code (the only sudo user in Pickforge).
 //   2. Behaviorally: the MCP server runs a representative tool set with a
 //      poisoned PATH where "sudo" is a recorder script; the recorder file
 //      must stay absent, and the tool list exposes no provisioning tools.
@@ -239,7 +239,7 @@ describe("bundle: built pickforge-mcp entrypoint", () => {
   }
 
   it("contains zero sudo occurrences across all imported chunks", () => {
-    const contents = bundleFiles("pickforge-lab-mcp.js");
+    const contents = bundleFiles("pickforge-mcp.js");
     // The entrypoint plus at least one shared chunk must have been scanned.
     expect(contents.size).toBeGreaterThanOrEqual(2);
     for (const [name, content] of contents) {
@@ -250,7 +250,7 @@ describe("bundle: built pickforge-mcp entrypoint", () => {
   });
 
   it("control: the scanner does find sudo in the CLI bundle that owns provisioning", () => {
-    const contents = bundleFiles("picklab.js");
+    const contents = bundleFiles("pickforge-lab.js");
     const total = [...contents.values()]
       .map((content) => content.match(/sudo/gi)?.length ?? 0)
       .reduce((a, b) => a + b, 0);
