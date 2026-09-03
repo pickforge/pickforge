@@ -125,6 +125,7 @@ export {
   isProcessGroupAlive,
   listProcessGroupMembers,
   processIdentityMatches,
+  readProcessGroupLeaderIdentity,
   readProcessIdentity,
   readProcessStartTicks,
   runCommand,
