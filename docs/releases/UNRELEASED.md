@@ -72,9 +72,8 @@ GitHub release description, then reset it after the release is published.
 ### Tested
 
 - Local Bun validation: install, typecheck, lint, and build pass. The full test
-  run has 1,141 passing and four skipped tests. Four live desktop/browser tests
-  fail on this host because `xterm` is absent and its Chromium exits during
-  startup; CI installs `xterm` and uses its documented Chrome runner setting.
+  run has 1,144 passing and four skipped tests. One desktop test fails on this
+  host because `xterm` is absent; CI installs it.
 - The pinned OSV Scanner v2.3.8 image reports no unfiltered advisories.
 - `cargo check --workspace` and `cargo test -p pickforge-cli` pass with 83 tests
   covering
