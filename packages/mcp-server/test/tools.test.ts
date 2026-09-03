@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { isProcessGroupAlive } from "@pickforge/picklab-core";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { imageContent } from "../src/context.js";
@@ -332,6 +334,30 @@ describe("desktop isolation tools", () => {
         }
       }
     }
+  });
+
+  it("stops a possibly escaped command when no client window appears", async () => {
+    const id = writeDesktopSessionRecord(dirs.home, dirs.projectDir);
+    const pidFile = path.join(dirs.root, "windowless.pid");
+    const command = path.join(dirs.root, "windowless-command");
+    writeScript(path.join(dirs.binDir, "xdotool"), "exit 1");
+    writeScript(command, `echo $$ > "${pidFile}"\nexec /bin/sleep 30`);
+
+    const result = await lab.client.callTool({
+      name: "desktop_exec",
+      arguments: { session: id, command, windowTimeoutMs: 100 },
+    });
+
+    expect(result.isError).toBe(true);
+    const report = parseToolJson(result);
+    expect(report.errors.join("\n")).toContain("PickLab stopped process group");
+    expect(report.errors.join("\n")).toContain("--window-timeout");
+    const processGroupId = Number(fs.readFileSync(pidFile, "utf8").trim());
+    const deadline = Date.now() + 2_000;
+    while (isProcessGroupAlive(processGroupId) && Date.now() < deadline) {
+      await sleep(20);
+    }
+    expect(isProcessGroupAlive(processGroupId)).toBe(false);
   });
 
   it("reports a zero-window screenshot with the shared escape warning", async () => {

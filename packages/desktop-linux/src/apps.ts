@@ -1,8 +1,11 @@
 import {
   isProcessGroupAlive,
+  readProcessIdentity,
   runCommand,
   startDaemon,
+  stopProcessGroupVerified,
   type EnvLike,
+  type ProcessIdentity,
   type RunCommandResult,
 } from "@pickforge/picklab-core";
 import { parseDisplayNumber } from "./display.js";
@@ -30,6 +33,10 @@ export interface AppHandle {
   logPath: string;
 }
 
+interface StartedApp extends AppHandle {
+  identity: ProcessIdentity;
+}
+
 export interface ExecAppOptions extends LaunchAppOptions {
   windowTimeoutMs?: number;
 }
@@ -44,7 +51,7 @@ export interface WindowInfo {
   name: string;
 }
 
-export async function launchApp(opts: LaunchAppOptions): Promise<AppHandle> {
+async function startApp(opts: LaunchAppOptions): Promise<StartedApp> {
   parseDisplayNumber(opts.display);
   const daemon = await startDaemon(opts.command, opts.args ?? [], {
     logDir: opts.logDir,
@@ -55,6 +62,7 @@ export async function launchApp(opts: LaunchAppOptions): Promise<AppHandle> {
     }),
     cleanEnv: true,
   });
+  let identity = readProcessIdentity(daemon.pid);
   const graceDeadline = Date.now() + LAUNCH_GRACE_MS;
   while (Date.now() < graceDeadline) {
     if (!isProcessGroupAlive(daemon.pid)) {
@@ -63,16 +71,27 @@ export async function launchApp(opts: LaunchAppOptions): Promise<AppHandle> {
           `check the log at ${daemon.logPath}`,
       );
     }
+    identity ??= readProcessIdentity(daemon.pid);
     await sleep(LAUNCH_POLL_INTERVAL_MS);
   }
-  return { pid: daemon.pid, logPath: daemon.logPath };
+  if (identity === undefined) {
+    throw new Error(
+      `Could not capture the process identity for ${opts.command} on ${opts.display}`,
+    );
+  }
+  return { pid: daemon.pid, logPath: daemon.logPath, identity };
+}
+
+export async function launchApp(opts: LaunchAppOptions): Promise<AppHandle> {
+  const app = await startApp(opts);
+  return { pid: app.pid, logPath: app.logPath };
 }
 
 export async function execApp(opts: ExecAppOptions): Promise<ExecAppHandle> {
   const existingWindowIds = new Set(
     (await listWindows(opts.display, opts.env)).map((window) => window.id),
   );
-  const app = await launchApp(opts);
+  const app = await startApp(opts);
   const timeoutMs = opts.windowTimeoutMs ?? DEFAULT_EXEC_WINDOW_TIMEOUT_MS;
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -80,7 +99,12 @@ export async function execApp(opts: ExecAppOptions): Promise<ExecAppHandle> {
       (window) => !existingWindowIds.has(window.id),
     );
     if (windows.length > 0) {
-      return { ...app, processGroupId: app.pid, windows };
+      return {
+        pid: app.pid,
+        logPath: app.logPath,
+        processGroupId: app.pid,
+        windows,
+      };
     }
     if (!isProcessGroupAlive(app.pid)) {
       throw new Error(
@@ -89,12 +113,22 @@ export async function execApp(opts: ExecAppOptions): Promise<ExecAppHandle> {
       );
     }
     if (Date.now() >= deadline) {
+      const stopped = await stopProcessGroupVerified(app.identity);
+      if (
+        stopped.outcome !== "terminated" &&
+        stopped.outcome !== "already-dead"
+      ) {
+        throw new Error(
+          `Could not verify that process group ${app.pid} was stopped after ` +
+            `no client window appeared on ${opts.display} within ${timeoutMs}ms`,
+        );
+      }
       throw new Error(
         `No new client window appeared on ${opts.display} within ${timeoutMs}ms ` +
-          `while ${opts.command} is still running. The app may have escaped ` +
-          "the lab and opened on your real desktop. Stop it before continuing " +
-          `with \`kill -- -${app.pid}\`, check that it supports X11, and use ` +
-          "the environment from `picklab desktop env --session <id>`. " +
+          `while ${opts.command} was still running. PickLab stopped process ` +
+          `group ${app.pid} because the app may have escaped the lab and ` +
+          "opened on your real desktop. If this was a slow first build, " +
+          "retry with `--window-timeout <ms>`. " +
           `Log: ${app.logPath}`,
       );
     }

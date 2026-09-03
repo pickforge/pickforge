@@ -77,9 +77,10 @@ picklab desktop exec --session <id> -- flutter run -d linux
 picklab desktop exec --session <id> --window-timeout 120000 -- flutter run -d linux
 ```
 
-If no client window appears while the command is still alive, PickLab reports
-that the app may have escaped to the real desktop instead of leaving a silent
-black frame. `desktop launch` uses the same isolated environment and remains
+If no client window appears while the command is still alive, PickLab stops
+its process group and reports that the app may have escaped to the real desktop
+instead of leaving a silent black frame. Increase `--window-timeout` for a slow
+first build. `desktop launch` uses the same isolated environment and remains
 the shorter path for an already-built app.
 
 When a shell or another parent process must launch the app itself, apply the

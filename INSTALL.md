@@ -111,8 +111,9 @@ eval "$(picklab desktop env --session <id>)"
 flutter run -d linux
 ```
 
-`desktop exec` waits a bounded time for a client window and reports a possible
-real-desktop escape if none appears while the command is alive. Desktop
+`desktop exec` waits a bounded time for a client window. If none appears while
+the command is alive, it stops the process group and reports a possible
+real-desktop escape. Increase `--window-timeout` for a slow first build. Desktop
 screenshots also report the client-window count and warn when it is zero.
 
 Finally, remind the user to restart the agent so the `picklab` MCP tools load, and that `session_status` over MCP is the quickest end-to-end check.

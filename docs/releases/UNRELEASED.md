@@ -11,8 +11,9 @@ GitHub release description, then reset it after the release is published.
   session backend hints. The poison value prevents libwayland from falling
   back to the user's default `wayland-0` socket when the variable is unset.
   New `picklab desktop exec` (also available as MCP `desktop_exec`) starts a
-  command in its own process group and reports a possible real-desktop escape
-  when no client window appears within a bounded wait. `picklab desktop env`
+  command in its own process group. If no client window appears within a
+  bounded wait, it stops the group before reporting a possible real-desktop
+  escape and suggests `--window-timeout` for slow first builds. `picklab desktop env`
   prints the same recipe for parent shells, with JSON output available.
   Desktop screenshots now include the client-window count and warn when it is
   zero instead of leaving a black frame unexplained.

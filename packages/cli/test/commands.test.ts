@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { isProcessGroupAlive } from "@pickforge/picklab-core";
 import { ensureCliBuilt } from "./build-once.js";
 
 const cliPath = fileURLToPath(new URL("../dist/picklab.js", import.meta.url));
@@ -789,18 +790,15 @@ describe("picklab desktop", () => {
       env,
       projectDir,
     );
-    try {
-      expect(result.code).toBe(1);
-      const errors = parseJson(result).errors.join("\n");
-      expect(errors).toContain("may have escaped the lab");
-      expect(errors).toContain("opened on your real desktop");
-      expect(errors).toMatch(/kill -- -\d+/);
-      expect(errors).toContain("picklab desktop env --session <id>");
-    } finally {
-      if (fs.existsSync(pidFile)) {
-        stopTestProcessGroup(Number(fs.readFileSync(pidFile, "utf8").trim()));
-      }
-    }
+    expect(result.code).toBe(1);
+    const errors = parseJson(result).errors.join("\n");
+    expect(errors).toContain("may have escaped the lab");
+    expect(errors).toContain("opened on your real desktop");
+    expect(errors).toContain("PickLab stopped process group");
+    expect(errors).toContain("--window-timeout");
+    const processGroupId = Number(fs.readFileSync(pidFile, "utf8").trim());
+    await waitFor(() => !isProcessGroupAlive(processGroupId));
+    expect(isProcessGroupAlive(processGroupId)).toBe(false);
   });
 
   it(
