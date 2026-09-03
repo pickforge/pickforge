@@ -7,11 +7,13 @@ import {
   desktopSessionLogDir,
   doubleClick,
   drag,
+  execApp,
   launchApp,
   MAX_DOUBLE_CLICK_INTERVAL_MS,
   MAX_DRAG_DURATION_MS,
   MAX_SCROLL_STEPS,
   move,
+  noClientWindowsWarning,
   pressKey,
   screenshot,
   scroll,
@@ -134,6 +136,72 @@ export function registerDesktopTools(
   );
 
   server.registerTool(
+    "desktop_exec",
+    {
+      title: "Execute desktop command",
+      description:
+        "Start a command in the isolated desktop environment and process " +
+        "group, then wait a bounded time for a client window to appear.",
+      inputSchema: {
+        ...sessionArg,
+        command: z.string().min(1).describe("Executable to start"),
+        args: z.array(z.string()).optional().describe("Arguments for the executable"),
+        cwd: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Working directory (relative to the project dir)"),
+        windowTimeoutMs: z
+          .number()
+          .int()
+          .min(0)
+          .max(300_000)
+          .optional()
+          .describe("Maximum time to wait for a client window (default 30000)"),
+      },
+    },
+    (args) =>
+      runTool(async () => {
+        const { id, display } = await resolveDesktop(ctx, args.session);
+        return withMcpEvidence(
+          ctx,
+          {
+            sessionId: id,
+            tool: "desktop_exec",
+            target: { name: args.command },
+          },
+          async () => {
+            const app = await withAgentPermit(id, ctx.env, () =>
+              execApp({
+                display,
+                command: args.command,
+                args: args.args ?? [],
+                env: ctx.env,
+                logDir: desktopSessionLogDir(id, ctx.env),
+                cwd:
+                  args.cwd === undefined
+                    ? undefined
+                    : path.resolve(ctx.projectDir, args.cwd),
+                windowTimeoutMs: args.windowTimeoutMs,
+              }),
+            );
+            return {
+              data: {
+                sessionId: id,
+                display,
+                pid: app.pid,
+                processGroupId: app.processGroupId,
+                logPath: app.logPath,
+                windowCount: app.windows.length,
+                windows: app.windows,
+              },
+            };
+          },
+        );
+      }),
+  );
+
+  server.registerTool(
     "desktop_screenshot",
     {
       title: "Desktop screenshot",
@@ -180,6 +248,7 @@ export function registerDesktopTools(
                   }
                 : await resolveScreenshotTarget(ctx, args, "desktop", id);
             let tool: string | undefined;
+            let windowCount: number | undefined;
             const data = await captureToTarget(target, async () => {
               const result = await screenshot({
                 display,
@@ -187,10 +256,15 @@ export function registerDesktopTools(
                 env: ctx.env,
               });
               tool = result.tool;
+              windowCount = result.windowCount;
             });
             data.sessionId = id;
             data.display = display;
             data.tool = tool;
+            data.windowCount = windowCount;
+            if (windowCount === 0) {
+              data.warnings = [noClientWindowsWarning(display, id)];
+            }
             if (run !== undefined && target.run === undefined) {
               data.runId = run.runId;
               data.runDir = run.dir;

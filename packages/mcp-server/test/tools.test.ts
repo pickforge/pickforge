@@ -11,6 +11,8 @@ import {
   parseToolJson,
   PLANTED_TOKEN,
   removeLabDirs,
+  writeDesktopSessionRecord,
+  writeScript,
   writeSyntheticRun,
   type ConnectedLab,
   type LabDirs,
@@ -21,6 +23,7 @@ const EXPECTED_TOOLS = [
   "session_status",
   "session_destroy",
   "desktop_launch",
+  "desktop_exec",
   "desktop_screenshot",
   "desktop_click",
   "desktop_move",
@@ -280,6 +283,76 @@ describe("artifact report", () => {
     });
     expect(result.isError).toBe(true);
     expect(JSON.stringify(result)).toContain("Unsafe run catalog file");
+  });
+});
+
+describe("desktop isolation tools", () => {
+  it("executes a command as an argv array and waits for its client window", async () => {
+    const id = writeDesktopSessionRecord(dirs.home, dirs.projectDir);
+    const searchMarker = path.join(dirs.root, "xdotool-searched");
+    writeScript(
+      path.join(dirs.binDir, "xdotool"),
+      'case "$1" in\n  search)\n' +
+        `    if [ -f "${searchMarker}" ]; then echo 4242; else : > "${searchMarker}"; exit 1; fi ;;\n` +
+        "  getwindowname) echo picklab-mcp-window ;;\nesac",
+    );
+    const command = path.join(dirs.root, "mcp-exec");
+    const capture = path.join(dirs.root, "mcp-exec.txt");
+    writeScript(
+      command,
+      `printf 'DISPLAY=%s\\nGDK_BACKEND=%s\\nARG=%s\\n' "$DISPLAY" "$GDK_BACKEND" "$1" > "${capture}"\nexec /bin/sleep 30`,
+    );
+
+    const result = await lab.client.callTool({
+      name: "desktop_exec",
+      arguments: {
+        session: id,
+        command,
+        args: ["hello world"],
+        windowTimeoutMs: 1000,
+      },
+    });
+    const report = parseToolJson(result);
+    try {
+      expect(report.ok).toBe(true);
+      expect(report.processGroupId).toBe(report.pid);
+      expect(report.windowCount).toBe(1);
+      expect(report.windows).toEqual([
+        { id: "4242", name: "picklab-mcp-window" },
+      ]);
+      expect(fs.readFileSync(capture, "utf8")).toBe(
+        "DISPLAY=:987\nGDK_BACKEND=x11\nARG=hello world\n",
+      );
+    } finally {
+      if (typeof report.pid === "number") {
+        try {
+          process.kill(-report.pid, "SIGTERM");
+        } catch {
+          // The test command has already exited.
+        }
+      }
+    }
+  });
+
+  it("reports a zero-window screenshot with the shared escape warning", async () => {
+    const id = writeDesktopSessionRecord(dirs.home, dirs.projectDir);
+    writeScript(path.join(dirs.binDir, "xdotool"), "exit 1");
+    writeScript(
+      path.join(dirs.binDir, "import"),
+      'for arg in "$@"; do out="$arg"; done\nprintf "\\211PNG\\r\\n\\032\\n" > "$out"',
+    );
+
+    const result = await lab.client.callTool({
+      name: "desktop_screenshot",
+      arguments: { session: id, out: "shot.png" },
+    });
+    const report = parseToolJson(result);
+    expect(report.ok).toBe(true);
+    expect(report.windowCount).toBe(0);
+    expect(report.warnings).toEqual([
+      expect.stringContaining("may have escaped the lab"),
+    ]);
+    expect(report.warnings[0]).toContain("opened on your real desktop");
   });
 });
 
