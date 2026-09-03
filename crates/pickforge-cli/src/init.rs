@@ -189,15 +189,18 @@ fn recoverable_state_artifacts(
                 entry.path().display()
             )
         })?;
-        if !metadata.is_file() || metadata.len() > MAX_STATE_ARTIFACT_BYTES {
-            return Ok(false);
-        }
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
             return Ok(false);
         };
-        if name.starts_with(".pickforge-tmp-") {
+        if name.starts_with(".pickforge-tmp-")
+            && metadata.is_file()
+            && metadata.len() <= MAX_STATE_ARTIFACT_BYTES
+        {
             continue;
+        }
+        if !metadata.is_file() || metadata.len() > MAX_STATE_ARTIFACT_BYTES {
+            return Ok(false);
         }
         if name.starts_with("project.json.pickforge-backup-") {
             let (_, bytes) = transaction::inspect_file(entry.path(), true).map_err(|error| {

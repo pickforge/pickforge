@@ -394,3 +394,119 @@ fn init_precondition_failure_exits_one_without_writing() {
     assert!(!stdout.contains("\\u{ef}"), "{stdout:?}");
     assert!(!temp.path().join("state").exists());
 }
+
+#[test]
+fn evidence_record_supports_stdin_path_human_json_and_errors() {
+    let temp = TempDir::new().unwrap();
+    let project_dir = flutter_project(temp.path());
+    git(&project_dir, &["init", "--quiet"]);
+    git(&project_dir, &["add", "pubspec.yaml"]);
+    git(
+        &project_dir,
+        &[
+            "-c",
+            "user.name=Pickforge Test",
+            "-c",
+            "user.email=test@invalid.example",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+    );
+    let status_before = git(&project_dir, &["status", "--porcelain=v1"]);
+    let project_before = snapshot_without_git(&project_dir);
+    let input = serde_json::json!({"schemaVersion":1,"scenario":"Smoke","outcome":"passed","before":{"summary":"Before","observations":[],"artifacts":[]},"after":{"summary":"After","observations":[],"artifacts":[]},"sourceChanges":[],"checks":[],"limitations":[]}).to_string();
+    let missing_receipt = pickforge(temp.path(), &[])
+        .args(["evidence", "record", "--project-dir"])
+        .arg(&project_dir)
+        .write_stdin(input.as_bytes())
+        .assert()
+        .code(1);
+    let stderr = String::from_utf8_lossy(&missing_receipt.get_output().stderr);
+    let expected_receipt = temp.path().join("state").join("projects");
+    assert!(
+        stderr.contains(&expected_receipt.to_string_lossy().into_owned())
+            && stderr.contains("project.json"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("pickforge init --mobile-integration-alpha"),
+        "{stderr}"
+    );
+
+    pickforge(temp.path(), &["dart"])
+        .args([
+            "init",
+            "--mobile-integration-alpha",
+            "--harness",
+            "codex",
+            "--project-dir",
+        ])
+        .arg(&project_dir)
+        .assert()
+        .success();
+    let missing_input = temp.path().join("missing-input.json");
+    let input_error = pickforge(temp.path(), &[])
+        .args(["evidence", "record", "--input"])
+        .arg(&missing_input)
+        .arg("--project-dir")
+        .arg(&project_dir)
+        .assert()
+        .code(1);
+    let stderr = String::from_utf8_lossy(&input_error.get_output().stderr);
+    assert!(
+        stderr.contains(&missing_input.to_string_lossy().into_owned()),
+        "{stderr}"
+    );
+    assert!(stderr.contains("verify or fix `--input`"), "{stderr}");
+    assert!(!stderr.contains("pickforge init"), "{stderr}");
+
+    let human = pickforge(temp.path(), &[])
+        .args(["evidence", "record", "--project-dir"])
+        .arg(&project_dir)
+        .write_stdin(input.as_bytes())
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&human.get_output().stdout);
+    assert!(stdout.contains("recorded Flutter evidence run"), "{stdout}");
+    assert!(
+        stdout.contains("evidence:") && stdout.contains("report:"),
+        "{stdout}"
+    );
+
+    let input_path = temp.path().join("input.json");
+    std::fs::write(&input_path, input).unwrap();
+    let json = pickforge(temp.path(), &[])
+        .args(["evidence", "record", "--json", "--input"])
+        .arg(&input_path)
+        .arg("--project-dir")
+        .arg(&project_dir)
+        .assert()
+        .success();
+    let value: serde_json::Value = serde_json::from_slice(&json.get_output().stdout).unwrap();
+    assert_eq!(value["schemaVersion"], 1);
+    assert_eq!(value["changed"], true);
+    assert!(value["evidencePath"]
+        .as_str()
+        .unwrap()
+        .ends_with("evidence.json"));
+
+    let error = pickforge(temp.path(), &[])
+        .args(["evidence", "record", "--json", "--project-dir"])
+        .arg(&project_dir)
+        .write_stdin("{}")
+        .assert()
+        .code(1);
+    let value: serde_json::Value = serde_json::from_slice(&error.get_output().stdout).unwrap();
+    assert_eq!(value["schemaVersion"], 1);
+    assert!(value["error"]
+        .as_str()
+        .unwrap()
+        .contains("invalid evidence input"));
+    assert_eq!(
+        git(&project_dir, &["status", "--porcelain=v1"]),
+        status_before
+    );
+    assert_eq!(snapshot_without_git(&project_dir), project_before);
+}

@@ -122,6 +122,18 @@ fn nonempty_unowned_state_directory_is_refused() {
 }
 
 #[test]
+fn runs_directory_without_a_receipt_is_foreign() {
+    let (_temp, project, env) = fixture();
+    let request = InitRequest::new(&project);
+    let initial = plan_init(&request, &env).unwrap();
+    let runs = Path::new(&initial.report.state_dir).join("runs");
+    std::fs::create_dir_all(&runs).unwrap();
+    let error = plan_init(&request, &env).unwrap_err().to_string();
+    assert!(error.contains("non-empty but has no Pickforge project receipt"));
+    assert!(runs.is_dir());
+}
+
+#[test]
 fn empty_or_owned_interruption_state_allows_receipt_recovery() {
     let (_temp, project, env) = fixture();
     let request = InitRequest::new(&project);
@@ -294,6 +306,7 @@ fn flutter_pack_plans_owned_harness_configs_and_deduplicated_workflows_in_order(
     let before = std::fs::read(project.join("pubspec.yaml")).unwrap();
     let plan = plan_init(&request, &env).unwrap();
     assert_eq!(plan.report.pack.name, "pickforge-flutter");
+    assert_eq!(plan.report.pack.version, 2);
     assert_eq!(plan.report.actions.len(), 6);
     assert!(plan.report.actions[0].target.ends_with(".claude.json"));
     assert!(plan.report.actions[1].target.ends_with("config.toml"));
