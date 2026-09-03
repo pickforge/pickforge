@@ -288,11 +288,13 @@ describe("launchApp display isolation", () => {
       path.join(binDir, "capture-env"),
       "#!/bin/sh\n" +
         "printf 'DISPLAY=%s\\nWAYLAND_DISPLAY=%s\\nWAYLAND_SOCKET=%s\\n" +
-        "GDK_BACKEND=%s\\nQT_QPA_PLATFORM=%s\\nSDL_VIDEODRIVER=%s\\n" +
-        "WINIT_UNIX_BACKEND=%s\\nXDG_SESSION_TYPE=%s\\n' " +
+        "ELECTRON_OZONE_PLATFORM_HINT=%s\\nGDK_BACKEND=%s\\nGLFW_PLATFORM=%s\\n" +
+        "QT_QPA_PLATFORM=%s\\nSDL_VIDEODRIVER=%s\\nWINIT_UNIX_BACKEND=%s\\n" +
+        "XDG_SESSION_TYPE=%s\\n' " +
         '"$DISPLAY" "${WAYLAND_DISPLAY-unset}" "${WAYLAND_SOCKET-unset}" ' +
-        '"$GDK_BACKEND" "$QT_QPA_PLATFORM" "$SDL_VIDEODRIVER" ' +
-        '"$WINIT_UNIX_BACKEND" "$XDG_SESSION_TYPE" > ' +
+        '"$ELECTRON_OZONE_PLATFORM_HINT" "$GDK_BACKEND" "$GLFW_PLATFORM" ' +
+        '"$QT_QPA_PLATFORM" "$SDL_VIDEODRIVER" "$WINIT_UNIX_BACKEND" ' +
+        '"$XDG_SESSION_TYPE" > ' +
         `'${outFile}'\n` +
         "sleep 5\n",
     );
@@ -310,7 +312,8 @@ describe("launchApp display isolation", () => {
       expect(fs.readFileSync(outFile, "utf8")).toBe(
         `DISPLAY=${DEAD_DISPLAY}\n` +
           "WAYLAND_DISPLAY=picklab-no-wayland\nWAYLAND_SOCKET=unset\n" +
-          "GDK_BACKEND=x11\nQT_QPA_PLATFORM=xcb\n" +
+          "ELECTRON_OZONE_PLATFORM_HINT=x11\nGDK_BACKEND=x11\n" +
+          "GLFW_PLATFORM=x11\nQT_QPA_PLATFORM=xcb\n" +
           "SDL_VIDEODRIVER=x11\nWINIT_UNIX_BACKEND=x11\n" +
           "XDG_SESSION_TYPE=x11\n",
       );
@@ -600,11 +603,13 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
         "#!/bin/sh\n" +
           '[ "$WAYLAND_DISPLAY" = picklab-no-wayland ] || exit 20\n' +
           '[ "${WAYLAND_SOCKET+set}" != set ] || exit 21\n' +
-          '[ "$GDK_BACKEND" = x11 ] || exit 22\n' +
-          '[ "$QT_QPA_PLATFORM" = xcb ] || exit 23\n' +
-          '[ "$SDL_VIDEODRIVER" = x11 ] || exit 24\n' +
-          '[ "$WINIT_UNIX_BACKEND" = x11 ] || exit 25\n' +
-          '[ "$XDG_SESSION_TYPE" = x11 ] || exit 26\n' +
+          '[ "$ELECTRON_OZONE_PLATFORM_HINT" = x11 ] || exit 22\n' +
+          '[ "$GDK_BACKEND" = x11 ] || exit 23\n' +
+          '[ "$GLFW_PLATFORM" = x11 ] || exit 24\n' +
+          '[ "$QT_QPA_PLATFORM" = xcb ] || exit 25\n' +
+          '[ "$SDL_VIDEODRIVER" = x11 ] || exit 26\n' +
+          '[ "$WINIT_UNIX_BACKEND" = x11 ] || exit 27\n' +
+          '[ "$XDG_SESSION_TYPE" = x11 ] || exit 28\n' +
           'exec zenity --info --text picklab --title picklab-exec-itest\n',
       );
       try {

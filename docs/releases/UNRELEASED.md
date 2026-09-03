@@ -7,9 +7,10 @@ GitHub release description, then reset it after the release is published.
 
 - Desktop commands now share one isolated X11 environment that points
   `WAYLAND_DISPLAY` at the non-existent `picklab-no-wayland` socket, removes
-  other inherited `WAYLAND_*` variables, and sets GTK, Qt, SDL, winit, and
-  session backend hints. The poison value prevents libwayland from falling
-  back to the user's default `wayland-0` socket when the variable is unset.
+  other inherited `WAYLAND_*` variables, and sets Electron, GLFW, GTK, Qt,
+  SDL, winit, and session backend hints. The poison value prevents libwayland
+  from falling back to the user's default `wayland-0` socket when the variable
+  is unset.
   New `picklab desktop exec` (also available as MCP `desktop_exec`) starts a
   command in its own process group. If no client window appears within a
   bounded wait, it stops the group before reporting a possible real-desktop

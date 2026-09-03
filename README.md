@@ -66,7 +66,8 @@ Every screenshot, log, and action lands in a run directory with a manifest, so a
 Use `desktop exec` for commands that build and start their own GUI process, such
 as Flutter. It starts a separate process group with `WAYLAND_DISPLAY` pointed
 at the non-existent `picklab-no-wayland` socket, removes other inherited
-`WAYLAND_*` variables, and sets X11 backend hints for GTK, Qt, SDL, and winit.
+`WAYLAND_*` variables, and sets X11 backend hints for Electron, GLFW, GTK, Qt,
+SDL, winit, and the session type.
 The poison value matters because libwayland falls back to `wayland-0` when
 `WAYLAND_DISPLAY` is unset. PickLab then waits up to 30 seconds for a client
 window on the lab display:
@@ -95,7 +96,9 @@ flutter run -d linux
 ```
 
 `desktop env --json` returns the same `exports`, `unset`, and `script` recipe
-without including unrelated environment variables or secrets. Desktop
+without including unrelated environment variables or secrets. Desktop sessions
+still inherit the user's XDG runtime and D-Bus; isolation is tracked in
+[#86](https://github.com/pickforge/picklab/issues/86). Desktop
 screenshots report the visible client-window count and warn when it is zero.
 If `xdotool` is missing, capture still succeeds and warns that the count is
 unavailable instead of reporting a possible escape.

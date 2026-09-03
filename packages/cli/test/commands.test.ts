@@ -655,6 +655,8 @@ describe("picklab desktop", () => {
         WAYLAND_DISPLAY: "wayland-0",
         WAYLAND_SOCKET: "42",
         WAYLAND_DEBUG: "client",
+        ELECTRON_OZONE_PLATFORM_HINT: "wayland",
+        GLFW_PLATFORM: "wayland",
         SECRET_TOKEN: "do-not-print",
       },
     });
@@ -671,7 +673,9 @@ describe("picklab desktop", () => {
     expect(report.exports).toEqual({
       DISPLAY: ":98",
       WAYLAND_DISPLAY: "picklab-no-wayland",
+      ELECTRON_OZONE_PLATFORM_HINT: "x11",
       GDK_BACKEND: "x11",
+      GLFW_PLATFORM: "x11",
       QT_QPA_PLATFORM: "xcb",
       SDL_VIDEODRIVER: "x11",
       WINIT_UNIX_BACKEND: "x11",
@@ -692,14 +696,16 @@ describe("picklab desktop", () => {
       "/bin/sh",
       [
         "-c",
-        'eval "$1"; printf "%s\\n" "$DISPLAY" "${WAYLAND_DISPLAY-unset}" "$GDK_BACKEND" "$QT_QPA_PLATFORM"',
+        'eval "$1"; printf "%s\\n" "$DISPLAY" "${WAYLAND_DISPLAY-unset}" "$ELECTRON_OZONE_PLATFORM_HINT" "$GDK_BACKEND" "$GLFW_PLATFORM" "$QT_QPA_PLATFORM"',
         "sh",
         text.stdout,
       ],
       { env, encoding: "utf8" },
     );
     expect(evaluated.status).toBe(0);
-    expect(evaluated.stdout).toBe(":98\npicklab-no-wayland\nx11\nxcb\n");
+    expect(evaluated.stdout).toBe(
+      ":98\npicklab-no-wayland\nx11\nx11\nx11\nxcb\n",
+    );
   });
 
   it("executes argv in the isolated environment and reports its process group", async () => {
@@ -722,8 +728,8 @@ describe("picklab desktop", () => {
     const id = writeDesktopSessionRecord(env, projectDir, ":97");
     writeScript(
       command,
-      "printf 'DISPLAY=%s\\nWAYLAND_DISPLAY=%s\\nWAYLAND_SOCKET=%s\\nGDK_BACKEND=%s\\nQT_QPA_PLATFORM=%s\\nSDL_VIDEODRIVER=%s\\nWINIT_UNIX_BACKEND=%s\\nXDG_SESSION_TYPE=%s\\n' " +
-        '"$DISPLAY" "${WAYLAND_DISPLAY-unset}" "${WAYLAND_SOCKET-unset}" "$GDK_BACKEND" "$QT_QPA_PLATFORM" "$SDL_VIDEODRIVER" "$WINIT_UNIX_BACKEND" "$XDG_SESSION_TYPE" ' +
+      "printf 'DISPLAY=%s\\nWAYLAND_DISPLAY=%s\\nWAYLAND_SOCKET=%s\\nELECTRON_OZONE_PLATFORM_HINT=%s\\nGDK_BACKEND=%s\\nGLFW_PLATFORM=%s\\nQT_QPA_PLATFORM=%s\\nSDL_VIDEODRIVER=%s\\nWINIT_UNIX_BACKEND=%s\\nXDG_SESSION_TYPE=%s\\n' " +
+        '"$DISPLAY" "${WAYLAND_DISPLAY-unset}" "${WAYLAND_SOCKET-unset}" "$ELECTRON_OZONE_PLATFORM_HINT" "$GDK_BACKEND" "$GLFW_PLATFORM" "$QT_QPA_PLATFORM" "$SDL_VIDEODRIVER" "$WINIT_UNIX_BACKEND" "$XDG_SESSION_TYPE" ' +
         `> "${capture}"\n` +
         `printf 'ARG=%s\\n' "$@" >> "${capture}"\n` +
         "exec /bin/sleep 30",
@@ -757,7 +763,8 @@ describe("picklab desktop", () => {
       expect(fs.readFileSync(capture, "utf8")).toBe(
         "DISPLAY=:97\n" +
           "WAYLAND_DISPLAY=picklab-no-wayland\nWAYLAND_SOCKET=unset\n" +
-          "GDK_BACKEND=x11\nQT_QPA_PLATFORM=xcb\n" +
+          "ELECTRON_OZONE_PLATFORM_HINT=x11\nGDK_BACKEND=x11\n" +
+          "GLFW_PLATFORM=x11\nQT_QPA_PLATFORM=xcb\n" +
           "SDL_VIDEODRIVER=x11\nWINIT_UNIX_BACKEND=x11\n" +
           "XDG_SESSION_TYPE=x11\n" +
           "ARG=hello world\nARG=$(not-expanded)\n",
