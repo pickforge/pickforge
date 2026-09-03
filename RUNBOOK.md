@@ -33,52 +33,28 @@ Merge this PR into `main` only after `pickforge/picklab` has become
 `pickforge/pickforge`. Do not merge it while the old repository name is still
 active.
 
-## 4. Create the unscoped npm package manually
+## 4. Merge the alpha gate
 
-A new npm package cannot be created by the release workflow's OIDC trusted
-publisher. The first publish must be manual.
+After the rename PR merges, retarget the alpha-gate PR to `main`, wait for all
+checks to pass, and merge it only after final human review.
 
-```sh
-cd ~/Projects/Pickforge/picklab
-git fetch origin
-git switch main
-git pull --ff-only
-test "$(node -p "require('./packages/cli/package.json').version")" = "0.4.0-alpha.1"
-bun install --frozen-lockfile
-bun run build
-cd packages/cli
-npm whoami
-npm publish --access public --tag next
-npm view pickforge@next version
-npm view pickforge@next bin --json
-cd ../..
-```
+## 5. Cut and verify the alpha
 
-## 5. Configure npm trusted publishing
+Follow [docs/releases/CHECKLIST.md](docs/releases/CHECKLIST.md) from the start.
+It is the one authoritative sequence for local gates, the opt-in live Flutter
+test, the real-device vision pass, the first manual npm publish, trusted
+publisher setup, tag creation, workflow monitoring, draft asset checks, the
+clean-machine installer smoke, and final prerelease publication.
 
-After the manual publish, open the `pickforge` package settings on npm and add
-a GitHub Actions trusted publisher with these exact values:
+Do not repeat the first npm publish outside the checklist. Do not publish the
+GitHub draft until every checklist gate is green. The owner creates and pushes
+the tag; no implementation or review agent does so.
 
-- Organization or user: `pickforge`
-- Repository: `pickforge`
-- Workflow filename: `release.yml`
-- Environment: leave empty
+A manual workflow dispatch is a build-and-test dry run unless its required
+`confirm` input is exactly `release`. That confirmation can publish and is an
+owner-only recovery path, not part of the normal tagged release sequence.
 
-Confirm the publisher before creating the release tag. The workflow at
-`.github/workflows/release.yml` publishes with provenance and adds the `next`
-tag because `0.4.0-alpha.1` is a prerelease.
-
-## 6. Cut and verify the alpha
-
-Follow [docs/releases/CHECKLIST.md](docs/releases/CHECKLIST.md) exactly. It is
-the authoritative sequence for local gates, the opt-in live Flutter test, the
-real-device vision pass, tag creation, workflow monitoring, draft asset checks,
-the clean-machine installer smoke, and final prerelease publication.
-
-Do not publish the GitHub draft until every checklist gate is green. The owner
-creates and pushes the tag; no implementation or review agent does so.
-
-## 7. Deprecate the old package later
+## 6. Deprecate the old package later
 
 Do this only after the new package and install path have been verified.
 
@@ -86,7 +62,7 @@ Do this only after the new package and install path have been verified.
 npm deprecate @pickforge/picklab@'*' 'Renamed to pickforge'
 ```
 
-## 8. Verification checklist
+## 7. Verification checklist
 
 ```sh
 gh repo view pickforge/pickforge --json nameWithOwner,url
