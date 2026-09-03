@@ -8,9 +8,9 @@ import {
   type SystemImage,
 } from "@pickforge/lab-android";
 import {
-  legacyPickforgeHome,
+  legacyPickforgeHomes,
   loadConfig,
-  picklabHome,
+  pickforgeHome,
   readPickforgeEnv,
   resolvedDefaults,
   resolveRunStorage,
@@ -24,7 +24,7 @@ import {
 } from "@pickforge/lab-desktop-linux";
 
 export interface DetectionSnapshot {
-  picklabHome: { path: string; exists: boolean; writable: boolean };
+  pickforgeHome: { path: string; exists: boolean; writable: boolean };
   /** Present only when the pre-#34 `~/.picklab` root still exists and
    * differs from the current default (never when `PICKFORGE_HOME` is set
    * explicitly — that is the user's own root, not a legacy one). */
@@ -103,26 +103,61 @@ export async function labUserExists(
   }
 }
 
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
+interface ConfigDetection {
+  config: DetectionSnapshot["config"];
+  loaded: Awaited<ReturnType<typeof loadConfig>>;
+}
+
+async function detectConfig(
+  projectDir: string,
+  env: EnvLike,
+): Promise<ConfigDetection> {
+  try {
+    const loaded = await loadConfig(projectDir, env);
+    return {
+      loaded,
+      config: { ok: true, error: null, profile: loaded.profile ?? null },
+    };
+  } catch (error) {
+    return {
+      loaded: { ...resolvedDefaults },
+      config: { ok: false, error: (error as Error).message, profile: null },
+    };
+  }
+}
+
+function detectLegacyHome(
+  homePath: string,
+  env: EnvLike,
+): { path: string } | null {
+  const legacyPath = legacyPickforgeHomes(env).find(
+    (candidate) => candidate !== homePath && dirExists(candidate),
+  );
+  return legacyPath === undefined ? null : { path: legacyPath };
+}
+
+async function detectRejectedProjectCustom(
+  projectDir: string,
+  env: EnvLike,
+): Promise<{ requestedPath?: string } | null> {
+  try {
+    const resolvedStorage = await resolveRunStorage(projectDir, env);
+    return resolvedStorage.rejectedProjectCustom ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function nonEmpty(value: string | undefined): string | undefined {
+  return value === undefined || value === "" ? undefined : value;
+}
+
 export async function collectSnapshot(
   opts: CollectSnapshotOptions = {},
 ): Promise<DetectionSnapshot> {
   const env = opts.env ?? process.env;
   const projectDir = opts.projectDir ?? process.cwd();
-
-  let config: DetectionSnapshot["config"] = {
-    ok: true,
-    error: null,
-    profile: null,
-  };
-  let loaded: Awaited<ReturnType<typeof loadConfig>>;
-  try {
-    loaded = await loadConfig(projectDir, env);
-    config = { ok: true, error: null, profile: loaded.profile ?? null };
-  } catch (error) {
-    loaded = { ...resolvedDefaults };
-    config = { ok: false, error: (error as Error).message, profile: null };
-  }
+  const { config, loaded } = await detectConfig(projectDir, env);
 
   const avdName =
     opts.avdName ?? loaded.android?.avdName ?? resolvedDefaults.android.avdName;
@@ -131,34 +166,23 @@ export async function collectSnapshot(
   const labUserHome =
     opts.labUserHome ?? loaded.labUser?.home ?? resolvedDefaults.labUser.home;
 
-  const homePath = picklabHome(env);
+  const homePath = pickforgeHome(env);
   const homeExists = dirExists(homePath);
-  const legacyPath = legacyPickforgeHome(env);
-  const legacyHome =
-    legacyPath !== undefined && legacyPath !== homePath && dirExists(legacyPath)
-      ? { path: legacyPath }
-      : null;
+  const legacyHome = detectLegacyHome(homePath, env);
+  const rejectedProjectCustom = await detectRejectedProjectCustom(
+    projectDir,
+    env,
+  );
 
-  let rejectedProjectCustom: { requestedPath?: string } | null = null;
-  try {
-    const resolvedStorage = await resolveRunStorage(projectDir, env);
-    rejectedProjectCustom = resolvedStorage.rejectedProjectCustom ?? null;
-  } catch {
-    // A resolver error (e.g. a broken global/env custom path) is not this
-    // check's concern; it surfaces wherever storage is actually resolved for
-    // a run.
-  }
-
-  const kvmPath = readPickforgeEnv(env, "KVM_PATH");
   const androidEnv = detectAndroidEnvironment({
     env,
-    homeDir: env.HOME !== undefined && env.HOME !== "" ? env.HOME : undefined,
-    kvmPath: kvmPath !== undefined && kvmPath !== "" ? kvmPath : undefined,
+    homeDir: nonEmpty(env.HOME),
+    kvmPath: nonEmpty(readPickforgeEnv(env, "KVM_PATH")),
   });
   const avds = await listAvds({ sdk: androidEnv.sdkRoot, env });
 
   return {
-    picklabHome: {
+    pickforgeHome: {
       path: homePath,
       exists: homeExists,
       writable: homeExists && isWritable(homePath),

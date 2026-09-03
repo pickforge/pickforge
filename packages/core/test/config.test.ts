@@ -146,7 +146,7 @@ describe("loadConfig legacy home fallback", () => {
       expect(config.profile).toBe("android");
       // Non-destructive: nothing was written to the new default location.
       expect(
-        fs.existsSync(path.join(fakeHome, ".pickforge", "picklab")),
+        fs.existsSync(path.join(fakeHome, ".pickforge", "lab")),
       ).toBe(false);
     } finally {
       homedirSpy.mockRestore();
@@ -154,7 +154,7 @@ describe("loadConfig legacy home fallback", () => {
     }
   });
 
-  it("prefers the new default over the legacy home once the new one has a config", async () => {
+  it("prefers ~/.pickforge/picklab over the older ~/.picklab fallback", async () => {
     const fakeHome = await fs.promises.mkdtemp(
       path.join(os.tmpdir(), "pickforge-lab-fakehome-"),
     );
@@ -184,7 +184,33 @@ describe("loadConfig legacy home fallback", () => {
     }
   });
 
-  it("does not fall back to ~/.picklab once PICKFORGE_HOME is set explicitly", async () => {
+  it("prefers the new ~/.pickforge/lab default over both fallbacks", async () => {
+    const fakeHome = await fs.promises.mkdtemp(
+      path.join(os.tmpdir(), "pickforge-lab-fakehome-"),
+    );
+    const homedirSpy = vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
+    try {
+      for (const [dir, profile] of [
+        [path.join(fakeHome, ".picklab"), "android"],
+        [path.join(fakeHome, ".pickforge", "picklab"), "generic"],
+        [path.join(fakeHome, ".pickforge", "lab"), "flutter-desktop"],
+      ] as const) {
+        await fs.promises.mkdir(dir, { recursive: true });
+        await fs.promises.writeFile(
+          path.join(dir, "config.json"),
+          JSON.stringify({ profile }),
+        );
+      }
+
+      const config = await loadConfig(project, {});
+      expect(config.profile).toBe("flutter-desktop");
+    } finally {
+      homedirSpy.mockRestore();
+      await fs.promises.rm(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  it("does not fall back to old defaults once PICKFORGE_HOME is set explicitly", async () => {
     const fakeHome = await fs.promises.mkdtemp(
       path.join(os.tmpdir(), "pickforge-lab-fakehome-"),
     );

@@ -3,7 +3,7 @@ import path from "node:path";
 import {
   ensureDir,
   globalConfigPath,
-  legacyGlobalConfigPath,
+  legacyGlobalConfigPaths,
   projectConfigPath,
   resolveReadablePath,
   writeFileAtomic,
@@ -140,7 +140,7 @@ export async function loadConfigLayers(
   // different primitive.
   const globalPath = await resolveReadablePath(
     globalConfigPath(env),
-    legacyGlobalConfigPath(env),
+    legacyGlobalConfigPaths(env),
   );
   const global = await readConfigFile(globalPath);
   const project = await readConfigFile(projectConfigPath(projectDir));

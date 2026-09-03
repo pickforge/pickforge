@@ -8,7 +8,7 @@ import { runTakeoverWatchdogLoop } from "../../src/takeover-watchdog.js";
 const [sessionId, leaseId, home, pollIntervalMs] = process.argv.slice(2);
 if (sessionId === undefined || leaseId === undefined || home === undefined) {
   console.error(
-    "usage: takeover-watchdog-worker <sessionId> <leaseId> <picklabHome> [pollIntervalMs]",
+    "usage: takeover-watchdog-worker <sessionId> <leaseId> <pickforgeHome> [pollIntervalMs]",
   );
   process.exit(2);
 }

@@ -8,7 +8,7 @@ import type { DetectionSnapshot } from "../src/provision/detect.js";
 
 function snapshot(
   overrides: {
-    picklabHome?: Partial<DetectionSnapshot["picklabHome"]>;
+    pickforgeHome?: Partial<DetectionSnapshot["pickforgeHome"]>;
     legacyHome?: DetectionSnapshot["legacyHome"];
     storage?: DetectionSnapshot["storage"];
     config?: Partial<DetectionSnapshot["config"]>;
@@ -19,11 +19,11 @@ function snapshot(
   } = {},
 ): DetectionSnapshot {
   return {
-    picklabHome: {
-      path: "/home/u/.pickforge/picklab",
+    pickforgeHome: {
+      path: "/home/u/.pickforge/lab",
       exists: true,
       writable: true,
-      ...overrides.picklabHome,
+      ...overrides.pickforgeHome,
     },
     legacyHome: overrides.legacyHome ?? null,
     storage: overrides.storage ?? { rejectedProjectCustom: null },
@@ -83,7 +83,7 @@ describe("evaluateChecks", () => {
 
   it("flags a missing pickforge-lab home", () => {
     const check = checkById(
-      snapshot({ picklabHome: { exists: false, writable: false } }),
+      snapshot({ pickforgeHome: { exists: false, writable: false } }),
       "pickforge-home",
     );
     expect(check.status).toBe("missing");
@@ -91,7 +91,7 @@ describe("evaluateChecks", () => {
 
   it("flags an unwritable pickforge-lab home as missing", () => {
     const check = checkById(
-      snapshot({ picklabHome: { writable: false } }),
+      snapshot({ pickforgeHome: { writable: false } }),
       "pickforge-home",
     );
     expect(check.status).toBe("missing");

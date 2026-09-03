@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   isPidAlive,
-  picklabHome,
+  pickforgeHome,
   runCommand,
   startDaemon,
   stopPid,
@@ -182,7 +182,7 @@ export function consolePortLockPath(
   port: number,
   registryEnv: EnvLike = process.env,
 ): string {
-  return path.join(picklabHome(registryEnv), "ports", `emulator-${port}.lock`);
+  return path.join(pickforgeHome(registryEnv), "ports", `emulator-${port}.lock`);
 }
 
 function readLockOwnerPid(lockPath: string): number | null {

@@ -12,6 +12,10 @@ export const SHARED_SNIPPET_BASENAMES = [
   "pickforge-mcp.json",
   "pickforge-mcp.toml",
 ] as const;
+export const LEGACY_SHARED_SNIPPET_BASENAMES = [
+  "picklab-mcp.json",
+  "picklab-mcp.toml",
+] as const;
 
 export function mcpServerEntry(): McpServerEntry {
   return { command: "pickforge-lab", args: ["mcp", "serve"] };

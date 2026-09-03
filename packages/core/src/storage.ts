@@ -8,7 +8,7 @@ import {
   type StorageMode,
 } from "./config.js";
 import { readPickforgeEnv, type EnvLike } from "./env-compat.js";
-import { picklabHome, runsDir } from "./paths.js";
+import { pickforgeHome, runsDir } from "./paths.js";
 
 export type { StorageConfig, StorageMode } from "./config.js";
 
@@ -42,7 +42,7 @@ export async function canonicalProjectPath(projectDir: string): Promise<string> 
  * Stable per-project id derived from a canonical project path: a sha256
  * digest (load-bearing for uniqueness) prefixed with a human-readable slug of
  * the directory's basename purely for debuggability (`ls
- * ~/.pickforge/picklab/projects` stays legible). The same canonical path
+ * ~/.pickforge/lab/projects` stays legible). The same canonical path
  * always yields the same id; different paths practically never collide.
  */
 export function deriveProjectId(canonicalPath: string): string {
@@ -126,7 +126,7 @@ function isSameOrDescendant(ancestor: string, descendant: string): boolean {
  * `project-local` (blast radius already scoped to the project itself) or
  * `home`.
  *
- * - `home` (default): `<picklabHome>/projects/<projectId>/runs`, isolated per
+ * - `home` (default): `<pickforgeHome>/projects/<projectId>/runs`, isolated per
  *   project and outside every target repository.
  * - `project-local`: the pre-#34 `<project>/.picklab/runs` layout.
  * - `custom`: `<storage.path>/runs` under an explicit absolute path outside
@@ -201,7 +201,7 @@ export async function resolveRunStorage(
   const id = await projectId(projectDir);
   const resolved: ResolvedRunStorage = {
     mode: "home",
-    runsDir: path.join(picklabHome(env), "projects", id, "runs"),
+    runsDir: path.join(pickforgeHome(env), "projects", id, "runs"),
     projectId: id,
   };
   if (rejectedProjectCustom !== undefined) {

@@ -1,6 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
-import { picklabHome, runsDir, type EnvLike } from "./paths.js";
+import {
+  legacyPickforgeHomes,
+  pickforgeHome,
+  runsDir,
+  type EnvLike,
+} from "./paths.js";
 import { resolveRunStorage } from "./storage.js";
 import type { RunManifest } from "./run.js";
 
@@ -497,6 +502,18 @@ async function projectLocalRoot(
   };
 }
 
+async function homeRunRoot(
+  home: string,
+  projectId: string,
+): Promise<RunCatalogRoot | undefined> {
+  const homeReal = await realpathIfExists(home);
+  if (homeReal === undefined) return undefined;
+  return {
+    dir: path.join(home, "projects", projectId, "runs"),
+    expectedRealDir: path.join(homeReal, "projects", projectId, "runs"),
+  };
+}
+
 /**
  * Open the run catalog for a project: the resolved storage mode's root as the
  * highest-precedence source, plus (unless that root already is the
@@ -515,18 +532,11 @@ export async function openRunCatalog(
   if (resolved.mode === "project-local") {
     const root = await projectLocalRoot(projectDir);
     if (root !== undefined) roots.push(root);
-  } else if (resolved.mode === "home") {
-    const homeReal = await realpathIfExists(picklabHome(env));
-    if (homeReal !== undefined && resolved.projectId !== undefined) {
-      roots.push({
-        dir: resolved.runsDir,
-        expectedRealDir: path.join(
-          homeReal,
-          "projects",
-          resolved.projectId,
-          "runs",
-        ),
-      });
+  } else if (resolved.mode === "home" && resolved.projectId !== undefined) {
+    const homes = [pickforgeHome(env), ...legacyPickforgeHomes(env)];
+    for (const home of homes) {
+      const root = await homeRunRoot(home, resolved.projectId);
+      if (root !== undefined) roots.push(root);
     }
   } else {
     // custom: the configured absolute path is the trusted ancestor to verify

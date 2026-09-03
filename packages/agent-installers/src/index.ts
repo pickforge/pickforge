@@ -29,6 +29,7 @@ export {
   renderJsonSnippet,
   renderTomlSnippet,
   SHARED_SNIPPET_BASENAMES,
+  LEGACY_SHARED_SNIPPET_BASENAMES,
   writeSharedSnippets,
   type SharedSnippets,
 } from "./snippet.js";

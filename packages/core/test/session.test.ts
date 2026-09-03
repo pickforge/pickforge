@@ -1152,8 +1152,11 @@ describe("legacy session home fallback", () => {
     await fs.promises.rm(fakeHome, { recursive: true, force: true });
   });
 
-  function writeLegacySession(id: string): void {
-    const dir = path.join(fakeHome, ".picklab", "sessions");
+  function writeLegacySession(
+    id: string,
+    root = path.join(fakeHome, ".picklab"),
+  ): void {
+    const dir = path.join(root, "sessions");
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
       path.join(dir, `${id}.json`),
@@ -1171,6 +1174,16 @@ describe("legacy session home fallback", () => {
     writeLegacySession("desk-1eaac1");
 
     const record = await getSession("desk-1eaac1", {});
+    expect(record?.projectDir).toBe("/legacy/project");
+  });
+
+  it("reads sessions from the former ~/.pickforge/picklab state root", async () => {
+    writeLegacySession(
+      "desk-1eaac6",
+      path.join(fakeHome, ".pickforge", "picklab"),
+    );
+
+    const record = await getSession("desk-1eaac6", {});
     expect(record?.projectDir).toBe("/legacy/project");
   });
 
@@ -1218,7 +1231,7 @@ describe("legacy session home fallback", () => {
     const newPath = path.join(
       fakeHome,
       ".pickforge",
-      "pickforge-lab",
+      "lab",
       "sessions",
       "desk-1eaac5.json",
     );

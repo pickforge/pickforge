@@ -127,56 +127,25 @@ function planLabUserProvisioning(
   });
 }
 
-// eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/pickforge#60
-export async function runInit(
-  opts: InitCliOptions,
-  env: EnvLike = process.env,
-): Promise<number> {
-  const profile = opts.profile ?? "generic";
-  const projectDir = path.resolve(opts.projectDir ?? process.cwd());
-  const snapshot = await collectSnapshot({ env, projectDir });
-  const allChecks = evaluateChecks(snapshot);
-  const requiredIds = requiredChecksForProfile(profile);
-  const checks = allChecks.filter((check) => requiredIds.includes(check.id));
-
-  if (opts.json !== true) {
-    for (const check of checks) {
-      console.log(formatCheckLine(check));
-    }
-  }
-
-  const sections: ProvisioningSection[] = [
-    {
-      kind: "plan",
-      plan: {
-        steps: [
-          {
-            id: "project-config",
-            title: `Write project config (profile: ${profile})`,
-            kind: "write-project-config",
-            privileged: false,
-            config: { profile },
-          },
-        ],
-      },
+function projectConfigSection(profile: PickforgeProfile): ProvisioningSection {
+  return {
+    kind: "plan",
+    plan: {
+      steps: [{
+        id: "project-config",
+        title: `Write project config (profile: ${profile})`,
+        kind: "write-project-config",
+        privileged: false,
+        config: { profile },
+      }],
     },
-  ];
-  const homePlan = planPickforgeHome({
-    path: snapshot.picklabHome.path,
-    exists: snapshot.picklabHome.exists,
-  });
-  if (homePlan.steps.length > 0) {
-    sections.push({ kind: "plan", plan: homePlan, satisfies: "pickforge-home" });
-  }
+  };
+}
 
-  const avdRequired = requiredIds.includes("avd");
-  if (!snapshot.android.avdExists && (avdRequired || opts.createAvd === true)) {
-    planAvdProvisioning(snapshot, opts, sections);
-  }
-  if (!snapshot.labUser.exists && opts.createLabUser === true) {
-    planLabUserProvisioning(snapshot, opts, sections);
-  }
-
+function addMissingCheckSections(
+  sections: ProvisioningSection[],
+  checks: DoctorCheck[],
+): void {
   for (const check of checks) {
     if (check.status !== "missing") continue;
     sections.push({
@@ -187,7 +156,80 @@ export async function runInit(
         (check.hint === undefined ? "" : ` Hint: ${check.hint}`),
     });
   }
+}
 
+function buildInitSections(
+  profile: PickforgeProfile,
+  snapshot: DetectionSnapshot,
+  checks: DoctorCheck[],
+  requiredIds: readonly string[],
+  opts: InitCliOptions,
+): ProvisioningSection[] {
+  const sections = [projectConfigSection(profile)];
+  const homePlan = planPickforgeHome({
+    path: snapshot.pickforgeHome.path,
+    exists: snapshot.pickforgeHome.exists,
+  });
+  if (homePlan.steps.length > 0) {
+    sections.push({ kind: "plan", plan: homePlan, satisfies: "pickforge-home" });
+  }
+  const avdRequired = requiredIds.includes("avd");
+  if (!snapshot.android.avdExists && (avdRequired || opts.createAvd === true)) {
+    planAvdProvisioning(snapshot, opts, sections);
+  }
+  if (!snapshot.labUser.exists && opts.createLabUser === true) {
+    planLabUserProvisioning(snapshot, opts, sections);
+  }
+  addMissingCheckSections(sections, checks);
+  return sections;
+}
+
+function applyExecution(
+  report: InitReport,
+  execution: ExecuteProvisioningResult,
+): void {
+  report.plan = execution.plan.steps;
+  report.results = execution.results;
+  report.ok = execution.ok;
+  report.status = execution.status;
+  if (execution.ok) return;
+  const errors =
+    execution.errors.length > 0 ? execution.errors : ["provisioning failed"];
+  const projectConfigWritten = execution.results.some(
+    (result) => result.id === "project-config" && result.ok,
+  );
+  if (projectConfigWritten) {
+    report.errors.push(
+      `${errors[0]}. Project config was written; fix the failed dependency and ` +
+        `re-run pickforge-lab init (idempotent), or check pickforge-lab doctor.`,
+      ...errors.slice(1),
+    );
+    return;
+  }
+  report.errors.push(...errors);
+}
+
+export async function runInit(
+  opts: InitCliOptions,
+  env: EnvLike = process.env,
+): Promise<number> {
+  const profile = opts.profile ?? "generic";
+  const projectDir = path.resolve(opts.projectDir ?? process.cwd());
+  const snapshot = await collectSnapshot({ env, projectDir });
+  const requiredIds = requiredChecksForProfile(profile);
+  const checks = evaluateChecks(snapshot).filter((check) =>
+    requiredIds.includes(check.id),
+  );
+  if (opts.json !== true) {
+    for (const check of checks) console.log(formatCheckLine(check));
+  }
+  const sections = buildInitSections(
+    profile,
+    snapshot,
+    checks,
+    requiredIds,
+    opts,
+  );
   const report: InitReport = {
     ok: false,
     status: "failed",
@@ -199,43 +241,19 @@ export async function runInit(
     results: [],
     errors: [],
   };
-
   const log =
     opts.json === true ? () => {} : (line: string) => console.log(line);
-  const execution = await executeProvisioning(
-    sections,
-    {
-      dryRun: opts.dryRun,
-      env,
-      projectDir,
-      log,
-      privilege: {
-        sudoPath: snapshot.sudo,
-        askpass: resolveAskpassCapability(env),
-      },
+  const execution = await executeProvisioning(sections, {
+    dryRun: opts.dryRun,
+    env,
+    projectDir,
+    log,
+    privilege: {
+      sudoPath: snapshot.sudo,
+      askpass: resolveAskpassCapability(env),
     },
-  );
-  report.plan = execution.plan.steps;
-  report.results = execution.results;
-  report.ok = execution.ok;
-  report.status = execution.status;
-  if (!execution.ok) {
-    const errors =
-      execution.errors.length > 0 ? execution.errors : ["provisioning failed"];
-    if (
-      execution.results.some(
-        (result) => result.id === "project-config" && result.ok,
-      )
-    ) {
-      report.errors.push(
-        `${errors[0]}. Project config was written; fix the failed dependency and ` +
-          `re-run pickforge-lab init (idempotent), or check pickforge-lab doctor.`,
-      );
-      report.errors.push(...errors.slice(1));
-    } else {
-      report.errors.push(...errors);
-    }
-  }
+  });
+  applyExecution(report, execution);
   emit(report, opts);
   return report.ok ? 0 : 1;
 }

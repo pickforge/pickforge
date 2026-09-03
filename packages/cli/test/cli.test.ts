@@ -146,12 +146,19 @@ afterEach(() => {
 });
 
 describe("pickforge-lab doctor", () => {
+  it("prints the resolved state directory", async () => {
+    const env = makeEnv(tmpDir);
+    const result = await runCli(["doctor"], env, tmpDir);
+    expect(result.stdout).toContain(`State directory: ${env.PICKFORGE_HOME}`);
+  });
+
   it("exits 0 with findings on a bare machine", async () => {
     const env = makeEnv(tmpDir);
     const result = await runCli(["doctor", "--json"], env, tmpDir);
     expect(result.code).toBe(0);
     const report = parseJson(result);
     expect(report.ok).toBe(false);
+    expect(report.stateDir).toBe(env.PICKFORGE_HOME);
     const byId = Object.fromEntries(
       (report.checks as Array<{ id: string; status: string }>).map((c) => [
         c.id,

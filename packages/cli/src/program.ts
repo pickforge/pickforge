@@ -546,7 +546,7 @@ function registerArtifactCommands(program: Command): void {
   const artifacts = program
     .command("artifacts")
     .description(
-      "Inspect recorded run artifacts (default storage: ~/.pickforge/picklab)",
+      "Inspect recorded run artifacts (default storage: ~/.pickforge/lab)",
     );
 
   withJson(

@@ -75,7 +75,7 @@ function writeExecutable(file: string, contents: string): void {
 function baseEnv(home: string, extra: Record<string, string> = {}): Record<string, string> {
   return {
     HOME: home,
-    PICKFORGE_HOME: path.join(home, ".picklab"),
+    PICKFORGE_HOME: path.join(home, ".pickforge", "lab"),
     PATH: process.env.PATH ?? "",
     npm_config_cache: npmCache,
     ...extra,
@@ -170,8 +170,8 @@ describe("install.sh", () => {
       });
       expect(install.code, describeFailure(install)).toBe(0);
 
-      const picklabHome = path.join(home, ".picklab");
-      expect(fs.existsSync(picklabHome)).toBe(false);
+      const pickforgeHome = path.join(home, ".pickforge", "lab");
+      expect(fs.existsSync(pickforgeHome)).toBe(false);
       const init = await run(
         path.join(prefix, "bin", "pickforge-lab"),
         ["init", "--profile", "generic", "--yes", "--json"],
@@ -180,7 +180,7 @@ describe("install.sh", () => {
       expect(init.code, describeFailure(init)).toBe(0);
       const report = JSON.parse(init.stdout) as Record<string, any>;
       expect(report.ok).toBe(true);
-      expect(fs.existsSync(picklabHome)).toBe(true);
+      expect(fs.existsSync(pickforgeHome)).toBe(true);
       const config = JSON.parse(
         fs.readFileSync(path.join(project, ".picklab", "config.json"), "utf8"),
       );
@@ -460,7 +460,7 @@ describe("packed tarball execution", () => {
       expect(result.code, describeFailure(result)).toBe(0);
       const report = JSON.parse(result.stdout) as Record<string, any>;
       expect(report.ok).toBe(true);
-      expect(fs.existsSync(path.join(home, ".picklab"))).toBe(true);
+      expect(fs.existsSync(path.join(home, ".pickforge", "lab"))).toBe(true);
       expect(
         fs.existsSync(path.join(project, ".picklab", "config.json")),
       ).toBe(true);

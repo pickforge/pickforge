@@ -5,7 +5,7 @@ import { finalizeActiveEvidenceRun } from "./evidence.js";
 import { writeEvidenceReport } from "./evidence-render.js";
 import {
   ensureDir,
-  legacySessionsDir,
+  legacySessionsDirs,
   listDirSafe,
   resolveReadablePath,
   sessionsDir,
@@ -154,11 +154,10 @@ export async function getSession(
   if (!isValidSessionId(id)) {
     return undefined;
   }
-  const legacyDir = legacySessionsDir(env);
-  const filePath = await resolveReadablePath(
-    sessionPath(id, env),
-    legacyDir === undefined ? undefined : path.join(legacyDir, `${id}.json`),
+  const legacyPaths = legacySessionsDirs(env).map((dir) =>
+    path.join(dir, `${id}.json`),
   );
+  const filePath = await resolveReadablePath(sessionPath(id, env), legacyPaths);
   let raw: string;
   try {
     raw = await fs.promises.readFile(filePath, "utf8");
@@ -181,10 +180,11 @@ export async function getSession(
 export async function listSessions(
   env: EnvLike = process.env,
 ): Promise<SessionRecord[]> {
-  const legacyDir = legacySessionsDir(env);
   const primaryEntries = await listDirSafe(sessionsDir(env));
-  const legacyEntries = legacyDir === undefined ? [] : await listDirSafe(legacyDir);
-  const entries = [...new Set([...primaryEntries, ...legacyEntries])];
+  const legacyEntries = await Promise.all(
+    legacySessionsDirs(env).map((dir) => listDirSafe(dir)),
+  );
+  const entries = [...new Set([...primaryEntries, ...legacyEntries.flat()])];
 
   const records: SessionRecord[] = [];
   for (const entry of entries) {
@@ -323,11 +323,11 @@ export async function destroySessionRecord(
   // target the new home) leaves stale copies at both locations; removing
   // only the new-home one would let it resurrect via the legacy read
   // fallback in getSession/listSessions.
-  const legacyDir = legacySessionsDir(env);
-  const legacyPath =
-    legacyDir === undefined ? undefined : path.join(legacyDir, `${id}.json`);
+  const legacyPaths = legacySessionsDirs(env).map((dir) =>
+    path.join(dir, `${id}.json`),
+  );
   await fs.promises.rm(sessionPath(id, env), { force: true });
-  if (legacyPath !== undefined) {
+  for (const legacyPath of legacyPaths) {
     await fs.promises.rm(legacyPath, { force: true });
   }
 }

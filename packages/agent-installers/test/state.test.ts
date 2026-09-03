@@ -9,7 +9,7 @@ let homedirSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(async () => {
   fakeHome = await fs.promises.mkdtemp(
-    path.join(os.tmpdir(), "picklab-agentstate-fakehome-"),
+    path.join(os.tmpdir(), "pickforge-lab-agentstate-fakehome-"),
   );
   homedirSpy = vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
 });
@@ -39,6 +39,24 @@ describe("readAgentsState legacy home fallback", () => {
     const state = await readAgentsState({});
     expect(state.agents["claude-code"]?.registered).toBe(true);
     expect(state.agents["claude-code"]?.configPath).toBe("/legacy/.claude.json");
+  });
+
+  it("reads the former ~/.pickforge/picklab state before ~/.picklab", async () => {
+    for (const [dir, registered] of [
+      [path.join(fakeHome, ".picklab", "agents"), false],
+      [path.join(fakeHome, ".pickforge", "picklab", "agents"), true],
+    ] as const) {
+      await fs.promises.mkdir(dir, { recursive: true });
+      await fs.promises.writeFile(
+        path.join(dir, "state.json"),
+        JSON.stringify({
+          agents: { codex: { registered, configPath: dir } },
+        }),
+      );
+    }
+
+    const state = await readAgentsState({});
+    expect(state.agents.codex?.registered).toBe(true);
   });
 
   it("prefers the new home once it has its own state", async () => {
@@ -102,7 +120,7 @@ describe("readAgentsState legacy home fallback", () => {
     expect(legacyRaw.agents.cursor).toBeUndefined();
     expect(
       fs.existsSync(
-        path.join(fakeHome, ".pickforge", "picklab", "agents", "state.json"),
+        path.join(fakeHome, ".pickforge", "lab", "agents", "state.json"),
       ),
     ).toBe(true);
   });

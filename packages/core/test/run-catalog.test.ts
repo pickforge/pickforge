@@ -6,6 +6,7 @@ import {
   RunCatalog,
   createRun,
   openRunCatalog,
+  projectId,
   type RunManifest,
 } from "../src/index.js";
 
@@ -238,6 +239,32 @@ describe("openRunCatalog storage modes", () => {
 
     const entries = await (await openRunCatalog(project, env)).list();
     expect(entries.map((entry) => entry.manifest.runId)).toEqual([run.runId]);
+  });
+
+  it("reads runs from ~/.pickforge/picklab while writing under ~/.pickforge/lab", async () => {
+    const fakeHome = path.join(root, "user-home");
+    const project = path.join(root, "project");
+    await fs.promises.mkdir(project, { recursive: true });
+    vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
+    const id = await projectId(project);
+    const legacyRoot = path.join(
+      fakeHome,
+      ".pickforge",
+      "picklab",
+      "projects",
+      id,
+      "runs",
+    );
+    await writeRun(legacyRoot, "legacy-home-run");
+
+    const newRun = await createRun(project, "fresh", {}, {});
+    const entries = await (await openRunCatalog(project, {})).list();
+
+    expect(newRun.dir).toContain(path.join(".pickforge", "lab", "projects"));
+    expect(entries.map((entry) => entry.manifest.runId).sort()).toEqual(
+      ["legacy-home-run", newRun.runId].sort(),
+    );
+    expect(fs.existsSync(path.join(legacyRoot, "legacy-home-run"))).toBe(true);
   });
 
   it("keeps pre-existing project-local runs discoverable without migration", async () => {
