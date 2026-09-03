@@ -83,6 +83,35 @@ describe("runAgentsDoctor", () => {
     expect(agentsCheck.detail).toContain("broken symlink");
   });
 
+  it("flags owned legacy JSON entries as stale and says to re-link", async () => {
+    const configPaths = {
+      "claude-code": path.join(home, ".claude.json"),
+      cursor: path.join(home, ".cursor", "mcp.json"),
+      pi: path.join(home, ".config", "mcp", "mcp.json"),
+    } as const;
+    for (const configPath of Object.values(configPaths)) {
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(
+        configPath,
+        JSON.stringify({
+          mcpServers: {
+            picklab: { command: "picklab", args: ["mcp", "serve"] },
+          },
+        }),
+      );
+    }
+
+    const report = await runAgentsDoctor({ env });
+
+    expect(report.ok).toBe(false);
+    for (const name of Object.keys(configPaths)) {
+      const agentCheck = check(report.checks, `agent-${name}`);
+      expect(agentCheck.status).toBe("problem");
+      expect(agentCheck.detail).toContain("owned legacy picklab entry");
+      expect(agentCheck.detail).toContain(`agents link ${name}`);
+    }
+  });
+
   it("flags codex markers without a pickforge-lab section as stale", async () => {
     const configPath = path.join(home, ".codex", "config.toml");
     fs.mkdirSync(path.dirname(configPath), { recursive: true });

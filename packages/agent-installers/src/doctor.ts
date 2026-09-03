@@ -3,7 +3,10 @@ import path from "node:path";
 import { agentsDir, type EnvLike } from "@pickforge/lab-core";
 import { BUILTIN_AGENTS } from "./agents/builtin.js";
 import { isBackupPath } from "./backup.js";
-import { jsonFileMcpServerState } from "./jsonConfig.js";
+import {
+  jsonFileMcpServerState,
+  ownedLegacyMcpServerNamesInJsonFile,
+} from "./jsonConfig.js";
 import { readAgentsState, type AgentStateEntry } from "./state.js";
 import { inspectTomlFile } from "./tomlConfig.js";
 import type { AgentKind, RegistrationState } from "./types.js";
@@ -188,6 +191,18 @@ async function checkBuiltinAgent(
     return;
   }
   const registered = await jsonFileMcpServerState(configPath);
+  const ownedLegacyEntries =
+    await ownedLegacyMcpServerNamesInJsonFile(configPath);
+  if (registered === false && ownedLegacyEntries.length > 0) {
+    checks.push({
+      id,
+      status: "problem",
+      detail:
+        `stale: ${configPath} has an owned legacy picklab entry ` +
+        `(re-run: pickforge-lab agents link ${name})`,
+    });
+    return;
+  }
   pushRegistrationCheck(checks, id, configPath, registered, backups, stateEntry);
 }
 
