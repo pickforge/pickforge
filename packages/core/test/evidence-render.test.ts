@@ -26,7 +26,7 @@ beforeEach(() => {
   fs.mkdirSync(projectDir, { recursive: true });
   // Isolate createRun's default storage resolution from the real developer
   // home; the exact mode does not matter to these render-only assertions.
-  vi.stubEnv("PICKLAB_STORAGE_MODE", "project-local");
+  vi.stubEnv("PICKFORGE_STORAGE_MODE", "project-local");
 });
 
 afterEach(() => {

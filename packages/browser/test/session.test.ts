@@ -52,7 +52,7 @@ beforeEach(() => {
   projectDir = path.join(tmp, "project");
   fs.mkdirSync(home, { recursive: true });
   fs.mkdirSync(projectDir, { recursive: true });
-  registryEnv = { PICKLAB_HOME: home };
+  registryEnv = { PICKFORGE_HOME: home };
 });
 
 afterEach(() => {

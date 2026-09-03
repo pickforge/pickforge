@@ -54,7 +54,7 @@ describe("browser partial startup ownership", () => {
     const env: EnvLike = {
       ...process.env,
       HOME: home,
-      PICKLAB_HOME: path.join(root, "pickforge-home"),
+      PICKFORGE_HOME: path.join(root, "pickforge-home"),
       PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     };
 
@@ -81,7 +81,7 @@ describe("browser partial startup ownership", () => {
     });
     expect(record.browser).toBeUndefined();
     expect(
-      fs.existsSync(path.join(env.PICKLAB_HOME!, "sessions", record.id, "profile")),
+      fs.existsSync(path.join(env.PICKFORGE_HOME!, "sessions", record.id, "profile")),
     ).toBe(true);
     await destroySessionRecord(record.id, env);
   });

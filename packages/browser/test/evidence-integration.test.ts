@@ -150,7 +150,7 @@ describe("browser evidence integration", () => {
       "utf8",
     );
     const registryEnv: EnvLike = {
-      PICKLAB_HOME: path.join(root, "pickforge-home"),
+      PICKFORGE_HOME: path.join(root, "pickforge-home"),
     };
     const sessionId = (
       await createSession({ type: "browser", projectDir }, registryEnv)

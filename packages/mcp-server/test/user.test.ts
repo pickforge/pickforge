@@ -25,7 +25,7 @@ interface ElicitingLab {
 async function connectElicitingLab(dirs: LabDirs): Promise<ElicitingLab> {
   const server = createMcpServer({
     projectDir: dirs.projectDir,
-    env: { PICKLAB_HOME: dirs.home, PATH: dirs.binDir },
+    env: { PICKFORGE_HOME: dirs.home, PATH: dirs.binDir },
   });
   const client = new Client(
     { name: "pickforge-lab-test", version: "0.0.0" },
@@ -178,7 +178,7 @@ describe("request_user_input without elicitation support", () => {
     dirs = makeLabDirs();
     lab = await connectLab({
       projectDir: dirs.projectDir,
-      env: { PICKLAB_HOME: dirs.home, PATH: dirs.binDir },
+      env: { PICKFORGE_HOME: dirs.home, PATH: dirs.binDir },
     });
   });
 

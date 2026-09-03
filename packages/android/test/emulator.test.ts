@@ -54,7 +54,7 @@ function makeRegistryEnv(): EnvLike {
   homeCounter += 1;
   const home = path.join(tmpRoot, `home-${homeCounter}`);
   fs.mkdirSync(home, { recursive: true });
-  return { PICKLAB_HOME: home };
+  return { PICKFORGE_HOME: home };
 }
 
 async function deadPid(): Promise<number> {

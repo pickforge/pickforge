@@ -27,10 +27,10 @@ import {
 import { reapDeadRunningSessions as reapWithTypedRuntime } from "../src/session-lifecycle.js";
 
 let home: string;
-let env: { PICKLAB_HOME: string };
+let env: { PICKFORGE_HOME: string };
 
 function reapDeadRunningSessions(
-  registryEnv: { PICKLAB_HOME: string },
+  registryEnv: { PICKFORGE_HOME: string },
   isAlive?: SessionLivenessCheck,
 ) {
   return reapWithTypedRuntime(
@@ -55,7 +55,7 @@ function reapDeadRunningSessions(
 
 beforeEach(async () => {
   home = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-sess-"));
-  env = { PICKLAB_HOME: home };
+  env = { PICKFORGE_HOME: home };
 });
 
 afterEach(async () => {
@@ -1167,7 +1167,7 @@ describe("legacy session home fallback", () => {
     );
   }
 
-  it("reads a legacy ~/.picklab session when PICKLAB_HOME is unset", async () => {
+  it("reads a legacy ~/.picklab session when PICKFORGE_HOME is unset", async () => {
     writeLegacySession("desk-1eaac1");
 
     const record = await getSession("desk-1eaac1", {});
@@ -1185,10 +1185,10 @@ describe("legacy session home fallback", () => {
     expect(ids).toEqual(["desk-1eaac2", created.id].sort());
   });
 
-  it("does not fall back once PICKLAB_HOME is set explicitly", async () => {
+  it("does not fall back once PICKFORGE_HOME is set explicitly", async () => {
     writeLegacySession("desk-1eaac3");
 
-    expect(await getSession("desk-1eaac3", { PICKLAB_HOME: "/other" })).toBeUndefined();
+    expect(await getSession("desk-1eaac3", { PICKFORGE_HOME: "/other" })).toBeUndefined();
   });
 
   it("destroying a session found via the legacy fallback removes it there, not just the new home", async () => {

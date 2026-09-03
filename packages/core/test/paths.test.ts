@@ -16,39 +16,39 @@ import {
 } from "../src/paths.js";
 
 describe("picklabHome", () => {
-  it("uses PICKLAB_HOME when set and non-empty", () => {
-    expect(picklabHome({ PICKLAB_HOME: "/custom/home" })).toBe("/custom/home");
+  it("uses PICKFORGE_HOME when set and non-empty", () => {
+    expect(picklabHome({ PICKFORGE_HOME: "/custom/home" })).toBe("/custom/home");
   });
 
-  it("falls back to ~/.pickforge/picklab when PICKLAB_HOME is empty", () => {
-    expect(picklabHome({ PICKLAB_HOME: "" })).toBe(
+  it("falls back to ~/.pickforge/picklab when PICKFORGE_HOME is empty", () => {
+    expect(picklabHome({ PICKFORGE_HOME: "" })).toBe(
       path.join(os.homedir(), ".pickforge", "picklab"),
     );
   });
 
-  it("falls back to ~/.pickforge/picklab when PICKLAB_HOME is unset", () => {
+  it("falls back to ~/.pickforge/picklab when PICKFORGE_HOME is unset", () => {
     expect(picklabHome({})).toBe(path.join(os.homedir(), ".pickforge", "picklab"));
   });
 });
 
 describe("legacyPickforgeHome", () => {
-  it("returns ~/.picklab when PICKLAB_HOME is unset", () => {
+  it("returns ~/.picklab when PICKFORGE_HOME is unset", () => {
     expect(legacyPickforgeHome({})).toBe(path.join(os.homedir(), ".picklab"));
   });
 
-  it("returns ~/.picklab when PICKLAB_HOME is empty", () => {
-    expect(legacyPickforgeHome({ PICKLAB_HOME: "" })).toBe(
+  it("returns ~/.picklab when PICKFORGE_HOME is empty", () => {
+    expect(legacyPickforgeHome({ PICKFORGE_HOME: "" })).toBe(
       path.join(os.homedir(), ".picklab"),
     );
   });
 
-  it("is undefined once PICKLAB_HOME is set explicitly (the user's own root)", () => {
-    expect(legacyPickforgeHome({ PICKLAB_HOME: "/custom/home" })).toBeUndefined();
+  it("is undefined once PICKFORGE_HOME is set explicitly (the user's own root)", () => {
+    expect(legacyPickforgeHome({ PICKFORGE_HOME: "/custom/home" })).toBeUndefined();
   });
 });
 
 describe("legacy subdir helpers", () => {
-  it("derive from legacyPickforgeHome, undefined once PICKLAB_HOME is explicit", () => {
+  it("derive from legacyPickforgeHome, undefined once PICKFORGE_HOME is explicit", () => {
     expect(legacySessionsDir({})).toBe(
       path.join(os.homedir(), ".picklab", "sessions"),
     );
@@ -58,9 +58,9 @@ describe("legacy subdir helpers", () => {
     expect(legacyGlobalConfigPath({})).toBe(
       path.join(os.homedir(), ".picklab", "config.json"),
     );
-    expect(legacySessionsDir({ PICKLAB_HOME: "/lab" })).toBeUndefined();
-    expect(legacyAgentsDir({ PICKLAB_HOME: "/lab" })).toBeUndefined();
-    expect(legacyGlobalConfigPath({ PICKLAB_HOME: "/lab" })).toBeUndefined();
+    expect(legacySessionsDir({ PICKFORGE_HOME: "/lab" })).toBeUndefined();
+    expect(legacyAgentsDir({ PICKFORGE_HOME: "/lab" })).toBeUndefined();
+    expect(legacyGlobalConfigPath({ PICKFORGE_HOME: "/lab" })).toBeUndefined();
   });
 });
 
@@ -121,7 +121,7 @@ describe("listDirSafe", () => {
 });
 
 describe("global subdirs", () => {
-  const env = { PICKLAB_HOME: "/lab" };
+  const env = { PICKFORGE_HOME: "/lab" };
 
   it("builds the sessions dir", () => {
     expect(sessionsDir(env)).toBe(path.join("/lab", "sessions"));

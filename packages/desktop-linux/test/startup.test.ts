@@ -47,7 +47,7 @@ describe("desktop partial startup ownership", () => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-desktop-startup-"));
     const env: EnvLike = {
       ...process.env,
-      PICKLAB_HOME: path.join(root, "home"),
+      PICKFORGE_HOME: path.join(root, "home"),
     };
     await expect(
       createDesktopSession({

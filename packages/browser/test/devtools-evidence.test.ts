@@ -20,7 +20,7 @@ beforeEach(async () => {
     path.join(os.tmpdir(), "pickforge-lab-devtools-evidence-"),
   );
   // These tests assert against the literal `.picklab/runs` layout.
-  vi.stubEnv("PICKLAB_STORAGE_MODE", "project-local");
+  vi.stubEnv("PICKFORGE_STORAGE_MODE", "project-local");
 });
 
 afterEach(async () => {

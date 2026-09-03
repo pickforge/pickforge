@@ -36,7 +36,7 @@ beforeEach(async () => {
   sessionId = writeAndroidSessionRecord(dirs.home, dirs.projectDir);
   lab = await connectLab({
     projectDir: dirs.projectDir,
-    env: { PICKLAB_HOME: dirs.home, PATH: dirs.binDir, ANDROID_HOME: sdk },
+    env: { PICKFORGE_HOME: dirs.home, PATH: dirs.binDir, ANDROID_HOME: sdk },
   });
 });
 
@@ -316,7 +316,7 @@ describe("android_start (fake sdk)", () => {
     const startLab = await connectLab({
       projectDir: startDirs.projectDir,
       env: {
-        PICKLAB_HOME: startDirs.home,
+        PICKFORGE_HOME: startDirs.home,
         PATH: startDirs.binDir,
         ANDROID_HOME: sdk,
       },
@@ -416,7 +416,7 @@ describe("android_start (fake sdk)", () => {
     const startLab = await connectLab({
       projectDir: startDirs.projectDir,
       env: {
-        PICKLAB_HOME: startDirs.home,
+        PICKFORGE_HOME: startDirs.home,
         PATH: startDirs.binDir,
         ANDROID_HOME: sdk,
       },

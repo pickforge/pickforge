@@ -36,7 +36,7 @@ function runCli(args: string[]): Promise<CliResult> {
     const child = spawn("bun", [cliPath, ...args], {
       env: {
         HOME: home,
-        PICKLAB_HOME: home,
+        PICKFORGE_HOME: home,
         PATH: process.env.PATH ?? "",
       },
       stdio: ["ignore", "pipe", "pipe"],

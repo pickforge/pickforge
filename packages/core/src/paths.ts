@@ -1,16 +1,17 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { readPickforgeEnv, type EnvLike } from "./env-compat.js";
 
-export type EnvLike = Record<string, string | undefined>;
+export type { EnvLike } from "./env-compat.js";
 
 /**
  * The PickLab home root, shared by every product under the Pickforge company
- * root (`~/.pickforge/<product-slug>/`). `PICKLAB_HOME` remains the override
+ * root (`~/.pickforge/<product-slug>/`). `PICKFORGE_HOME` remains the override
  * for automation/tests/custom installs.
  */
 export function picklabHome(env: EnvLike = process.env): string {
-  const fromEnv = env.PICKLAB_HOME;
+  const fromEnv = readPickforgeEnv(env, "HOME");
   if (fromEnv !== undefined && fromEnv !== "") {
     return fromEnv;
   }
@@ -19,15 +20,15 @@ export function picklabHome(env: EnvLike = process.env): string {
 
 /**
  * The pre-#34 PickLab home (`~/.picklab`). Only meaningful when the caller is
- * on the default root (no explicit `PICKLAB_HOME`): once a user sets
- * `PICKLAB_HOME` themselves they have taken explicit control and no legacy
+ * on the default root (no explicit `PICKFORGE_HOME`): once a user sets
+ * `PICKFORGE_HOME` themselves they have taken explicit control and no legacy
  * fallback applies. Existing global config, agent state, and sessions under
  * this path are never migrated or deleted — callers that read single files or
  * list directories fall back to this path only when the new default has
  * nothing yet, so nothing already there is silently orphaned.
  */
 export function legacyPickforgeHome(env: EnvLike = process.env): string | undefined {
-  const fromEnv = env.PICKLAB_HOME;
+  const fromEnv = readPickforgeEnv(env, "HOME");
   if (fromEnv !== undefined && fromEnv !== "") {
     return undefined;
   }

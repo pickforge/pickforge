@@ -16,7 +16,7 @@ if (sessionId === undefined || leaseId === undefined || home === undefined) {
 await runTakeoverWatchdogLoop({
   sessionId,
   leaseId,
-  registryEnv: { ...process.env, PICKLAB_HOME: home },
+  registryEnv: { ...process.env, PICKFORGE_HOME: home },
   pollIntervalMs: pollIntervalMs === undefined ? undefined : Number(pollIntervalMs),
 });
 process.exit(0);

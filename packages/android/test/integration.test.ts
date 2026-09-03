@@ -44,7 +44,7 @@ const home = path.join(tmpRoot, "home");
 const projectDir = path.join(tmpRoot, "project");
 fs.mkdirSync(home, { recursive: true });
 fs.mkdirSync(projectDir, { recursive: true });
-const registryEnv: EnvLike = { ...process.env, PICKLAB_HOME: home };
+const registryEnv: EnvLike = { ...process.env, PICKFORGE_HOME: home };
 
 afterAll(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });

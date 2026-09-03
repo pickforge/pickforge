@@ -236,7 +236,7 @@ describe("createTakeoverBusyIntercept", () => {
   it("blocks tools/call while a human lease is active, and only that", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-takeover-intercept-"));
     temporaryDirectories.push(tmp);
-    const env = { PICKLAB_HOME: path.join(tmp, "home") };
+    const env = { PICKFORGE_HOME: path.join(tmp, "home") };
     const intercept = createTakeoverBusyIntercept("brow-aaaaaa11", env);
 
     // No lease yet: everything passes through.

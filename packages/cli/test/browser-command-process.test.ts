@@ -59,7 +59,7 @@ describe.skipIf(!hasXvfb)("built browser relay command exit", () => {
 
       const session = await createBrowserSession({
         projectDir,
-        registryEnv: { PICKLAB_HOME: home },
+        registryEnv: { PICKFORGE_HOME: home },
         env: { ...process.env, PATH: fakePath(binDir) },
       });
 
@@ -116,7 +116,7 @@ describe.skipIf(!hasXvfb)("built browser relay command exit", () => {
           cwd: projectDir,
           env: {
             ...process.env,
-            PICKLAB_HOME: home,
+            PICKFORGE_HOME: home,
             PATH: fakePath(binDir),
             READY_PATH: readyPath,
           },
@@ -146,7 +146,7 @@ describe.skipIf(!hasXvfb)("built browser relay command exit", () => {
         });
       } finally {
         child.kill("SIGKILL");
-        await destroyBrowserSession(session.id, { PICKLAB_HOME: home }).catch(
+        await destroyBrowserSession(session.id, { PICKFORGE_HOME: home }).catch(
           () => {},
         );
       }

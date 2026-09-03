@@ -66,7 +66,7 @@ describe("MCP tool outputs (fake adb with planted secrets)", () => {
       projectDir: dirs.projectDir,
       env: {
         HOME: dirs.home,
-        PICKLAB_HOME: dirs.home,
+        PICKFORGE_HOME: dirs.home,
         PATH: dirs.binDir,
         ANDROID_HOME: sdk,
       },
@@ -124,7 +124,7 @@ describe("MCP run-log resource (planted log on disk)", () => {
     });
     lab = await connectLab({
       projectDir: dirs.projectDir,
-      env: { HOME: dirs.home, PICKLAB_HOME: dirs.home, PATH: dirs.binDir },
+      env: { HOME: dirs.home, PICKFORGE_HOME: dirs.home, PATH: dirs.binDir },
     });
   });
 
@@ -160,10 +160,10 @@ describe("run manifest hygiene (planted env secrets)", () => {
       projectDir: dirs.projectDir,
       env: {
         HOME: dirs.home,
-        PICKLAB_HOME: dirs.home,
+        PICKFORGE_HOME: dirs.home,
         PATH: dirs.binDir,
         ANDROID_HOME: sdk,
-        PICKLAB_TEST_SECRET: ENV_SECRET,
+        PICKFORGE_TEST_SECRET: ENV_SECRET,
         DB_PASSWORD: ENV_PASSWORD,
       },
     });
@@ -222,7 +222,7 @@ describe("built CLI logcat output", () => {
     });
     env = {
       HOME: dirs.home,
-      PICKLAB_HOME: dirs.home,
+      PICKFORGE_HOME: dirs.home,
       PATH: dirs.binDir,
       ANDROID_HOME: sdk,
     };

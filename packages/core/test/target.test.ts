@@ -10,7 +10,7 @@ import {
 } from "../src/target.js";
 
 let home: string;
-let env: { PICKLAB_HOME: string };
+let env: { PICKFORGE_HOME: string };
 
 const HINTS = {
   consumerLabel: "test",
@@ -51,7 +51,7 @@ async function createRunningBrowser(projectDir: string): Promise<string> {
 
 beforeEach(async () => {
   home = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-target-"));
-  env = { PICKLAB_HOME: home };
+  env = { PICKFORGE_HOME: home };
 });
 
 afterEach(async () => {

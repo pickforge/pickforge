@@ -115,7 +115,7 @@ describe("behavioral: MCP server with poisoned PATH", () => {
       projectDir: dirs.projectDir,
       env: {
         HOME: dirs.home,
-        PICKLAB_HOME: dirs.home,
+        PICKFORGE_HOME: dirs.home,
         PATH: dirs.binDir,
         ANDROID_HOME: sdk,
       },
@@ -183,7 +183,7 @@ describe("behavioral: MCP server with poisoned PATH", () => {
         projectDir: startDirs.projectDir,
         env: {
           HOME: startDirs.home,
-          PICKLAB_HOME: startDirs.home,
+          PICKFORGE_HOME: startDirs.home,
           PATH: startDirs.binDir,
           ANDROID_HOME: sdk,
         },

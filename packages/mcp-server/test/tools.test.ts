@@ -53,7 +53,7 @@ beforeEach(async () => {
   dirs = makeLabDirs();
   lab = await connectLab({
     projectDir: dirs.projectDir,
-    env: { PICKLAB_HOME: dirs.home, PATH: dirs.binDir },
+    env: { PICKFORGE_HOME: dirs.home, PATH: dirs.binDir },
   });
 });
 
@@ -363,13 +363,13 @@ describe("inline image content", () => {
 });
 
 describe("server context", () => {
-  it("falls back to PICKLAB_PROJECT_DIR from the environment", async () => {
+  it("falls back to PICKFORGE_PROJECT_DIR from the environment", async () => {
     const projectDir = path.join(dirs.root, "env-project");
     const server = createMcpServer({
       env: {
-        PICKLAB_HOME: dirs.home,
+        PICKFORGE_HOME: dirs.home,
         PATH: dirs.binDir,
-        PICKLAB_PROJECT_DIR: projectDir,
+        PICKFORGE_PROJECT_DIR: projectDir,
       },
     });
     const client = new Client({ name: "pickforge-lab-test", version: "0.0.0" });

@@ -54,7 +54,7 @@ import {
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-destroy-test-"));
 const registryEnv: EnvLike = {
   ...process.env,
-  PICKLAB_HOME: path.join(tmpRoot, "home"),
+  PICKFORGE_HOME: path.join(tmpRoot, "home"),
 };
 const projectDir = path.join(tmpRoot, "project");
 fs.mkdirSync(projectDir, { recursive: true });

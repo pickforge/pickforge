@@ -11,7 +11,7 @@ let project: string;
 // (covered by storage.test.ts).
 beforeEach(async () => {
   project = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-run-"));
-  vi.stubEnv("PICKLAB_STORAGE_MODE", "project-local");
+  vi.stubEnv("PICKFORGE_STORAGE_MODE", "project-local");
 });
 
 afterEach(async () => {

@@ -27,7 +27,7 @@ describe.skipIf(!hasXvfb)("MCP browser lifecycle", () => {
     writeFakeChrome(dirs.binDir, "ready");
     registryEnv = {
       HOME: dirs.home,
-      PICKLAB_HOME: dirs.home,
+      PICKFORGE_HOME: dirs.home,
       PATH: fakePath(dirs.binDir),
       SECRET_TOKEN: "pickforge-lab-mcp-browser-secret",
     };

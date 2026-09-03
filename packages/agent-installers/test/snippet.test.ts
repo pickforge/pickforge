@@ -74,7 +74,7 @@ describe("renderTomlSnippet", () => {
 
 describe("writeSharedSnippets", () => {
   it("writes both snippet files into the agents dir", async () => {
-    const env = { PICKLAB_HOME: path.join(tmpDir, ".picklab") };
+    const env = { PICKFORGE_HOME: path.join(tmpDir, ".picklab") };
     const snippets = await writeSharedSnippets(env);
     expect(snippets.jsonPath).toBe(
       path.join(tmpDir, ".picklab", "agents", "picklab-mcp.json"),

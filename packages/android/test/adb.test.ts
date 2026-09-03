@@ -361,7 +361,7 @@ describe("stopEmulator", () => {
       pid: daemon.pid,
       sdk: null,
       env: { PATH: bin },
-      registryEnv: { PICKLAB_HOME: path.join(tmpRoot, "stop-home") },
+      registryEnv: { PICKFORGE_HOME: path.join(tmpRoot, "stop-home") },
       timeoutMs: 300,
     });
     expect(stopped).toBe(true);

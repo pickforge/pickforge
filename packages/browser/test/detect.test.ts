@@ -38,18 +38,18 @@ describe("detectChromeBinary", () => {
     );
   });
 
-  it("honors an executable PICKLAB_CHROME_BIN override by absolute path", () => {
+  it("honors an executable PICKFORGE_CHROME_BIN override by absolute path", () => {
     const custom = path.join(tmp, "custom-chrome");
     writeExecutable(custom, "#!/bin/sh\nexit 0\n");
     expect(
-      detectChromeBinary({ env: { PATH: "", PICKLAB_CHROME_BIN: custom } }),
+      detectChromeBinary({ env: { PATH: "", PICKFORGE_CHROME_BIN: custom } }),
     ).toBe(custom);
   });
 
   it("rejects a non-executable override path", () => {
     const missing = path.join(tmp, "nope-chrome");
     expect(
-      detectChromeBinary({ env: { PATH: "", PICKLAB_CHROME_BIN: missing } }),
+      detectChromeBinary({ env: { PATH: "", PICKFORGE_CHROME_BIN: missing } }),
     ).toBe(null);
   });
 
@@ -79,7 +79,7 @@ describe("requireChromeBinary", () => {
   it("throws a specific error when a configured override is unusable", () => {
     expect(() =>
       requireChromeBinary({
-        env: { PATH: "", PICKLAB_CHROME_BIN: path.join(tmp, "ghost") },
+        env: { PATH: "", PICKFORGE_CHROME_BIN: path.join(tmp, "ghost") },
       }),
     ).toThrow(/Configured Chrome binary is not usable/);
   });

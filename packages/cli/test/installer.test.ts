@@ -75,7 +75,7 @@ function writeExecutable(file: string, contents: string): void {
 function baseEnv(home: string, extra: Record<string, string> = {}): Record<string, string> {
   return {
     HOME: home,
-    PICKLAB_HOME: path.join(home, ".picklab"),
+    PICKFORGE_HOME: path.join(home, ".picklab"),
     PATH: process.env.PATH ?? "",
     npm_config_cache: npmCache,
     ...extra,
@@ -135,8 +135,8 @@ describe("install.sh", () => {
       const { home, dir } = makeCase("sh-npm");
       const prefix = path.join(dir, "prefix");
       const env = baseEnv(home, {
-        PICKLAB_INSTALL_FROM_TARBALL: tarball,
-        PICKLAB_INSTALL_RUNTIME: "npm",
+        PICKFORGE_INSTALL_FROM_TARBALL: tarball,
+        PICKFORGE_INSTALL_RUNTIME: "npm",
         npm_config_prefix: prefix,
       });
       const result = await run("sh", [installScript], { cwd: dir, env });
@@ -163,8 +163,8 @@ describe("install.sh", () => {
       const install = await run("sh", [installScript], {
         cwd: dir,
         env: baseEnv(home, {
-          PICKLAB_INSTALL_FROM_TARBALL: tarball,
-          PICKLAB_INSTALL_RUNTIME: "npm",
+          PICKFORGE_INSTALL_FROM_TARBALL: tarball,
+          PICKFORGE_INSTALL_RUNTIME: "npm",
           npm_config_prefix: prefix,
         }),
       });
@@ -206,7 +206,7 @@ describe("install.sh", () => {
       cwd: dir,
       env: baseEnv(home, {
         PATH: fakeBin,
-        PICKLAB_INSTALL_FROM_TARBALL: tarball,
+        PICKFORGE_INSTALL_FROM_TARBALL: tarball,
         FAKE_BUN_CALLED: bunCalled,
       }),
     });
@@ -240,7 +240,7 @@ describe("install.sh", () => {
         cwd: dir,
         env: baseEnv(home, {
           PATH: [fakeBin, "/usr/bin", "/bin"].join(path.delimiter),
-          PICKLAB_INSTALL_FROM_TARBALL: tarball,
+          PICKFORGE_INSTALL_FROM_TARBALL: tarball,
           FAKE_BUN_CALLED: bunCalled,
         }),
       });
@@ -265,13 +265,13 @@ describe("install.sh", () => {
         cwd: dir,
         env: baseEnv(home, {
           PATH: [fakeBin, "/usr/bin", "/bin"].join(path.delimiter),
-          PICKLAB_INSTALL_FROM_TARBALL: tarball,
-          PICKLAB_INSTALL_RUNTIME: "invalid",
+          PICKFORGE_INSTALL_FROM_TARBALL: tarball,
+          PICKFORGE_INSTALL_RUNTIME: "invalid",
         }),
       });
       expect(result.code).toBe(1);
       expect(result.stderr).toContain(
-        'unsupported PICKLAB_INSTALL_RUNTIME "invalid"',
+        'unsupported PICKFORGE_INSTALL_RUNTIME "invalid"',
       );
       expect(result.stderr).not.toContain("PickLab needs Node.js");
     },
@@ -299,14 +299,14 @@ describe("install.sh", () => {
         "fi",
         "if [ \"${1:-}\" = \"add\" ] && [ \"${2:-}\" = \"--global\" ]; then",
         "  mkdir -p \"${FAKE_BUN_GLOBAL_BIN}\"",
-        "  cat >\"${FAKE_BUN_GLOBAL_BIN}/pickforge-lab\" <<'PICKLAB_FAKE_BIN'",
+        "  cat >\"${FAKE_BUN_GLOBAL_BIN}/pickforge-lab\" <<'PICKFORGE_FAKE_BIN'",
         "#!/bin/sh",
         "if [ \"${1:-}\" = \"--version\" ]; then",
-        "  printf '%s\\n' \"${FAKE_PICKLAB_VERSION}\"",
+        "  printf '%s\\n' \"${FAKE_PICKFORGE_VERSION}\"",
         "  exit 0",
         "fi",
         "exit 1",
-        "PICKLAB_FAKE_BIN",
+        "PICKFORGE_FAKE_BIN",
         "  chmod +x \"${FAKE_BUN_GLOBAL_BIN}/pickforge-lab\"",
         "  exit 0",
         "fi",
@@ -318,12 +318,12 @@ describe("install.sh", () => {
       cwd: dir,
       env: baseEnv(home, {
         PATH: [fakeBin, "/usr/bin", "/bin"].join(path.delimiter),
-        PICKLAB_INSTALL_FROM_TARBALL: tarball,
-        PICKLAB_INSTALL_RUNTIME: "bun",
+        PICKFORGE_INSTALL_FROM_TARBALL: tarball,
+        PICKFORGE_INSTALL_RUNTIME: "bun",
         BUN_INSTALL: bunInstall,
         FAKE_BUN_GLOBAL_BIN: customBin,
         FAKE_BUN_LOG: bunLog,
-        FAKE_PICKLAB_VERSION: cliVersion,
+        FAKE_PICKFORGE_VERSION: cliVersion,
       }),
     });
 
@@ -343,8 +343,8 @@ describe("install.sh", () => {
       const { home, dir } = makeCase("sh-bun");
       const bunInstall = path.join(dir, "bun");
       const env = baseEnv(home, {
-        PICKLAB_INSTALL_FROM_TARBALL: tarball,
-        PICKLAB_INSTALL_RUNTIME: "bun",
+        PICKFORGE_INSTALL_FROM_TARBALL: tarball,
+        PICKFORGE_INSTALL_RUNTIME: "bun",
         BUN_INSTALL: bunInstall,
       });
       const result = await run("sh", [installScript], { cwd: dir, env });
@@ -367,11 +367,26 @@ describe("install.sh", () => {
     const result = await run("sh", [installScript], {
       cwd: dir,
       env: baseEnv(home, {
-        PICKLAB_INSTALL_FROM_TARBALL: path.join(dir, "nope.tgz"),
+        PICKFORGE_INSTALL_FROM_TARBALL: path.join(dir, "nope.tgz"),
       }),
     });
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("missing file");
+  });
+
+  it("falls back to the deprecated tarball variable with a warning", async () => {
+    const { home, dir } = makeCase("sh-legacy-tarball");
+    const result = await run("sh", [installScript], {
+      cwd: dir,
+      env: baseEnv(home, {
+        PICKLAB_INSTALL_FROM_TARBALL: path.join(dir, "nope.tgz"),
+      }),
+    });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(
+      "warning: PICKLAB_INSTALL_FROM_TARBALL is deprecated; use PICKFORGE_INSTALL_FROM_TARBALL instead",
+    );
+    expect(result.stderr.match(/PICKLAB_INSTALL_FROM_TARBALL is deprecated/g)).toHaveLength(1);
   });
 
   it("fails closed for an unsupported runtime override", async () => {
@@ -379,12 +394,28 @@ describe("install.sh", () => {
     const result = await run("sh", [installScript], {
       cwd: dir,
       env: baseEnv(home, {
-        PICKLAB_INSTALL_FROM_TARBALL: tarball,
-        PICKLAB_INSTALL_RUNTIME: "yarn",
+        PICKFORGE_INSTALL_FROM_TARBALL: tarball,
+        PICKFORGE_INSTALL_RUNTIME: "yarn",
       }),
     });
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("unsupported");
+  });
+
+  it("falls back to the deprecated runtime variable with a warning", async () => {
+    const { home, dir } = makeCase("sh-legacy-runtime");
+    const result = await run("sh", [installScript], {
+      cwd: dir,
+      env: baseEnv(home, {
+        PICKFORGE_INSTALL_FROM_TARBALL: tarball,
+        PICKLAB_INSTALL_RUNTIME: "yarn",
+      }),
+    });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(
+      "warning: PICKLAB_INSTALL_RUNTIME is deprecated; use PICKFORGE_INSTALL_RUNTIME instead",
+    );
+    expect(result.stderr.match(/PICKLAB_INSTALL_RUNTIME is deprecated/g)).toHaveLength(1);
   });
 });
 

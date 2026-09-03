@@ -56,7 +56,7 @@ const home = path.join(tmpRoot, "home");
 const projectDir = path.join(tmpRoot, "project");
 fs.mkdirSync(home, { recursive: true });
 fs.mkdirSync(projectDir, { recursive: true });
-const env: EnvLike = { ...process.env, PICKLAB_HOME: home };
+const env: EnvLike = { ...process.env, PICKFORGE_HOME: home };
 
 afterAll(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
@@ -199,7 +199,7 @@ describe("createDesktopSession registry reaping", () => {
     const isolatedHome = path.join(tmpRoot, "home-reap-desktop");
     const isolatedEnv: EnvLike = {
       ...process.env,
-      PICKLAB_HOME: isolatedHome,
+      PICKFORGE_HOME: isolatedHome,
     };
     const binDir = path.join(tmpRoot, "fake-xvfb");
     writeFakeXvfb(binDir);

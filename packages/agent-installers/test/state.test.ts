@@ -20,7 +20,7 @@ afterEach(async () => {
 });
 
 describe("readAgentsState legacy home fallback", () => {
-  it("reads a legacy ~/.picklab/agents/state.json when PICKLAB_HOME is unset", async () => {
+  it("reads a legacy ~/.picklab/agents/state.json when PICKFORGE_HOME is unset", async () => {
     const legacyDir = path.join(fakeHome, ".picklab", "agents");
     await fs.promises.mkdir(legacyDir, { recursive: true });
     await fs.promises.writeFile(
@@ -62,7 +62,7 @@ describe("readAgentsState legacy home fallback", () => {
     expect(state.agents.codex?.configPath).toBe("/new/codex");
   });
 
-  it("does not fall back once PICKLAB_HOME is set explicitly", async () => {
+  it("does not fall back once PICKFORGE_HOME is set explicitly", async () => {
     await fs.promises.mkdir(path.join(fakeHome, ".picklab", "agents"), {
       recursive: true,
     });
@@ -73,7 +73,7 @@ describe("readAgentsState legacy home fallback", () => {
       }),
     );
 
-    const state = await readAgentsState({ PICKLAB_HOME: "/other" });
+    const state = await readAgentsState({ PICKFORGE_HOME: "/other" });
     expect(state.agents).toEqual({});
   });
 

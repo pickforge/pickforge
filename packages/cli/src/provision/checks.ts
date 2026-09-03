@@ -127,7 +127,7 @@ export function evaluateChecks(s: DetectionSnapshot): DoctorCheck[] {
       hint:
         "project-committed config cannot select custom storage (it travels " +
         "with git clone); set storage.mode in the global config instead, " +
-        "or PICKLAB_STORAGE_MODE/PICKLAB_STORAGE_PATH",
+        "or PICKFORGE_STORAGE_MODE/PICKFORGE_STORAGE_PATH",
     });
   }
 

@@ -46,11 +46,11 @@ export async function connectLab(opts: {
 }): Promise<ConnectedLab> {
   // Default new runs to the pre-#34 project-local layout so existing
   // fixtures (`writeSyntheticRun`, hardcoded `.picklab/runs` assertions)
-  // keep working; individual tests can still override PICKLAB_STORAGE_MODE
+  // keep working; individual tests can still override PICKFORGE_STORAGE_MODE
   // via opts.env to exercise the new "home" default explicitly.
   const server = createMcpServer({
     ...opts,
-    env: { PICKLAB_STORAGE_MODE: "project-local", ...opts.env },
+    env: { PICKFORGE_STORAGE_MODE: "project-local", ...opts.env },
   });
   const client = new Client({ name: "pickforge-lab-test", version: "0.0.0" });
   const [clientTransport, serverTransport] =

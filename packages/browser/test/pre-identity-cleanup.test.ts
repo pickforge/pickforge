@@ -136,7 +136,7 @@ async function setUpStalledFakeChrome(): Promise<EnvLike> {
   return {
     ...process.env,
     HOME: home,
-    PICKLAB_HOME: path.join(root, "pickforge-home"),
+    PICKFORGE_HOME: path.join(root, "pickforge-home"),
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
   };
 }

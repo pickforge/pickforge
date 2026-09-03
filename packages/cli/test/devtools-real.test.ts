@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { readPickforgeEnv } from "@pickforge/lab-core";
 import { findOnPath } from "@pickforge/lab-desktop-linux";
 import {
   createBrowserSession,
@@ -33,7 +34,7 @@ afterEach(() => {
 
 describe("real DevTools relay prerequisites", () => {
   it("fails closed in required-browser environments when prerequisites are missing", () => {
-    if (process.env.PICKLAB_REQUIRE_BROWSER === "1") {
+    if (readPickforgeEnv(process.env, "REQUIRE_BROWSER") === "1") {
       expect({ hasXvfb, hasChrome }).toEqual({
         hasXvfb: true,
         hasChrome: true,
@@ -75,7 +76,7 @@ describe.skipIf(!ready)("real Chrome through the exact upstream relay", () => {
         throw new Error("Test HTTP server did not bind a TCP port");
       }
 
-      const registryEnv = { PICKLAB_HOME: home };
+      const registryEnv = { PICKFORGE_HOME: home };
       const session = await createBrowserSession({
         projectDir,
         registryEnv,
@@ -87,7 +88,7 @@ describe.skipIf(!ready)("real Chrome through the exact upstream relay", () => {
           cliEnv[key] = value;
         }
       }
-      cliEnv.PICKLAB_HOME = home;
+      cliEnv.PICKFORGE_HOME = home;
 
       const transport = new StdioClientTransport({
         command: process.execPath,

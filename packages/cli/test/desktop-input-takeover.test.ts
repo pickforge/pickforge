@@ -22,8 +22,8 @@ let logs: string[];
 
 beforeEach(async () => {
   root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-desktop-takeover-"));
-  env = { PICKLAB_HOME: path.join(root, "home") };
-  process.env.PICKLAB_HOME = env.PICKLAB_HOME;
+  env = { PICKFORGE_HOME: path.join(root, "home") };
+  process.env.PICKFORGE_HOME = env.PICKFORGE_HOME;
   logs = [];
   vi.spyOn(console, "log").mockImplementation((line: string) => {
     logs.push(line);
@@ -33,7 +33,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   vi.restoreAllMocks();
-  delete process.env.PICKLAB_HOME;
+  delete process.env.PICKFORGE_HOME;
   process.exitCode = 0;
   await fs.promises.rm(root, { recursive: true, force: true });
 });

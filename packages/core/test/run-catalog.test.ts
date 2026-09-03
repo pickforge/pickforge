@@ -20,7 +20,7 @@ beforeEach(async () => {
   root = await fs.promises.mkdtemp(
     path.join(os.tmpdir(), "pickforge-lab-run-catalog-"),
   );
-  vi.stubEnv("PICKLAB_STORAGE_MODE", "project-local");
+  vi.stubEnv("PICKFORGE_STORAGE_MODE", "project-local");
 });
 
 afterEach(async () => {
@@ -224,12 +224,12 @@ describe("RunCatalog", () => {
 
 describe("openRunCatalog storage modes", () => {
   // These tests set env explicitly per call (not via the file-level
-  // PICKLAB_STORAGE_MODE stub) so they exercise the real "home" default.
+  // PICKFORGE_STORAGE_MODE stub) so they exercise the real "home" default.
   it("defaults new runs under the home root, isolated per project, with no files in the project dir", async () => {
     const home = path.join(root, "home");
     const project = path.join(root, "project");
     await fs.promises.mkdir(project, { recursive: true });
-    const env = { PICKLAB_HOME: home };
+    const env = { PICKFORGE_HOME: home };
 
     const run = await createRun(project, "smoke", {}, env);
 
@@ -244,7 +244,7 @@ describe("openRunCatalog storage modes", () => {
     const home = path.join(root, "home");
     const project = path.join(root, "project");
     await fs.promises.mkdir(project, { recursive: true });
-    const env = { PICKLAB_HOME: home };
+    const env = { PICKFORGE_HOME: home };
     const legacyRoot = path.join(project, ".picklab", "runs");
     await writeRun(legacyRoot, "legacy-run");
 
@@ -263,7 +263,7 @@ describe("openRunCatalog storage modes", () => {
     const projectB = path.join(root, "project-b");
     await fs.promises.mkdir(projectA, { recursive: true });
     await fs.promises.mkdir(projectB, { recursive: true });
-    const env = { PICKLAB_HOME: home };
+    const env = { PICKFORGE_HOME: home };
 
     const runA = await createRun(projectA, "a-run", {}, env);
     const runB = await createRun(projectB, "b-run", {}, env);
@@ -279,7 +279,7 @@ describe("openRunCatalog storage modes", () => {
     const home = path.join(root, "home");
     const project = path.join(root, "project");
     await fs.promises.mkdir(project, { recursive: true });
-    const env = { PICKLAB_HOME: home, PICKLAB_STORAGE_MODE: "project-local" };
+    const env = { PICKFORGE_HOME: home, PICKFORGE_STORAGE_MODE: "project-local" };
 
     const run = await createRun(project, "local", {}, env);
 
@@ -293,7 +293,7 @@ describe("openRunCatalog storage modes", () => {
     const project = path.join(root, "project");
     await fs.promises.mkdir(project, { recursive: true });
     await expect(
-      createRun(project, "x", {}, { PICKLAB_STORAGE_MODE: "custom" }),
+      createRun(project, "x", {}, { PICKFORGE_STORAGE_MODE: "custom" }),
     ).rejects.toThrow(/storage path/i);
   });
 
@@ -302,8 +302,8 @@ describe("openRunCatalog storage modes", () => {
     await fs.promises.mkdir(project, { recursive: true });
     await expect(
       createRun(project, "x", {}, {
-        PICKLAB_STORAGE_MODE: "custom",
-        PICKLAB_STORAGE_PATH: "relative/artifacts",
+        PICKFORGE_STORAGE_MODE: "custom",
+        PICKFORGE_STORAGE_PATH: "relative/artifacts",
       }),
     ).rejects.toThrow(/absolute/i);
   });
@@ -313,8 +313,8 @@ describe("openRunCatalog storage modes", () => {
     const custom = path.join(root, "custom-artifacts");
     await fs.promises.mkdir(project, { recursive: true });
     const env = {
-      PICKLAB_STORAGE_MODE: "custom",
-      PICKLAB_STORAGE_PATH: custom,
+      PICKFORGE_STORAGE_MODE: "custom",
+      PICKFORGE_STORAGE_PATH: custom,
     };
 
     const run = await createRun(project, "x", {}, env);

@@ -80,7 +80,7 @@ describe("resolveRunStorage", () => {
     const home = path.join(root, "home");
     const project = path.join(root, "project");
     await fs.promises.mkdir(project, { recursive: true });
-    const env = { PICKLAB_HOME: home };
+    const env = { PICKFORGE_HOME: home };
 
     const resolved = await resolveRunStorage(project, env);
 
@@ -91,12 +91,12 @@ describe("resolveRunStorage", () => {
     );
   });
 
-  it("resolves project-local mode from PICKLAB_STORAGE_MODE", async () => {
+  it("resolves project-local mode from PICKFORGE_STORAGE_MODE", async () => {
     const project = path.join(root, "project");
     await fs.promises.mkdir(project, { recursive: true });
 
     const resolved = await resolveRunStorage(project, {
-      PICKLAB_STORAGE_MODE: "project-local",
+      PICKFORGE_STORAGE_MODE: "project-local",
     });
 
     expect(resolved.mode).toBe("project-local");
@@ -121,8 +121,8 @@ describe("resolveRunStorage", () => {
     await saveProjectConfig(project, { storage: { mode: "project-local" } });
 
     const resolved = await resolveRunStorage(project, {
-      PICKLAB_HOME: home,
-      PICKLAB_STORAGE_MODE: "home",
+      PICKFORGE_HOME: home,
+      PICKFORGE_STORAGE_MODE: "home",
     });
 
     expect(resolved.mode).toBe("home");
@@ -134,24 +134,24 @@ describe("resolveRunStorage", () => {
     const custom = path.join(root, "custom-artifacts");
     await fs.promises.mkdir(project, { recursive: true });
     await saveGlobalConfig({ storage: { mode: "custom", path: custom } }, {
-      PICKLAB_HOME: home,
+      PICKFORGE_HOME: home,
     });
 
-    const resolved = await resolveRunStorage(project, { PICKLAB_HOME: home });
+    const resolved = await resolveRunStorage(project, { PICKFORGE_HOME: home });
 
     expect(resolved.mode).toBe("custom");
     expect(resolved.runsDir).toBe(path.join(custom, "runs"));
     expect(resolved.rejectedProjectCustom).toBeUndefined();
   });
 
-  it("resolves custom mode from PICKLAB_STORAGE_MODE + PICKLAB_STORAGE_PATH", async () => {
+  it("resolves custom mode from PICKFORGE_STORAGE_MODE + PICKFORGE_STORAGE_PATH", async () => {
     const project = path.join(root, "project");
     const custom = path.join(root, "custom-artifacts");
     await fs.promises.mkdir(project, { recursive: true });
 
     const resolved = await resolveRunStorage(project, {
-      PICKLAB_STORAGE_MODE: "custom",
-      PICKLAB_STORAGE_PATH: custom,
+      PICKFORGE_STORAGE_MODE: "custom",
+      PICKFORGE_STORAGE_PATH: custom,
     });
 
     expect(resolved.mode).toBe("custom");
@@ -163,7 +163,7 @@ describe("resolveRunStorage", () => {
     await fs.promises.mkdir(project, { recursive: true });
 
     await expect(
-      resolveRunStorage(project, { PICKLAB_STORAGE_MODE: "custom" }),
+      resolveRunStorage(project, { PICKFORGE_STORAGE_MODE: "custom" }),
     ).rejects.toThrow(StorageConfigError);
   });
 
@@ -173,8 +173,8 @@ describe("resolveRunStorage", () => {
 
     await expect(
       resolveRunStorage(project, {
-        PICKLAB_STORAGE_MODE: "custom",
-        PICKLAB_STORAGE_PATH: "relative/path",
+        PICKFORGE_STORAGE_MODE: "custom",
+        PICKFORGE_STORAGE_PATH: "relative/path",
       }),
     ).rejects.toThrow(/absolute/i);
   });
@@ -190,7 +190,7 @@ describe("resolveRunStorage", () => {
       });
 
       const resolved = await resolveRunStorage(project, {
-        PICKLAB_HOME: home,
+        PICKFORGE_HOME: home,
       });
 
       expect(resolved.mode).toBe("home");
@@ -206,14 +206,14 @@ describe("resolveRunStorage", () => {
       const hostilePath = path.join(root, "attacker-controlled");
       await fs.promises.mkdir(project, { recursive: true });
       await saveGlobalConfig({ storage: { mode: "project-local" } }, {
-        PICKLAB_HOME: home,
+        PICKFORGE_HOME: home,
       });
       await saveProjectConfig(project, {
         storage: { mode: "custom", path: hostilePath },
       });
 
       const resolved = await resolveRunStorage(project, {
-        PICKLAB_HOME: home,
+        PICKFORGE_HOME: home,
       });
 
       expect(resolved.mode).toBe("project-local");
@@ -236,12 +236,12 @@ describe("resolveRunStorage", () => {
       const project = path.join(root, "project");
       await fs.promises.mkdir(project, { recursive: true });
       await saveGlobalConfig({ storage: { mode: "project-local" } }, {
-        PICKLAB_HOME: home,
+        PICKFORGE_HOME: home,
       });
       await saveProjectConfig(project, { storage: { mode: "home" } });
 
       const resolved = await resolveRunStorage(project, {
-        PICKLAB_HOME: home,
+        PICKFORGE_HOME: home,
       });
 
       expect(resolved.mode).toBe("home");
@@ -257,8 +257,8 @@ describe("resolveRunStorage", () => {
       });
 
       const resolved = await resolveRunStorage(project, {
-        PICKLAB_STORAGE_MODE: "custom",
-        PICKLAB_STORAGE_PATH: custom,
+        PICKFORGE_STORAGE_MODE: "custom",
+        PICKFORGE_STORAGE_PATH: custom,
       });
 
       expect(resolved.mode).toBe("custom");
@@ -281,8 +281,8 @@ describe("resolveRunStorage", () => {
       // the project layer's path.
       await expect(
         resolveRunStorage(project, {
-          PICKLAB_HOME: home,
-          PICKLAB_STORAGE_MODE: "custom",
+          PICKFORGE_HOME: home,
+          PICKFORGE_STORAGE_MODE: "custom",
         }),
       ).rejects.toThrow(StorageConfigError);
     });
@@ -295,8 +295,8 @@ describe("resolveRunStorage", () => {
 
       await expect(
         resolveRunStorage(project, {
-          PICKLAB_STORAGE_MODE: "custom",
-          PICKLAB_STORAGE_PATH: project,
+          PICKFORGE_STORAGE_MODE: "custom",
+          PICKFORGE_STORAGE_PATH: project,
         }),
       ).rejects.toThrow(/outside the project directory/i);
     });
@@ -307,8 +307,8 @@ describe("resolveRunStorage", () => {
 
       await expect(
         resolveRunStorage(project, {
-          PICKLAB_STORAGE_MODE: "custom",
-          PICKLAB_STORAGE_PATH: path.join(project, "artifacts"),
+          PICKFORGE_STORAGE_MODE: "custom",
+          PICKFORGE_STORAGE_PATH: path.join(project, "artifacts"),
         }),
       ).rejects.toThrow(/outside the project directory/i);
     });
@@ -319,8 +319,8 @@ describe("resolveRunStorage", () => {
       await fs.promises.mkdir(project, { recursive: true });
 
       const resolved = await resolveRunStorage(project, {
-        PICKLAB_STORAGE_MODE: "custom",
-        PICKLAB_STORAGE_PATH: sibling,
+        PICKFORGE_STORAGE_MODE: "custom",
+        PICKFORGE_STORAGE_PATH: sibling,
       });
 
       expect(resolved.runsDir).toBe(path.join(sibling, "runs"));
@@ -333,7 +333,7 @@ describe("repo cleanliness smoke", () => {
     const home = path.join(root, "home");
     const project = path.join(root, "target-repo");
     await fs.promises.mkdir(project, { recursive: true });
-    const env = { ...process.env, PICKLAB_HOME: home };
+    const env = { ...process.env, PICKFORGE_HOME: home };
 
     await execFileAsync("git", ["init", "-q"], { cwd: project });
     await execFileAsync("git", ["config", "user.email", "test@example.com"], {

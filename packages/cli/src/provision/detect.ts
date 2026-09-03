@@ -11,6 +11,7 @@ import {
   legacyPickforgeHome,
   loadConfig,
   picklabHome,
+  readPickforgeEnv,
   resolvedDefaults,
   resolveRunStorage,
   runCommand,
@@ -25,7 +26,7 @@ import {
 export interface DetectionSnapshot {
   picklabHome: { path: string; exists: boolean; writable: boolean };
   /** Present only when the pre-#34 `~/.picklab` root still exists and
-   * differs from the current default (never when `PICKLAB_HOME` is set
+   * differs from the current default (never when `PICKFORGE_HOME` is set
    * explicitly — that is the user's own root, not a legacy one). */
   legacyHome: { path: string } | null;
   config: { ok: boolean; error: string | null; profile: PickforgeProfile | null };
@@ -148,13 +149,11 @@ export async function collectSnapshot(
     // a run.
   }
 
+  const kvmPath = readPickforgeEnv(env, "KVM_PATH");
   const androidEnv = detectAndroidEnvironment({
     env,
     homeDir: env.HOME !== undefined && env.HOME !== "" ? env.HOME : undefined,
-    kvmPath:
-      env.PICKLAB_KVM_PATH !== undefined && env.PICKLAB_KVM_PATH !== ""
-        ? env.PICKLAB_KVM_PATH
-        : undefined,
+    kvmPath: kvmPath !== undefined && kvmPath !== "" ? kvmPath : undefined,
   });
   const avds = await listAvds({ sdk: androidEnv.sdkRoot, env });
 

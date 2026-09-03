@@ -12,6 +12,7 @@ import {
   processIdentityMatches,
   reapDeadRunningSessions,
   readProcessIdentity,
+  readPickforgeEnv,
   sessionsDir,
   startDaemon,
   stopProcessGroupVerified,
@@ -61,7 +62,7 @@ function assertNotAborted(signal: AbortSignal | undefined): void {
 
 export interface CreateBrowserSessionOptions {
   projectDir: string;
-  /** Registry env (PICKLAB_HOME) for session records. */
+  /** Registry env (PICKFORGE_HOME) for session records. */
   registryEnv?: EnvLike;
   /** Spawn env: source for PATH, locale, and Chrome binary detection. */
   env?: EnvLike;
@@ -372,7 +373,9 @@ export async function createBrowserSession(
       profileDir: layout.profileDir,
       width: xvfb.width,
       height: xvfb.height,
-      noSandbox: opts.noSandbox ?? spawnEnv.PICKLAB_CHROME_NO_SANDBOX === "1",
+      noSandbox:
+        opts.noSandbox ??
+        readPickforgeEnv(spawnEnv, "CHROME_NO_SANDBOX") === "1",
       ...(opts.extraArgs !== undefined ? { extraArgs: opts.extraArgs } : {}),
       ...(opts.startUrl !== undefined ? { startUrl: opts.startUrl } : {}),
     });

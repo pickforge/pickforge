@@ -72,9 +72,9 @@ describe("runCommand", () => {
       node,
       [
         "-e",
-        "console.log(process.cwd(), process.env.PICKLAB_TEST, typeof process.env.PATH)",
+        "console.log(process.cwd(), process.env.PICKFORGE_TEST, typeof process.env.PATH)",
       ],
-      { cwd: dir, env: { PICKLAB_TEST: "yes" } },
+      { cwd: dir, env: { PICKFORGE_TEST: "yes" } },
     );
     expect(result.stdout).toContain("yes");
     expect(result.stdout).toContain("string");
@@ -86,9 +86,9 @@ describe("runCommand", () => {
     const result = await runCommand(
       node,
       ["-e", "console.log(JSON.stringify(Object.keys(process.env)))"],
-      { cleanEnv: true, env: { PICKLAB_ONLY: "1" } },
+      { cleanEnv: true, env: { PICKFORGE_ONLY: "1" } },
     );
-    expect(JSON.parse(result.stdout)).toEqual(["PICKLAB_ONLY"]);
+    expect(JSON.parse(result.stdout)).toEqual(["PICKFORGE_ONLY"]);
   });
 
   it("does not crash when the child exits before consuming stdin", async () => {

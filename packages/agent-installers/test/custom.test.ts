@@ -16,7 +16,7 @@ let env: Record<string, string>;
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-custom-"));
-  env = { PICKLAB_HOME: path.join(tmpDir, ".picklab") };
+  env = { PICKFORGE_HOME: path.join(tmpDir, ".picklab") };
 });
 
 afterEach(() => {
@@ -48,7 +48,7 @@ describe("addCustomAgent / listCustomAgents / removeCustomAgent", () => {
       env,
     );
     expect(agent.configPath).toBe(
-      path.join(env.PICKLAB_HOME, "agents", "my-agent.json"),
+      path.join(env.PICKFORGE_HOME, "agents", "my-agent.json"),
     );
     expect(JSON.parse(fs.readFileSync(agent.configPath, "utf8"))).toEqual({
       mcpServers: { picklab: { command: "picklab", args: ["mcp", "serve"] } },

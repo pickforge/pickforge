@@ -46,7 +46,7 @@ beforeEach(() => {
   writeFakeChrome(binDir, "ready");
   env = {
     HOME: home,
-    PICKLAB_HOME: home,
+    PICKFORGE_HOME: home,
     PATH: fakePath(binDir),
     SECRET_TOKEN: PLANTED_SECRET,
   };

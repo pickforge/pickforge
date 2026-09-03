@@ -61,7 +61,7 @@ beforeEach(() => {
   fs.mkdirSync(home, { recursive: true });
   env = {
     HOME: home,
-    PICKLAB_HOME: path.join(home, ".picklab"),
+    PICKFORGE_HOME: path.join(home, ".picklab"),
     PATH: path.join(tmpDir, "empty-bin"),
   };
 });
@@ -176,12 +176,12 @@ describe("picklab agents link cursor", () => {
 
     expect(
       fs.existsSync(
-        path.join(env.PICKLAB_HOME, "agents", "picklab-mcp.json"),
+        path.join(env.PICKFORGE_HOME, "agents", "picklab-mcp.json"),
       ),
     ).toBe(true);
     expect(
       fs.existsSync(
-        path.join(env.PICKLAB_HOME, "agents", "picklab-mcp.toml"),
+        path.join(env.PICKFORGE_HOME, "agents", "picklab-mcp.toml"),
       ),
     ).toBe(true);
 
@@ -500,7 +500,7 @@ describe("picklab agents add / unlink (custom)", () => {
     const addReport = parseJson(added);
     expect(addReport.ok).toBe(true);
     expect(addReport.configPath).toBe(
-      path.join(env.PICKLAB_HOME, "agents", "my-agent.json"),
+      path.join(env.PICKFORGE_HOME, "agents", "my-agent.json"),
     );
     expect(addReport.command).toBe("picklab");
     expect(addReport.args).toEqual(["mcp", "serve"]);
@@ -642,7 +642,7 @@ describe("picklab agents doctor", () => {
   });
 
   it("reports broken symlinks under the agents dir", async () => {
-    const agents = path.join(env.PICKLAB_HOME, "agents");
+    const agents = path.join(env.PICKFORGE_HOME, "agents");
     fs.mkdirSync(agents, { recursive: true });
     fs.symlinkSync(
       path.join(tmpDir, "gone"),

@@ -29,7 +29,7 @@ let project: string;
 // covered by storage.test.ts and run-catalog.test.ts.
 beforeEach(async () => {
   project = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-evi-"));
-  vi.stubEnv("PICKLAB_STORAGE_MODE", "project-local");
+  vi.stubEnv("PICKFORGE_STORAGE_MODE", "project-local");
 });
 
 afterEach(async () => {
@@ -1338,7 +1338,7 @@ describe("finalized-run retention", () => {
     const home = await fs.promises.mkdtemp(
       path.join(os.tmpdir(), "pickforge-lab-evi-prune-home-"),
     );
-    const homeEnv = { PICKLAB_HOME: home };
+    const homeEnv = { PICKFORGE_HOME: home };
     try {
       // 15 pre-existing legacy finalized runs (the file-level stub keeps
       // `finalizedEvidenceRun`'s default env at project-local).

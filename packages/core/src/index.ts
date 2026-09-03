@@ -1,5 +1,7 @@
 export const packageName = "@pickforge/lab-core";
 
+export { readPickforgeEnv, type EnvLike } from "./env-compat.js";
+
 export {
   agentsDir,
   ensureDir,
@@ -16,7 +18,6 @@ export {
   runsDir,
   sessionsDir,
   writeFileAtomic,
-  type EnvLike,
 } from "./paths.js";
 
 export {

@@ -113,9 +113,9 @@ function makeEnv(
   }
   const env: Record<string, string> = {
     HOME: home,
-    PICKLAB_HOME: path.join(home, ".picklab"),
+    PICKFORGE_HOME: path.join(home, ".picklab"),
     PATH: bin,
-    PICKLAB_KVM_PATH: path.join(tmp, "no-kvm"),
+    PICKFORGE_KVM_PATH: path.join(tmp, "no-kvm"),
   };
   if (opts.sdk !== undefined) {
     env.ANDROID_HOME = opts.sdk;
@@ -180,10 +180,10 @@ describe("pickforge-lab doctor", () => {
         x11vnc: "exit 0",
       },
     });
-    fs.mkdirSync(env.PICKLAB_HOME!, { recursive: true });
+    fs.mkdirSync(env.PICKFORGE_HOME!, { recursive: true });
     const kvmPath = path.join(tmpDir, "kvm");
     fs.writeFileSync(kvmPath, "", { mode: 0o660 });
-    env.PICKLAB_KVM_PATH = kvmPath;
+    env.PICKFORGE_KVM_PATH = kvmPath;
 
     const result = await runCli(["doctor", "--json"], env, tmpDir);
     expect(result.code).toBe(0);
@@ -203,7 +203,7 @@ describe("pickforge-lab doctor", () => {
     expect(result.code).toBe(0);
     const report = parseJson(result);
     expect(report.fix.status).toBe("completed");
-    expect(fs.statSync(env.PICKLAB_HOME!).isDirectory()).toBe(true);
+    expect(fs.statSync(env.PICKFORGE_HOME!).isDirectory()).toBe(true);
     expect(report.fix.results).toEqual([
       { id: "pickforge-home", ok: true, detail: expect.stringContaining("mkdir") },
     ]);
@@ -244,7 +244,7 @@ describe("pickforge-lab doctor", () => {
     expect(result.code).toBe(0);
     const report = parseJson(result);
     expect(fs.existsSync(path.join(sdk, "avdmanager.log"))).toBe(false);
-    expect(fs.statSync(env.PICKLAB_HOME!).isDirectory()).toBe(true);
+    expect(fs.statSync(env.PICKFORGE_HOME!).isDirectory()).toBe(true);
     const skipped = (report.fix.skipped as string[]).join("\n");
     expect(skipped).toContain("avd: skipped (requires consent");
     expect(skipped).toContain("--yes");
@@ -283,7 +283,7 @@ describe("pickforge-lab doctor", () => {
     expect(
       (report.fix.steps as Array<{ id: string }>).map((step) => step.id),
     ).toEqual(["pickforge-home"]);
-    expect(fs.existsSync(env.PICKLAB_HOME!)).toBe(false);
+    expect(fs.existsSync(env.PICKFORGE_HOME!)).toBe(false);
   });
 });
 
@@ -305,7 +305,7 @@ describe("pickforge-lab init", () => {
       fs.readFileSync(path.join(projectDir, ".picklab", "config.json"), "utf8"),
     ) as Record<string, unknown>;
     expect(config).toEqual({ profile: "generic" });
-    expect(fs.statSync(env.PICKLAB_HOME!).isDirectory()).toBe(true);
+    expect(fs.statSync(env.PICKFORGE_HOME!).isDirectory()).toBe(true);
   });
 
   it("does not write anything in --dry-run", async () => {
@@ -319,7 +319,7 @@ describe("pickforge-lab init", () => {
     );
     expect(result.code).toBe(0);
     expect(fs.existsSync(path.join(projectDir, ".picklab"))).toBe(false);
-    expect(fs.existsSync(env.PICKLAB_HOME!)).toBe(false);
+    expect(fs.existsSync(env.PICKFORGE_HOME!)).toBe(false);
   });
 
   // Graphical sudo is Linux-only (locked v1 contract) — on any other
@@ -348,7 +348,7 @@ describe("pickforge-lab init", () => {
     expect((report.errors as string[]).join("\n")).toContain("--yes");
     expect(fs.existsSync(sudoLog)).toBe(false);
     expect(fs.existsSync(path.join(projectDir, ".picklab"))).toBe(false);
-    expect(fs.existsSync(env.PICKLAB_HOME!)).toBe(false);
+    expect(fs.existsSync(env.PICKFORGE_HOME!)).toBe(false);
   });
 
   it("fails closed when --create-avd lacks --yes in a non-interactive session", async () => {
@@ -366,7 +366,7 @@ describe("pickforge-lab init", () => {
     expect((report.errors as string[]).join("\n")).toContain("--yes");
     expect(fs.existsSync(path.join(sdk, "avdmanager.log"))).toBe(false);
     expect(fs.existsSync(path.join(projectDir, ".picklab"))).toBe(false);
-    expect(fs.existsSync(env.PICKLAB_HOME!)).toBe(false);
+    expect(fs.existsSync(env.PICKFORGE_HOME!)).toBe(false);
   });
 
   it("reports required AVD consent refusal before the required-check error", async () => {
@@ -514,7 +514,7 @@ describe("pickforge-lab init", () => {
       'sdkmanager "system-images;android-35;google_apis;x86_64"',
     );
     expect(fs.existsSync(path.join(projectDir, ".picklab"))).toBe(false);
-    expect(fs.existsSync(env.PICKLAB_HOME!)).toBe(false);
+    expect(fs.existsSync(env.PICKFORGE_HOME!)).toBe(false);
   });
 
   it("prints a recovery hint when init fails after writing project config", async () => {
@@ -571,7 +571,7 @@ describe("pickforge-lab init", () => {
       ["project-config", "pickforge-home"],
     );
     expect(fs.existsSync(path.join(projectDir, ".picklab"))).toBe(false);
-    expect(fs.existsSync(env.PICKLAB_HOME!)).toBe(false);
+    expect(fs.existsSync(env.PICKFORGE_HOME!)).toBe(false);
   });
 
   it("fails closed with an actionable manual fallback when sudo exists but no graphical session is available", async () => {
@@ -641,7 +641,7 @@ describe("pickforge-lab init", () => {
     expect(report.errors.join("\n")).toContain("sudo not found");
     expect(fs.existsSync(path.join(sdk, "avdmanager.log"))).toBe(false);
     expect(fs.existsSync(path.join(projectDir, ".picklab"))).toBe(false);
-    expect(fs.existsSync(env.PICKLAB_HOME!)).toBe(false);
+    expect(fs.existsSync(env.PICKFORGE_HOME!)).toBe(false);
   });
 
   it("reports an unrelated planning error and missing privilege support", async () => {
@@ -667,7 +667,7 @@ describe("pickforge-lab init", () => {
     expect(report.errors[0]).toContain("sdkmanager");
     expect(report.errors[1]).toContain("sudo not found");
     expect(fs.existsSync(path.join(projectDir, ".picklab"))).toBe(false);
-    expect(fs.existsSync(env.PICKLAB_HOME!)).toBe(false);
+    expect(fs.existsSync(env.PICKFORGE_HOME!)).toBe(false);
   });
 
   // Linux-only (see rationale above).
@@ -766,7 +766,7 @@ describe("pickforge-lab init", () => {
     ) as Record<string, unknown>;
     expect(projectConfig).toEqual({ profile: "android" });
     const globalConfig = JSON.parse(
-      fs.readFileSync(path.join(env.PICKLAB_HOME!, "config.json"), "utf8"),
+      fs.readFileSync(path.join(env.PICKFORGE_HOME!, "config.json"), "utf8"),
     ) as Record<string, any>;
     expect(globalConfig.android.avdName).toBe("pickforge-avd");
   });
@@ -988,7 +988,7 @@ describe("pickforge-lab setup lab-user", () => {
       "-A chmod 750 /var/lib/pickforge/lab-home",
     ]);
     const globalConfig = JSON.parse(
-      fs.readFileSync(path.join(env.PICKLAB_HOME!, "config.json"), "utf8"),
+      fs.readFileSync(path.join(env.PICKFORGE_HOME!, "config.json"), "utf8"),
     ) as Record<string, any>;
     expect(globalConfig.labUser).toEqual({
       name: "pickforge-lab",
@@ -1033,7 +1033,7 @@ describe("pickforge-lab setup lab-user", () => {
     ]);
     expect(JSON.stringify(report)).toContain("API_TOKEN=[REDACTED]");
     expect(JSON.stringify(report)).not.toContain("planted-secret");
-    expect(fs.existsSync(path.join(env.PICKLAB_HOME!, "config.json"))).toBe(
+    expect(fs.existsSync(path.join(env.PICKFORGE_HOME!, "config.json"))).toBe(
       false,
     );
   });

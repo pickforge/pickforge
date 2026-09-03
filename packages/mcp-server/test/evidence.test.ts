@@ -22,7 +22,7 @@ const sessionId = "desk-evidence";
 
 beforeEach(() => {
   dirs = makeLabDirs();
-  env = { PICKLAB_HOME: dirs.home };
+  env = { PICKFORGE_HOME: dirs.home };
 });
 
 afterEach(() => {
@@ -42,7 +42,7 @@ describe("MCP evidence producer", () => {
 
     await expect(
       withMcpEvidence(
-        { projectDir: dirs.projectDir, env: { PICKLAB_HOME: dirs.home } },
+        { projectDir: dirs.projectDir, env: { PICKFORGE_HOME: dirs.home } },
         {
           sessionId,
           tool: "desktop_launch",
@@ -68,7 +68,7 @@ describe("MCP evidence producer", () => {
 
   it("records structured tool errors as failed actions", async () => {
     const result = await withMcpEvidence(
-      { projectDir: dirs.projectDir, env: { PICKLAB_HOME: dirs.home } },
+      { projectDir: dirs.projectDir, env: { PICKFORGE_HOME: dirs.home } },
       { sessionId, tool: "android_run_adb" },
       async () => ({
         data: { code: 1 },
@@ -95,7 +95,7 @@ describe("MCP evidence producer", () => {
   ])("classifies %s failures as %s", async (failure, status) => {
     await expect(
       withMcpEvidence(
-        { projectDir: dirs.projectDir, env: { PICKLAB_HOME: dirs.home } },
+        { projectDir: dirs.projectDir, env: { PICKFORGE_HOME: dirs.home } },
         { sessionId, tool: "desktop_click" },
         async () => {
           throw failure;
@@ -111,7 +111,7 @@ describe("MCP evidence producer", () => {
     fs.writeFileSync(outside, "outside");
 
     await withMcpEvidence(
-      { projectDir: dirs.projectDir, env: { PICKLAB_HOME: dirs.home } },
+      { projectDir: dirs.projectDir, env: { PICKFORGE_HOME: dirs.home } },
       {
         sessionId,
         tool: "desktop_screenshot",
@@ -145,7 +145,7 @@ describe("MCP evidence producer", () => {
 
   it("does not create evidence without a session or when disabled", async () => {
     const withoutSession = await withMcpEvidence(
-      { projectDir: dirs.projectDir, env: { PICKLAB_HOME: dirs.home } },
+      { projectDir: dirs.projectDir, env: { PICKFORGE_HOME: dirs.home } },
       { tool: "desktop_click" },
       async ({ run }) => ({ data: { run } }),
     );
@@ -153,7 +153,7 @@ describe("MCP evidence producer", () => {
 
     await saveProjectConfig(dirs.projectDir, { evidence: { enabled: false } });
     const disabled = await withMcpEvidence(
-      { projectDir: dirs.projectDir, env: { PICKLAB_HOME: dirs.home } },
+      { projectDir: dirs.projectDir, env: { PICKFORGE_HOME: dirs.home } },
       { sessionId, tool: "desktop_click" },
       async ({ run }) => ({ data: { run } }),
     );
@@ -165,7 +165,7 @@ describe("MCP evidence producer", () => {
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       const result = await withMcpEvidence(
-        { projectDir: dirs.projectDir, env: { PICKLAB_HOME: dirs.home } },
+        { projectDir: dirs.projectDir, env: { PICKFORGE_HOME: dirs.home } },
         { sessionId, tool: "desktop_click" },
         async ({ run }) => {
           await fs.promises.rm(run!.dir, { recursive: true, force: true });

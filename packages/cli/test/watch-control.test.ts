@@ -78,14 +78,14 @@ async function delayedResolve<T>(value: T, ms: number): Promise<T> {
 async function createDesktop(): Promise<string> {
   const record = await createSession(
     { type: "desktop", projectDir: root, status: "running", desktop: { display: ":42" } },
-    { PICKLAB_HOME: path.join(root, "home") },
+    { PICKFORGE_HOME: path.join(root, "home") },
   );
   return record.id;
 }
 
 beforeEach(async () => {
   root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-watch-control-"));
-  process.env.PICKLAB_HOME = path.join(root, "home");
+  process.env.PICKFORGE_HOME = path.join(root, "home");
   startHumanTakeover.mockReset();
   endHumanTakeover.mockReset();
   renewHumanTakeover.mockReset();
@@ -97,7 +97,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  delete process.env.PICKLAB_HOME;
+  delete process.env.PICKFORGE_HOME;
   await fs.promises.rm(root, { recursive: true, force: true });
 });
 

@@ -81,11 +81,11 @@ function makeEnv(opts: EnvOptions = {}): Record<string, string> {
   }
   return {
     HOME: home,
-    PICKLAB_HOME: path.join(home, ".picklab"),
+    PICKFORGE_HOME: path.join(home, ".picklab"),
     // Default new runs to the pre-#34 project-local layout so existing
     // fixtures/assertions in this file keep working; tests that exercise the
     // new "home" default explicitly override this via opts.extra.
-    PICKLAB_STORAGE_MODE: "project-local",
+    PICKFORGE_STORAGE_MODE: "project-local",
     PATH: pathParts.join(":"),
     ...(opts.extra ?? {}),
   };
@@ -1123,7 +1123,7 @@ describe("pickforge-lab android (fake adb)", () => {
   it("fails closed on ambiguous default android sessions instead of running raw adb", async () => {
     const { env, adbLog } = fakeAdbEnv();
     const projectDir = makeProjectDir();
-    const sessionsDir = path.join(env.PICKLAB_HOME, "sessions");
+    const sessionsDir = path.join(env.PICKFORGE_HOME, "sessions");
     fs.mkdirSync(sessionsDir, { recursive: true });
     for (const [id, serial] of [
       ["andr-11111111", "emulator-5554"],
@@ -1166,7 +1166,7 @@ describe("pickforge-lab android (fake adb)", () => {
     const { env, adbLog } = fakeAdbEnv();
     const ownerProject = makeProjectDir("owner");
     const otherProject = makeProjectDir("other");
-    const sessionsDir = path.join(env.PICKLAB_HOME, "sessions");
+    const sessionsDir = path.join(env.PICKFORGE_HOME, "sessions");
     fs.mkdirSync(sessionsDir, { recursive: true });
     fs.writeFileSync(
       path.join(sessionsDir, "andr-33333333.json"),
@@ -1214,7 +1214,7 @@ describe("pickforge-lab android (fake adb)", () => {
 
   it("rejects a desktop session id passed to an android command", async () => {
     const { env } = fakeAdbEnv();
-    const sessionsDir = path.join(env.PICKLAB_HOME, "sessions");
+    const sessionsDir = path.join(env.PICKFORGE_HOME, "sessions");
     fs.mkdirSync(sessionsDir, { recursive: true });
     fs.writeFileSync(
       path.join(sessionsDir, "desk-12345678.json"),

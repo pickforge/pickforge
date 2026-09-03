@@ -57,7 +57,7 @@ let project: string;
 // `process.env`) rather than the new `home` default.
 beforeEach(async () => {
   project = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-evc-"));
-  vi.stubEnv("PICKLAB_STORAGE_MODE", "project-local");
+  vi.stubEnv("PICKFORGE_STORAGE_MODE", "project-local");
 });
 
 afterEach(async () => {

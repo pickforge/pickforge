@@ -12,12 +12,12 @@ import {
 
 let home: string;
 let project: string;
-let env: { PICKLAB_HOME: string };
+let env: { PICKFORGE_HOME: string };
 
 beforeEach(async () => {
   home = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-home-"));
   project = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-proj-"));
-  env = { PICKLAB_HOME: home };
+  env = { PICKFORGE_HOME: home };
 });
 
 afterEach(async () => {
@@ -129,7 +129,7 @@ describe("resolvedDefaults", () => {
 });
 
 describe("loadConfig legacy home fallback", () => {
-  it("reads an existing ~/.picklab global config when PICKLAB_HOME is unset and the new default has nothing yet", async () => {
+  it("reads an existing ~/.picklab global config when PICKFORGE_HOME is unset and the new default has nothing yet", async () => {
     const fakeHome = await fs.promises.mkdtemp(
       path.join(os.tmpdir(), "pickforge-lab-fakehome-"),
     );
@@ -184,7 +184,7 @@ describe("loadConfig legacy home fallback", () => {
     }
   });
 
-  it("does not fall back to ~/.picklab once PICKLAB_HOME is set explicitly", async () => {
+  it("does not fall back to ~/.picklab once PICKFORGE_HOME is set explicitly", async () => {
     const fakeHome = await fs.promises.mkdtemp(
       path.join(os.tmpdir(), "pickforge-lab-fakehome-"),
     );

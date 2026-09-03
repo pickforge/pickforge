@@ -35,7 +35,7 @@ describe.skipIf(!hasDesktopStack)("desktop flow (real Xvfb)", () => {
 
   beforeAll(async () => {
     dirs = makeLabDirs();
-    registryEnv = { ...process.env, PICKLAB_HOME: dirs.home };
+    registryEnv = { ...process.env, PICKFORGE_HOME: dirs.home };
     lab = await connectLab({ projectDir: dirs.projectDir, env: registryEnv });
   });
 

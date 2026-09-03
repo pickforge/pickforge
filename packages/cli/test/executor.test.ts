@@ -528,7 +528,7 @@ describe("executeProvisioning", () => {
           },
         },
       ],
-      { env: { PICKLAB_HOME: home }, projectDir },
+      { env: { PICKFORGE_HOME: home }, projectDir },
     );
     expect(result.ok).toBe(true);
     expect(

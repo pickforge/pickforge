@@ -1,7 +1,9 @@
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
+import { readPickforgeEnv } from "./packages/core/src/env-compat.js";
 
-const runLiveAndroid = process.env.PICKLAB_LIVE_ANDROID === "1";
+const runLiveAndroid =
+  readPickforgeEnv(process.env, "LIVE_ANDROID") === "1";
 
 export default defineConfig({
   resolve: {

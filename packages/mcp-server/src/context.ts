@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
+  readPickforgeEnv,
   resolveRunnableSession,
   resolveScreenshotTarget as resolveTarget,
   type EnvLike,
@@ -34,7 +35,7 @@ export function resolveContext(
 ): ServerContext {
   const env = opts.env ?? process.env;
   const projectDir = path.resolve(
-    opts.projectDir ?? env.PICKLAB_PROJECT_DIR ?? process.cwd(),
+    opts.projectDir ?? readPickforgeEnv(env, "PROJECT_DIR") ?? process.cwd(),
   );
   return { projectDir, env };
 }

@@ -23,7 +23,7 @@ const home = path.join(tmpRoot, "home");
 const projectDir = path.join(tmpRoot, "project");
 fs.mkdirSync(home, { recursive: true });
 fs.mkdirSync(projectDir, { recursive: true });
-const registryEnv: EnvLike = { ...process.env, PICKLAB_HOME: home };
+const registryEnv: EnvLike = { ...process.env, PICKFORGE_HOME: home };
 
 afterAll(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
@@ -111,7 +111,7 @@ describe("createAndroidSession", () => {
   it("marks the session as error and stops the emulator when boot times out", async () => {
     const sdk = makeFakeSdk({ bootCompleted: "0" });
     const isolatedHome = path.join(tmpRoot, "home-boot-timeout");
-    const isolatedEnv: EnvLike = { ...process.env, PICKLAB_HOME: isolatedHome };
+    const isolatedEnv: EnvLike = { ...process.env, PICKFORGE_HOME: isolatedHome };
     await expect(
       createAndroidSession({
         projectDir,
@@ -152,7 +152,7 @@ describe("createAndroidSession", () => {
     const isolatedHome = path.join(tmpRoot, "home-reap-android");
     const isolatedEnv: EnvLike = {
       ...process.env,
-      PICKLAB_HOME: isolatedHome,
+      PICKFORGE_HOME: isolatedHome,
     };
     const stale = await createSession(
       { type: "android", projectDir, android: { avdName: "old-avd" } },
@@ -198,7 +198,7 @@ describe("startEmulator failure detail", () => {
   it("includes the daemon log path when boot never completes", async () => {
     const sdk = makeFakeSdk({ bootCompleted: "0" });
     const failureEnv: EnvLike = {
-      PICKLAB_HOME: path.join(tmpRoot, "home-emu-failure"),
+      PICKFORGE_HOME: path.join(tmpRoot, "home-emu-failure"),
     };
     await expect(
       startEmulator({

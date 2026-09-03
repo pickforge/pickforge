@@ -31,7 +31,7 @@ let env: EnvLike;
 
 beforeEach(() => {
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-takeover-test-"));
-  env = { ...process.env, PICKLAB_HOME: path.join(tmpRoot, "home") };
+  env = { ...process.env, PICKFORGE_HOME: path.join(tmpRoot, "home") };
 });
 
 afterEach(() => {
@@ -39,7 +39,7 @@ afterEach(() => {
 });
 
 async function writeRawLease(sessionId: string, lease: HumanLease): Promise<string> {
-  const dir = path.join(env.PICKLAB_HOME as string, "sessions", sessionId);
+  const dir = path.join(env.PICKFORGE_HOME as string, "sessions", sessionId);
   fs.mkdirSync(dir, { recursive: true });
   const raw = `${JSON.stringify(lease)}\n`;
   fs.writeFileSync(path.join(dir, "human.lease.json"), raw);
@@ -126,7 +126,7 @@ describe("acquireHumanLease", () => {
   });
 
   it("sweeps a permit owned by a dead process instead of blocking the drain", async () => {
-    const dir = path.join(env.PICKLAB_HOME as string, "sessions", "desk-a7", "permits");
+    const dir = path.join(env.PICKFORGE_HOME as string, "sessions", "desk-a7", "permits");
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
       path.join(dir, "dead-permit.json"),
@@ -147,7 +147,7 @@ describe("withAgentPermit", () => {
   it("runs the action and cleans up its permit when no lease is held", async () => {
     const result = await withAgentPermit("desk-b1", env, async () => "ran");
     expect(result).toBe("ran");
-    const permitsDir = path.join(env.PICKLAB_HOME as string, "sessions", "desk-b1", "permits");
+    const permitsDir = path.join(env.PICKFORGE_HOME as string, "sessions", "desk-b1", "permits");
     expect(fs.existsSync(permitsDir) ? fs.readdirSync(permitsDir) : []).toEqual([]);
   });
 
@@ -160,7 +160,7 @@ describe("withAgentPermit", () => {
       }),
     ).rejects.toThrow(HumanControlActiveError);
     expect(ran).toBe(false);
-    const permitsDir = path.join(env.PICKLAB_HOME as string, "sessions", "desk-b2", "permits");
+    const permitsDir = path.join(env.PICKFORGE_HOME as string, "sessions", "desk-b2", "permits");
     expect(fs.existsSync(permitsDir) ? fs.readdirSync(permitsDir) : []).toEqual([]);
   });
 

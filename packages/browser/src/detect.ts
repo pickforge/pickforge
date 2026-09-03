@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import type { EnvLike } from "@pickforge/lab-core";
+import { readPickforgeEnv, type EnvLike } from "@pickforge/lab-core";
 import { findOnPath } from "@pickforge/lab-desktop-linux";
 
 /**
@@ -34,13 +34,13 @@ function overrideFrom(opts: DetectChromeOptions, env: EnvLike): string | undefin
   if (opts.binaryPath !== undefined && opts.binaryPath !== "") {
     return opts.binaryPath;
   }
-  const fromEnv = env.PICKLAB_CHROME_BIN;
+  const fromEnv = readPickforgeEnv(env, "CHROME_BIN");
   return fromEnv !== undefined && fromEnv !== "" ? fromEnv : undefined;
 }
 
 /**
  * Resolve a usable Chrome/Chromium binary, or `null` if none is available.
- * An explicit override (option or `PICKLAB_CHROME_BIN`) is honored only when it
+ * An explicit override (option or `PICKFORGE_CHROME_BIN`) is honored only when it
  * points at an executable file; otherwise we search `PATH` for known binaries.
  */
 export function detectChromeBinary(opts: DetectChromeOptions = {}): string | null {
@@ -72,13 +72,13 @@ export function requireChromeBinary(opts: DetectChromeOptions = {}): string {
   if (override !== undefined) {
     throw new Error(
       `Configured Chrome binary is not usable: "${override}". ` +
-        `Set PICKLAB_CHROME_BIN (or the binaryPath option) to an executable ` +
+        `Set PICKFORGE_CHROME_BIN (or the binaryPath option) to an executable ` +
         `Chrome/Chromium, or remove it to fall back to PATH detection.`,
     );
   }
   throw new Error(
     "No Chrome or Chromium binary found on PATH. PickLab looked for " +
       `${SUPPORTED_CHROME_BINARIES.join(", ")}. Install Google Chrome or ` +
-      "Chromium, or set PICKLAB_CHROME_BIN to the browser binary path.",
+      "Chromium, or set PICKFORGE_CHROME_BIN to the browser binary path.",
   );
 }

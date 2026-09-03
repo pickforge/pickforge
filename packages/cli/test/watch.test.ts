@@ -26,7 +26,7 @@ function syntheticVncPort(): number {
   return 5_900 + syntheticDisplayNumber;
 }
 const originalEnv = {
-  PICKLAB_HOME: process.env.PICKLAB_HOME,
+  PICKFORGE_HOME: process.env.PICKFORGE_HOME,
   PATH: process.env.PATH,
   DISPLAY: process.env.DISPLAY,
   WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY,
@@ -73,7 +73,7 @@ beforeEach(async () => {
   const closed = once(reservation, "close");
   reservation.close();
   await closed;
-  process.env.PICKLAB_HOME = path.join(root, "home");
+  process.env.PICKFORGE_HOME = path.join(root, "home");
   process.env.PATH = binDir;
   delete process.env.DISPLAY;
   delete process.env.WAYLAND_DISPLAY;
@@ -88,7 +88,7 @@ afterEach(async () => {
     }
     await destroySessionRecord(record.id).catch(() => {});
   }
-  restoreEnv("PICKLAB_HOME");
+  restoreEnv("PICKFORGE_HOME");
   restoreEnv("PATH");
   restoreEnv("DISPLAY");
   restoreEnv("WAYLAND_DISPLAY");

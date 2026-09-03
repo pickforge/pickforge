@@ -16,8 +16,8 @@ let logs: string[];
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-desktop-input-"));
-  savedPickforgeHome = process.env.PICKLAB_HOME;
-  process.env.PICKLAB_HOME = path.join(tmpDir, "home");
+  savedPickforgeHome = process.env.PICKFORGE_HOME;
+  process.env.PICKFORGE_HOME = path.join(tmpDir, "home");
   logs = [];
   vi.spyOn(console, "log").mockImplementation((line: string) => {
     logs.push(line);
@@ -28,9 +28,9 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   if (savedPickforgeHome === undefined) {
-    delete process.env.PICKLAB_HOME;
+    delete process.env.PICKFORGE_HOME;
   } else {
-    process.env.PICKLAB_HOME = savedPickforgeHome;
+    process.env.PICKFORGE_HOME = savedPickforgeHome;
   }
   fs.rmSync(tmpDir, { recursive: true, force: true });
   process.exitCode = 0;

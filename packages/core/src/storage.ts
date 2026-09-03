@@ -7,7 +7,8 @@ import {
   type StorageConfig,
   type StorageMode,
 } from "./config.js";
-import { picklabHome, runsDir, type EnvLike } from "./paths.js";
+import { readPickforgeEnv, type EnvLike } from "./env-compat.js";
+import { picklabHome, runsDir } from "./paths.js";
 
 export type { StorageConfig, StorageMode } from "./config.js";
 
@@ -79,7 +80,7 @@ export interface ResolvedRunStorage {
 }
 
 function envStorageMode(env: EnvLike): StorageMode | undefined {
-  const value = env.PICKLAB_STORAGE_MODE;
+  const value = readPickforgeEnv(env, "STORAGE_MODE");
   if (value === "home" || value === "project-local" || value === "custom") {
     return value;
   }
@@ -90,7 +91,7 @@ function validateCustomPath(customPath: string | undefined): string {
   if (customPath === undefined || customPath === "") {
     throw new StorageConfigError(
       'storage mode "custom" requires a storage path ' +
-        "(storage.path in config, or PICKLAB_STORAGE_PATH)",
+        "(storage.path in config, or PICKFORGE_STORAGE_PATH)",
     );
   }
   if (!path.isAbsolute(customPath)) {
@@ -111,9 +112,9 @@ function isSameOrDescendant(ancestor: string, descendant: string): boolean {
  * Resolve where new run artifacts should be written for a project.
  *
  * Reads `storage` from two config layers plus an environment override, in
- * increasing precedence: global config (`<PICKLAB_HOME>/config.json`),
- * project config (`.picklab/config.json`), then `PICKLAB_STORAGE_MODE` /
- * `PICKLAB_STORAGE_PATH` for automation and tests. **`custom` mode is an
+ * increasing precedence: global config (`<PICKFORGE_HOME>/config.json`),
+ * project config (`.picklab/config.json`), then `PICKFORGE_STORAGE_MODE` /
+ * `PICKFORGE_STORAGE_PATH` for automation and tests. **`custom` mode is an
  * exception to that precedence**: only the global-config layer or the env
  * override may select it (and supply its path) — project config is
  * repo-committed and travels with `git clone`, so honoring a `custom`
@@ -156,7 +157,7 @@ export async function resolveRunStorage(
     // from project config — project config never supplies a custom path,
     // regardless of which layer selected the mode.
     mode = envMode;
-    customPath = env.PICKLAB_STORAGE_PATH ?? globalStorage.path;
+    customPath = readPickforgeEnv(env, "STORAGE_PATH") ?? globalStorage.path;
   } else if (projectStorage.mode === "custom") {
     rejectedProjectCustom = { requestedPath: projectStorage.path };
     mode = globalStorage.mode ?? resolvedDefaults.storage.mode;

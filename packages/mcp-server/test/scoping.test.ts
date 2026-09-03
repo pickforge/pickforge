@@ -28,7 +28,7 @@ beforeEach(async () => {
   fs.mkdirSync(projectB, { recursive: true });
   const sdk = writeFakeAdbSdk(dirs.root, path.join(dirs.root, "adb.log"));
   const env = {
-    PICKLAB_HOME: dirs.home,
+    PICKFORGE_HOME: dirs.home,
     PATH: dirs.binDir,
     ANDROID_HOME: sdk,
   };
@@ -71,7 +71,7 @@ describe("project-scoped default session resolution", () => {
     fs.mkdirSync(projectC, { recursive: true });
     const labC = await connectLab({
       projectDir: projectC,
-      env: { PICKLAB_HOME: dirs.home, PATH: dirs.binDir },
+      env: { PICKFORGE_HOME: dirs.home, PATH: dirs.binDir },
     });
     try {
       const result = await labC.client.callTool({

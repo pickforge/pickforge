@@ -24,7 +24,7 @@ afterEach(async () => {
 describe("takeover_status", () => {
   it("reports agent-active, then human-active, then stale", async () => {
     dirs = makeLabDirs();
-    const env = { PICKLAB_HOME: dirs.home };
+    const env = { PICKFORGE_HOME: dirs.home };
     lab = await connectLab({ projectDir: dirs.projectDir, env });
     const id = writeDesktopSessionRecord(dirs.home, dirs.projectDir);
 
@@ -68,7 +68,7 @@ describe("takeover_status", () => {
 describe("desktop input tools fail closed under human control", () => {
   it("rejects desktop_click with a stable busy error while a lease is held, without touching xdotool", async () => {
     dirs = makeLabDirs();
-    const env = { PICKLAB_HOME: dirs.home };
+    const env = { PICKFORGE_HOME: dirs.home };
     lab = await connectLab({ projectDir: dirs.projectDir, env });
     const id = writeDesktopSessionRecord(dirs.home, dirs.projectDir);
 
@@ -86,7 +86,7 @@ describe("desktop input tools fail closed under human control", () => {
 
   it("rejects desktop_type and desktop_key the same way", async () => {
     dirs = makeLabDirs();
-    const env = { PICKLAB_HOME: dirs.home };
+    const env = { PICKFORGE_HOME: dirs.home };
     lab = await connectLab({ projectDir: dirs.projectDir, env });
     const id = writeDesktopSessionRecord(dirs.home, dirs.projectDir);
     await acquireHumanLease(id, env);
@@ -112,7 +112,7 @@ describe("desktop input tools fail closed under human control", () => {
 
   it("rejects desktop_launch too (a new client can grab focus on the shared display)", async () => {
     dirs = makeLabDirs();
-    const env = { PICKLAB_HOME: dirs.home };
+    const env = { PICKFORGE_HOME: dirs.home };
     lab = await connectLab({ projectDir: dirs.projectDir, env });
     const id = writeDesktopSessionRecord(dirs.home, dirs.projectDir);
     const lease = await acquireHumanLease(id, env);
@@ -131,7 +131,7 @@ describe("desktop input tools fail closed under human control", () => {
 
   it("leaves desktop_screenshot ungated (read-only, no input delivered)", async () => {
     dirs = makeLabDirs();
-    const env = { PICKLAB_HOME: dirs.home };
+    const env = { PICKFORGE_HOME: dirs.home };
     lab = await connectLab({ projectDir: dirs.projectDir, env });
     const id = writeDesktopSessionRecord(dirs.home, dirs.projectDir);
     await acquireHumanLease(id, env);

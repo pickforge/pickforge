@@ -4,19 +4,39 @@
 # Never uses sudo.
 set -eu
 
+warned_legacy_envs=""
+warn_legacy_env() {
+  legacy_name="$1"
+  current_name="$2"
+  case " ${warned_legacy_envs} " in
+    *" ${legacy_name} "*) return ;;
+  esac
+  warned_legacy_envs="${warned_legacy_envs} ${legacy_name}"
+  echo "warning: ${legacy_name} is deprecated; use ${current_name} instead" >&2
+}
+
 resolve_package_spec() {
   package_spec="pickforge"
-  if [ "${PICKLAB_INSTALL_FROM_TARBALL:-}" != "" ]; then
-    if [ ! -f "${PICKLAB_INSTALL_FROM_TARBALL}" ]; then
-      echo "error: PICKLAB_INSTALL_FROM_TARBALL points to a missing file: ${PICKLAB_INSTALL_FROM_TARBALL}" >&2
+  tarball="${PICKFORGE_INSTALL_FROM_TARBALL:-}"
+  if [ "${PICKFORGE_INSTALL_FROM_TARBALL+set}" != "set" ] && [ "${PICKLAB_INSTALL_FROM_TARBALL+set}" = "set" ]; then
+    warn_legacy_env PICKLAB_INSTALL_FROM_TARBALL PICKFORGE_INSTALL_FROM_TARBALL
+    tarball="${PICKLAB_INSTALL_FROM_TARBALL}"
+  fi
+  if [ "${tarball}" != "" ]; then
+    if [ ! -f "${tarball}" ]; then
+      echo "error: PICKFORGE_INSTALL_FROM_TARBALL points to a missing file: ${tarball}" >&2
       exit 1
     fi
-    package_spec="${PICKLAB_INSTALL_FROM_TARBALL}"
+    package_spec="${tarball}"
   fi
 }
 
 resolve_runtime() {
-  runtime="${PICKLAB_INSTALL_RUNTIME:-}"
+  runtime="${PICKFORGE_INSTALL_RUNTIME:-}"
+  if [ "${PICKFORGE_INSTALL_RUNTIME+set}" != "set" ] && [ "${PICKLAB_INSTALL_RUNTIME+set}" = "set" ]; then
+    warn_legacy_env PICKLAB_INSTALL_RUNTIME PICKFORGE_INSTALL_RUNTIME
+    runtime="${PICKLAB_INSTALL_RUNTIME}"
+  fi
   if [ "${runtime}" = "" ]; then
     if command -v bun >/dev/null 2>&1; then
       runtime="bun"
@@ -74,7 +94,7 @@ resolve_bun_bin_dir() {
 
 install_with_bun() {
   if ! command -v bun >/dev/null 2>&1; then
-    echo "error: PICKLAB_INSTALL_RUNTIME=bun but bun is not installed" >&2
+    echo "error: PICKFORGE_INSTALL_RUNTIME=bun but bun is not installed" >&2
     exit 1
   fi
   echo "Installing ${package_spec} with bun..."
@@ -87,7 +107,7 @@ install_with_bun() {
 
 install_with_npm() {
   if ! command -v npm >/dev/null 2>&1; then
-    echo "error: PICKLAB_INSTALL_RUNTIME=npm but npm is not installed" >&2
+    echo "error: PICKFORGE_INSTALL_RUNTIME=npm but npm is not installed" >&2
     exit 1
   fi
   echo "Installing ${package_spec} with npm..."
@@ -135,7 +155,7 @@ main() {
       install_with_npm
       ;;
     *)
-      echo "error: unsupported PICKLAB_INSTALL_RUNTIME \"${runtime}\" (expected bun or npm)" >&2
+      echo "error: unsupported PICKFORGE_INSTALL_RUNTIME \"${runtime}\" (expected bun or npm)" >&2
       exit 1
       ;;
   esac

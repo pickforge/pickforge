@@ -25,7 +25,7 @@ beforeEach(() => {
   fs.mkdirSync(home, { recursive: true });
   env = {
     HOME: home,
-    PICKLAB_HOME: path.join(home, ".picklab"),
+    PICKFORGE_HOME: path.join(home, ".picklab"),
     PATH: path.join(tmpDir, "bin"),
   };
 });
@@ -72,7 +72,7 @@ describe("runAgentsDoctor", () => {
   });
 
   it("flags broken symlinks in the agents dir", async () => {
-    const agents = path.join(env.PICKLAB_HOME, "agents");
+    const agents = path.join(env.PICKFORGE_HOME, "agents");
     fs.mkdirSync(agents, { recursive: true });
     fs.symlinkSync(path.join(tmpDir, "missing-target"), path.join(agents, "dangling"));
 

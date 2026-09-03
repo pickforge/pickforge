@@ -322,7 +322,7 @@ describe("behavioral: MCP android_run_adb (InMemoryTransport + recorder adb)", (
       projectDir: dirs.projectDir,
       env: {
         HOME: dirs.home,
-        PICKLAB_HOME: dirs.home,
+        PICKFORGE_HOME: dirs.home,
         PATH: dirs.binDir,
         ANDROID_HOME: sdk,
       },
@@ -370,7 +370,7 @@ describe("behavioral: built CLI (spawned pickforge-lab binary)", () => {
     const sdk = makeRecorderAdbSdk(dirs.root, { record });
     env = {
       HOME: dirs.home,
-      PICKLAB_HOME: dirs.home,
+      PICKFORGE_HOME: dirs.home,
       PATH: dirs.binDir,
       ANDROID_HOME: sdk,
     };
