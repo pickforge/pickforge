@@ -67,7 +67,7 @@ describe("runCommand", () => {
   });
 
   it("passes cwd and merges env over the inherited environment", async () => {
-    const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "picklab-"));
+    const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-"));
     const result = await runCommand(
       node,
       [
@@ -167,7 +167,7 @@ describe("daemon supervision", () => {
   let pid: number | undefined;
 
   beforeEach(async () => {
-    logDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "picklab-log-"));
+    logDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-log-"));
   });
 
   afterEach(async () => {
@@ -179,7 +179,7 @@ describe("daemon supervision", () => {
 
   it("rejects catchably when the daemon binary does not exist", async () => {
     await expect(
-      startDaemon("/nonexistent/picklab-missing-binary", [], { logDir }),
+      startDaemon("/nonexistent/pickforge-lab-missing-binary", [], { logDir }),
     ).rejects.toThrow(/ENOENT/);
   });
 
@@ -651,7 +651,7 @@ describe("isProcessGroupAlive", () => {
     // not exit on its own.
     const readyFile = path.join(
       os.tmpdir(),
-      `picklab-proc-group-ready-${process.pid}-${Date.now()}`,
+      `pickforge-lab-proc-group-ready-${process.pid}-${Date.now()}`,
     );
     const script = [
       'const { spawn } = require("node:child_process");',

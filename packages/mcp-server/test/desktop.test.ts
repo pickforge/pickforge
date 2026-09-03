@@ -5,12 +5,12 @@ import {
   listRuns,
   listSessions,
   readActions,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
   detectScreenshotTool,
   destroyDesktopSession,
   findOnPath,
-} from "@pickforge/picklab-desktop-linux";
+} from "@pickforge/lab-desktop-linux";
 import {
   connectLab,
   makeLabDirs,
@@ -166,7 +166,7 @@ describe.skipIf(!hasDesktopStack)("desktop flow (real Xvfb)", () => {
       const typed = parseToolJson(
         await lab.client.callTool({
           name: "desktop_type",
-          arguments: { text: "picklab" },
+          arguments: { text: "pickforge-lab" },
         }),
       );
       expect(typed.ok).toBe(true);

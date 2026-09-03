@@ -3,7 +3,7 @@
 //
 // Planted GitHub, OpenAI-style, and AWS credentials must come out as
 // [REDACTED] from the MCP android_logcat tool, the MCP ui-tree tool, the
-// picklab://runs/{id}/logs/{name} resource, and the built CLI logcat command;
+// pickforge://runs/{id}/logs/{name} resource, and the built CLI logcat command;
 // run manifests must never embed environment values.
 
 import fs from "node:fs";
@@ -133,9 +133,9 @@ describe("MCP run-log resource (planted log on disk)", () => {
     removeLabDirs(dirs);
   });
 
-  it("serves picklab://runs/{id}/logs/{name} with secrets redacted", async () => {
+  it("serves pickforge://runs/{id}/logs/{name} with secrets redacted", async () => {
     const { contents } = await lab.client.readResource({
-      uri: `picklab://runs/${RUN_ID}/logs/app.log`,
+      uri: `pickforge://runs/${RUN_ID}/logs/app.log`,
     });
     const text = (contents as Array<Record<string, unknown>>)[0]
       .text as string;
@@ -232,7 +232,7 @@ describe("built CLI logcat output", () => {
     removeLabDirs(dirs);
   });
 
-  it("redacts planted secrets from picklab android logcat (json)", async () => {
+  it("redacts planted secrets from pickforge-lab android logcat (json)", async () => {
     const result = await runBuiltCli(
       ["android", "logcat", "--serial", FAKE_SERIAL, "--json"],
       env,
@@ -245,7 +245,7 @@ describe("built CLI logcat output", () => {
     expectRedacted(report.output as string);
   });
 
-  it("redacts planted secrets from picklab android logcat (plain)", async () => {
+  it("redacts planted secrets from pickforge-lab android logcat (plain)", async () => {
     const result = await runBuiltCli(
       ["android", "logcat", "--serial", FAKE_SERIAL],
       env,

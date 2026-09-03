@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import { Command, Option } from "commander";
-import type { PicklabProfile, SessionType } from "@pickforge/picklab-core";
+import type { PickforgeProfile, SessionType } from "@pickforge/lab-core";
 import {
   runAndroidAdb,
   runAndroidBack,
@@ -53,7 +53,7 @@ import { runWatch } from "./commands/watch.js";
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json") as { version: string };
 
-const PROFILES: PicklabProfile[] = [
+const PROFILES: PickforgeProfile[] = [
   "flutter-desktop",
   "android",
   "desktop+android",
@@ -92,10 +92,10 @@ function withAndroidTarget(command: Command): Command {
   );
 }
 
-// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/pickforge#60
 export function buildProgram(): Command {
   const program = new Command()
-    .name("picklab")
+    .name("pickforge-lab")
     .description(
       "Native app and Android emulator automation for AI coding agents",
     )
@@ -237,7 +237,7 @@ export function buildProgram(): Command {
     process.exitCode = await runTakeoverStatus(opts);
   });
 
-  // Internal, undocumented commands spawned by picklab itself — not a
+  // Internal, undocumented commands spawned by pickforge-lab itself — not a
   // supported public CLI surface.
   const internal = program.command("internal", { hidden: true });
 
@@ -578,8 +578,8 @@ export function buildProgram(): Command {
   });
 
   for (const [verb, description] of [
-    ["install", "Register the picklab MCP server with an agent"],
-    ["link", "Register the picklab MCP server with an agent (alias of install)"],
+    ["install", "Register the pickforge-lab MCP server with an agent"],
+    ["link", "Register the pickforge-lab MCP server with an agent (alias of install)"],
   ] as const) {
     withJson(
       agents
@@ -598,7 +598,7 @@ export function buildProgram(): Command {
   withJson(
     agents
       .command("unlink")
-      .description("Remove the picklab MCP server entry from an agent config")
+      .description("Remove the pickforge-lab MCP server entry from an agent config")
       .argument("<agent>", "agent name (codex, claude-code, cursor, or custom)")
       .option(
         "--config-path <path>",
@@ -631,7 +631,7 @@ export function buildProgram(): Command {
       .requiredOption("--name <name>", "custom agent name")
       .requiredOption(
         "--mcp-command <command>",
-        'MCP server command, split on whitespace (e.g. "picklab mcp serve")',
+        'MCP server command, split on whitespace (e.g. "pickforge-lab mcp serve")',
       )
       .option("--force", "overwrite an existing custom agent with the same name"),
   ).action(async (opts) => {

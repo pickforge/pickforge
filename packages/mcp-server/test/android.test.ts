@@ -6,7 +6,7 @@ import {
   listRuns,
   readActions,
   saveProjectConfig,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
   adbLogLines,
   connectLab,
@@ -174,7 +174,7 @@ describe("android tools (fake adb)", () => {
     expect(report.xml).toContain("[REDACTED]");
     expect(report.xml).not.toContain(PLANTED_TOKEN);
     expect(adbLogLines(adbLog)).toContain(
-      `-s ${FAKE_SERIAL} shell uiautomator dump /sdcard/picklab-ui.xml`,
+      `-s ${FAKE_SERIAL} shell uiautomator dump /sdcard/pickforge-lab-ui.xml`,
     );
   });
 
@@ -331,7 +331,7 @@ describe("android_start (fake sdk)", () => {
       expect(started.ok).toBe(true);
       const session = started.sessions[0];
       expect(session.id).toMatch(/^andr-[0-9a-f]+$/);
-      expect(session.avdName).toBe("picklab-avd");
+      expect(session.avdName).toBe("pickforge-avd");
       expect(session.serial).toMatch(/^emulator-\d+$/);
 
       const [activeManifest] = await listRuns(startDirs.projectDir);

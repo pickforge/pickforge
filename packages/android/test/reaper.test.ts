@@ -26,7 +26,7 @@ import {
   isPidAlive,
   reapDeadRunningSessions,
   type EnvLike,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
   createAndroidSession,
   destroyAndroidSession,
@@ -34,7 +34,7 @@ import {
 } from "../src/index.js";
 
 const tmpRoot = fs.mkdtempSync(
-  path.join(os.tmpdir(), "picklab-android-reaper-"),
+  path.join(os.tmpdir(), "pickforge-lab-android-reaper-"),
 );
 const home = path.join(tmpRoot, "home");
 const projectDir = path.join(tmpRoot, "project");

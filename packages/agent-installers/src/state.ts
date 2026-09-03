@@ -6,7 +6,7 @@ import {
   resolveReadablePath,
   writeFileAtomic,
   type EnvLike,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 
 export interface AgentStateEntry {
   registered: boolean;

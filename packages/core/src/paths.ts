@@ -26,7 +26,7 @@ export function picklabHome(env: EnvLike = process.env): string {
  * list directories fall back to this path only when the new default has
  * nothing yet, so nothing already there is silently orphaned.
  */
-export function legacyPicklabHome(env: EnvLike = process.env): string | undefined {
+export function legacyPickforgeHome(env: EnvLike = process.env): string | undefined {
   const fromEnv = env.PICKLAB_HOME;
   if (fromEnv !== undefined && fromEnv !== "") {
     return undefined;
@@ -39,7 +39,7 @@ export function sessionsDir(env: EnvLike = process.env): string {
 }
 
 export function legacySessionsDir(env: EnvLike = process.env): string | undefined {
-  const legacyHome = legacyPicklabHome(env);
+  const legacyHome = legacyPickforgeHome(env);
   return legacyHome === undefined ? undefined : path.join(legacyHome, "sessions");
 }
 
@@ -48,7 +48,7 @@ export function agentsDir(env: EnvLike = process.env): string {
 }
 
 export function legacyAgentsDir(env: EnvLike = process.env): string | undefined {
-  const legacyHome = legacyPicklabHome(env);
+  const legacyHome = legacyPickforgeHome(env);
   return legacyHome === undefined ? undefined : path.join(legacyHome, "agents");
 }
 
@@ -61,7 +61,7 @@ export function globalConfigPath(env: EnvLike = process.env): string {
 }
 
 export function legacyGlobalConfigPath(env: EnvLike = process.env): string | undefined {
-  const legacyHome = legacyPicklabHome(env);
+  const legacyHome = legacyPickforgeHome(env);
   return legacyHome === undefined ? undefined : path.join(legacyHome, "config.json");
 }
 

@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
-import type { SystemImage } from "@pickforge/picklab-android";
+import type { SystemImage } from "@pickforge/lab-android";
 import type {
-  PicklabConfig,
-} from "@pickforge/picklab-core";
+  PickforgeConfig,
+} from "@pickforge/lab-core";
 import type { ProvisioningStep, StepCommand } from "../src/provision/plan.js";
 import {
   chooseSystemImage,
   planCreateAvd,
   planLabUser,
-  planPicklabHome,
+  planPickforgeHome,
   RECOMMENDED_SYSTEM_IMAGE,
 } from "../src/provision/planner.js";
 
@@ -18,7 +18,7 @@ function commandOf(step: ProvisioningStep): StepCommand {
   return step.command;
 }
 
-function configOf(step: ProvisioningStep): PicklabConfig {
+function configOf(step: ProvisioningStep): PickforgeConfig {
   if (
     step.kind !== "write-global-config" &&
     step.kind !== "write-project-config"
@@ -39,8 +39,8 @@ function image(packageId: string): SystemImage {
 }
 
 const baseLabUser = {
-  name: "picklab-lab",
-  home: "/var/lib/picklab/lab-home",
+  name: "pickforge-lab",
+  home: "/var/lib/pickforge/lab-home",
   userExists: false,
   homeExists: false,
   kvmPresent: true,
@@ -63,22 +63,22 @@ describe("planLabUser", () => {
     expect(useradd.privileged).toBe(true);
     expect(commandOf(useradd)).toEqual({
       cmd: "useradd",
-      args: ["-r", "-M", "-s", "/usr/sbin/nologin", "picklab-lab"],
+      args: ["-r", "-M", "-s", "/usr/sbin/nologin", "pickforge-lab"],
     });
     expect(commandOf(result.plan.steps[3]!).args).toEqual([
       "750",
-      "/var/lib/picklab/lab-home",
+      "/var/lib/pickforge/lab-home",
     ]);
     expect(commandOf(result.plan.steps[4]!).args).toEqual([
       "-aG",
       "kvm",
-      "picklab-lab",
+      "pickforge-lab",
     ]);
     const persist = result.plan.steps[5]!;
     expect(persist.kind).toBe("write-global-config");
     expect(persist.privileged).toBe(false);
     expect(configOf(persist)).toEqual({
-      labUser: { name: "picklab-lab", home: "/var/lib/picklab/lab-home" },
+      labUser: { name: "pickforge-lab", home: "/var/lib/pickforge/lab-home" },
     });
   });
 
@@ -178,7 +178,7 @@ describe("chooseSystemImage", () => {
 });
 
 const baseAvd = {
-  avdName: "picklab-avd",
+  avdName: "pickforge-avd",
   sdkRoot: "/sdk",
   avdmanagerPath: "/sdk/cmdline-tools/latest/bin/avdmanager",
   installedImages: [image("system-images;android-34;google_apis;x86_64")],
@@ -189,7 +189,7 @@ describe("planCreateAvd", () => {
   it("is a config-only no-op when the AVD already exists", () => {
     const result = planCreateAvd({
       ...baseAvd,
-      existingAvds: ["picklab-avd"],
+      existingAvds: ["pickforge-avd"],
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -245,7 +245,7 @@ describe("planCreateAvd", () => {
         "create",
         "avd",
         "-n",
-        "picklab-avd",
+        "pickforge-avd",
         "-k",
         "system-images;android-34;google_apis;x86_64",
       ],
@@ -253,7 +253,7 @@ describe("planCreateAvd", () => {
       input: "no\n",
     });
     expect(configOf(result.plan.steps[1]!)).toEqual({
-      android: { avdName: "picklab-avd" },
+      android: { avdName: "pickforge-avd" },
     });
   });
 
@@ -270,12 +270,12 @@ describe("planCreateAvd", () => {
   });
 });
 
-describe("planPicklabHome", () => {
+describe("planPickforgeHome", () => {
   it("plans a mkdir when the home is missing", () => {
-    const plan = planPicklabHome({ path: "/tmp/x/.picklab", exists: false });
+    const plan = planPickforgeHome({ path: "/tmp/x/.picklab", exists: false });
     expect(plan.steps).toEqual([
       {
-        id: "picklab-home",
+        id: "pickforge-home",
         title: "Create PickLab home /tmp/x/.picklab",
         kind: "mkdir",
         privileged: false,
@@ -285,6 +285,6 @@ describe("planPicklabHome", () => {
   });
 
   it("is a no-op when the home exists", () => {
-    expect(planPicklabHome({ path: "/tmp/x", exists: true }).steps).toEqual([]);
+    expect(planPickforgeHome({ path: "/tmp/x", exists: true }).steps).toEqual([]);
   });
 });

@@ -17,8 +17,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // inject an interleaving action between recovery's two staleness checks via
 // `mockImplementationOnce`, while every other call still runs the real
 // implementation.
-vi.mock("@pickforge/picklab-core", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@pickforge/picklab-core")>();
+vi.mock("@pickforge/lab-core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@pickforge/lab-core")>();
   return {
     ...actual,
     readProcessIdentity: vi.fn((pid: number) => ({ pid, startTicks: pid })),
@@ -41,7 +41,7 @@ import {
   resolveRunStorage,
   stopPid,
   type EnvLike,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
   endHumanTakeover,
   recoverStaleHumanLease,
@@ -101,7 +101,7 @@ async function createDesktop(desktop: Record<string, unknown> = {}): Promise<str
 }
 
 beforeEach(async () => {
-  root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "picklab-takeover-dl-"));
+  root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-takeover-dl-"));
   binDir = path.join(root, "bin");
   await fs.promises.mkdir(binDir, { recursive: true });
   argvLogPath = path.join(root, "argv.log");
@@ -395,7 +395,7 @@ describe("startHumanTakeover self-healing", () => {
 
 describe("startHumanTakeover against a pre-existing --vnc-control session", () => {
   it("degrades safely: fails cleanly, leaves the persistent writable VNC undisturbed, and rolls back the lease", async () => {
-    // Simulates `picklab session create --vnc-control`'s persistent, lease-
+    // Simulates `pickforge-lab session create --vnc-control`'s persistent, lease-
     // uncoordinated writable VNC — a completely different mechanism (#22)
     // from the leased takeover this module implements (#21). The two must
     // never be silently conflated: a takeover attempt against a session
@@ -467,7 +467,7 @@ describe("ensureSessionVnc recovery integration", () => {
   });
 });
 
-// Real separate-process proof (pickforge/picklab#21 P0-A): the watchdog must
+// Real separate-process proof (pickforge/pickforge#21 P0-A): the watchdog must
 // actively reclaim a stale lease running as a genuinely independent OS
 // process — not merely "correct in-process against a mock" — since the whole
 // point is surviving a `SIGKILL` of its sibling `watch --control` process.
@@ -482,7 +482,7 @@ const watchdogWorker = fileURLToPath(
   new URL("./workers/takeover-watchdog-worker.ts", import.meta.url),
 );
 // Bun's default package resolution for a plain `bun <script.ts>` invocation
-// follows `@pickforge/picklab-core`'s published `exports.default`
+// follows `@pickforge/lab-core`'s published `exports.default`
 // (`dist/index.js`) rather than vitest's own source alias, so the worker
 // would otherwise run against whatever the core package's dist happened to
 // contain at last build — stale during normal iteration, unlike every other

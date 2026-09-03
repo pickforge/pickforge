@@ -20,8 +20,8 @@ export interface LabDirs {
 }
 
 export function makeLabDirs(): LabDirs {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-mcp-"));
-  const home = path.join(root, "picklab-home");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-mcp-"));
+  const home = path.join(root, "pickforge-home");
   const projectDir = path.join(root, "project");
   const binDir = path.join(root, "bin");
   fs.mkdirSync(home, { recursive: true });
@@ -52,7 +52,7 @@ export async function connectLab(opts: {
     ...opts,
     env: { PICKLAB_STORAGE_MODE: "project-local", ...opts.env },
   });
-  const client = new Client({ name: "picklab-test", version: "0.0.0" });
+  const client = new Client({ name: "pickforge-lab-test", version: "0.0.0" });
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
   await Promise.all([
@@ -92,8 +92,8 @@ export function writeFakeAdbSdk(root: string, adbLog: string): string {
     `printf '%s\\n' "$*" >> "${adbLog}"`,
     'case "$*" in',
     "  *\"screencap -p\"*) printf '\\211PNG\\r\\n\\032\\n' ;;",
-    '  *"uiautomator dump"*) echo "UI hierchary dumped to: /sdcard/picklab-ui.xml" ;;',
-    `  *"cat /sdcard/picklab-ui.xml"*) printf '<?xml version="1.0"?><hierarchy rotation="0"><node text="token=${PLANTED_TOKEN}" /></hierarchy>' ;;`,
+    '  *"uiautomator dump"*) echo "UI hierchary dumped to: /sdcard/pickforge-lab-ui.xml" ;;',
+    `  *"cat /sdcard/pickforge-lab-ui.xml"*) printf '<?xml version="1.0"?><hierarchy rotation="0"><node text="token=${PLANTED_TOKEN}" /></hierarchy>' ;;`,
     `  *"logcat -d"*) printf 'I/Auth( 123): authToken=${PLANTED_TOKEN}\\nI/App( 123): started\\n' ;;`,
     '  *"install -r"*) echo Success ;;',
     '  *monkey*) echo "Events injected: 1" ;;',
@@ -174,7 +174,7 @@ export function writeAndroidSessionRecord(
     createdAt: new Date().toISOString(),
     status: "running",
     projectDir,
-    android: { avdName: "picklab-avd", serial, consolePort: 5554 },
+    android: { avdName: "pickforge-avd", serial, consolePort: 5554 },
   };
   const dir = path.join(home, "sessions");
   fs.mkdirSync(dir, { recursive: true });

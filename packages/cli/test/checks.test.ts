@@ -53,14 +53,14 @@ function snapshot(
         },
       ],
       kvm: { exists: true, readable: true, writable: true, supported: true },
-      avdName: "picklab-avd",
-      avds: ["picklab-avd"],
+      avdName: "pickforge-avd",
+      avds: ["pickforge-avd"],
       avdExists: true,
       ...overrides.android,
     },
     labUser: {
-      name: "picklab-lab",
-      home: "/var/lib/picklab/lab-home",
+      name: "pickforge-lab",
+      home: "/var/lib/pickforge/lab-home",
       exists: true,
       homeExists: true,
       ...overrides.labUser,
@@ -81,18 +81,18 @@ describe("evaluateChecks", () => {
     expect(checks.every((check) => check.status === "ok")).toBe(true);
   });
 
-  it("flags a missing picklab home", () => {
+  it("flags a missing pickforge-lab home", () => {
     const check = checkById(
       snapshot({ picklabHome: { exists: false, writable: false } }),
-      "picklab-home",
+      "pickforge-home",
     );
     expect(check.status).toBe("missing");
   });
 
-  it("flags an unwritable picklab home as missing", () => {
+  it("flags an unwritable pickforge-lab home as missing", () => {
     const check = checkById(
       snapshot({ picklabHome: { writable: false } }),
-      "picklab-home",
+      "pickforge-home",
     );
     expect(check.status).toBe("missing");
     expect(check.detail).toContain("not writable");
@@ -219,21 +219,21 @@ describe("evaluateChecks", () => {
       "avd",
     );
     expect(check.status).toBe("missing");
-    expect(check.hint).toContain("picklab setup android --create-avd");
+    expect(check.hint).toContain("pickforge-lab setup android --create-avd");
   });
 
   it("treats a missing lab user as an optional warning", () => {
     const check = checkById(snapshot({ labUser: { exists: false } }), "lab-user");
     expect(check.status).toBe("warn");
     expect(check.hint).toContain("optional until session isolation ships");
-    expect(check.hint).toContain("picklab setup lab-user");
+    expect(check.hint).toContain("pickforge-lab setup lab-user");
   });
 });
 
 describe("requiredChecksForProfile", () => {
   it("keeps generic projects to home and config", () => {
     expect(requiredChecksForProfile("generic")).toEqual([
-      "picklab-home",
+      "pickforge-home",
       "config",
     ]);
   });

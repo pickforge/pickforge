@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { getSession, isPidAlive, type EnvLike } from "@pickforge/picklab-core";
+import { getSession, isPidAlive, type EnvLike } from "@pickforge/lab-core";
 import {
   createAndroidSession,
   createAvd,
@@ -39,7 +39,7 @@ const hasAndroidStack =
   kvm.supported &&
   (avdExists || avdCreatable);
 
-const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-android-itest-"));
+const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-android-itest-"));
 const home = path.join(tmpRoot, "home");
 const projectDir = path.join(tmpRoot, "project");
 fs.mkdirSync(home, { recursive: true });
@@ -61,7 +61,7 @@ describe.skipIf(!hasAndroidStack)("android integration (emulator + adb)", () => 
   }, TEST_TIMEOUT_MS);
 
   it(
-    "boots picklab-avd and drives screenshot, tap, ui-tree, and logcat",
+    "boots pickforge-avd and drives screenshot, tap, ui-tree, and logcat",
     async () => {
       const session = await createAndroidSession({
         projectDir,

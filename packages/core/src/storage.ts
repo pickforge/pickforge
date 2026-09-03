@@ -72,7 +72,7 @@ export interface ResolvedRunStorage {
    * user-owned global config or an env override may select `custom` (and
    * supply its path). The resolver falls back to the next layer (global
    * config, then `home`) rather than erroring, so a cloned repo with a
-   * hostile or misconfigured project config never bricks `picklab`; `picklab
+   * hostile or misconfigured project config never bricks `pickforge-lab`; `pickforge-lab
    * doctor` surfaces this field as a warning.
    */
   rejectedProjectCustom?: { requestedPath?: string };
@@ -135,7 +135,7 @@ function isSameOrDescendant(ancestor: string, descendant: string): boolean {
  * This is the single resolver every run-creation and artifact-lookup path
  * (core, CLI, MCP) goes through, so they always agree on where runs live.
  */
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function resolveRunStorage(
   projectDir: string,
   env: EnvLike = process.env,

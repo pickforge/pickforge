@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { writeFileAtomic } from "@pickforge/picklab-core";
+import { writeFileAtomic } from "@pickforge/lab-core";
 import { backupFile } from "./backup.js";
 import { renderTomlSnippet } from "./snippet.js";
 import type { ChangeResult, McpServerEntry } from "./types.js";

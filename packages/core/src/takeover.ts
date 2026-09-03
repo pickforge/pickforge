@@ -8,7 +8,7 @@ import { ensureDir, sessionsDir, writeFileAtomic, type EnvLike } from "./paths.j
 import { isPidAlive, processIdentityMatches, readProcessStartTicks } from "./proc.js";
 
 /**
- * Supervised pause / human takeover (pickforge/picklab#21).
+ * Supervised pause / human takeover (pickforge/pickforge#21).
  *
  * State machine: `agent-active -> pause-requested -> human-active(lease,
  * deadline) -> returning -> agent-active`.
@@ -28,7 +28,7 @@ import { isPidAlive, processIdentityMatches, readProcessStartTicks } from "./pro
  *
  * This module owns only the storage-backed lease/permit primitives (pure
  * `fs` + process-identity logic, testable without X11). VNC-mode switching
- * and screenshot/evidence orchestration live in `@pickforge/picklab-desktop-linux`.
+ * and screenshot/evidence orchestration live in `@pickforge/lab-desktop-linux`.
  */
 
 export const HUMAN_LEASE_FILE = "human.lease.json";
@@ -333,7 +333,7 @@ export interface AcquireHumanLeaseOptions {
  * lease this call just created is released and `HumanLeaseDrainTimeoutError`
  * is thrown — "timeout aborts cleanly."
  */
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function acquireHumanLease(
   sessionId: string,
   env: EnvLike = process.env,

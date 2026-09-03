@@ -12,7 +12,7 @@ import { writeExecutable } from "./fakes.js";
 let tmp: string;
 
 beforeEach(() => {
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-detect-"));
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-detect-"));
 });
 
 afterEach(() => {

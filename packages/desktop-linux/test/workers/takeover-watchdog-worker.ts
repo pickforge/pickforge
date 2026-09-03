@@ -1,7 +1,7 @@
 // Separate-process watchdog worker, run with `bun`. Proves
 // `runTakeoverWatchdogLoop`'s reclaim logic works as a genuinely independent
 // OS process (not just in-process against a mock) — the property that lets
-// `picklab watch --control` survive its own SIGKILL (pickforge/picklab#21
+// `pickforge-lab watch --control` survive its own SIGKILL (pickforge/pickforge#21
 // P0-A). Not a `*.test.ts` file, so vitest never runs it directly.
 import { runTakeoverWatchdogLoop } from "../../src/takeover-watchdog.js";
 

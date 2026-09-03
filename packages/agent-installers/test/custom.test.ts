@@ -89,7 +89,7 @@ describe("addCustomAgent / listCustomAgents / removeCustomAgent", () => {
       "codex",
       "claude-code",
       "cursor",
-      "picklab-mcp",
+      "pickforge-mcp",
       "state",
     ]) {
       await expect(

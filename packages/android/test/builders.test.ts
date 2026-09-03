@@ -31,14 +31,14 @@ describe("buildCreateAvdArgs", () => {
   it("builds the avdmanager invocation", () => {
     expect(
       buildCreateAvdArgs({
-        name: "picklab-avd",
+        name: "pickforge-avd",
         systemImage: "system-images;android-34;google_apis;x86_64",
       }),
     ).toEqual([
       "create",
       "avd",
       "-n",
-      "picklab-avd",
+      "pickforge-avd",
       "-k",
       "system-images;android-34;google_apis;x86_64",
     ]);
@@ -46,7 +46,7 @@ describe("buildCreateAvdArgs", () => {
 
   it("appends the optional device profile as one element", () => {
     const args = buildCreateAvdArgs({
-      name: "picklab-avd",
+      name: "pickforge-avd",
       systemImage: "system-images;android-34;google_apis;x86_64",
       device: "pixel 5",
     });
@@ -77,9 +77,9 @@ describe("buildCreateAvdArgs", () => {
 
 describe("buildEmulatorArgs", () => {
   it("builds headless defaults with an explicit port", () => {
-    expect(buildEmulatorArgs({ avdName: "picklab-avd", port: 5556 })).toEqual([
+    expect(buildEmulatorArgs({ avdName: "pickforge-avd", port: 5556 })).toEqual([
       "-avd",
-      "picklab-avd",
+      "pickforge-avd",
       "-no-window",
       "-no-audio",
       "-no-boot-anim",
@@ -89,7 +89,7 @@ describe("buildEmulatorArgs", () => {
   });
 
   it("omits -no-window when headless is disabled", () => {
-    const args = buildEmulatorArgs({ avdName: "picklab-avd", headless: false });
+    const args = buildEmulatorArgs({ avdName: "pickforge-avd", headless: false });
     expect(args).not.toContain("-no-window");
     expect(args).toContain("-no-audio");
   });
@@ -373,10 +373,10 @@ describe("parseEmulatorListAvds", () => {
   it("keeps avd names and drops emulator log noise", () => {
     const output = [
       "INFO    | Storing crashdata in: /tmp/android-x/emu-crash.db",
-      "picklab-avd",
+      "pickforge-avd",
       "Pixel_5_API_34",
       "",
     ].join("\n");
-    expect(parseEmulatorListAvds(output)).toEqual(["picklab-avd", "Pixel_5_API_34"]);
+    expect(parseEmulatorListAvds(output)).toEqual(["pickforge-avd", "Pixel_5_API_34"]);
   });
 });

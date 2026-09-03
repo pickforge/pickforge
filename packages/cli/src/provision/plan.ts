@@ -1,4 +1,4 @@
-import type { PicklabConfig } from "@pickforge/picklab-core";
+import type { PickforgeConfig } from "@pickforge/lab-core";
 
 export interface StepCommand {
   cmd: string;
@@ -25,12 +25,12 @@ export interface MkdirStep extends StepBase {
 
 export interface WriteGlobalConfigStep extends StepBase {
   kind: "write-global-config";
-  config: PicklabConfig;
+  config: PickforgeConfig;
 }
 
 export interface WriteProjectConfigStep extends StepBase {
   kind: "write-project-config";
-  config: PicklabConfig;
+  config: PickforgeConfig;
 }
 
 export type ProvisioningStep =

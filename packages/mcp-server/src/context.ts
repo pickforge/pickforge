@@ -8,14 +8,14 @@ import {
   type RunnableSessionType,
   type ScreenshotTarget,
   type SessionRecord,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 
 export {
   captureToTarget,
   requireDisplay,
   type RunnableSessionType,
   type ScreenshotTarget,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 
 const MAX_INLINE_IMAGE_BYTES = 2 * 1024 * 1024;
 

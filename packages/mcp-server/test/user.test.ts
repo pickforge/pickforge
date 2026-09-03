@@ -28,7 +28,7 @@ async function connectElicitingLab(dirs: LabDirs): Promise<ElicitingLab> {
     env: { PICKLAB_HOME: dirs.home, PATH: dirs.binDir },
   });
   const client = new Client(
-    { name: "picklab-test", version: "0.0.0" },
+    { name: "pickforge-lab-test", version: "0.0.0" },
     { capabilities: { elicitation: {} } },
   );
   const requests: Array<{ message: string; requestedSchema: unknown }> = [];

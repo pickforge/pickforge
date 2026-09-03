@@ -1,4 +1,4 @@
-import type { EnvLike } from "@pickforge/picklab-core";
+import type { EnvLike } from "@pickforge/lab-core";
 import type { AgentKind, ChangeResult, RegistrationState } from "../types.js";
 import {
   claudeCodeConfigPath,

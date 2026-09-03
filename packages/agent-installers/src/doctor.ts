@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { agentsDir, type EnvLike } from "@pickforge/picklab-core";
+import { agentsDir, type EnvLike } from "@pickforge/lab-core";
 import { BUILTIN_AGENTS } from "./agents/builtin.js";
 import { isBackupPath } from "./backup.js";
 import { jsonFileMcpServerState } from "./jsonConfig.js";

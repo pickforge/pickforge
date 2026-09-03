@@ -1,4 +1,4 @@
-export const packageName = "@pickforge/picklab-core";
+export const packageName = "@pickforge/lab-core";
 
 export {
   agentsDir,
@@ -7,7 +7,7 @@ export {
   isProfileConfined,
   legacyAgentsDir,
   legacyGlobalConfigPath,
-  legacyPicklabHome,
+  legacyPickforgeHome,
   legacySessionsDir,
   listDirSafe,
   picklabHome,
@@ -27,8 +27,8 @@ export {
   resolvedDefaults,
   saveGlobalConfig,
   saveProjectConfig,
-  type PicklabConfig,
-  type PicklabProfile,
+  type PickforgeConfig,
+  type PickforgeProfile,
   type StorageConfig,
   type StorageMode,
   type ViewerMode,

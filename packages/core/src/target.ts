@@ -96,7 +96,7 @@ export async function resolveDesktopCapableSession(
     env: opts.env,
     projectDir: opts.projectDir,
     consumerLabel: "watch",
-    createHint: "create one with: picklab session create --type desktop",
+    createHint: "create one with: pickforge-lab session create --type desktop",
     selectHint: "pick one with --session <id>",
   });
   if (record.status !== "running") {
@@ -148,7 +148,7 @@ export interface ResolveScreenshotTargetOptions {
   env?: EnvLike;
 }
 
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function resolveScreenshotTarget(
   opts: ResolveScreenshotTargetOptions,
 ): Promise<ScreenshotTarget> {

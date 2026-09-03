@@ -11,8 +11,8 @@ import {
   screenshot,
   tap,
   typeText,
-} from "@pickforge/picklab-android";
-import { listSessions, redactSecrets } from "@pickforge/picklab-core";
+} from "@pickforge/lab-android";
+import { listSessions, redactSecrets } from "@pickforge/lab-core";
 import fs from "node:fs";
 import {
   captureToTarget,
@@ -237,7 +237,7 @@ export async function runAndroidLogcat(
   });
 }
 
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function runAndroidAdb(
   args: string[],
   opts: AndroidTargetOptions,

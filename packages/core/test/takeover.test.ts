@@ -30,7 +30,7 @@ let tmpRoot: string;
 let env: EnvLike;
 
 beforeEach(() => {
-  tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-takeover-test-"));
+  tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-takeover-test-"));
   env = { ...process.env, PICKLAB_HOME: path.join(tmpRoot, "home") };
 });
 

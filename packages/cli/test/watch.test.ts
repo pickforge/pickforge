@@ -11,7 +11,7 @@ import {
   listSessions,
   readProcessIdentity,
   stopPid,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import { runWatch, watchDesktopSession } from "../src/commands/watch.js";
 
 let root: string;
@@ -58,7 +58,7 @@ async function createDesktop(
 }
 
 beforeEach(async () => {
-  root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "picklab-watch-unit-"));
+  root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-watch-unit-"));
   binDir = path.join(root, "bin");
   await fs.promises.mkdir(binDir, { recursive: true });
   const reservation = net.createServer();
@@ -111,7 +111,7 @@ describe("watch command in process", () => {
     const report = JSON.parse(String(output.mock.calls[0]?.[0]));
     expect(report.ok).toBe(false);
     expect(report.errors.join("\n")).toContain(
-      "picklab session create --type desktop",
+      "pickforge-lab session create --type desktop",
     );
   });
 

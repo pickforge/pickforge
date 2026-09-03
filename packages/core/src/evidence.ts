@@ -615,7 +615,7 @@ async function withJournalLock<T>(
  * just-created run is finalized (`failed`) and the claim released, so no
  * permanent running orphan is ever left behind.
  */
-// eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function beginEvidenceRun(
   projectDir: string,
   sessionId: string,
@@ -656,9 +656,9 @@ export async function beginEvidenceRun(
         // between the wx create and its identity stamp).
         const owner = resolution.claim;
         if (owner !== undefined) {
-          // eslint-disable-next-line max-depth -- Legacy gate debt: pickforge/picklab#60
+          // eslint-disable-next-line max-depth -- Legacy gate debt: pickforge/pickforge#60
           if (identityIsAlive(owner.ownerPid, owner.ownerStartTicks)) {
-            // eslint-disable-next-line max-depth -- Legacy gate debt: pickforge/picklab#60
+            // eslint-disable-next-line max-depth -- Legacy gate debt: pickforge/pickforge#60
             if (Date.now() >= deadline) break;
             await delay(claimBackoff(attempt));
             continue;
@@ -816,7 +816,7 @@ export async function beginEvidenceRun(
  * The pointer is compare-cleared only after the manifest is durable, so a
  * concurrently replaced pointer is never removed.
  */
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function finalizeActiveEvidenceRun(
   projectDir: string,
   sessionId: string,
@@ -1449,7 +1449,7 @@ async function commitTruncationSentinel(
  *
  * Returns true only for the process that actually appended the marker.
  */
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 async function writeTruncationMarkerOnce(
   runDir: string,
   handle: fs.promises.FileHandle,
@@ -1480,7 +1480,7 @@ async function writeTruncationMarkerOnce(
           const ownedByCaller =
             state.claim.ownerPid === ownerPid &&
             state.claim.ownerStartTicks === ownerStartTicks;
-          // eslint-disable-next-line max-depth -- Legacy gate debt: pickforge/picklab#60
+          // eslint-disable-next-line max-depth -- Legacy gate debt: pickforge/pickforge#60
           if (ownedByCaller && (await journalHasTruncationMarker(runDir))) {
             await commitTruncationSentinel(sentinelPath, ownerPid, ownerStartTicks);
           }
@@ -1689,7 +1689,7 @@ async function collectActiveRunIds(parent: string): Promise<Set<string>> {
  * `finalizeActiveEvidenceRun` calls this automatically after every
  * finalization.
  */
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function pruneFinalizedEvidenceRuns(
   projectDir: string,
   opts: PruneEvidenceOptions = {},

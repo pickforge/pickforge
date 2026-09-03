@@ -8,8 +8,8 @@ import {
   resolveRunStorage,
   type RunCatalog,
   type RunCatalogEntry,
-} from "@pickforge/picklab-core";
-import { findOnPath } from "@pickforge/picklab-desktop-linux";
+} from "@pickforge/lab-core";
+import { findOnPath } from "@pickforge/lab-desktop-linux";
 import {
   resolveProjectDir,
   runReported,
@@ -54,7 +54,7 @@ async function findRun(
       const { runsDir } = await resolveRunStorage(projectDir);
       throw new Error(`No runs found under ${runsDir}`);
     }
-    throw new Error(`Run not found: ${runId} (see: picklab artifacts list)`);
+    throw new Error(`Run not found: ${runId} (see: pickforge-lab artifacts list)`);
   }
   return { catalog, entry };
 }

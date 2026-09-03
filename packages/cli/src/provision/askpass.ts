@@ -1,5 +1,5 @@
 // Linux graphical `sudo` (askpass) capability detection —
-// pickforge/picklab#27.
+// pickforge/pickforge#27.
 //
 // Implements the *detection* half of the "Shared graphical sudo (askpass)
 // security contract — locked v1" pinned on that issue (shared with
@@ -19,7 +19,7 @@
 // Linux, matching where the feature actually activates.
 
 import fs from "node:fs";
-import type { EnvLike } from "@pickforge/picklab-core";
+import type { EnvLike } from "@pickforge/lab-core";
 
 /**
  * Fixed, documented askpass helper probe list per the locked v1 contract —

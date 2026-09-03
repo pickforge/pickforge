@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import type { EnvLike } from "@pickforge/picklab-core";
+import type { EnvLike } from "@pickforge/lab-core";
 import {
   addCustomAgent,
   AGENT_KINDS,
@@ -12,7 +12,7 @@ import {
   type AgentKind,
   type AgentStatus,
   type ChangeResult,
-} from "@pickforge/picklab-agent-installers";
+} from "@pickforge/lab-agent-installers";
 import { runReported, type CommandResult } from "./shared.js";
 
 export interface AgentsCliOptions {
@@ -140,14 +140,14 @@ function changeLines(
   } else if (result.changed) {
     lines.push(
       verb === "registered"
-        ? `Registered the picklab MCP server for ${name} in ${result.configPath}`
-        : `Removed the picklab MCP server entry for ${name} from ${result.configPath}`,
+        ? `Registered the pickforge-lab MCP server for ${name} in ${result.configPath}`
+        : `Removed the pickforge-lab MCP server entry for ${name} from ${result.configPath}`,
     );
   } else {
     lines.push(
       verb === "registered"
         ? `${name} is already registered in ${result.configPath} (no changes made)`
-        : `${name} has no picklab entry in ${result.configPath} (nothing to remove)`,
+        : `${name} has no pickforge-lab entry in ${result.configPath} (nothing to remove)`,
     );
   }
   if (result.backupPath !== undefined) {

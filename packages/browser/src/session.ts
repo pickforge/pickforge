@@ -23,7 +23,7 @@ import {
   type OwnedDaemonHandle,
   type ProcessIdentity,
   type SessionRecord,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
   XvfbStartError,
   startXvfb,
@@ -31,7 +31,7 @@ import {
   withSessionVncLock,
   type XvfbHandle,
   type XvfbPartialStart,
-} from "@pickforge/picklab-desktop-linux";
+} from "@pickforge/lab-desktop-linux";
 import { buildChromeArgs } from "./args.js";
 import { requireChromeBinary } from "./detect.js";
 import {
@@ -289,7 +289,7 @@ async function stopOwnedBrowserDaemon(
  * If cleanup cannot be confirmed, the error record retains every known
  * identity and is marked for a later reaper retry.
  */
-// eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function createBrowserSession(
   opts: CreateBrowserSessionOptions,
 ): Promise<BrowserSessionHandle> {
@@ -577,7 +577,7 @@ export async function getBrowserSessionStatus(
  * into one error
  * and leave the record in `error` state for inspection.
  */
-// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/pickforge#60
 export async function teardownBrowserSession(
   id: string,
   registryEnv: EnvLike,
@@ -591,7 +591,7 @@ export async function teardownBrowserSession(
     throw new Error(`Session ${id} is not a browser session`);
   }
 
-  // eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/picklab#60
+  // eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/pickforge#60
   await withSessionVncLock(id, registryEnv, async () => {
     const record = await getSession(id, registryEnv);
     if (record === undefined) {

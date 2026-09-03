@@ -7,15 +7,15 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { findOnPath } from "@pickforge/picklab-desktop-linux";
+import { findOnPath } from "@pickforge/lab-desktop-linux";
 import {
   createBrowserSession,
   destroyBrowserSession,
   detectChromeBinary,
-} from "@pickforge/picklab-browser";
+} from "@pickforge/lab-browser";
 import { ensureCliBuilt } from "./build-once.js";
 
-const cliPath = fileURLToPath(new URL("../dist/picklab.js", import.meta.url));
+const cliPath = fileURLToPath(new URL("../dist/pickforge-lab.js", import.meta.url));
 const hasXvfb = findOnPath("Xvfb") !== null;
 const hasChrome = detectChromeBinary() !== null;
 const ready = hasXvfb && hasChrome;
@@ -49,7 +49,7 @@ describe.skipIf(!ready)("real Chrome through the exact upstream relay", () => {
     "navigates and exposes accessibility, console, and network metadata",
     { timeout: 60_000, retry: 1 },
     async () => {
-      const root = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-relay-real-"));
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-relay-real-"));
       temporaryDirectories.push(root);
       const projectDir = path.join(root, "project");
       const home = path.join(root, "home");
@@ -65,7 +65,7 @@ describe.skipIf(!ready)("real Chrome through the exact upstream relay", () => {
         response.writeHead(200, { "content-type": "text/html" });
         response.end(
           '<!doctype html><title>PickLab Relay</title><button>Relay Ready</button>' +
-            '<script>console.log("picklab-relay-console");fetch("/data")</script>',
+            '<script>console.log("pickforge-lab-relay-console");fetch("/data")</script>',
         );
       });
       server.listen(0, "127.0.0.1");
@@ -97,7 +97,7 @@ describe.skipIf(!ready)("real Chrome through the exact upstream relay", () => {
         stderr: "pipe",
       });
       const client = new Client({
-        name: "picklab-real-devtools-smoke",
+        name: "pickforge-lab-real-devtools-smoke",
         version: "0.0.0",
       });
       try {
@@ -122,7 +122,7 @@ describe.skipIf(!ready)("real Chrome through the exact upstream relay", () => {
           arguments: {},
         });
         expect(JSON.stringify(consoleMessages)).toContain(
-          "picklab-relay-console",
+          "pickforge-lab-relay-console",
         );
 
         const networkRequests = await client.callTool({

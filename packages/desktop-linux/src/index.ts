@@ -1,4 +1,4 @@
-export const packageName = "@pickforge/picklab-desktop-linux";
+export const packageName = "@pickforge/lab-desktop-linux";
 
 export {
   XvfbStartError,

@@ -1,4 +1,4 @@
-import { withAgentPermit } from "@pickforge/picklab-core";
+import { withAgentPermit } from "@pickforge/lab-core";
 import {
   click,
   desktopSessionLogDir,
@@ -14,7 +14,7 @@ import {
   scroll,
   typeText,
   waitForWindow,
-} from "@pickforge/picklab-desktop-linux";
+} from "@pickforge/lab-desktop-linux";
 import {
   captureToTarget,
   parseIntArg,
@@ -52,7 +52,7 @@ export async function runDesktopLaunch(
     const { id, display } = await resolveDesktop(opts);
     // A newly launched client on the shared display can grab input focus —
     // gated the same as direct input, so it can never land while a human
-    // holds the takeover lease (pickforge/picklab#21 P1-E).
+    // holds the takeover lease (pickforge/pickforge#21 P1-E).
     const app = await withAgentPermit(id, process.env, () =>
       launchApp({
         display,

@@ -372,7 +372,7 @@ describe("server context", () => {
         PICKLAB_PROJECT_DIR: projectDir,
       },
     });
-    const client = new Client({ name: "picklab-test", version: "0.0.0" });
+    const client = new Client({ name: "pickforge-lab-test", version: "0.0.0" });
     const [clientTransport, serverTransport] =
       InMemoryTransport.createLinkedPair();
     await Promise.all([

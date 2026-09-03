@@ -1,6 +1,6 @@
 {
-  "name": "@pickforge/picklab-mcp-server",
-  "version": "0.3.0",
+  "name": "@pickforge/lab-mcp-server",
+  "version": "0.4.0-alpha.1",
   "private": true,
   "description": "MCP server implementation for PickLab",
   "type": "module",
@@ -18,10 +18,10 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.0",
-    "@pickforge/picklab-android": "*",
-    "@pickforge/picklab-browser": "*",
-    "@pickforge/picklab-core": "*",
-    "@pickforge/picklab-desktop-linux": "*",
+    "@pickforge/lab-android": "*",
+    "@pickforge/lab-browser": "*",
+    "@pickforge/lab-core": "*",
+    "@pickforge/lab-desktop-linux": "*",
     "zod": "^4.0.0"
   }
 }

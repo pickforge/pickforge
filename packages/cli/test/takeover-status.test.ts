@@ -7,14 +7,14 @@ import {
   createSession,
   releaseHumanLease,
   type EnvLike,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import { takeoverStatus } from "../src/commands/takeover.js";
 
 let root: string;
 let env: EnvLike;
 
 beforeEach(async () => {
-  root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "picklab-takeover-status-"));
+  root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-takeover-status-"));
   env = { PICKLAB_HOME: path.join(root, "home") };
   process.env.PICKLAB_HOME = env.PICKLAB_HOME;
 });

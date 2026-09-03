@@ -4,7 +4,7 @@ import {
   startDaemon,
   type EnvLike,
   type RunCommandResult,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import { parseDisplayNumber } from "./display.js";
 import { sleep } from "./util.js";
 
@@ -46,7 +46,7 @@ export async function launchApp(opts: LaunchAppOptions): Promise<AppHandle> {
       // display. Merely unsetting WAYLAND_DISPLAY is not enough: libwayland
       // then falls back to the default "wayland-0" socket, so point it at a
       // socket that cannot exist to force the X11 fallback.
-      WAYLAND_DISPLAY: "picklab-no-wayland",
+      WAYLAND_DISPLAY: "pickforge-no-wayland",
       WAYLAND_SOCKET: undefined,
     },
   });

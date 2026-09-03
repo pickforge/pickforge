@@ -12,7 +12,7 @@ import {
   stopPid,
   updateSession,
   type EnvLike,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
   XvfbStartError,
   allocateDisplay,
@@ -51,7 +51,7 @@ const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const TEST_TIMEOUT_MS = 30_000;
 const DEAD_DISPLAY = ":219";
 
-const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-desktop-test-"));
+const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-desktop-test-"));
 const home = path.join(tmpRoot, "home");
 const projectDir = path.join(tmpRoot, "project");
 fs.mkdirSync(home, { recursive: true });
@@ -281,7 +281,7 @@ describe("launchApp display isolation", () => {
     try {
       const captured = fs.readFileSync(outFile, "utf8");
       expect(captured).toContain(`DISPLAY=${DEAD_DISPLAY}`);
-      expect(captured).toContain("WAYLAND_DISPLAY=picklab-no-wayland");
+      expect(captured).toContain("WAYLAND_DISPLAY=pickforge-no-wayland");
     } finally {
       await stopPid(app.pid);
     }
@@ -570,20 +570,20 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
             "-xrm",
             "XTerm.vt100.allowTitleOps: false",
             "-T",
-            "picklab-itest",
+            "pickforge-lab-itest",
           ],
           logDir: session.logDir,
         });
         const win = await waitForWindow(
           session.display,
-          "picklab-itest",
+          "pickforge-lab-itest",
           15_000,
         );
         expect(win.id).toMatch(/^\d+$/);
-        expect(win.name).toContain("picklab-itest");
+        expect(win.name).toContain("pickforge-lab-itest");
 
         await click({ display: session.display, sessionId: session.id, env, x: 40, y: 40 });
-        await typeText({ display: session.display, sessionId: session.id, env, text: "echo picklab" });
+        await typeText({ display: session.display, sessionId: session.id, env, text: "echo pickforge-lab" });
         await pressKey({ display: session.display, sessionId: session.id, env, key: "Return" });
         await pressKey({ display: session.display, sessionId: session.id, env, key: "ctrl+shift+t" });
 
@@ -653,7 +653,7 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
             "-xrm",
             "XTerm.vt100.allowTitleOps: false",
             "-T",
-            "picklab c++ [itest]",
+            "pickforge-lab c++ [itest]",
           ],
           logDir: session.logDir,
         });

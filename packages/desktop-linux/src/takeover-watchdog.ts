@@ -1,8 +1,8 @@
 import { setTimeout as delay } from "node:timers/promises";
-import { isHumanLeaseStale, readHumanLease, type EnvLike } from "@pickforge/picklab-core";
+import { isHumanLeaseStale, readHumanLease, type EnvLike } from "@pickforge/lab-core";
 import { recoverStaleHumanLease } from "./takeover.js";
 
-/** Default interval between staleness checks (pickforge/picklab#21 P0-A). */
+/** Default interval between staleness checks (pickforge/pickforge#21 P0-A). */
 export const DEFAULT_TAKEOVER_WATCHDOG_POLL_MS = 5_000;
 
 export interface RunTakeoverWatchdogLoopOptions {
@@ -24,7 +24,7 @@ export interface RunTakeoverWatchdogLoopOptions {
  * independent of the takeover-owning process's own lifetime.
  *
  * This is the crash-path half of the "writable VNC never outlives its
- * lease" invariant (pickforge/picklab#21 P0-A): `picklab watch --control`
+ * lease" invariant (pickforge/pickforge#21 P0-A): `pickforge-lab watch --control`
  * spawns this loop as a **detached** child process (own process group, not
  * killed by a `SIGKILL` of its parent — see
  * `packages/cli/src/commands/watch.ts`), so a crash of the controlling

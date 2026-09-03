@@ -14,7 +14,7 @@ import {
 let tmp: string;
 
 beforeEach(() => {
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-devtools-"));
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-devtools-"));
 });
 
 afterEach(() => {

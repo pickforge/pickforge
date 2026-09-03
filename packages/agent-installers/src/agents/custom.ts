@@ -5,7 +5,7 @@ import {
   ensureDir,
   writeFileAtomic,
   type EnvLike,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
   MCP_SERVER_NAME,
   renderJsonSnippet,

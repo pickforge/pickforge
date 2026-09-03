@@ -2,8 +2,8 @@ import {
   missingSdkMessage,
   sdkmanagerInstallCommand,
   sdkmanagerPackageInstallCommand,
-} from "@pickforge/picklab-android";
-import type { PicklabProfile } from "@pickforge/picklab-core";
+} from "@pickforge/lab-android";
+import type { PickforgeProfile } from "@pickforge/lab-core";
 import type { DetectionSnapshot } from "./detect.js";
 import { RECOMMENDED_SYSTEM_IMAGE } from "./planner.js";
 
@@ -17,7 +17,7 @@ export interface DoctorCheck {
   hint?: string;
 }
 
-const BASE_CHECKS = ["picklab-home", "config"] as const;
+const BASE_CHECKS = ["pickforge-home", "config"] as const;
 
 const DESKTOP_CHECKS = [
   "xvfb",
@@ -43,7 +43,7 @@ const PLATFORM_TOOLS_INSTALL_COMMAND =
   sdkmanagerPackageInstallCommand("platform-tools");
 
 export const PROFILE_REQUIRED_CHECKS: Record<
-  PicklabProfile,
+  PickforgeProfile,
   readonly string[]
 > = {
   generic: [...BASE_CHECKS],
@@ -53,7 +53,7 @@ export const PROFILE_REQUIRED_CHECKS: Record<
 };
 
 export function requiredChecksForProfile(
-  profile: PicklabProfile,
+  profile: PickforgeProfile,
 ): readonly string[] {
   return PROFILE_REQUIRED_CHECKS[profile];
 }
@@ -71,21 +71,21 @@ function pathCheck(
   return { id, title, status: missingStatus, detail: "not found", hint };
 }
 
-// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/pickforge#60
 export function evaluateChecks(s: DetectionSnapshot): DoctorCheck[] {
   const checks: DoctorCheck[] = [];
 
   if (!s.picklabHome.exists) {
     checks.push({
-      id: "picklab-home",
+      id: "pickforge-home",
       title: "PickLab home",
       status: "missing",
       detail: `${s.picklabHome.path} does not exist`,
-      hint: "run `picklab doctor --fix` or `picklab init` to create it",
+      hint: "run `pickforge-lab doctor --fix` or `pickforge-lab init` to create it",
     });
   } else if (!s.picklabHome.writable) {
     checks.push({
-      id: "picklab-home",
+      id: "pickforge-home",
       title: "PickLab home",
       status: "missing",
       detail: `${s.picklabHome.path} is not writable`,
@@ -93,7 +93,7 @@ export function evaluateChecks(s: DetectionSnapshot): DoctorCheck[] {
     });
   } else {
     checks.push({
-      id: "picklab-home",
+      id: "pickforge-home",
       title: "PickLab home",
       status: "ok",
       detail: s.picklabHome.path,
@@ -264,7 +264,7 @@ export function evaluateChecks(s: DetectionSnapshot): DoctorCheck[] {
       title: "Dedicated PickLab AVD",
       status: "missing",
       detail: `AVD "${s.android.avdName}" not found`,
-      hint: `create it with: picklab setup android --create-avd --avd-name ${s.android.avdName}`,
+      hint: `create it with: pickforge-lab setup android --create-avd --avd-name ${s.android.avdName}`,
     });
   }
 
@@ -283,7 +283,7 @@ export function evaluateChecks(s: DetectionSnapshot): DoctorCheck[] {
       detail: `user "${s.labUser.name}" not found`,
       hint:
         `optional until session isolation ships: create it with: ` +
-        `picklab setup lab-user --name ${s.labUser.name}`,
+        `pickforge-lab setup lab-user --name ${s.labUser.name}`,
     });
   }
 

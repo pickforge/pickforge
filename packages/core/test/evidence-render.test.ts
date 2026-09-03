@@ -21,7 +21,7 @@ let root: string;
 let projectDir: string;
 
 beforeEach(() => {
-  root = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-evidence-render-"));
+  root = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-evidence-render-"));
   projectDir = path.join(root, "project");
   fs.mkdirSync(projectDir, { recursive: true });
   // Isolate createRun's default storage resolution from the real developer

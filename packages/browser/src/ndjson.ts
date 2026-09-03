@@ -30,7 +30,7 @@ export type JsonRpcHook = (
  * instead, and the original record is never forwarded to `destination`.
  * Returning `undefined` falls through to the normal `hook`+forward path.
  * Used by the DevTools relay's fail-closed human-takeover gate (
- * pickforge/picklab#21) to answer a blocked `tools/call` with a synthetic
+ * pickforge/pickforge#21) to answer a blocked `tools/call` with a synthetic
  * busy error on the *response* stream, without ever reaching the upstream
  * child process.
  */
@@ -50,7 +50,7 @@ function isJsonRpcId(value: unknown): value is JsonRpcId {
   );
 }
 
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 export function assertJsonRpcMessage(value: unknown): asserts value is JsonRpcMessage {
   if (!isObject(value) || value.jsonrpc !== "2.0") {
     throw new Error('expected a JSON-RPC 2.0 object with jsonrpc: "2.0"');
@@ -202,7 +202,7 @@ export function serializeJsonRpcMessage(message: JsonRpcMessage): Buffer {
  * the same serializer. Used to fully order writes to a stream that more than
  * one independent pump can target — e.g. the DevTools relay's fail-closed
  * intercept answering directly on the client-facing output stream while the
- * child-response pump also writes to it (pickforge/picklab#21 P1-D) — so two
+ * child-response pump also writes to it (pickforge/pickforge#21 P1-D) — so two
  * concurrent producers can never have overlapping in-flight writes to the
  * same destination, made explicit in the code rather than left as an
  * incidental property of whichever `Writable` happens to be passed in.
@@ -334,7 +334,7 @@ export interface PumpJsonRpcNdjsonOptions {
 
 const runWriteImmediately: JsonRpcWriteSerializer = (write) => write();
 
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function pumpJsonRpcNdjson(
   source: Readable,
   destination: Writable,

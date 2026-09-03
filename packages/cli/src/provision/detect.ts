@@ -6,21 +6,21 @@ import {
   type KvmStatus,
   type SdkToolPaths,
   type SystemImage,
-} from "@pickforge/picklab-android";
+} from "@pickforge/lab-android";
 import {
-  legacyPicklabHome,
+  legacyPickforgeHome,
   loadConfig,
   picklabHome,
   resolvedDefaults,
   resolveRunStorage,
   runCommand,
   type EnvLike,
-  type PicklabProfile,
-} from "@pickforge/picklab-core";
+  type PickforgeProfile,
+} from "@pickforge/lab-core";
 import {
   detectScreenshotTool,
   detectVncBinary,
-} from "@pickforge/picklab-desktop-linux";
+} from "@pickforge/lab-desktop-linux";
 
 export interface DetectionSnapshot {
   picklabHome: { path: string; exists: boolean; writable: boolean };
@@ -28,7 +28,7 @@ export interface DetectionSnapshot {
    * differs from the current default (never when `PICKLAB_HOME` is set
    * explicitly — that is the user's own root, not a legacy one). */
   legacyHome: { path: string } | null;
-  config: { ok: boolean; error: string | null; profile: PicklabProfile | null };
+  config: { ok: boolean; error: string | null; profile: PickforgeProfile | null };
   /** Present when the project-committed `.picklab/config.json` requested
    * `storage.mode: "custom"` and the resolver rejected it (repo config
    * cannot select custom storage) and fell back to the next layer. */
@@ -102,7 +102,7 @@ export async function labUserExists(
   }
 }
 
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function collectSnapshot(
   opts: CollectSnapshotOptions = {},
 ): Promise<DetectionSnapshot> {
@@ -132,7 +132,7 @@ export async function collectSnapshot(
 
   const homePath = picklabHome(env);
   const homeExists = dirExists(homePath);
-  const legacyPath = legacyPicklabHome(env);
+  const legacyPath = legacyPickforgeHome(env);
   const legacyHome =
     legacyPath !== undefined && legacyPath !== homePath && dirExists(legacyPath)
       ? { path: legacyPath }

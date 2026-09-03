@@ -1,4 +1,4 @@
-export const packageName = "@pickforge/picklab-agent-installers";
+export const packageName = "@pickforge/lab-agent-installers";
 
 export {
   AGENT_KINDS,

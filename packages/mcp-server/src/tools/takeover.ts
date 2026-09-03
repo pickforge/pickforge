@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { getTakeoverStatus } from "@pickforge/picklab-core";
+import { getTakeoverStatus } from "@pickforge/lab-core";
 import { resolveSessionRecord, runTool, type ServerContext } from "../context.js";
 
 const sessionArg = {
@@ -18,10 +18,10 @@ export function registerTakeoverTools(server: McpServer, ctx: ServerContext): vo
       title: "Human takeover status",
       description:
         "Check whether a session is currently under supervised human control " +
-        "(pickforge/picklab#21). While active, desktop input and the DevTools " +
+        "(pickforge/pickforge#21). While active, desktop input and the DevTools " +
         "relay fail closed with a busy error — call this before retrying, or " +
         "use `request_user_input` to ask the human to finish and return " +
-        "control via `picklab watch --control`.",
+        "control via `pickforge-lab watch --control`.",
       inputSchema: { ...sessionArg },
     },
     (args) =>

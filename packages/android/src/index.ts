@@ -1,4 +1,4 @@
-export const packageName = "@pickforge/picklab-android";
+export const packageName = "@pickforge/lab-android";
 
 export {
   commonSdkPaths,

@@ -10,7 +10,7 @@ import {
   acquireHumanLease,
   releaseHumanLease,
   type SessionRecord,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
   createDeferred,
   CHROME_DEVTOOLS_MCP_BIN,
@@ -35,7 +35,7 @@ afterEach(() => {
 });
 
 function temporaryDirectory(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-devtools-mcp-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-devtools-mcp-"));
   temporaryDirectories.push(dir);
   return dir;
 }
@@ -234,7 +234,7 @@ describe("resolveLiveBrowserSession", () => {
 
 describe("createTakeoverBusyIntercept", () => {
   it("blocks tools/call while a human lease is active, and only that", async () => {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-takeover-intercept-"));
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-takeover-intercept-"));
     temporaryDirectories.push(tmp);
     const env = { PICKLAB_HOME: path.join(tmp, "home") };
     const intercept = createTakeoverBusyIntercept("brow-aaaaaa11", env);

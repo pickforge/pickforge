@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { acquireHumanLease, releaseHumanLease } from "@pickforge/picklab-core";
+import { acquireHumanLease, releaseHumanLease } from "@pickforge/lab-core";
 import {
   connectLab,
   makeLabDirs,

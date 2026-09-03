@@ -18,7 +18,7 @@ let root: string;
 // "openRunCatalog storage modes".
 beforeEach(async () => {
   root = await fs.promises.mkdtemp(
-    path.join(os.tmpdir(), "picklab-run-catalog-"),
+    path.join(os.tmpdir(), "pickforge-lab-run-catalog-"),
   );
   vi.stubEnv("PICKLAB_STORAGE_MODE", "project-local");
 });

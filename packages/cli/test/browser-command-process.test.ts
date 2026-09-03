@@ -9,12 +9,12 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   createBrowserSession,
   destroyBrowserSession,
-} from "@pickforge/picklab-browser";
-import { findOnPath } from "@pickforge/picklab-desktop-linux";
+} from "@pickforge/lab-browser";
+import { findOnPath } from "@pickforge/lab-desktop-linux";
 import { fakePath, writeFakeChrome } from "../../browser/test/fakes.js";
 import { ensureCliBuilt } from "./build-once.js";
 
-const cliPath = fileURLToPath(new URL("../dist/picklab.js", import.meta.url));
+const cliPath = fileURLToPath(new URL("../dist/pickforge-lab.js", import.meta.url));
 const cliPackageDir = path.dirname(path.dirname(cliPath));
 const hasXvfb = findOnPath("Xvfb") !== null;
 const cleanupPaths: string[] = [];
@@ -47,7 +47,7 @@ describe.skipIf(!hasXvfb)("built browser relay command exit", () => {
     "exits 137 after external-signal escalation while stdin remains open",
     { timeout: 15_000 },
     async () => {
-      const root = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-cli-exit-"));
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-cli-exit-"));
       cleanupPaths.push(root);
       const projectDir = path.join(root, "project");
       const home = path.join(root, "home");

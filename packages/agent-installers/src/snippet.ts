@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { agentsDir, ensureDir, type EnvLike } from "@pickforge/picklab-core";
+import { agentsDir, ensureDir, type EnvLike } from "@pickforge/lab-core";
 import type { McpServerEntry } from "./types.js";
 
 export const MCP_SERVER_NAME = "picklab";

@@ -1,7 +1,7 @@
 [[IgnoredVulns]]
 id = "GHSA-frvp-7c67-39w9"
-reason = "Below the high/critical gate; the fixed @hono/node-server release requires an upstream major-version update. Tracked in pickforge/picklab#60."
+reason = "Below the high/critical gate; the fixed @hono/node-server release requires an upstream major-version update. Tracked in pickforge/pickforge#60."
 
 [[IgnoredVulns]]
 id = "GHSA-g7r4-m6w7-qqqr"
-reason = "Below the high/critical gate; the fixed esbuild release is outside current direct dependency ranges. Tracked in pickforge/picklab#60."
+reason = "Below the high/critical gate; the fixed esbuild release is outside current direct dependency ranges. Tracked in pickforge/pickforge#60."

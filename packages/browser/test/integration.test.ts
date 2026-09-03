@@ -7,8 +7,8 @@ import {
   isPidAlive,
   listProcessGroupMembers,
   type EnvLike,
-} from "@pickforge/picklab-core";
-import { findOnPath } from "@pickforge/picklab-desktop-linux";
+} from "@pickforge/lab-core";
+import { findOnPath } from "@pickforge/lab-desktop-linux";
 import {
   createBrowserSession,
   destroyBrowserSession,
@@ -21,7 +21,7 @@ const hasXvfb = findOnPath("Xvfb") !== null;
 const hasChrome = detectChromeBinary() !== null;
 const ready = hasXvfb && hasChrome;
 const TEST_TIMEOUT_MS = 60_000;
-const SECRET = "picklab-integration-secret-should-not-leak";
+const SECRET = "pickforge-lab-integration-secret-should-not-leak";
 
 let tmp: string;
 let home: string;
@@ -30,7 +30,7 @@ let registryEnv: EnvLike;
 let spawnEnv: EnvLike;
 
 beforeEach(() => {
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-browser-int-"));
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-browser-int-"));
   home = path.join(tmp, "home");
   projectDir = path.join(tmp, "project");
   fs.mkdirSync(home, { recursive: true });

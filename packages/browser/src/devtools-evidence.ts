@@ -14,7 +14,7 @@ import {
   type AppendOutcome,
   type EnvLike,
   type RunHandle,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import type { JsonRpcHook, JsonRpcMessage } from "./ndjson.js";
 
 const MAX_PENDING_ACTIONS = 1_024;
@@ -204,7 +204,7 @@ function structuredContent(message: JsonRpcMessage): Record<string, unknown> | u
     : undefined;
 }
 
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 function diagnosticActions(
   message: JsonRpcMessage,
   sessionId: string,
@@ -397,7 +397,7 @@ async function captureInlinePng(
   return path.join("screenshots", filename);
 }
 
-// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/pickforge#60
 export async function createDevtoolsEvidenceRecorder(
   opts: CreateDevtoolsEvidenceRecorderOptions,
 ): Promise<DevtoolsEvidenceRecorder | undefined> {
@@ -454,7 +454,7 @@ export async function createDevtoolsEvidenceRecorder(
         report(error);
       }
     },
-    // eslint-disable-next-line complexity -- Legacy gate debt: pickforge/picklab#60
+    // eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
     afterResponse: async (message) => {
       try {
         const id = requestId(message);

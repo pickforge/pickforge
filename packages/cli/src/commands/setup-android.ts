@@ -1,5 +1,5 @@
-import { sdkmanagerInstallCommand } from "@pickforge/picklab-android";
-import type { EnvLike } from "@pickforge/picklab-core";
+import { sdkmanagerInstallCommand } from "@pickforge/lab-android";
+import type { EnvLike } from "@pickforge/lab-core";
 import { collectSnapshot, type DetectionSnapshot } from "../provision/detect.js";
 import {
   executeProvisioning,

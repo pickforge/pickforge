@@ -17,7 +17,7 @@ const HUMAN_BLOCKER_GUIDELINE =
   "for the answer. Never guess credentials and never abandon the session; " +
   "report what you need.";
 
-// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/pickforge#60
 export function registerPrompts(server: McpServer): void {
   server.registerPrompt(
     "test-flutter-desktop-visually",

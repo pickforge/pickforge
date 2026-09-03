@@ -97,7 +97,7 @@ function hasBun(): boolean {
 
 beforeAll(async () => {
   await ensureCliBuilt();
-  suiteDir = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-installer-"));
+  suiteDir = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-installer-"));
   npmCache = path.join(suiteDir, "npm-cache");
   fs.mkdirSync(npmCache, { recursive: true });
   const packDir = path.join(suiteDir, "pack");
@@ -141,11 +141,11 @@ describe("install.sh", () => {
       });
       const result = await run("sh", [installScript], { cwd: dir, env });
       expect(result.code, describeFailure(result)).toBe(0);
-      expect(result.stdout).toContain(`picklab ${cliVersion} installed.`);
-      expect(result.stdout).toContain("picklab agents install");
-      expect(result.stdout).toContain("picklab init --profile");
+      expect(result.stdout).toContain(`pickforge-lab ${cliVersion} installed.`);
+      expect(result.stdout).toContain("pickforge-lab agents install");
+      expect(result.stdout).toContain("pickforge-lab init --profile");
 
-      const binary = path.join(prefix, "bin", "picklab");
+      const binary = path.join(prefix, "bin", "pickforge-lab");
       const version = await run(binary, ["--version"], { env: baseEnv(home) });
       expect(version.code, describeFailure(version)).toBe(0);
       expect(version.stdout.trim()).toBe(cliVersion);
@@ -173,7 +173,7 @@ describe("install.sh", () => {
       const picklabHome = path.join(home, ".picklab");
       expect(fs.existsSync(picklabHome)).toBe(false);
       const init = await run(
-        path.join(prefix, "bin", "picklab"),
+        path.join(prefix, "bin", "pickforge-lab"),
         ["init", "--profile", "generic", "--yes", "--json"],
         { cwd: project, env: baseEnv(home) },
       );
@@ -299,7 +299,7 @@ describe("install.sh", () => {
         "fi",
         "if [ \"${1:-}\" = \"add\" ] && [ \"${2:-}\" = \"--global\" ]; then",
         "  mkdir -p \"${FAKE_BUN_GLOBAL_BIN}\"",
-        "  cat >\"${FAKE_BUN_GLOBAL_BIN}/picklab\" <<'PICKLAB_FAKE_BIN'",
+        "  cat >\"${FAKE_BUN_GLOBAL_BIN}/pickforge-lab\" <<'PICKLAB_FAKE_BIN'",
         "#!/bin/sh",
         "if [ \"${1:-}\" = \"--version\" ]; then",
         "  printf '%s\\n' \"${FAKE_PICKLAB_VERSION}\"",
@@ -307,7 +307,7 @@ describe("install.sh", () => {
         "fi",
         "exit 1",
         "PICKLAB_FAKE_BIN",
-        "  chmod +x \"${FAKE_BUN_GLOBAL_BIN}/picklab\"",
+        "  chmod +x \"${FAKE_BUN_GLOBAL_BIN}/pickforge-lab\"",
         "  exit 0",
         "fi",
         "exit 64",
@@ -328,10 +328,10 @@ describe("install.sh", () => {
     });
 
     expect(result.code, describeFailure(result)).toBe(0);
-    expect(result.stdout).toContain(`picklab ${cliVersion} installed.`);
+    expect(result.stdout).toContain(`pickforge-lab ${cliVersion} installed.`);
     expect(result.stdout).toContain(`note: ${customBin} is not on your PATH`);
-    expect(fs.existsSync(path.join(customBin, "picklab"))).toBe(true);
-    expect(fs.existsSync(path.join(bunInstall, "bin", "picklab"))).toBe(false);
+    expect(fs.existsSync(path.join(customBin, "pickforge-lab"))).toBe(true);
+    expect(fs.existsSync(path.join(bunInstall, "bin", "pickforge-lab"))).toBe(false);
     const log = fs.readFileSync(bunLog, "utf8");
     expect(log).toContain(`add --global ${tarball}`);
     expect(log).toContain("pm bin -g");
@@ -349,10 +349,10 @@ describe("install.sh", () => {
       });
       const result = await run("sh", [installScript], { cwd: dir, env });
       expect(result.code, describeFailure(result)).toBe(0);
-      expect(result.stdout).toContain(`picklab ${cliVersion} installed.`);
+      expect(result.stdout).toContain(`pickforge-lab ${cliVersion} installed.`);
 
       const version = await run(
-        path.join(bunInstall, "bin", "picklab"),
+        path.join(bunInstall, "bin", "pickforge-lab"),
         ["--version"],
         { env: baseEnv(home) },
       );
@@ -390,12 +390,12 @@ describe("install.sh", () => {
 
 describe("packed tarball execution", () => {
   it(
-    "runs picklab via npm exec from the tarball (npx equivalent)",
+    "runs pickforge-lab via npm exec from the tarball (npx equivalent)",
     async () => {
       const { home, dir } = makeCase("npx");
       const result = await run(
         "npm",
-        ["exec", "--yes", `--package=${tarball}`, "--", "picklab", "--version"],
+        ["exec", "--yes", `--package=${tarball}`, "--", "pickforge-lab", "--version"],
         { cwd: dir, env: baseEnv(home) },
       );
       expect(result.code, describeFailure(result)).toBe(0);
@@ -405,7 +405,7 @@ describe("packed tarball execution", () => {
   );
 
   it(
-    "runs picklab init via npm exec from the tarball (npx -y @pickforge/picklab init)",
+    "runs pickforge-lab init via npm exec from the tarball (npx -y pickforge init)",
     async () => {
       const { home, dir } = makeCase("npx-init");
       const project = path.join(dir, "project");
@@ -417,7 +417,7 @@ describe("packed tarball execution", () => {
           "--yes",
           `--package=${tarball}`,
           "--",
-          "picklab",
+          "pickforge-lab",
           "init",
           "--profile",
           "generic",
@@ -445,21 +445,21 @@ describe("packed tarball execution", () => {
       fs.mkdirSync(project, { recursive: true });
       fs.writeFileSync(
         path.join(project, "package.json"),
-        JSON.stringify({ name: "picklab-bun-host", private: true }),
+        JSON.stringify({ name: "pickforge-lab-bun-host", private: true }),
       );
       const env = baseEnv(home, { BUN_INSTALL: path.join(dir, "bun") });
       const added = await run("bun", ["add", tarball], { cwd: project, env });
       expect(added.code, describeFailure(added)).toBe(0);
 
-      const picklab = await run(
-        path.join(project, "node_modules", ".bin", "picklab"),
+      const pickforgeLab = await run(
+        path.join(project, "node_modules", ".bin", "pickforge-lab"),
         ["--version"],
         { cwd: project, env },
       );
-      expect(picklab.code, describeFailure(picklab)).toBe(0);
-      expect(picklab.stdout.trim()).toBe(cliVersion);
+      expect(pickforgeLab.code, describeFailure(pickforgeLab)).toBe(0);
+      expect(pickforgeLab.stdout.trim()).toBe(cliVersion);
 
-      const mcpBin = path.join(project, "node_modules", ".bin", "picklab-mcp");
+      const mcpBin = path.join(project, "node_modules", ".bin", "pickforge-mcp");
       expect(fs.existsSync(mcpBin)).toBe(true);
     },
     NETWORK_TIMEOUT,

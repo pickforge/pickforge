@@ -8,9 +8,9 @@ const handoff = vi.hoisted(() => ({
   pid: undefined as number | undefined,
 }));
 
-vi.mock("@pickforge/picklab-core", async (importOriginal) => {
+vi.mock("@pickforge/lab-core", async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import("@pickforge/picklab-core")>();
+    await importOriginal<typeof import("@pickforge/lab-core")>();
   const updateSession: typeof actual.updateSession = async (id, patch, env) => {
     if (patch.desktop !== undefined && patch.status === undefined) {
       handoff.pid = patch.desktop.xvfbPid;
@@ -32,7 +32,7 @@ import {
   isPidAlive,
   listSessions,
   type EnvLike,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import { createBrowserSession } from "../src/session.js";
 import { writeFakeChrome } from "./fakes.js";
 
@@ -46,7 +46,7 @@ afterEach(() => {
 });
 
 function makeEnv(): EnvLike {
-  root = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-handoff-"));
+  root = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-handoff-"));
   const binDir = path.join(root, "bin");
   fs.mkdirSync(binDir, { recursive: true });
   writeFakeChrome(binDir, "ready");
@@ -58,7 +58,7 @@ function makeEnv(): EnvLike {
   return {
     ...process.env,
     HOME: path.join(root, "home"),
-    PICKLAB_HOME: path.join(root, "picklab-home"),
+    PICKLAB_HOME: path.join(root, "pickforge-home"),
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
   };
 }

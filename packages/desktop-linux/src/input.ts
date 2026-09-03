@@ -1,4 +1,4 @@
-import { runCommand, withAgentPermit, type EnvLike } from "@pickforge/picklab-core";
+import { runCommand, withAgentPermit, type EnvLike } from "@pickforge/lab-core";
 import { parseDisplayNumber } from "./display.js";
 
 const TYPE_DELAY_MS = 50;
@@ -291,7 +291,7 @@ async function runXdotool(
  * Every desktop input call below is gated by `withAgentPermit`: it acquires
  * a short-lived agent permit, rechecks for a live human lease, delivers the
  * input only if none is found, and releases the permit in `finally` —
- * fail-closed, per pickforge/picklab#21. No permit fitness (or a lease
+ * fail-closed, per pickforge/pickforge#21. No permit fitness (or a lease
  * appearing before the recheck) means no input delivery.
  */
 

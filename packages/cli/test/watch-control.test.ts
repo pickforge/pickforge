@@ -6,7 +6,7 @@ import type {
   EndHumanTakeoverResult,
   HumanTakeoverHandle,
   OpenVncViewerResult,
-} from "@pickforge/picklab-desktop-linux";
+} from "@pickforge/lab-desktop-linux";
 
 const { startHumanTakeover, endHumanTakeover, renewHumanTakeover, openVncViewer } =
   vi.hoisted(() => ({
@@ -16,9 +16,9 @@ const { startHumanTakeover, endHumanTakeover, renewHumanTakeover, openVncViewer 
     openVncViewer: vi.fn(),
   }));
 
-vi.mock("@pickforge/picklab-desktop-linux", async (importOriginal) => {
+vi.mock("@pickforge/lab-desktop-linux", async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import("@pickforge/picklab-desktop-linux")>();
+    await importOriginal<typeof import("@pickforge/lab-desktop-linux")>();
   return {
     ...actual,
     startHumanTakeover,
@@ -28,7 +28,7 @@ vi.mock("@pickforge/picklab-desktop-linux", async (importOriginal) => {
   };
 });
 
-import { createSession } from "@pickforge/picklab-core";
+import { createSession } from "@pickforge/lab-core";
 import { watchDesktopSession, type SpawnWatchdogFn } from "../src/commands/watch.js";
 
 let root: string;
@@ -84,7 +84,7 @@ async function createDesktop(): Promise<string> {
 }
 
 beforeEach(async () => {
-  root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "picklab-watch-control-"));
+  root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-watch-control-"));
   process.env.PICKLAB_HOME = path.join(root, "home");
   startHumanTakeover.mockReset();
   endHumanTakeover.mockReset();

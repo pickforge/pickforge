@@ -7,7 +7,7 @@ import {
   resolveRunStorage,
   saveProjectConfig,
   type EnvLike,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import { withMcpEvidence } from "../src/evidence.js";
 import {
   makeLabDirs,
@@ -175,7 +175,7 @@ describe("MCP evidence producer", () => {
 
       expect(result).toEqual({ data: { ok: true } });
       expect(stderr).toHaveBeenCalledWith(
-        expect.stringContaining("[picklab evidence] desktop_click:"),
+        expect.stringContaining("[pickforge-lab evidence] desktop_click:"),
       );
     } finally {
       stderr.mockRestore();

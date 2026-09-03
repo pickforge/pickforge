@@ -4,13 +4,13 @@ import {
   runCommand,
   type EnvLike,
   type RunCommandResult,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import { findSdkTool } from "./sdk.js";
 import { sleep } from "./util.js";
 
 export const KEYCODE_HOME = "KEYCODE_HOME";
 export const KEYCODE_BACK = "KEYCODE_BACK";
-export const UI_DUMP_REMOTE_PATH = "/sdcard/picklab-ui.xml";
+export const UI_DUMP_REMOTE_PATH = "/sdcard/pickforge-lab-ui.xml";
 
 const SERIAL_PATTERN = /^[A-Za-z0-9._:-]+$/;
 const PACKAGE_PATTERN = /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/;

@@ -13,8 +13,8 @@ import {
   screenshot,
   tap,
   typeText,
-} from "@pickforge/picklab-android";
-import { redactSecrets } from "@pickforge/picklab-core";
+} from "@pickforge/lab-android";
+import { redactSecrets } from "@pickforge/lab-core";
 import {
   captureToTarget,
   imageContent,
@@ -74,7 +74,7 @@ function targetData(target: AndroidTarget): Record<string, unknown> {
   return data;
 }
 
-// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/pickforge#60
 export function registerAndroidTools(
   server: McpServer,
   ctx: ServerContext,
@@ -439,7 +439,7 @@ export function registerAndroidTools(
       title: "Run adb command",
       description:
         "Run a raw adb command as an argument array. Output is redacted; " +
-        "use the picklab CLI for unredacted adb access.",
+        "use the pickforge-lab CLI for unredacted adb access.",
       inputSchema: {
         ...targetArgs,
         args: z

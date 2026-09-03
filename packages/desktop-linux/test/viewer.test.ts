@@ -14,7 +14,7 @@ import {
   readProcessIdentity,
   stopPid,
   updateSession,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
   desktopSessionLogDir,
   destroyDesktopSession,
@@ -52,7 +52,7 @@ async function executable(name: string, source: string): Promise<string> {
 }
 
 beforeEach(async () => {
-  root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "picklab-viewer-"));
+  root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-viewer-"));
   binDir = path.join(root, "bin");
   home = path.join(root, "home");
   await fs.promises.mkdir(binDir, { recursive: true });

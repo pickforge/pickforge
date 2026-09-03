@@ -6,22 +6,22 @@ const runLiveAndroid = process.env.PICKLAB_LIVE_ANDROID === "1";
 export default defineConfig({
   resolve: {
     alias: {
-      "@pickforge/picklab-core": fileURLToPath(
+      "@pickforge/lab-core": fileURLToPath(
         new URL("packages/core/src/index.ts", import.meta.url),
       ),
-      "@pickforge/picklab-desktop-linux": fileURLToPath(
+      "@pickforge/lab-desktop-linux": fileURLToPath(
         new URL("packages/desktop-linux/src/index.ts", import.meta.url),
       ),
-      "@pickforge/picklab-browser": fileURLToPath(
+      "@pickforge/lab-browser": fileURLToPath(
         new URL("packages/browser/src/index.ts", import.meta.url),
       ),
-      "@pickforge/picklab-android": fileURLToPath(
+      "@pickforge/lab-android": fileURLToPath(
         new URL("packages/android/src/index.ts", import.meta.url),
       ),
-      "@pickforge/picklab-agent-installers": fileURLToPath(
+      "@pickforge/lab-agent-installers": fileURLToPath(
         new URL("packages/agent-installers/src/index.ts", import.meta.url),
       ),
-      "@pickforge/picklab-mcp-server": fileURLToPath(
+      "@pickforge/lab-mcp-server": fileURLToPath(
         new URL("packages/mcp-server/src/index.ts", import.meta.url),
       ),
     },

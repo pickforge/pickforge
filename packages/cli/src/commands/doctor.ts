@@ -1,4 +1,4 @@
-import type { EnvLike } from "@pickforge/picklab-core";
+import type { EnvLike } from "@pickforge/lab-core";
 import { resolveAskpassCapability } from "../provision/askpass.js";
 import {
   evaluateChecks,
@@ -17,7 +17,7 @@ import {
   labUserPrivilegeUnavailableMessage,
   planCreateAvd,
   planLabUser,
-  planPicklabHome,
+  planPickforgeHome,
 } from "../provision/planner.js";
 import { confirm, toConsentDecision } from "../provision/prompts.js";
 
@@ -57,7 +57,7 @@ async function buildFixPlan(
 
   sections.push({
     kind: "plan",
-    plan: planPicklabHome({
+    plan: planPickforgeHome({
       path: snapshot.picklabHome.path,
       exists: snapshot.picklabHome.exists,
     }),

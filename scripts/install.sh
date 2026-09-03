@@ -1,11 +1,11 @@
 #!/bin/sh
-# PickLab installer: curl -fsSL https://pickforge.dev/picklab/install.sh | sh
-# Installs @pickforge/picklab globally with bun (preferred) or npm.
+# PickLab installer: curl -fsSL https://pickforge.dev/pickforge-lab/install.sh | sh
+# Installs pickforge globally with bun (preferred) or npm.
 # Never uses sudo.
 set -eu
 
 resolve_package_spec() {
-  package_spec="@pickforge/picklab"
+  package_spec="pickforge"
   if [ "${PICKLAB_INSTALL_FROM_TARBALL:-}" != "" ]; then
     if [ ! -f "${PICKLAB_INSTALL_FROM_TARBALL}" ]; then
       echo "error: PICKLAB_INSTALL_FROM_TARBALL points to a missing file: ${PICKLAB_INSTALL_FROM_TARBALL}" >&2
@@ -101,25 +101,25 @@ install_with_npm() {
 }
 
 verify_install() {
-  picklab_bin="${bin_dir}/picklab"
-  if [ ! -x "${picklab_bin}" ]; then
-    echo "error: install finished but ${picklab_bin} was not found or is not executable" >&2
+  pickforge_lab_bin="${bin_dir}/pickforge-lab"
+  if [ ! -x "${pickforge_lab_bin}" ]; then
+    echo "error: install finished but ${pickforge_lab_bin} was not found or is not executable" >&2
     exit 1
   fi
-  version="$("${picklab_bin}" --version)"
-  echo "picklab ${version} installed."
-  resolved="$(command -v picklab 2>/dev/null || true)"
+  version="$("${pickforge_lab_bin}" --version)"
+  echo "pickforge-lab ${version} installed."
+  resolved="$(command -v pickforge-lab 2>/dev/null || true)"
   if [ "${resolved}" = "" ]; then
-    echo "note: ${bin_dir} is not on your PATH; add it to run \"picklab\" directly."
-  elif [ "${resolved}" != "${picklab_bin}" ]; then
-    echo "note: \"picklab\" on PATH is ${resolved}; this install wrote ${picklab_bin}."
+    echo "note: ${bin_dir} is not on your PATH; add it to run \"pickforge-lab\" directly."
+  elif [ "${resolved}" != "${pickforge_lab_bin}" ]; then
+    echo "note: \"pickforge-lab\" on PATH is ${resolved}; this install wrote ${pickforge_lab_bin}."
     echo "note: if those differ, remove the other install or reorder PATH."
   fi
   echo "Next steps:"
-  echo "  1. picklab agents install <codex|claude-code|cursor>  # register the MCP server"
-  echo "  2. picklab init --profile <flutter-desktop|android|desktop+android>  # inside your project"
-  echo "  3. picklab doctor  # verify dependencies; --fix repairs what it can"
-  echo "Agent-driven setup guide: https://github.com/pickforge/picklab/blob/main/INSTALL.md"
+  echo "  1. pickforge-lab agents install <codex|claude-code|cursor>  # register the MCP server"
+  echo "  2. pickforge-lab init --profile <flutter-desktop|android|desktop+android>  # inside your project"
+  echo "  3. pickforge-lab doctor  # verify dependencies; --fix repairs what it can"
+  echo "Agent-driven setup guide: https://github.com/pickforge/pickforge/blob/main/INSTALL.md"
 }
 
 main() {

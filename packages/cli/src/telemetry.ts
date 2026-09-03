@@ -1,7 +1,7 @@
 import { createRequire } from "node:module";
 import * as Sentry from "@sentry/node";
 import type { ErrorEvent } from "@sentry/node";
-import { redactSecrets } from "@pickforge/picklab-core";
+import { redactSecrets } from "@pickforge/lab-core";
 
 export type EnvLike = Record<string, string | undefined>;
 

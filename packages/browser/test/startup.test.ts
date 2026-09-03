@@ -7,13 +7,13 @@ import {
   destroySessionRecord,
   listSessions,
   type EnvLike,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 
 const PARTIAL_PID = 4_194_302;
 
-vi.mock("@pickforge/picklab-desktop-linux", async (importOriginal) => {
+vi.mock("@pickforge/lab-desktop-linux", async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import("@pickforge/picklab-desktop-linux")>();
+    await importOriginal<typeof import("@pickforge/lab-desktop-linux")>();
   return {
     ...actual,
     startXvfb: vi.fn(async () => {
@@ -46,7 +46,7 @@ afterEach(() => {
 
 describe("browser partial startup ownership", () => {
   it("persists identity and runtime for an unconfirmed Xvfb cleanup", async () => {
-    root = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-browser-startup-"));
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-browser-startup-"));
     const home = path.join(root, "home");
     const binDir = path.join(root, "bin");
     fs.mkdirSync(home, { recursive: true });
@@ -54,7 +54,7 @@ describe("browser partial startup ownership", () => {
     const env: EnvLike = {
       ...process.env,
       HOME: home,
-      PICKLAB_HOME: path.join(root, "picklab-home"),
+      PICKLAB_HOME: path.join(root, "pickforge-home"),
       PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     };
 

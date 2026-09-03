@@ -11,12 +11,12 @@ import {
 import { buildProgram } from "../src/program.js";
 
 let tmpDir: string;
-let savedPicklabHome: string | undefined;
+let savedPickforgeHome: string | undefined;
 let logs: string[];
 
 beforeEach(() => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-desktop-input-"));
-  savedPicklabHome = process.env.PICKLAB_HOME;
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-desktop-input-"));
+  savedPickforgeHome = process.env.PICKLAB_HOME;
   process.env.PICKLAB_HOME = path.join(tmpDir, "home");
   logs = [];
   vi.spyOn(console, "log").mockImplementation((line: string) => {
@@ -27,10 +27,10 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
-  if (savedPicklabHome === undefined) {
+  if (savedPickforgeHome === undefined) {
     delete process.env.PICKLAB_HOME;
   } else {
-    process.env.PICKLAB_HOME = savedPicklabHome;
+    process.env.PICKLAB_HOME = savedPickforgeHome;
   }
   fs.rmSync(tmpDir, { recursive: true, force: true });
   process.exitCode = 0;

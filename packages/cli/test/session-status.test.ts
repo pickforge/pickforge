@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ensureCliBuilt } from "./build-once.js";
 
-const cliPath = fileURLToPath(new URL("../dist/picklab.js", import.meta.url));
+const cliPath = fileURLToPath(new URL("../dist/pickforge-lab.js", import.meta.url));
 const DEAD_PID = 4_194_304;
 
 interface CliResult {
@@ -23,7 +23,7 @@ beforeAll(async () => {
 }, 300_000);
 
 beforeEach(async () => {
-  root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "picklab-cli-status-"));
+  root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-cli-status-"));
   home = path.join(root, "home");
 });
 
@@ -88,7 +88,7 @@ async function writeDesktopSessionRecord(): Promise<string> {
   return id;
 }
 
-describe("picklab session status", () => {
+describe("pickforge-lab session status", () => {
   it("reports dead when a running desktop session pid is gone", async () => {
     const id = await writeDesktopSessionRecord();
 

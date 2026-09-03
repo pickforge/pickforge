@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { isPidAlive, startDaemon } from "@pickforge/picklab-core";
+import { isPidAlive, startDaemon } from "@pickforge/lab-core";
 import {
   getUiTree,
   launchApp,
@@ -17,7 +17,7 @@ import {
   waitForBoot,
 } from "../src/index.js";
 
-const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-android-adb-"));
+const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-android-adb-"));
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const SERIAL = "emulator-5554";
 
@@ -111,8 +111,8 @@ describe("getUiTree", () => {
       [
         `echo "$*" >> '${callLog}'`,
         'case "$*" in',
-        '  *"uiautomator dump"*) echo "UI hierchary dumped to: /sdcard/picklab-ui.xml" ;;',
-        '  *"cat /sdcard/picklab-ui.xml"*) printf \'<?xml version="1.0"?><hierarchy rotation="0"><node text="hi"/></hierarchy>\' ;;',
+        '  *"uiautomator dump"*) echo "UI hierchary dumped to: /sdcard/pickforge-lab-ui.xml" ;;',
+        '  *"cat /sdcard/pickforge-lab-ui.xml"*) printf \'<?xml version="1.0"?><hierarchy rotation="0"><node text="hi"/></hierarchy>\' ;;',
         "esac",
       ].join("\n"),
     );
@@ -121,9 +121,9 @@ describe("getUiTree", () => {
     expect(xml).toContain('text="hi"');
     const calls = fs.readFileSync(callLog, "utf8").trim().split("\n");
     expect(calls).toEqual([
-      `-s ${SERIAL} shell uiautomator dump /sdcard/picklab-ui.xml`,
-      `-s ${SERIAL} exec-out cat /sdcard/picklab-ui.xml`,
-      `-s ${SERIAL} shell rm -f /sdcard/picklab-ui.xml`,
+      `-s ${SERIAL} shell uiautomator dump /sdcard/pickforge-lab-ui.xml`,
+      `-s ${SERIAL} exec-out cat /sdcard/pickforge-lab-ui.xml`,
+      `-s ${SERIAL} shell rm -f /sdcard/pickforge-lab-ui.xml`,
     ]);
   });
 
@@ -139,7 +139,7 @@ describe("getUiTree", () => {
       getUiTree({ serial: SERIAL, sdk: null, env: { PATH: bin }, attempts: 1 }),
     ).rejects.toThrow(/did not return XML/);
     const calls = fs.readFileSync(callLog, "utf8");
-    expect(calls).toContain("rm -f /sdcard/picklab-ui.xml");
+    expect(calls).toContain("rm -f /sdcard/pickforge-lab-ui.xml");
   });
 
   it("retries transient null-root dump failures", async () => {
@@ -155,8 +155,8 @@ describe("getUiTree", () => {
         '      echo "ERROR: null root node returned by UiTestAutomationBridge." >&2',
         "      exit 1",
         "    fi",
-        '    echo "UI hierchary dumped to: /sdcard/picklab-ui.xml" ;;',
-        '  *"cat /sdcard/picklab-ui.xml"*) printf \'<?xml version="1.0"?><hierarchy/>\' ;;',
+        '    echo "UI hierchary dumped to: /sdcard/pickforge-lab-ui.xml" ;;',
+        '  *"cat /sdcard/pickforge-lab-ui.xml"*) printf \'<?xml version="1.0"?><hierarchy/>\' ;;',
         "esac",
       ].join("\n"),
     );
@@ -178,9 +178,9 @@ describe("getUiTree", () => {
 
 describe("logcat and devices", () => {
   it("returns the dumped log", async () => {
-    const bin = fakeAdbDir('echo "06-09 19:00:00.000 I/Picklab: hello"');
+    const bin = fakeAdbDir('echo "06-09 19:00:00.000 I/Pickforge: hello"');
     const output = await logcat({ serial: SERIAL, lines: 10, sdk: null, env: { PATH: bin } });
-    expect(output).toContain("I/Picklab: hello");
+    expect(output).toContain("I/Pickforge: hello");
   });
 
   it("lists devices through the real parser", async () => {

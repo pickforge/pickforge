@@ -1,6 +1,6 @@
 import fs from "node:fs";
-import type { EnvLike } from "@pickforge/picklab-core";
-import { findOnPath } from "@pickforge/picklab-desktop-linux";
+import type { EnvLike } from "@pickforge/lab-core";
+import { findOnPath } from "@pickforge/lab-desktop-linux";
 
 /**
  * Chrome/Chromium binaries PickLab knows how to drive, in preference order.

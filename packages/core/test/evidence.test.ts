@@ -28,7 +28,7 @@ let project: string;
 // rather than the new `home` default. `home`-mode default behavior itself is
 // covered by storage.test.ts and run-catalog.test.ts.
 beforeEach(async () => {
-  project = await fs.promises.mkdtemp(path.join(os.tmpdir(), "picklab-evi-"));
+  project = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-evi-"));
   vi.stubEnv("PICKLAB_STORAGE_MODE", "project-local");
 });
 
@@ -1336,7 +1336,7 @@ describe("finalized-run retention", () => {
     // legacy root's runs as removal candidates just because the merged
     // cross-root list exceeds `keep`.
     const home = await fs.promises.mkdtemp(
-      path.join(os.tmpdir(), "picklab-evi-prune-home-"),
+      path.join(os.tmpdir(), "pickforge-lab-evi-prune-home-"),
     );
     const homeEnv = { PICKLAB_HOME: home };
     try {

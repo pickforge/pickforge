@@ -1,5 +1,5 @@
-import { getTakeoverStatus, resolveDesktopCapableSession } from "@pickforge/picklab-core";
-import { runTakeoverWatchdogLoop } from "@pickforge/picklab-desktop-linux";
+import { getTakeoverStatus, resolveDesktopCapableSession } from "@pickforge/lab-core";
+import { runTakeoverWatchdogLoop } from "@pickforge/lab-desktop-linux";
 import {
   parseIntArg,
   resolveProjectDir,
@@ -54,7 +54,7 @@ export interface TakeoverWatchdogOptions {
 /**
  * Internal command, not part of the public CLI surface: the actively
  * polling half of the "writable VNC never outlives its lease" crash-recovery
- * path (pickforge/picklab#21 P0-A). `picklab watch --control` spawns this as
+ * path (pickforge/pickforge#21 P0-A). `pickforge-lab watch --control` spawns this as
  * a detached process alongside a takeover; it runs until the lease it is
  * watching ends, is superseded, or goes stale (in which case it reclaims the
  * writable VNC itself and exits) — see `runTakeoverWatchdogLoop`.

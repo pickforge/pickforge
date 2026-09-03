@@ -19,7 +19,7 @@ const execFileAsync = promisify(execFile);
 let root: string;
 
 beforeEach(async () => {
-  root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "picklab-storage-"));
+  root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-storage-"));
 });
 
 afterEach(async () => {

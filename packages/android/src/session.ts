@@ -12,7 +12,7 @@ import {
   type EnvLike,
   type LocalSessionTeardownFinalizer,
   type SessionRecord,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import { listDevices } from "./adb.js";
 import { DEFAULT_AVD_NAME } from "./avd.js";
 import { startEmulator, stopEmulator, type EmulatorHandle } from "./emulator.js";

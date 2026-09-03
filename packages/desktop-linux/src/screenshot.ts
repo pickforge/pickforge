@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { runCommand, type EnvLike } from "@pickforge/picklab-core";
+import { runCommand, type EnvLike } from "@pickforge/lab-core";
 import { parseDisplayNumber } from "./display.js";
 import { findOnPath } from "./util.js";
 

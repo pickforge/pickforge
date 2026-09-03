@@ -9,7 +9,7 @@
 # Adding a fixture: choose an obviously fake value (a published sample, a counting
 # pattern), then add its exact anchored regex below. Never allowlist a rule or a path.
 
-title = "picklab"
+title = "pickforge"
 
 [extend]
 useDefault = true

@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { writeFileAtomic } from "@pickforge/picklab-core";
+import { writeFileAtomic } from "@pickforge/lab-core";
 import { backupFile } from "./backup.js";
 import {
   BROWSER_MCP_SERVER_NAME,

@@ -69,7 +69,7 @@ describe("buildBrowserEnv", () => {
       sourceEnv: { PATH: "/usr/bin" },
     });
     expect(env.DISPLAY).toBe(":137");
-    expect(env.WAYLAND_DISPLAY).toBe("picklab-no-wayland");
+    expect(env.WAYLAND_DISPLAY).toBe("pickforge-no-wayland");
   });
 
   it("falls back to a safe default PATH when the source has none", () => {

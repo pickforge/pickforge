@@ -54,7 +54,7 @@ function reapDeadRunningSessions(
 }
 
 beforeEach(async () => {
-  home = await fs.promises.mkdtemp(path.join(os.tmpdir(), "picklab-sess-"));
+  home = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-sess-"));
   env = { PICKLAB_HOME: home };
 });
 
@@ -98,7 +98,7 @@ describe("session registry", () => {
           browserStartTimeTicks: 987654,
           binaryPath: "/usr/bin/chromium",
           profileMode: "ephemeral",
-          profileDir: "/tmp/picklab-profile",
+          profileDir: "/tmp/pickforge-lab-profile",
           cdpPort: 45123,
         },
       },
@@ -146,7 +146,7 @@ describe("session registry", () => {
       {
         type: "android",
         projectDir: "/proj",
-        android: { avdName: "picklab-avd", consolePort: 5554 },
+        android: { avdName: "pickforge-avd", consolePort: 5554 },
       },
       env,
     );
@@ -583,7 +583,7 @@ describe("session registry", () => {
               browserStartTimeTicks,
               binaryPath: "/usr/bin/chromium",
               profileMode: "ephemeral",
-              profileDir: "/tmp/picklab-profile",
+              profileDir: "/tmp/pickforge-lab-profile",
               cdpPort: 1,
             },
           },
@@ -936,7 +936,7 @@ describe("session registry", () => {
 
   it("does not delete a profile that escapes the session dir when reaping", async () => {
     const outside = await fs.promises.mkdtemp(
-      path.join(os.tmpdir(), "picklab-outside-"),
+      path.join(os.tmpdir(), "pickforge-lab-outside-"),
     );
     try {
       const stale = await createSession(
@@ -1142,7 +1142,7 @@ describe("legacy session home fallback", () => {
 
   beforeEach(async () => {
     fakeHome = await fs.promises.mkdtemp(
-      path.join(os.tmpdir(), "picklab-legacy-fakehome-"),
+      path.join(os.tmpdir(), "pickforge-lab-legacy-fakehome-"),
     );
     homedirSpy = vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
   });
@@ -1218,7 +1218,7 @@ describe("legacy session home fallback", () => {
     const newPath = path.join(
       fakeHome,
       ".pickforge",
-      "picklab",
+      "pickforge-lab",
       "sessions",
       "desk-1eaac5.json",
     );

@@ -1,6 +1,6 @@
 {
-  "name": "@pickforge/picklab-agent-installers",
-  "version": "0.3.0",
+  "name": "@pickforge/lab-agent-installers",
+  "version": "0.4.0-alpha.1",
   "private": true,
   "description": "Codex, Claude Code, Cursor, and custom agent registration for PickLab",
   "type": "module",
@@ -17,6 +17,6 @@
     "build": "tsup src/index.ts --format esm --dts --clean"
   },
   "dependencies": {
-    "@pickforge/picklab-core": "*"
+    "@pickforge/lab-core": "*"
   }
 }

@@ -1,6 +1,6 @@
 {
-  "name": "@pickforge/picklab-core",
-  "version": "0.3.0",
+  "name": "@pickforge/lab-core",
+  "version": "0.4.0-alpha.1",
   "private": true,
   "description": "Config, sessions, artifacts, manifests, and process supervision for PickLab",
   "type": "module",

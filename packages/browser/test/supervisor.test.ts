@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runCommand } from "@pickforge/picklab-core";
+import { runCommand } from "@pickforge/lab-core";
 import { describe, expect, it } from "vitest";
 import { buildSupervisedBrowserCommand } from "../src/supervisor.js";
 
@@ -28,7 +28,7 @@ describe("buildSupervisedBrowserCommand", () => {
   });
 
   it("redacts split capability URLs while preserving stderr diagnostics and stdout", async () => {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-supervisor-"));
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-supervisor-"));
     const browser = path.join(tmp, "browser.cjs");
     fs.writeFileSync(
       browser,
@@ -61,7 +61,7 @@ describe("buildSupervisedBrowserCommand", () => {
   });
 
   it("bounds unbounded newline-free stderr instead of buffering it all", async () => {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-supervisor-"));
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-supervisor-"));
     const browser = path.join(tmp, "browser.cjs");
     fs.writeFileSync(
       browser,

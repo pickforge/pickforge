@@ -1,5 +1,6 @@
 {
-  "name": "picklab-monorepo",
+  "name": "pickforge-monorepo",
+  "version": "0.4.0-alpha.1",
   "private": true,
   "type": "module",
   "workspaces": [

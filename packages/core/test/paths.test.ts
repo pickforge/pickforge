@@ -7,7 +7,7 @@ import {
   isProfileConfined,
   legacyAgentsDir,
   legacyGlobalConfigPath,
-  legacyPicklabHome,
+  legacyPickforgeHome,
   legacySessionsDir,
   listDirSafe,
   picklabHome,
@@ -31,24 +31,24 @@ describe("picklabHome", () => {
   });
 });
 
-describe("legacyPicklabHome", () => {
+describe("legacyPickforgeHome", () => {
   it("returns ~/.picklab when PICKLAB_HOME is unset", () => {
-    expect(legacyPicklabHome({})).toBe(path.join(os.homedir(), ".picklab"));
+    expect(legacyPickforgeHome({})).toBe(path.join(os.homedir(), ".picklab"));
   });
 
   it("returns ~/.picklab when PICKLAB_HOME is empty", () => {
-    expect(legacyPicklabHome({ PICKLAB_HOME: "" })).toBe(
+    expect(legacyPickforgeHome({ PICKLAB_HOME: "" })).toBe(
       path.join(os.homedir(), ".picklab"),
     );
   });
 
   it("is undefined once PICKLAB_HOME is set explicitly (the user's own root)", () => {
-    expect(legacyPicklabHome({ PICKLAB_HOME: "/custom/home" })).toBeUndefined();
+    expect(legacyPickforgeHome({ PICKLAB_HOME: "/custom/home" })).toBeUndefined();
   });
 });
 
 describe("legacy subdir helpers", () => {
-  it("derive from legacyPicklabHome, undefined once PICKLAB_HOME is explicit", () => {
+  it("derive from legacyPickforgeHome, undefined once PICKLAB_HOME is explicit", () => {
     expect(legacySessionsDir({})).toBe(
       path.join(os.homedir(), ".picklab", "sessions"),
     );
@@ -72,7 +72,7 @@ describe("resolveReadablePath", () => {
   });
 
   it("prefers the primary path when it exists", async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-readable-"));
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-readable-"));
     const primary = path.join(root, "primary.json");
     const legacy = path.join(root, "legacy.json");
     fs.writeFileSync(primary, "{}");
@@ -85,7 +85,7 @@ describe("resolveReadablePath", () => {
   });
 
   it("falls back to the legacy path when the primary is missing", async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-readable-"));
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-readable-"));
     const primary = path.join(root, "primary.json");
     const legacy = path.join(root, "legacy.json");
     fs.writeFileSync(legacy, "{}");
@@ -109,7 +109,7 @@ describe("listDirSafe", () => {
   });
 
   it("lists real entries", async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-listdir-"));
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-listdir-"));
     fs.writeFileSync(path.join(root, "a.json"), "{}");
     fs.writeFileSync(path.join(root, "b.json"), "{}");
     try {
@@ -134,17 +134,17 @@ describe("global subdirs", () => {
 
 describe("isProfileConfined", () => {
   it("accepts the profile and runtime paths beneath a resolved session", async () => {
-    const sessionDir = "/tmp/picklab/sessions/../sessions/brow-12345678";
+    const sessionDir = "/tmp/pickforge-lab/sessions/../sessions/brow-12345678";
     expect(
       await isProfileConfined(
         sessionDir,
-        "/tmp/picklab/sessions/brow-12345678/profile",
+        "/tmp/pickforge-lab/sessions/brow-12345678/profile",
       ),
     ).toBe(true);
     expect(
       await isProfileConfined(
         sessionDir,
-        "/tmp/picklab/sessions/brow-12345678/home/.cache",
+        "/tmp/pickforge-lab/sessions/brow-12345678/home/.cache",
       ),
     ).toBe(true);
   });
@@ -152,14 +152,14 @@ describe("isProfileConfined", () => {
   it("rejects sibling paths with a shared prefix", async () => {
     expect(
       await isProfileConfined(
-        "/tmp/picklab/sessions/brow-12345678",
-        "/tmp/picklab/sessions/brow-123456789/profile",
+        "/tmp/pickforge-lab/sessions/brow-12345678",
+        "/tmp/pickforge-lab/sessions/brow-123456789/profile",
       ),
     ).toBe(false);
   });
 
   it("rejects symlinked session and profile ancestry", async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-paths-"));
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-paths-"));
     const sessions = path.join(root, "sessions");
     const outside = path.join(root, "outside");
     const id = "brow-12345678";

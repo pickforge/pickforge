@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { destroyBrowserSession } from "@pickforge/picklab-browser";
-import { listSessions } from "@pickforge/picklab-core";
-import { findOnPath } from "@pickforge/picklab-desktop-linux";
+import { destroyBrowserSession } from "@pickforge/lab-browser";
+import { listSessions } from "@pickforge/lab-core";
+import { findOnPath } from "@pickforge/lab-desktop-linux";
 import { fakePath, writeFakeChrome } from "../../browser/test/fakes.js";
 import {
   connectLab,
@@ -29,7 +29,7 @@ describe.skipIf(!hasXvfb)("MCP browser lifecycle", () => {
       HOME: dirs.home,
       PICKLAB_HOME: dirs.home,
       PATH: fakePath(dirs.binDir),
-      SECRET_TOKEN: "picklab-mcp-browser-secret",
+      SECRET_TOKEN: "pickforge-lab-mcp-browser-secret",
     };
     lab = await connectLab({ projectDir: dirs.projectDir, env: registryEnv });
   });

@@ -67,13 +67,13 @@ export function runCommand(
   args: readonly string[],
   opts?: RunCommandOptions,
 ): Promise<RunCommandResult>;
-// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/pickforge#60
 export function runCommand(
   cmd: string,
   args: readonly string[],
   opts: RunCommandOptions = {},
 ): Promise<RunCommandResult> {
-  // eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/picklab#60
+  // eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/pickforge#60
   return new Promise((resolve, reject) => {
     const maxBytes = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
     const killGraceMs = opts.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
@@ -493,7 +493,7 @@ function signalGroup(pid: number, signal: NodeJS.Signals): void {
  * The leader must have been spawned as a process-group leader (e.g. `spawn`
  * with `detached: true`), so its PID doubles as the group id.
  */
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function stopProcessGroupVerified(
   identity: ProcessIdentity,
   opts: { timeoutMs?: number } = {},

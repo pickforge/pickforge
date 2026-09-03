@@ -5,7 +5,7 @@ import {
   startDaemon,
   stopPid,
   type EnvLike,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import { parseDisplayNumber } from "./display.js";
 import { findOnPath, sleep } from "./util.js";
 

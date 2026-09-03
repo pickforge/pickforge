@@ -7,7 +7,7 @@ import {
   createSession,
   releaseHumanLease,
   type EnvLike,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
   runDesktopClick,
   runDesktopLaunch,
@@ -21,7 +21,7 @@ let env: EnvLike;
 let logs: string[];
 
 beforeEach(async () => {
-  root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "picklab-desktop-takeover-"));
+  root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-desktop-takeover-"));
   env = { PICKLAB_HOME: path.join(root, "home") };
   process.env.PICKLAB_HOME = env.PICKLAB_HOME;
   logs = [];

@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { EnvLike, PicklabProfile } from "@pickforge/picklab-core";
+import type { EnvLike, PickforgeProfile } from "@pickforge/lab-core";
 import { resolveAskpassCapability } from "../provision/askpass.js";
 import {
   evaluateChecks,
@@ -19,12 +19,12 @@ import {
   labUserPrivilegeUnavailableMessage,
   planCreateAvd,
   planLabUser,
-  planPicklabHome,
+  planPickforgeHome,
 } from "../provision/planner.js";
 import { confirm, toConsentDecision } from "../provision/prompts.js";
 
 export interface InitCliOptions {
-  profile?: PicklabProfile;
+  profile?: PickforgeProfile;
   yes?: boolean;
   createLabUser?: boolean;
   createAvd?: boolean;
@@ -40,7 +40,7 @@ export interface InitReport {
    * generic failure without string-matching `errors`. `"failed"` before an
    * execution ever runs. */
   status: ExecuteProvisioningResult["status"];
-  profile: PicklabProfile;
+  profile: PickforgeProfile;
   projectDir: string;
   dryRun: boolean;
   checks: DoctorCheck[];
@@ -88,7 +88,7 @@ function planAvdProvisioning(
         consentTo(
           `dedicated AVD "${snapshot.android.avdName}" (runs avdmanager)`,
           opts,
-          "Re-run with --yes --create-avd or run: picklab setup android --create-avd",
+          "Re-run with --yes --create-avd or run: pickforge-lab setup android --create-avd",
         ),
     },
   });
@@ -121,13 +121,13 @@ function planLabUserProvisioning(
         consentTo(
           `lab user "${snapshot.labUser.name}" (privileged, runs sudo)`,
           opts,
-          "Re-run with --yes --create-lab-user or run: picklab setup lab-user",
+          "Re-run with --yes --create-lab-user or run: pickforge-lab setup lab-user",
         ),
     },
   });
 }
 
-// eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function runInit(
   opts: InitCliOptions,
   env: EnvLike = process.env,
@@ -161,12 +161,12 @@ export async function runInit(
       },
     },
   ];
-  const homePlan = planPicklabHome({
+  const homePlan = planPickforgeHome({
     path: snapshot.picklabHome.path,
     exists: snapshot.picklabHome.exists,
   });
   if (homePlan.steps.length > 0) {
-    sections.push({ kind: "plan", plan: homePlan, satisfies: "picklab-home" });
+    sections.push({ kind: "plan", plan: homePlan, satisfies: "pickforge-home" });
   }
 
   const avdRequired = requiredIds.includes("avd");
@@ -229,7 +229,7 @@ export async function runInit(
     ) {
       report.errors.push(
         `${errors[0]}. Project config was written; fix the failed dependency and ` +
-          `re-run picklab init (idempotent), or check picklab doctor.`,
+          `re-run pickforge-lab init (idempotent), or check pickforge-lab doctor.`,
       );
       report.errors.push(...errors.slice(1));
     } else {
@@ -256,8 +256,8 @@ function emit(report: InitReport, opts: InitCliOptions): void {
     );
     if (!report.dryRun) {
       console.log(
-        "Next: picklab agents install <codex|claude-code|cursor> to register " +
-          "the MCP server, then picklab doctor to verify dependencies.",
+        "Next: pickforge-lab agents install <codex|claude-code|cursor> to register " +
+          "the MCP server, then pickforge-lab doctor to verify dependencies.",
       );
     }
   }
