@@ -135,6 +135,7 @@ function changeLines(
   verb: "registered" | "removed",
 ): string[] {
   const lines: string[] = [];
+  const migratedLegacyEntries = result.migratedLegacyEntries ?? [];
   if (result.instructions !== undefined) {
     lines.push(result.instructions);
   } else if (result.changed) {
@@ -148,6 +149,12 @@ function changeLines(
       verb === "registered"
         ? `${name} is already registered in ${result.configPath} (no changes made)`
         : `${name} has no pickforge-lab entry in ${result.configPath} (nothing to remove)`,
+    );
+  }
+  if (migratedLegacyEntries.length > 0) {
+    lines.push(
+      `Replaced owned legacy ${migratedLegacyEntries.join(", ")} ` +
+        "MCP entries with pickforge-lab in the same config update",
     );
   }
   if (result.backupPath !== undefined) {
@@ -193,6 +200,7 @@ export async function runAgentsLink(
         registered,
         changed: result.changed,
         backupPath: result.backupPath ?? null,
+        migratedLegacyEntries: result.migratedLegacyEntries ?? [],
         instructions: result.instructions ?? null,
         warning: result.warning ?? null,
         snippets,

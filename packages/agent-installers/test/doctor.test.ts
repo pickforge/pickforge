@@ -20,7 +20,7 @@ let home: string;
 let env: Record<string, string>;
 
 beforeEach(() => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-doctor-"));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-doctor-"));
   home = path.join(tmpDir, "home");
   fs.mkdirSync(home, { recursive: true });
   env = {
@@ -51,14 +51,14 @@ describe("runAgentsDoctor", () => {
     expect(check(report.checks, "agent-codex").status).toBe("ok");
     expect(check(report.checks, "agent-claude-code").status).toBe("ok");
     expect(check(report.checks, "agent-cursor").status).toBe("ok");
-    expect(check(report.checks, "picklab-bin").status).toBe("warn");
+    expect(check(report.checks, "pickforge-lab-bin").status).toBe("warn");
   });
 
-  it("reports ok for healthy registrations and picklab on PATH", async () => {
+  it("reports ok for healthy registrations and pickforge-lab on PATH", async () => {
     const bin = path.join(tmpDir, "bin");
     fs.mkdirSync(bin, { recursive: true });
-    fs.writeFileSync(path.join(bin, "picklab"), "#!/bin/sh\n");
-    fs.chmodSync(path.join(bin, "picklab"), 0o755);
+    fs.writeFileSync(path.join(bin, "pickforge-lab"), "#!/bin/sh\n");
+    fs.chmodSync(path.join(bin, "pickforge-lab"), 0o755);
     await linkCodex(path.join(home, ".codex", "config.toml"));
     await linkCursor(path.join(home, ".cursor", "mcp.json"));
 
@@ -68,7 +68,7 @@ describe("runAgentsDoctor", () => {
     expect(check(report.checks, "agent-cursor").detail).toContain(
       "registered",
     );
-    expect(check(report.checks, "picklab-bin").status).toBe("ok");
+    expect(check(report.checks, "pickforge-lab-bin").status).toBe("ok");
   });
 
   it("flags broken symlinks in the agents dir", async () => {
@@ -83,7 +83,7 @@ describe("runAgentsDoctor", () => {
     expect(agentsCheck.detail).toContain("broken symlink");
   });
 
-  it("flags codex markers without a picklab section as stale", async () => {
+  it("flags codex markers without a pickforge-lab section as stale", async () => {
     const configPath = path.join(home, ".codex", "config.toml");
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
     fs.writeFileSync(
@@ -98,7 +98,7 @@ describe("runAgentsDoctor", () => {
     expect(codexCheck.detail).toContain("stale");
   });
 
-  it("warns (not problem) when backups exist without picklab state tracking", async () => {
+  it("warns (not problem) when backups exist without pickforge-lab state tracking", async () => {
     const configPath = path.join(home, ".cursor", "mcp.json");
     await linkCursor(configPath);
     await removeMcpServerFromJsonFile(configPath);
@@ -110,7 +110,7 @@ describe("runAgentsDoctor", () => {
     expect(cursorCheck.detail).toContain("backup");
   });
 
-  it("flags configs recorded as linked that lost the picklab entry", async () => {
+  it("flags configs recorded as linked that lost the pickforge-lab entry", async () => {
     const configPath = path.join(home, ".cursor", "mcp.json");
     await linkCursor(configPath);
     await recordAgentState("cursor", { registered: true, configPath }, env);
@@ -208,7 +208,7 @@ describe("runAgentsDoctor", () => {
     ).toEqual([]);
     const cursorCheck = check(report.checks, "agent-cursor");
     expect(cursorCheck.status).toBe("ok");
-    expect(cursorCheck.detail).toContain("unlinked by picklab");
+    expect(cursorCheck.detail).toContain("unlinked by pickforge-lab");
   });
 
   it("warns when a JSON config exists but is not strict JSON", async () => {
@@ -237,7 +237,7 @@ describe("runAgentsDoctor", () => {
     expect(cursorCheck.detail).toContain("backups");
   });
 
-  it("warns about unmanaged codex picklab sections", async () => {
+  it("warns about unmanaged codex pickforge-lab sections", async () => {
     const configPath = path.join(home, ".codex", "config.toml");
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
     fs.writeFileSync(configPath, '[mcp_servers.picklab]\ncommand = "x"\n');

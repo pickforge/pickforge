@@ -92,15 +92,12 @@ function withAndroidTarget(command: Command): Command {
   );
 }
 
-// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/pickforge#60
-export function buildProgram(): Command {
-  const program = new Command()
-    .name("pickforge-lab")
-    .description(
-      "Native app and Android emulator automation for AI coding agents",
-    )
-    .version(version);
+const collectConfigPath = (value: string, previous: string[]): string[] => [
+    ...previous,
+    value,
+  ];
 
+function registerProvisioningCommands(program: Command): void {
   program
     .command("doctor")
     .description("Check dependencies and dedicated lab resources")
@@ -157,7 +154,9 @@ export function buildProgram(): Command {
     .action(async (opts) => {
       process.exitCode = await runSetupAndroid(opts);
     });
+}
 
+function registerSessionCommands(program: Command): void {
   const session = program
     .command("session")
     .description("Manage desktop, browser, and Android lab sessions");
@@ -208,7 +207,9 @@ export function buildProgram(): Command {
   ).action(async (id, opts) => {
     process.exitCode = await runSessionDestroy(id, opts);
   });
+}
 
+function registerWatchAndBrowserCommands(program: Command): void {
   withJson(
     withDesktopSession(
       program
@@ -265,11 +266,9 @@ export function buildProgram(): Command {
     .action(async (opts) => {
       process.exitCode = await runBrowserDevtoolsMcp(opts);
     });
+}
 
-  const desktop = program
-    .command("desktop")
-    .description("Drive the desktop (X11) lab session");
-
+function registerDesktopLaunchCommands(desktop: Command): void {
   withJson(
     withDesktopSession(
       desktop
@@ -298,7 +297,9 @@ export function buildProgram(): Command {
   ).action(async (opts) => {
     process.exitCode = await runDesktopScreenshot(opts);
   });
+}
 
+function registerDesktopPointerCommands(desktop: Command): void {
   withJson(
     withDesktopSession(
       desktop
@@ -339,7 +340,9 @@ export function buildProgram(): Command {
   ).action(async (deltaX, deltaY, opts) => {
     process.exitCode = await runDesktopScroll(deltaX, deltaY, opts);
   });
+}
 
+function registerDesktopInputCommands(desktop: Command): void {
   withJson(
     withDesktopSession(
       desktop
@@ -391,11 +394,18 @@ export function buildProgram(): Command {
   ).action(async (keys, opts) => {
     process.exitCode = await runDesktopKey(keys, opts);
   });
+}
 
-  const android = program
-    .command("android")
-    .description("Drive the Android emulator lab session");
+function registerDesktopCommands(program: Command): void {
+  const desktop = program
+    .command("desktop")
+    .description("Drive the desktop (X11) lab session");
+  registerDesktopLaunchCommands(desktop);
+  registerDesktopPointerCommands(desktop);
+  registerDesktopInputCommands(desktop);
+}
 
+function registerAndroidSessionCommands(android: Command): void {
   withJson(
     withProjectDir(
       android
@@ -441,7 +451,9 @@ export function buildProgram(): Command {
   ).action(async (opts) => {
     process.exitCode = await runAndroidScreenshot(opts);
   });
+}
 
+function registerAndroidInputCommands(android: Command): void {
   withJson(
     withAndroidTarget(
       android
@@ -480,7 +492,9 @@ export function buildProgram(): Command {
   ).action(async (opts) => {
     process.exitCode = await runAndroidHome(opts);
   });
+}
 
+function registerAndroidDiagnosticCommands(android: Command): void {
   withJson(
     withAndroidTarget(
       android
@@ -517,7 +531,18 @@ export function buildProgram(): Command {
   ).action(async (args, opts) => {
     process.exitCode = await runAndroidAdb(args, opts);
   });
+}
 
+function registerAndroidCommands(program: Command): void {
+  const android = program
+    .command("android")
+    .description("Drive the Android emulator lab session");
+  registerAndroidSessionCommands(android);
+  registerAndroidInputCommands(android);
+  registerAndroidDiagnosticCommands(android);
+}
+
+function registerArtifactCommands(program: Command): void {
   const artifacts = program
     .command("artifacts")
     .description(
@@ -553,16 +578,9 @@ export function buildProgram(): Command {
   ).action(async (runId, opts) => {
     process.exitCode = await runArtifactsReport(runId, opts);
   });
+}
 
-  const agents = program
-    .command("agents")
-    .description("Register the PickLab MCP server with coding agents");
-
-  const collectConfigPath = (value: string, previous: string[]): string[] => [
-    ...previous,
-    value,
-  ];
-
+function registerAgentListCommands(agents: Command): void {
   withJson(
     agents
       .command("list")
@@ -576,7 +594,9 @@ export function buildProgram(): Command {
   ).action(async (opts) => {
     process.exitCode = await runAgentsList(opts);
   });
+}
 
+function registerAgentLinkCommands(agents: Command): void {
   for (const [verb, description] of [
     ["install", "Register the pickforge-lab MCP server with an agent"],
     ["link", "Register the pickforge-lab MCP server with an agent (alias of install)"],
@@ -585,7 +605,7 @@ export function buildProgram(): Command {
       agents
         .command(verb)
         .description(description)
-        .argument("<agent>", "agent name (codex, claude-code, cursor)")
+        .argument("<agent>", "agent name (codex, claude-code, cursor, pi)")
         .option(
           "--config-path <path>",
           "agent config file (overrides the default location)",
@@ -599,7 +619,7 @@ export function buildProgram(): Command {
     agents
       .command("unlink")
       .description("Remove the pickforge-lab MCP server entry from an agent config")
-      .argument("<agent>", "agent name (codex, claude-code, cursor, or custom)")
+      .argument("<agent>", "agent name (codex, claude-code, cursor, pi, or custom)")
       .option(
         "--config-path <path>",
         "agent config file (overrides the default location)",
@@ -607,7 +627,9 @@ export function buildProgram(): Command {
   ).action(async (agent, opts) => {
     process.exitCode = await runAgentsUnlink(agent, opts);
   });
+}
 
+function registerAgentDoctorCommands(agents: Command): void {
   withJson(
     agents
       .command("doctor")
@@ -637,7 +659,18 @@ export function buildProgram(): Command {
   ).action(async (opts) => {
     process.exitCode = await runAgentsAdd(opts);
   });
+}
 
+function registerAgentCommands(program: Command): void {
+  const agents = program
+    .command("agents")
+    .description("Register the PickLab MCP server with coding agents");
+  registerAgentListCommands(agents);
+  registerAgentLinkCommands(agents);
+  registerAgentDoctorCommands(agents);
+}
+
+function registerMcpCommands(program: Command): void {
   const mcp = program
     .command("mcp")
     .description("Model Context Protocol server");
@@ -648,6 +681,23 @@ export function buildProgram(): Command {
     .action(async () => {
       process.exitCode = await runMcpServe();
     });
+}
 
+export function buildProgram(): Command {
+  const program = new Command()
+    .name("pickforge-lab")
+    .description(
+      "Native app and Android emulator automation for AI coding agents",
+    )
+    .version(version);
+
+  registerProvisioningCommands(program);
+  registerSessionCommands(program);
+  registerWatchAndBrowserCommands(program);
+  registerDesktopCommands(program);
+  registerAndroidCommands(program);
+  registerArtifactCommands(program);
+  registerAgentCommands(program);
+  registerMcpCommands(program);
   return program;
 }

@@ -15,7 +15,7 @@ let tmpDir: string;
 let env: Record<string, string>;
 
 beforeEach(() => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-custom-"));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-custom-"));
   env = { PICKFORGE_HOME: path.join(tmpDir, ".picklab") };
 });
 
@@ -25,8 +25,8 @@ afterEach(() => {
 
 describe("parseMcpCommand", () => {
   it("splits on whitespace", () => {
-    expect(parseMcpCommand("picklab mcp serve")).toEqual({
-      command: "picklab",
+    expect(parseMcpCommand("pickforge-lab mcp serve")).toEqual({
+      command: "pickforge-lab",
       args: ["mcp", "serve"],
     });
     expect(parseMcpCommand("  node   server.js  ")).toEqual({
@@ -44,14 +44,14 @@ describe("parseMcpCommand", () => {
 describe("addCustomAgent / listCustomAgents / removeCustomAgent", () => {
   it("stores a snippet file under the agents dir and lists it", async () => {
     const agent = await addCustomAgent(
-      { name: "my-agent", mcpCommand: "picklab mcp serve" },
+      { name: "my-agent", mcpCommand: "pickforge-lab mcp serve" },
       env,
     );
     expect(agent.configPath).toBe(
       path.join(env.PICKFORGE_HOME, "agents", "my-agent.json"),
     );
     expect(JSON.parse(fs.readFileSync(agent.configPath, "utf8"))).toEqual({
-      mcpServers: { picklab: { command: "picklab", args: ["mcp", "serve"] } },
+      mcpServers: { "pickforge-lab": { command: "pickforge-lab", args: ["mcp", "serve"] } },
     });
 
     const listed = await listCustomAgents(env);
@@ -59,7 +59,7 @@ describe("addCustomAgent / listCustomAgents / removeCustomAgent", () => {
       {
         name: "my-agent",
         configPath: agent.configPath,
-        entry: { command: "picklab", args: ["mcp", "serve"] },
+        entry: { command: "pickforge-lab", args: ["mcp", "serve"] },
       },
     ]);
   });

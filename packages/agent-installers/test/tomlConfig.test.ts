@@ -4,6 +4,8 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   inspectTomlFile,
+  LEGACY_TOML_MARKER_BEGIN,
+  LEGACY_TOML_MARKER_END,
   removeTomlMarkerBlock,
   TOML_MARKER_BEGIN,
   TOML_MARKER_END,
@@ -15,7 +17,7 @@ let tmpDir: string;
 let file: string;
 
 beforeEach(() => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-toml-"));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-toml-"));
   file = path.join(tmpDir, "config.toml");
 });
 
@@ -25,13 +27,13 @@ afterEach(() => {
 
 const EXPECTED_BLOCK =
   `${TOML_MARKER_BEGIN}\n` +
-  '[mcp_servers.picklab]\ncommand = "picklab"\nargs = ["mcp", "serve"]\n' +
-  '[mcp_servers.picklab-browser]\ncommand = "picklab"\n' +
+  '[mcp_servers."pickforge-lab"]\ncommand = "pickforge-lab"\nargs = ["mcp", "serve"]\n' +
+  '[mcp_servers."pickforge-lab-browser"]\ncommand = "pickforge-lab"\n' +
   'args = ["browser", "devtools-mcp"]\n' +
   `${TOML_MARKER_END}\n`;
 
 function backupsIn(dir: string): string[] {
-  return fs.readdirSync(dir).filter((entry) => entry.includes("picklab-backup"));
+  return fs.readdirSync(dir).filter((entry) => entry.includes("pickforge-backup"));
 }
 
 describe("upsertTomlMarkerBlock", () => {
@@ -75,11 +77,31 @@ describe("upsertTomlMarkerBlock", () => {
     );
   });
 
+  it("replaces an owned legacy block in the same atomic update", async () => {
+    fs.writeFileSync(
+      file,
+      `model = "gpt-5"\n\n${LEGACY_TOML_MARKER_BEGIN}\n` +
+        '[mcp_servers.picklab]\ncommand = "picklab"\nargs = ["mcp", "serve"]\n' +
+        '[mcp_servers.picklab-browser]\ncommand = "picklab"\n' +
+        'args = ["browser", "devtools-mcp"]\n' +
+        `${LEGACY_TOML_MARKER_END}\n`,
+    );
+    const result = await upsertTomlMarkerBlock(file);
+    expect(result.migratedLegacyEntries).toEqual([
+      "picklab",
+      "picklab-browser",
+    ]);
+    expect(result.backupPath).toBeDefined();
+    expect(fs.readFileSync(file, "utf8")).toBe(
+      `model = "gpt-5"\n\n${EXPECTED_BLOCK}`,
+    );
+  });
+
   it("refuses a foreign [mcp_servers.picklab] section and leaves the file untouched", async () => {
     const content = '[mcp_servers.picklab]\ncommand = "something-else"\n';
     fs.writeFileSync(file, content);
     await expect(upsertTomlMarkerBlock(file)).rejects.toThrow(
-      "outside the picklab markers",
+      "outside the managed markers",
     );
     expect(fs.readFileSync(file, "utf8")).toBe(content);
     expect(backupsIn(tmpDir)).toEqual([]);
@@ -88,7 +110,7 @@ describe("upsertTomlMarkerBlock", () => {
   it("refuses unbalanced markers", async () => {
     fs.writeFileSync(file, `${TOML_MARKER_BEGIN}\n`);
     await expect(upsertTomlMarkerBlock(file)).rejects.toThrow(
-      "unbalanced picklab markers",
+      "unbalanced pickforge-lab markers",
     );
   });
 });
@@ -118,12 +140,13 @@ describe("inspectTomlFile / tomlFileHasMcpServer", () => {
       exists: true,
       markersPresent: true,
       markersHaveSection: true,
+      legacyMarkersPresent: false,
       foreignSection: false,
     });
     expect(await tomlFileHasMcpServer(file)).toBe(true);
     expect(
       await tomlFileHasMcpServer(file, {
-        command: "picklab",
+        command: "pickforge-lab",
         args: ["mcp", "serve"],
       }),
     ).toBe(true);
@@ -140,13 +163,13 @@ describe("inspectTomlFile / tomlFileHasMcpServer", () => {
     fs.writeFileSync(
       file,
       `${TOML_MARKER_BEGIN}\n` +
-        '[mcp_servers.picklab]\ncommand = "old-picklab"\nargs = ["mcp", "serve"]\n' +
+        '[mcp_servers."pickforge-lab"]\ncommand = "old-pickforge-lab"\nargs = ["mcp", "serve"]\n' +
         `${TOML_MARKER_END}\n`,
     );
     expect(await tomlFileHasMcpServer(file)).toBe(false);
     expect(
       await tomlFileHasMcpServer(file, {
-        command: "picklab",
+        command: "pickforge-lab",
         args: ["mcp", "serve"],
       }),
     ).toBe(false);
@@ -164,7 +187,7 @@ describe("inspectTomlFile / tomlFileHasMcpServer", () => {
     const inspection = await inspectTomlFile(file);
     expect(inspection.foreignSection).toBe(true);
     await expect(upsertTomlMarkerBlock(file)).rejects.toThrow(
-      "outside the picklab markers",
+      "outside the managed markers",
     );
   });
 
@@ -173,11 +196,11 @@ describe("inspectTomlFile / tomlFileHasMcpServer", () => {
     const inspection = await inspectTomlFile(file);
     expect(inspection.foreignSection).toBe(true);
     await expect(upsertTomlMarkerBlock(file)).rejects.toThrow(
-      "outside the picklab markers",
+      "outside the managed markers",
     );
   });
 
-  it("does not treat other mcp_servers sections as picklab sections", async () => {
+  it("does not treat other mcp_servers sections as pickforge-lab sections", async () => {
     fs.writeFileSync(file, '[mcp_servers.picklabber]\ncommand = "x"\n');
     const inspection = await inspectTomlFile(file);
     expect(inspection.foreignSection).toBe(false);
@@ -188,6 +211,7 @@ describe("inspectTomlFile / tomlFileHasMcpServer", () => {
       exists: false,
       markersPresent: false,
       markersHaveSection: false,
+      legacyMarkersPresent: false,
       foreignSection: false,
     });
   });

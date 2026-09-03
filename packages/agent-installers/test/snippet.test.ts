@@ -13,7 +13,7 @@ import {
 let tmpDir: string;
 
 beforeEach(() => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-snippet-"));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-snippet-"));
 });
 
 afterEach(() => {
@@ -21,15 +21,15 @@ afterEach(() => {
 });
 
 describe("mcpServerEntry", () => {
-  it("uses picklab mcp serve as the canonical command", () => {
+  it("uses pickforge-lab mcp serve as the canonical command", () => {
     expect(mcpServerEntry()).toEqual({
-      command: "picklab",
+      command: "pickforge-lab",
       args: ["mcp", "serve"],
     });
   });
   it("uses a static project-local browser relay command", () => {
     expect(browserMcpServerEntry()).toEqual({
-      command: "picklab",
+      command: "pickforge-lab",
       args: ["browser", "devtools-mcp"],
     });
   });
@@ -41,9 +41,9 @@ describe("renderJsonSnippet", () => {
       `${JSON.stringify(
         {
           mcpServers: {
-            picklab: { command: "picklab", args: ["mcp", "serve"] },
-            "picklab-browser": {
-              command: "picklab",
+            "pickforge-lab": { command: "pickforge-lab", args: ["mcp", "serve"] },
+            "pickforge-lab-browser": {
+              command: "pickforge-lab",
               args: ["browser", "devtools-mcp"],
             },
           },
@@ -57,7 +57,7 @@ describe("renderJsonSnippet", () => {
   it("renders custom entries", () => {
     const snippet = renderJsonSnippet({ command: "node", args: ["serve.js"] });
     expect(JSON.parse(snippet)).toEqual({
-      mcpServers: { picklab: { command: "node", args: ["serve.js"] } },
+      mcpServers: { "pickforge-lab": { command: "node", args: ["serve.js"] } },
     });
   });
 });
@@ -65,8 +65,8 @@ describe("renderJsonSnippet", () => {
 describe("renderTomlSnippet", () => {
   it("renders the exact TOML snippet", () => {
     expect(renderTomlSnippet()).toBe(
-      '[mcp_servers.picklab]\ncommand = "picklab"\nargs = ["mcp", "serve"]\n' +
-        '[mcp_servers.picklab-browser]\ncommand = "picklab"\n' +
+      '[mcp_servers."pickforge-lab"]\ncommand = "pickforge-lab"\nargs = ["mcp", "serve"]\n' +
+        '[mcp_servers."pickforge-lab-browser"]\ncommand = "pickforge-lab"\n' +
         'args = ["browser", "devtools-mcp"]\n',
     );
   });
@@ -77,10 +77,10 @@ describe("writeSharedSnippets", () => {
     const env = { PICKFORGE_HOME: path.join(tmpDir, ".picklab") };
     const snippets = await writeSharedSnippets(env);
     expect(snippets.jsonPath).toBe(
-      path.join(tmpDir, ".picklab", "agents", "picklab-mcp.json"),
+      path.join(tmpDir, ".picklab", "agents", "pickforge-mcp.json"),
     );
     expect(snippets.tomlPath).toBe(
-      path.join(tmpDir, ".picklab", "agents", "picklab-mcp.toml"),
+      path.join(tmpDir, ".picklab", "agents", "pickforge-mcp.toml"),
     );
     expect(fs.readFileSync(snippets.jsonPath, "utf8")).toBe(
       renderJsonSnippet(),

@@ -56,7 +56,7 @@ beforeAll(async () => {
 }, 300_000);
 
 beforeEach(() => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-agents-cli-"));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-agents-cli-"));
   home = path.join(tmpDir, "home");
   fs.mkdirSync(home, { recursive: true });
   env = {
@@ -73,10 +73,10 @@ afterEach(() => {
 function backupsIn(dir: string): string[] {
   return fs
     .readdirSync(dir)
-    .filter((entry) => entry.includes("picklab-backup"));
+    .filter((entry) => entry.includes("pickforge-backup"));
 }
 
-describe("picklab agents list", () => {
+describe("pickforge-lab agents list", () => {
   it("lists the builtin agents as not registered in a clean home", async () => {
     const result = await runCli(["agents", "list", "--json"], env);
     expect(result.code).toBe(0);
@@ -89,6 +89,7 @@ describe("picklab agents list", () => {
       "claude-code",
       "codex",
       "cursor",
+      "pi",
     ]);
     expect(byName.codex.configPath).toBe(
       path.join(home, ".codex", "config.toml"),
@@ -98,6 +99,9 @@ describe("picklab agents list", () => {
     );
     expect(byName.cursor.configPath).toBe(
       path.join(home, ".cursor", "mcp.json"),
+    );
+    expect(byName.pi.configPath).toBe(
+      path.join(home, ".config", "mcp", "mcp.json"),
     );
     for (const agent of report.agents) {
       expect(agent.registered).toBe(false);
@@ -111,9 +115,9 @@ describe("picklab agents list", () => {
       configPath,
       JSON.stringify({
         mcpServers: {
-          picklab: { command: "picklab", args: ["mcp", "serve"] },
-          "picklab-browser": {
-            command: "picklab",
+          "pickforge-lab": { command: "pickforge-lab", args: ["mcp", "serve"] },
+          "pickforge-lab-browser": {
+            command: "pickforge-lab",
             args: ["browser", "devtools-mcp"],
           },
         },
@@ -147,7 +151,7 @@ describe("picklab agents list", () => {
   });
 });
 
-describe("picklab agents link cursor", () => {
+describe("pickforge-lab agents link cursor", () => {
   it("merges into an existing config with a backup and stays idempotent", async () => {
     const configPath = path.join(tmpDir, "cursor-mcp.json");
     fs.writeFileSync(
@@ -164,24 +168,24 @@ describe("picklab agents link cursor", () => {
     expect(report.ok).toBe(true);
     expect(report.registered).toBe(true);
     expect(report.changed).toBe(true);
-    expect(report.backupPath).toContain("picklab-backup");
+    expect(report.backupPath).toContain("pickforge-backup");
     expect(fs.existsSync(report.backupPath)).toBe(true);
 
     const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
-    expect(config.mcpServers.picklab).toEqual({
-      command: "picklab",
+    expect(config.mcpServers["pickforge-lab"]).toEqual({
+      command: "pickforge-lab",
       args: ["mcp", "serve"],
     });
     expect(config.mcpServers.other).toEqual({ command: "other", args: [] });
 
     expect(
       fs.existsSync(
-        path.join(env.PICKFORGE_HOME, "agents", "picklab-mcp.json"),
+        path.join(env.PICKFORGE_HOME, "agents", "pickforge-mcp.json"),
       ),
     ).toBe(true);
     expect(
       fs.existsSync(
-        path.join(env.PICKFORGE_HOME, "agents", "picklab-mcp.toml"),
+        path.join(env.PICKFORGE_HOME, "agents", "pickforge-mcp.toml"),
       ),
     ).toBe(true);
 
@@ -201,7 +205,7 @@ describe("picklab agents link cursor", () => {
     const configPath = path.join(home, ".cursor", "mcp.json");
     expect(parseJson(linked).configPath).toBe(configPath);
     expect(
-      JSON.parse(fs.readFileSync(configPath, "utf8")).mcpServers.picklab,
+      JSON.parse(fs.readFileSync(configPath, "utf8")).mcpServers["pickforge-lab"],
     ).toBeDefined();
 
     const listed = parseJson(await runCli(["agents", "list", "--json"], env));
@@ -217,7 +221,33 @@ describe("picklab agents link cursor", () => {
   });
 });
 
-describe("picklab agents link codex", () => {
+describe("pickforge-lab agents link pi", () => {
+  it("replaces an owned legacy entry and reports the migration", async () => {
+    const configPath = path.join(home, ".config", "mcp", "mcp.json");
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        mcpServers: {
+          picklab: { command: "picklab", args: ["mcp", "serve"] },
+        },
+      }),
+    );
+
+    const result = await runCli(["agents", "link", "pi"], env);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain(
+      "Replaced owned legacy picklab MCP entries with pickforge-lab",
+    );
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    expect(config.mcpServers.picklab).toBeUndefined();
+    expect(config.mcpServers["pickforge-lab"]).toBeDefined();
+    expect(backupsIn(path.dirname(configPath))).toHaveLength(1);
+  });
+});
+
+describe("pickforge-lab agents link codex", () => {
   it("appends a marker block and removes it on unlink", async () => {
     const configPath = path.join(tmpDir, "codex-config.toml");
     fs.writeFileSync(configPath, 'model = "gpt-5"\n');
@@ -230,9 +260,9 @@ describe("picklab agents link codex", () => {
     expect(parseJson(linked).registered).toBe(true);
     const content = fs.readFileSync(configPath, "utf8");
     expect(content).toContain('model = "gpt-5"');
-    expect(content).toContain("# >>> picklab >>>");
-    expect(content).toContain("[mcp_servers.picklab]");
-    expect(content).toContain("# <<< picklab <<<");
+    expect(content).toContain("# >>> pickforge-lab >>>");
+    expect(content).toContain('[mcp_servers."pickforge-lab"]');
+    expect(content).toContain("# <<< pickforge-lab <<<");
 
     const unlinked = await runCli(
       ["agents", "unlink", "codex", "--config-path", configPath, "--json"],
@@ -241,7 +271,31 @@ describe("picklab agents link codex", () => {
     expect(unlinked.code).toBe(0);
     const after = fs.readFileSync(configPath, "utf8");
     expect(after).toContain('model = "gpt-5"');
-    expect(after).not.toContain("picklab");
+    expect(after).not.toContain("pickforge-lab");
+  });
+
+  it("replaces an owned legacy block and reports the migration", async () => {
+    const configPath = path.join(tmpDir, "codex-legacy.toml");
+    fs.writeFileSync(
+      configPath,
+      "# >>> picklab >>>\n" +
+        '[mcp_servers.picklab]\ncommand = "picklab"\nargs = ["mcp", "serve"]\n' +
+        "# <<< picklab <<<\n",
+    );
+
+    const result = await runCli(
+      ["agents", "link", "codex", "--config-path", configPath],
+      env,
+    );
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain(
+      "Replaced owned legacy picklab MCP entries with pickforge-lab",
+    );
+    const content = fs.readFileSync(configPath, "utf8");
+    expect(content).not.toContain("# >>> picklab >>>");
+    expect(content).toContain("# >>> pickforge-lab >>>");
+    expect(backupsIn(tmpDir)).toHaveLength(1);
   });
 
   it("refuses a foreign [mcp_servers.picklab] section before backing up", async () => {
@@ -256,13 +310,13 @@ describe("picklab agents link codex", () => {
     expect(result.code).toBe(1);
     const report = parseJson(result);
     expect(report.ok).toBe(false);
-    expect(report.errors.join("\n")).toContain("outside the picklab markers");
+    expect(report.errors.join("\n")).toContain("outside the managed markers");
     expect(fs.readFileSync(configPath, "utf8")).toBe(original);
     expect(backupsIn(tmpDir)).toEqual([]);
   });
 });
 
-describe("picklab agents link claude-code (claude binary absent)", () => {
+describe("pickforge-lab agents link claude-code (claude binary absent)", () => {
   it("instructs instead of creating a missing ~/.claude.json", async () => {
     const result = await runCli(["agents", "link", "claude-code", "--json"], env);
     expect(result.code).toBe(0);
@@ -270,7 +324,7 @@ describe("picklab agents link claude-code (claude binary absent)", () => {
     expect(report.registered).toBe(false);
     expect(report.changed).toBe(false);
     expect(report.instructions).toContain(
-      "claude mcp add --scope user picklab -- picklab mcp serve",
+      "claude mcp add --scope user pickforge-lab -- pickforge-lab mcp serve",
     );
     expect(fs.existsSync(path.join(home, ".claude.json"))).toBe(false);
   });
@@ -285,19 +339,42 @@ describe("picklab agents link claude-code (claude binary absent)", () => {
     expect(report.warning).toContain("close Claude Code");
     const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
     expect(config.numStartups).toBe(1);
-    expect(config.mcpServers.picklab).toEqual({
-      command: "picklab",
+    expect(config.mcpServers["pickforge-lab"]).toEqual({
+      command: "pickforge-lab",
       args: ["mcp", "serve"],
     });
-    expect(config.mcpServers["picklab-browser"]).toEqual({
-      command: "picklab",
+    expect(config.mcpServers["pickforge-lab-browser"]).toEqual({
+      command: "pickforge-lab",
       args: ["browser", "devtools-mcp"],
     });
     expect(backupsIn(home)).toHaveLength(1);
   });
+
+  it("replaces an owned legacy entry and reports the migration", async () => {
+    const configPath = path.join(home, ".claude.json");
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        mcpServers: {
+          picklab: { command: "picklab", args: ["mcp", "serve"] },
+        },
+      }),
+    );
+
+    const result = await runCli(["agents", "link", "claude-code"], env);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain(
+      "Replaced owned legacy picklab MCP entries with pickforge-lab",
+    );
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    expect(config.mcpServers.picklab).toBeUndefined();
+    expect(config.mcpServers["pickforge-lab"]).toBeDefined();
+    expect(backupsIn(home)).toHaveLength(1);
+  });
 });
 
-describe("picklab agents link claude-code (claude binary on PATH)", () => {
+describe("pickforge-lab agents link claude-code (claude binary on PATH)", () => {
   function installFakeClaude(
     script = '#!/bin/sh\nprintf \'%s\\n\' "$@" >> "${CLAUDE_ARGS_FILE}"\n',
   ): { binDir: string; argsFile: string } {
@@ -332,18 +409,18 @@ describe("picklab agents link claude-code (claude binary on PATH)", () => {
       "add",
       "--scope",
       "user",
-      "picklab",
+      "pickforge-lab",
       "--",
-      "picklab",
+      "pickforge-lab",
       "mcp",
       "serve",
       "mcp",
       "add",
       "--scope",
       "user",
-      "picklab-browser",
+      "pickforge-lab-browser",
       "--",
-      "picklab",
+      "pickforge-lab",
       "browser",
       "devtools-mcp",
     ]);
@@ -358,9 +435,9 @@ describe("picklab agents link claude-code (claude binary on PATH)", () => {
     const original = JSON.stringify({
       numStartups: 1,
       mcpServers: {
-        picklab: { command: "picklab", args: ["mcp", "serve"] },
-        "picklab-browser": {
-          command: "picklab",
+        "pickforge-lab": { command: "pickforge-lab", args: ["mcp", "serve"] },
+        "pickforge-lab-browser": {
+          command: "pickforge-lab",
           args: ["browser", "devtools-mcp"],
         },
       },
@@ -387,7 +464,7 @@ describe("picklab agents link claude-code (claude binary on PATH)", () => {
         "#!/bin/sh",
         'printf \'%s\\n\' "$@" >> "${CLAUDE_ARGS_FILE}"',
         'if [ "${1:-}" = "mcp" ] && [ "${2:-}" = "add" ]; then',
-        '  printf \'%s\\n\' \'{"mcpServers":{"picklab":{"command":"picklab","args":["mcp","serve"]},"picklab-browser":{"command":"picklab","args":["browser","devtools-mcp"]}}}\' > "${HOME}/.claude.json"',
+        '  printf \'%s\\n\' \'{"mcpServers":{"pickforge-lab":{"command":"pickforge-lab","args":["mcp","serve"]},"pickforge-lab-browser":{"command":"pickforge-lab","args":["browser","devtools-mcp"]}}}\' > "${HOME}/.claude.json"',
         "fi",
       ].join("\n"),
     );
@@ -396,7 +473,7 @@ describe("picklab agents link claude-code (claude binary on PATH)", () => {
       configPath,
       JSON.stringify({
         mcpServers: {
-          picklab: { command: "old-picklab", args: ["mcp", "serve"] },
+          "pickforge-lab": { command: "old-pickforge-lab", args: ["mcp", "serve"] },
         },
       }),
     );
@@ -409,13 +486,13 @@ describe("picklab agents link claude-code (claude binary on PATH)", () => {
     expect(result.code).toBe(0);
     expect(result.stderr).toBe("");
     expect(result.stdout.trim()).toBe(
-      `Registered the picklab MCP server for claude-code in ${configPath}`,
+      `Registered the pickforge-lab MCP server for claude-code in ${configPath}`,
     );
     expect(JSON.parse(fs.readFileSync(configPath, "utf8"))).toEqual({
       mcpServers: {
-        picklab: { command: "picklab", args: ["mcp", "serve"] },
-        "picklab-browser": {
-          command: "picklab",
+        "pickforge-lab": { command: "pickforge-lab", args: ["mcp", "serve"] },
+        "pickforge-lab-browser": {
+          command: "pickforge-lab",
           args: ["browser", "devtools-mcp"],
         },
       },
@@ -425,18 +502,18 @@ describe("picklab agents link claude-code (claude binary on PATH)", () => {
       "add",
       "--scope",
       "user",
-      "picklab",
+      "pickforge-lab",
       "--",
-      "picklab",
+      "pickforge-lab",
       "mcp",
       "serve",
       "mcp",
       "add",
       "--scope",
       "user",
-      "picklab-browser",
+      "pickforge-lab-browser",
       "--",
-      "picklab",
+      "pickforge-lab",
       "browser",
       "devtools-mcp",
     ]);
@@ -454,7 +531,7 @@ describe("picklab agents link claude-code (claude binary on PATH)", () => {
     expect(result.code).toBe(1);
     expect(result.stdout).toBe("");
     expect(result.stderr).toContain(
-      'error: "claude mcp add" failed for picklab (exit code 1): network unavailable',
+      'error: "claude mcp add" failed for pickforge-lab (exit code 1): network unavailable',
     );
   });
 
@@ -472,17 +549,17 @@ describe("picklab agents link claude-code (claude binary on PATH)", () => {
       "remove",
       "--scope",
       "user",
-      "picklab",
+      "pickforge-lab",
       "mcp",
       "remove",
       "--scope",
       "user",
-      "picklab-browser",
+      "pickforge-lab-browser",
     ]);
   });
 });
 
-describe("picklab agents add / unlink (custom)", () => {
+describe("pickforge-lab agents add / unlink (custom)", () => {
   it("adds a custom agent, lists it, and removes it", async () => {
     const added = await runCli(
       [
@@ -491,7 +568,7 @@ describe("picklab agents add / unlink (custom)", () => {
         "--name",
         "my-agent",
         "--mcp-command",
-        "picklab mcp serve",
+        "pickforge-lab mcp serve",
         "--json",
       ],
       env,
@@ -502,7 +579,7 @@ describe("picklab agents add / unlink (custom)", () => {
     expect(addReport.configPath).toBe(
       path.join(env.PICKFORGE_HOME, "agents", "my-agent.json"),
     );
-    expect(addReport.command).toBe("picklab");
+    expect(addReport.command).toBe("pickforge-lab");
     expect(addReport.args).toEqual(["mcp", "serve"]);
 
     const listed = parseJson(await runCli(["agents", "list", "--json"], env));
@@ -576,7 +653,7 @@ describe("picklab agents add / unlink (custom)", () => {
   });
 });
 
-describe("picklab agents doctor", () => {
+describe("pickforge-lab agents doctor", () => {
   it("reports ok in a clean environment", async () => {
     const result = await runCli(["agents", "doctor", "--json"], env);
     expect(result.code).toBe(0);
@@ -588,7 +665,7 @@ describe("picklab agents doctor", () => {
   it("reports stale codex markers and exits 1", async () => {
     const configPath = path.join(home, ".codex", "config.toml");
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
-    fs.writeFileSync(configPath, "# >>> picklab >>>\n# <<< picklab <<<\n");
+    fs.writeFileSync(configPath, "# >>> pickforge-lab >>>\n# <<< pickforge-lab <<<\n");
 
     const result = await runCli(["agents", "doctor", "--json"], env);
     expect(result.code).toBe(1);
@@ -617,7 +694,7 @@ describe("picklab agents doctor", () => {
 
   it("inspects nonstandard config paths via --config-path", async () => {
     const configPath = path.join(tmpDir, "custom-codex.toml");
-    fs.writeFileSync(configPath, "# >>> picklab >>>\n# <<< picklab <<<\n");
+    fs.writeFileSync(configPath, "# >>> pickforge-lab >>>\n# <<< pickforge-lab <<<\n");
 
     const clean = await runCli(["agents", "doctor", "--json"], env);
     expect(clean.code).toBe(0);

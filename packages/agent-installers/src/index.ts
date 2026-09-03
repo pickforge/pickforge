@@ -20,9 +20,12 @@ export {
 export {
   MCP_SERVER_NAME,
   BROWSER_MCP_SERVER_NAME,
+  LEGACY_MCP_SERVER_NAME,
+  LEGACY_BROWSER_MCP_SERVER_NAME,
   browserMcpServerEntry,
+  legacyMcpServerEntries,
   mcpServerEntry,
-  picklabMcpServerEntries,
+  pickforgeLabMcpServerEntries,
   renderJsonSnippet,
   renderTomlSnippet,
   SHARED_SNIPPET_BASENAMES,
@@ -37,6 +40,7 @@ export {
   jsonFileMcpServerState,
   mergeMcpServerIntoJsonFile,
   removeMcpServerFromJsonFile,
+  replaceOwnedLegacyMcpServersInJsonFile,
   type JsonMergeOptions,
   type JsonMcpServerStateOptions,
 } from "./jsonConfig.js";
@@ -46,6 +50,8 @@ export {
   removeTomlMarkerBlock,
   TOML_MARKER_BEGIN,
   TOML_MARKER_END,
+  LEGACY_TOML_MARKER_BEGIN,
+  LEGACY_TOML_MARKER_END,
   tomlFileHasMcpServer,
   upsertTomlMarkerBlock,
   type TomlInspection,
@@ -79,6 +85,13 @@ export {
   linkCursor,
   unlinkCursor,
 } from "./agents/cursor.js";
+
+export {
+  linkPi,
+  piConfigPath,
+  piIsRegistered,
+  unlinkPi,
+} from "./agents/pi.js";
 
 export {
   addCustomAgent,

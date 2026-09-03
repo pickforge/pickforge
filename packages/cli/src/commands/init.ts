@@ -256,7 +256,7 @@ function emit(report: InitReport, opts: InitCliOptions): void {
     );
     if (!report.dryRun) {
       console.log(
-        "Next: pickforge-lab agents install <codex|claude-code|cursor> to register " +
+        "Next: pickforge-lab agents install <codex|claude-code|cursor|pi> to register " +
           "the MCP server, then pickforge-lab doctor to verify dependencies.",
       );
     }

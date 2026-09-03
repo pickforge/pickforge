@@ -10,6 +10,7 @@ import {
   cursorConfigPath,
   findClaudeBinary,
   linkClaudeCode,
+  piConfigPath,
   unlinkClaudeCode,
 } from "../src/index.js";
 
@@ -18,7 +19,7 @@ let home: string;
 let cleanEnv: Record<string, string>;
 
 beforeEach(() => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-agents-"));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-agents-"));
   home = path.join(tmpDir, "home");
   fs.mkdirSync(home, { recursive: true });
   cleanEnv = { HOME: home, PATH: path.join(tmpDir, "empty-bin") };
@@ -58,6 +59,9 @@ describe("default config paths", () => {
     );
     expect(claudeCodeConfigPath(env)).toBe(path.join(home, ".claude.json"));
     expect(cursorConfigPath(env)).toBe(path.join(home, ".cursor", "mcp.json"));
+    expect(piConfigPath(env)).toBe(
+      path.join(home, ".config", "mcp", "mcp.json"),
+    );
   });
 
   it("honor CODEX_HOME for codex", () => {
@@ -100,12 +104,12 @@ describe("linkClaudeCode without the claude binary", () => {
     expect(result.warning).toContain("close Claude Code");
     const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
     expect(config.numStartups).toBe(3);
-    expect(config.mcpServers.picklab).toEqual({
-      command: "picklab",
+    expect(config.mcpServers["pickforge-lab"]).toEqual({
+      command: "pickforge-lab",
       args: ["mcp", "serve"],
     });
-    expect(config.mcpServers["picklab-browser"]).toEqual({
-      command: "picklab",
+    expect(config.mcpServers["pickforge-lab-browser"]).toEqual({
+      command: "pickforge-lab",
       args: ["browser", "devtools-mcp"],
     });
     expect(await claudeCodeIsRegistered(configPath)).toBe(true);
@@ -138,25 +142,25 @@ describe("linkClaudeCode with the claude binary on PATH", () => {
       "add",
       "--scope",
       "user",
-      "picklab",
+      "pickforge-lab",
       "--",
-      "picklab",
+      "pickforge-lab",
       "mcp",
       "serve",
       "mcp",
       "add",
       "--scope",
       "user",
-      "picklab-browser",
+      "pickforge-lab-browser",
       "--",
-      "picklab",
+      "pickforge-lab",
       "browser",
       "devtools-mcp",
     ]);
     expect(fs.existsSync(configPath)).toBe(false);
   });
 
-  it("does not shell out when ~/.claude.json already has picklab registered", async () => {
+  it("does not shell out when ~/.claude.json already has pickforge-lab registered", async () => {
     const env = installFakeClaude(
       '#!/bin/sh\nprintf \'%s\\n\' "$@" > "${CLAUDE_ARGS_FILE}"\nexit 99\n',
     );
@@ -164,9 +168,9 @@ describe("linkClaudeCode with the claude binary on PATH", () => {
     const original = JSON.stringify({
       numStartups: 2,
       mcpServers: {
-        picklab: { command: "picklab", args: ["mcp", "serve"] },
-        "picklab-browser": {
-          command: "picklab",
+        "pickforge-lab": { command: "pickforge-lab", args: ["mcp", "serve"] },
+        "pickforge-lab-browser": {
+          command: "pickforge-lab",
           args: ["browser", "devtools-mcp"],
         },
       },
@@ -180,13 +184,38 @@ describe("linkClaudeCode with the claude binary on PATH", () => {
     expect(fs.existsSync(env.CLAUDE_ARGS_FILE)).toBe(false);
   });
 
+  it("atomically migrates owned legacy entries without shelling out", async () => {
+    const env = installFakeClaude(RECORDING_CLAUDE);
+    const configPath = path.join(home, ".claude.json");
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        mcpServers: {
+          picklab: { command: "picklab", args: ["mcp", "serve"] },
+        },
+      }),
+    );
+
+    const result = await linkClaudeCode(configPath, env);
+
+    expect(result.migratedLegacyEntries).toEqual(["picklab"]);
+    expect(result.warning).toContain("replaced atomically");
+    expect(fs.existsSync(env.CLAUDE_ARGS_FILE)).toBe(false);
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    expect(config.mcpServers.picklab).toBeUndefined();
+    expect(config.mcpServers["pickforge-lab"]).toEqual({
+      command: "pickforge-lab",
+      args: ["mcp", "serve"],
+    });
+  });
+
   it("updates a stale ~/.claude.json while adding both servers", async () => {
     const env = installFakeClaude(
       [
         "#!/bin/sh",
         'printf \'%s\\n\' "$@" >> "${CLAUDE_ARGS_FILE}"',
         'if [ "${1:-}" = "mcp" ] && [ "${2:-}" = "add" ]; then',
-        '  printf \'%s\\n\' \'{"mcpServers":{"picklab":{"command":"picklab","args":["mcp","serve"]},"picklab-browser":{"command":"picklab","args":["browser","devtools-mcp"]}}}\' > "${HOME}/.claude.json"',
+        '  printf \'%s\\n\' \'{"mcpServers":{"pickforge-lab":{"command":"pickforge-lab","args":["mcp","serve"]},"pickforge-lab-browser":{"command":"pickforge-lab","args":["browser","devtools-mcp"]}}}\' > "${HOME}/.claude.json"',
         "fi",
       ].join("\n"),
     );
@@ -195,7 +224,7 @@ describe("linkClaudeCode with the claude binary on PATH", () => {
       configPath,
       JSON.stringify({
         mcpServers: {
-          picklab: { command: "old-picklab", args: ["mcp", "serve"] },
+          "pickforge-lab": { command: "old-pickforge-lab", args: ["mcp", "serve"] },
         },
       }),
     );
@@ -209,18 +238,18 @@ describe("linkClaudeCode with the claude binary on PATH", () => {
       "add",
       "--scope",
       "user",
-      "picklab",
+      "pickforge-lab",
       "--",
-      "picklab",
+      "pickforge-lab",
       "mcp",
       "serve",
       "mcp",
       "add",
       "--scope",
       "user",
-      "picklab-browser",
+      "pickforge-lab-browser",
       "--",
-      "picklab",
+      "pickforge-lab",
       "browser",
       "devtools-mcp",
     ]);
@@ -235,12 +264,12 @@ describe("linkClaudeCode with the claude binary on PATH", () => {
       "remove",
       "--scope",
       "user",
-      "picklab",
+      "pickforge-lab",
       "mcp",
       "remove",
       "--scope",
       "user",
-      "picklab-browser",
+      "pickforge-lab-browser",
     ]);
   });
 
@@ -248,7 +277,7 @@ describe("linkClaudeCode with the claude binary on PATH", () => {
     const env = installFakeClaude(
       [
         "#!/bin/sh",
-        'printf \'%s\\n\' \'{"mcpServers":{"picklab":{"command":"picklab","args":["mcp","serve"]},"picklab-browser":{"command":"picklab","args":["browser","devtools-mcp"]}}}\' > "${HOME}/.claude.json"',
+        'printf \'%s\\n\' \'{"mcpServers":{"pickforge-lab":{"command":"pickforge-lab","args":["mcp","serve"]},"pickforge-lab-browser":{"command":"pickforge-lab","args":["browser","devtools-mcp"]}}}\' > "${HOME}/.claude.json"',
         'echo "MCP server ${5:-unknown} already exists in user config." >&2',
         "exit 1",
       ].join("\n"),
@@ -262,12 +291,12 @@ describe("linkClaudeCode with the claude binary on PATH", () => {
     const env = installFakeClaude('#!/bin/sh\necho "boom" >&2\nexit 1\n');
     await expect(
       linkClaudeCode(path.join(home, ".claude.json"), env),
-    ).rejects.toThrow('"claude mcp add" failed for picklab (exit code 1): boom');
+    ).rejects.toThrow('"claude mcp add" failed for pickforge-lab (exit code 1): boom');
   });
 
   it("treats a not-found claude mcp remove as a no-op", async () => {
     const env = installFakeClaude(
-      '#!/bin/sh\necho "No MCP server found with name: picklab" >&2\nexit 1\n',
+      '#!/bin/sh\necho "No MCP server found with name: pickforge-lab" >&2\nexit 1\n',
     );
     const result = await unlinkClaudeCode(path.join(home, ".claude.json"), env);
     expect(result.changed).toBe(false);

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 
-export const BACKUP_PATTERN = /\.picklab-backup-\d{8}-\d{6}(-\d+)?$/;
+export const BACKUP_PATTERN =
+  /\.(?:pickforge|picklab)-backup-\d{8}-\d{6}(-\d+)?$/;
 
 function timestamp(now: Date): string {
   const pad = (value: number): string => String(value).padStart(2, "0");
@@ -18,7 +19,7 @@ export async function backupFile(
   filePath: string,
   now: Date = new Date(),
 ): Promise<string | undefined> {
-  const base = `${filePath}.picklab-backup-${timestamp(now)}`;
+  const base = `${filePath}.pickforge-backup-${timestamp(now)}`;
   let candidate = base;
   for (let attempt = 2; ; attempt += 1) {
     try {

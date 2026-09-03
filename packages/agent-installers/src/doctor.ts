@@ -91,7 +91,7 @@ async function countBackups(configPath: string): Promise<number> {
     return 0;
   }
   return entries.filter(
-    (entry) => entry.startsWith(`${base}.picklab-backup-`) && isBackupPath(entry),
+    (entry) => entry.startsWith(`${base}.`) && isBackupPath(entry),
   ).length;
 }
 
@@ -132,8 +132,8 @@ async function checkBuiltinAgent(
         id,
         status: "problem",
         detail:
-          `stale: PickLab linked ${configPath} but the file no longer ` +
-          `exists (re-run: picklab agents link)`,
+          `stale: Pickforge linked ${configPath} but the file no longer ` +
+          `exists (re-run: pickforge-lab agents link)`,
       });
       return;
     }
@@ -146,13 +146,24 @@ async function checkBuiltinAgent(
   }
   if (name === "codex") {
     const inspection = await inspectTomlFile(configPath);
+    if (inspection.legacyMarkersPresent) {
+      checks.push({
+        id,
+        status: "problem",
+        detail:
+          `stale: ${configPath} has an owned legacy picklab entry ` +
+          `(re-run: pickforge-lab agents link codex)`,
+      });
+      return;
+    }
     if (inspection.markersPresent && !inspection.markersHaveSection) {
       checks.push({
         id,
         status: "problem",
         detail:
-          `stale: ${configPath} has picklab markers without an ` +
-          `[mcp_servers.picklab] section (re-run: picklab agents link codex)`,
+          `stale: ${configPath} has pickforge-lab markers without a ` +
+          `[mcp_servers."pickforge-lab"] section ` +
+          `(re-run: pickforge-lab agents link codex)`,
       });
       return;
     }
@@ -161,7 +172,7 @@ async function checkBuiltinAgent(
         id,
         status: "warn",
         detail:
-          `${configPath} has an [mcp_servers.picklab] section that PickLab ` +
+          `${configPath} has a Pickforge Lab MCP section that Pickforge ` +
           `does not manage`,
       });
       return;
@@ -194,7 +205,7 @@ function pushRegistrationCheck(
       status: "warn",
       detail:
         `${configPath} exists but is not parseable as strict JSON ` +
-        `(JSONC comments or trailing commas?); cannot tell whether picklab ` +
+        `(JSONC comments or trailing commas?); cannot tell whether pickforge-lab ` +
         `is registered`,
     });
     return;
@@ -204,8 +215,8 @@ function pushRegistrationCheck(
       id,
       status: "problem",
       detail:
-        `stale: PickLab linked ${configPath} but the picklab entry is gone ` +
-        `(re-run: picklab agents link)`,
+        `stale: Pickforge linked ${configPath} but the pickforge-lab entry is gone ` +
+        `(re-run: pickforge-lab agents link)`,
     });
     return;
   }
@@ -213,7 +224,7 @@ function pushRegistrationCheck(
     checks.push({
       id,
       status: "warn",
-      detail: `${backups} picklab backups next to ${configPath}; consider pruning`,
+      detail: `${backups} pickforge-lab backups next to ${configPath}; consider pruning`,
     });
     return;
   }
@@ -222,9 +233,9 @@ function pushRegistrationCheck(
       id,
       status: "warn",
       detail:
-        `${configPath} has ${backups} picklab backup(s) but no picklab ` +
-        `entry; it may have been edited outside PickLab ` +
-        `(re-link with: picklab agents link)`,
+        `${configPath} has ${backups} pickforge-lab backup(s) but no pickforge-lab ` +
+        `entry; it may have been edited outside Pickforge ` +
+        `(re-link with: pickforge-lab agents link)`,
     });
     return;
   }
@@ -234,22 +245,22 @@ function pushRegistrationCheck(
     detail: registered
       ? `registered in ${configPath}`
       : stateEntry?.registered === false
-        ? `not registered in ${configPath} (unlinked by picklab)`
+        ? `not registered in ${configPath} (unlinked by pickforge-lab)`
         : `not registered in ${configPath}`,
   });
 }
 
-function checkPicklabOnPath(env: EnvLike, checks: AgentsDoctorCheck[]): void {
+function checkPickforgeOnPath(env: EnvLike, checks: AgentsDoctorCheck[]): void {
   const pathValue = env.PATH ?? "";
   for (const dir of pathValue.split(path.delimiter)) {
     if (dir === "") {
       continue;
     }
-    const candidate = path.join(dir, "picklab");
+    const candidate = path.join(dir, "pickforge-lab");
     try {
       fs.accessSync(candidate, fs.constants.X_OK);
       if (fs.statSync(candidate).isFile()) {
-        checks.push({ id: "picklab-bin", status: "ok", detail: candidate });
+        checks.push({ id: "pickforge-lab-bin", status: "ok", detail: candidate });
         return;
       }
     } catch {
@@ -257,10 +268,10 @@ function checkPicklabOnPath(env: EnvLike, checks: AgentsDoctorCheck[]): void {
     }
   }
   checks.push({
-    id: "picklab-bin",
+    id: "pickforge-lab-bin",
     status: "warn",
     detail:
-      "picklab is not on PATH; registered agents will fail to start the MCP " +
+      "pickforge-lab is not on PATH; registered agents will fail to start the MCP " +
       "server (install globally or adjust PATH)",
   });
 }
@@ -282,7 +293,7 @@ export async function runAgentsDoctor(
       state.agents[agent.name],
     );
   }
-  checkPicklabOnPath(env, checks);
+  checkPickforgeOnPath(env, checks);
   return {
     ok: !checks.some((check) => check.status === "problem"),
     checks,

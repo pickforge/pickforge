@@ -5,6 +5,7 @@ import {
   jsonFileMcpServerState,
   mergeMcpServerIntoJsonFile,
   removeMcpServerFromJsonFile,
+  replaceOwnedLegacyMcpServersInJsonFile,
 } from "../jsonConfig.js";
 import {
   BROWSER_MCP_SERVER_NAME,
@@ -16,8 +17,8 @@ import type { ChangeResult, RegistrationState } from "../types.js";
 import { homeDir } from "./home.js";
 
 export const CLAUDE_CODE_MANUAL_COMMAND =
-  "claude mcp add --scope user picklab -- picklab mcp serve && " +
-  "claude mcp add --scope user picklab-browser -- picklab browser devtools-mcp";
+  "claude mcp add --scope user pickforge-lab -- pickforge-lab mcp serve && " +
+  "claude mcp add --scope user pickforge-lab-browser -- pickforge-lab browser devtools-mcp";
 
 const DIRECT_EDIT_WARNING =
   "the claude binary was not found on PATH, so the config file was edited " +
@@ -168,6 +169,18 @@ export async function linkClaudeCode(
   env: EnvLike = process.env,
 ): Promise<ChangeResult> {
   const claudeBin = findClaudeBinary(env);
+  const migration = await replaceOwnedLegacyMcpServersInJsonFile(configPath);
+  if (migration.changed) {
+    return {
+      ...migration,
+      warning:
+        claudeBin === undefined
+          ? DIRECT_EDIT_WARNING
+          : "the owned legacy MCP entries were replaced atomically by editing " +
+            "the config directly; close Claude Code while linking, or it may " +
+            "overwrite the change",
+    };
+  }
   if (claudeBin !== undefined) {
     if ((await claudeCodeIsRegistered(configPath)) === true) {
       return { configPath, changed: false };
