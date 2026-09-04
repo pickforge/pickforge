@@ -110,8 +110,8 @@ export async function runAndroidScreenshot(
       "android",
       target.sessionId,
     );
-    const data = await captureToTarget(destination, async () => {
-      await screenshot({ serial: target.serial, outPath: destination.outPath });
+    const data = await captureToTarget(destination, async (outPath) => {
+      await screenshot({ serial: target.serial, outPath });
     });
     Object.assign(data, targetData(target));
     const lines = [`screenshot saved to ${destination.outPath}`];

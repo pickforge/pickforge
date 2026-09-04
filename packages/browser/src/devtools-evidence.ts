@@ -429,7 +429,7 @@ export async function createDevtoolsEvidenceRecorder(
     action: EvidenceAction,
   ): Promise<AppendOutcome | undefined> => {
     try {
-      const result = await appendAction(run.dir, action, {
+      const result = await appendAction(run, action, {
         maxBytes: opts.maxBytes,
       });
       return result.outcome;

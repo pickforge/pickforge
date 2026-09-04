@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { beginEvidenceRun } from "../src/evidence.js";
-import { createRun, listRuns, openRun } from "../src/run.js";
+import { adoptRun, createRun, listRuns } from "../src/run.js";
 import {
   ensureVerifiedRunsRoot,
   RunStorageAccessError,
@@ -122,33 +122,42 @@ describe("project-local write root", () => {
     expect(await tree(run.dir)).toEqual(["logs", "manifest.json", "screenshots"]);
   });
 
-  it("detects a runs root swapped for a symlink between verification and run creation", async () => {
+  it("creates the run in the verified root even when the root is swapped mid-creation", async () => {
     const runsRoot = path.join(project, ".picklab", "runs");
+    await fs.promises.mkdir(runsRoot, { recursive: true });
     const moved = path.join(project, ".picklab", "runs-real");
     const original = fs.promises.mkdir;
     let swapped = false;
     vi.spyOn(fs.promises, "mkdir").mockImplementation(
       async (target, options) => {
-        if (!swapped && typeof target === "string" && path.dirname(target) === runsRoot) {
-          // The root passed verification a moment ago; now redirect it.
+        if (
+          !swapped &&
+          typeof target === "string" &&
+          target.startsWith("/proc/self/fd/") &&
+          path.basename(target).endsWith("-race")
+        ) {
+          // The root was verified a moment ago and the run directory is being
+          // created inside it right now: redirect the pathname underneath.
           swapped = true;
           await fs.promises.rename(runsRoot, moved);
-          await fs.promises.symlink(moved, runsRoot);
+          await fs.promises.symlink(outside, runsRoot);
         }
         return original.call(fs.promises, target, options as never);
       },
     );
 
-    await expect(createRun(project, "race")).rejects.toBeInstanceOf(
-      RunStorageAccessError,
-    );
+    const run = await createRun(project, "race");
     expect(swapped).toBe(true);
-    expect(await isSymlinkTo(runsRoot, moved)).toBe(true);
-    // The stray directory the raced mkdir produced holds no run data.
-    const leftovers = await tree(moved);
-    expect(leftovers.some((entry) => entry.endsWith("manifest.json"))).toBe(false);
-    expect(leftovers.some((entry) => entry.endsWith("screenshots"))).toBe(false);
-    expect(await listRuns(project)).toEqual([]);
+    expect(await isSymlinkTo(runsRoot, outside)).toBe(true);
+    // Every write followed the descriptor of the directory that was verified,
+    // so nothing landed through the planted symlink.
+    expect(await tree(outside)).toEqual([]);
+    const realRunDir = path.join(moved, path.basename(run.dir));
+    expect(await tree(realRunDir)).toEqual([
+      "logs",
+      "manifest.json",
+      "screenshots",
+    ]);
   });
 
   it("refuses manifest writes after the run directory is swapped for a symlink", async () => {
@@ -184,7 +193,7 @@ describe("project-local write root", () => {
 
   it("binds adopted handles to the verified root", async () => {
     const run = await createRun(project, "adopt");
-    const adopted = await openRun(project, run.runId, run.manifest);
+    const adopted = await adoptRun(project, run.runId, run.manifest);
     await adopted.finish("completed");
     expect(
       JSON.parse(
@@ -195,9 +204,9 @@ describe("project-local write root", () => {
     const stolen = path.join(root, "stolen");
     await fs.promises.rename(run.dir, stolen);
     await fs.promises.symlink(stolen, run.dir);
-    await expect(openRun(project, run.runId, run.manifest)).rejects.toBeInstanceOf(
-      RunStorageAccessError,
-    );
+    await expect(
+      adoptRun(project, run.runId, run.manifest),
+    ).rejects.toBeInstanceOf(RunStorageAccessError);
   });
 
   it("routes evidence runs through the verified root", async () => {

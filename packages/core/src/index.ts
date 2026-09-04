@@ -48,7 +48,6 @@ export {
   createRun,
   EVIDENCE_ACTION_LOG,
   EVIDENCE_VERSION,
-  openRun,
   RunHandle,
   type ArtifactType,
   type CreateRunOptions,
@@ -60,7 +59,7 @@ export {
 export {
   ensureVerifiedRunsRoot,
   RunStorageAccessError,
-  type RunDirIdentity,
+  type RunDirBinding,
   type RunStorageRoot,
   type VerifiedRunRoot,
 } from "./run-root.js";
@@ -153,6 +152,7 @@ export {
 } from "./proc.js";
 
 export {
+  captureRunArtifact,
   captureToTarget,
   requireDisplay,
   resolveConfinedPath,

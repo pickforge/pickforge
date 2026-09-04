@@ -164,8 +164,8 @@ export async function runDesktopScreenshot(
     let tool: string | undefined;
     let windowCount: number | undefined;
     let warnings: string[] = [];
-    const data = await captureToTarget(target, async () => {
-      const result = await screenshot({ display, outPath: target.outPath });
+    const data = await captureToTarget(target, async (outPath) => {
+      const result = await screenshot({ display, outPath });
       tool = result.tool;
       windowCount = result.windowCount;
       warnings = result.warnings;

@@ -24,9 +24,21 @@ release description, then reset it after that release is published.
   or planted later, is refused with a clear error instead of redirecting
   screenshots and manifests. `home` and `custom` modes verify their
   `projects/<id>/runs` and `runs` components the same way.
-- Manifest writes through a run handle re-verify the run directory's identity,
-  so a directory swapped for a symlink after creation cannot redirect later
-  writes. Evidence runs adopt and finalize through the same bound handles.
+- Sensitive run writes are now bound to the verified *directory*, not to its
+  pathname. Each directory is opened once with `O_DIRECTORY|O_NOFOLLOW` and
+  verified through that descriptor, and the manifest, the evidence journal (and
+  its lock and truncation sentinel), the session's active-run pointer, and
+  screenshots and other run artifacts are all written through the same
+  descriptor. Swapping an ancestor after verification can no longer redirect
+  those writes: they land in the verified directory or fail with a named error.
+- Screenshots are captured into a process-private staging directory and
+  published into the run through the descriptor held across the capture, so an
+  external capture tool can no longer be pointed outside the run directory by a
+  swap while it runs.
+- Run adoption stays internal: `openRun` is no longer exported. Adoption goes
+  through one helper that requires a single-component run id naming a real
+  directory directly under the verified root, and a manifest that describes
+  that run, so an out-of-root or traversing id is refused.
 - Nothing is migrated, replaced, or deleted when an unsafe entry is found; the
   offending path is named in the error.
 
@@ -36,7 +48,13 @@ release description, then reset it after that release is published.
 
 ## Known limits
 
-- Node.js has no directory-handle-relative `mkdir`, so a swap between the
-  verification and the creation of one directory level is detected after the
-  fact and reported rather than prevented; no manifest or artifact is written
-  through a redirected path.
+- Descriptor-bound writes rely on Linux `/proc/self/fd` capability paths, since
+  Node exposes no `openat`/`mkdirat` family. The TypeScript lab is Linux-only;
+  on any other platform run-storage writes now fail closed with a clear error
+  instead of falling back to pathname writes.
+- The binding covers run-storage writes. Reads (run listing, manifest and
+  journal reads, report rendering) and retention pruning still apply the
+  lstat/realpath trust boundary by pathname and are not descriptor-bound.
+- A swap performed *before* an operation opens its directory is not silently
+  tolerated: the open fails verification and the operation reports the unsafe
+  path. Only the redirection of an already verified write is prevented.

@@ -174,7 +174,7 @@ export async function withMcpEvidence<T extends ToolReport>(
         if ((result.errors?.length ?? 0) > 0) {
           action.error = sanitizeErrorText(result.errors!.join("; "));
         }
-        await appendAction(run.dir, action);
+        await appendAction(run, action);
         if (options.refreshReportAfterRecord === true) {
           await refreshFinalizedReport(run);
         }
@@ -201,7 +201,7 @@ export async function withMcpEvidence<T extends ToolReport>(
           action.sessionId = options.sessionId;
         }
         if (target !== undefined) action.target = target;
-        await appendAction(run.dir, action);
+        await appendAction(run, action);
       } catch (appendError) {
         reportEvidenceFailure(options.tool, appendError);
       }

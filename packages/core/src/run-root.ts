@@ -1,7 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
+import {
+  DirHandle,
+  RunStorageAccessError,
+  assertSafeEntryName,
+  withDirHandle,
+} from "./dir-handle.js";
 import { pickforgeHome, type EnvLike } from "./paths.js";
 import { resolveRunStorage, type ResolvedRunStorage } from "./storage.js";
+
+export { RunStorageAccessError, withDirHandle } from "./dir-handle.js";
+export type { DirHandle } from "./dir-handle.js";
 
 /**
  * One trusted run-storage root. `expectedRealDir` is derived from the trusted
@@ -21,20 +30,20 @@ export interface VerifiedRunRoot {
   stat: fs.Stats;
 }
 
-/** A run directory bound to the verified root and identity it was created in. */
-export interface RunDirIdentity {
-  root: VerifiedRunRoot;
-  dirName: string;
-  stat: fs.Stats;
-}
-
 /**
- * Raised when a run-storage write would go through a symlink, a non-directory,
- * or a directory that no longer resolves where the trusted ancestor says it
- * should. Nothing is moved, rewritten, or removed when this is thrown: the
- * offending entry is the user's (or the repository's) to fix.
+ * Everything needed to re-open one run directory *as the identity it was
+ * verified at*: the runs root's logical path and verified real path, the run
+ * directory's name, and its `fstat` identity. Re-opening through
+ * {@link withBoundRunDir} yields a descriptor, and every write goes through
+ * that descriptor's capability path — so verification and write share one
+ * directory identity and no ancestor swap can separate them.
  */
-export class RunStorageAccessError extends Error {}
+export interface RunDirBinding {
+  rootDir: string;
+  realRootDir: string;
+  runId: string;
+  identity: fs.Stats;
+}
 
 export function isMissing(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException).code;
@@ -66,48 +75,6 @@ export async function verifyExistingRoot(
   }
   if (realDir !== root.expectedRealDir) return undefined;
   return { dir: root.dir, realDir, stat };
-}
-
-/**
- * Write-side check for one directory: it must be a real (non-symlink)
- * directory resolving exactly to `expectedRealDir`. Unlike the read side this
- * fails loudly, because a write that silently lands elsewhere is the bug #54
- * exists to prevent.
- */
-export async function verifyWritableDir(
-  dir: string,
-  expectedRealDir: string,
-): Promise<fs.Stats> {
-  let stat: fs.Stats;
-  try {
-    stat = await fs.promises.lstat(dir);
-  } catch (error) {
-    if (isMissing(error)) {
-      throw new RunStorageAccessError(
-        `Run storage path disappeared while being verified: ${dir}`,
-      );
-    }
-    throw error;
-  }
-  if (stat.isSymbolicLink()) {
-    throw new RunStorageAccessError(
-      `Refusing to write run artifacts through a symlink at ${dir}; ` +
-        "replace it with a real directory (nothing was written, moved, or removed)",
-    );
-  }
-  if (!stat.isDirectory()) {
-    throw new RunStorageAccessError(
-      `Refusing to write run artifacts: ${dir} exists but is not a directory`,
-    );
-  }
-  const realDir = await fs.promises.realpath(dir);
-  if (realDir !== expectedRealDir) {
-    throw new RunStorageAccessError(
-      `Refusing to write run artifacts: ${dir} resolves to ${realDir}, ` +
-        `expected ${expectedRealDir}`,
-    );
-  }
-  return stat;
 }
 
 interface RunWriteSpec {
@@ -147,59 +114,10 @@ function writeSpecFor(
   };
 }
 
-async function realTrustedDir(spec: RunWriteSpec): Promise<string> {
-  if (spec.createTrusted) {
-    await fs.promises.mkdir(spec.trustedDir, { recursive: true });
-  }
-  let stat: fs.Stats;
-  try {
-    stat = await fs.promises.stat(spec.trustedDir);
-  } catch (error) {
-    if (isMissing(error)) {
-      throw new RunStorageAccessError(
-        `Run storage root does not exist: ${spec.trustedDir}`,
-      );
-    }
-    throw error;
-  }
-  if (!stat.isDirectory()) {
-    throw new RunStorageAccessError(
-      `Run storage root is not a directory: ${spec.trustedDir}`,
-    );
-  }
-  return fs.promises.realpath(spec.trustedDir);
-}
-
-/**
- * Create `dir` if missing, then verify it. A plain (non-recursive) `mkdir`
- * never follows a symlink at the final component: a planted link, dangling or
- * not, yields `EEXIST` and is then rejected by the `lstat` check.
- */
-async function createVerifiedDir(
-  dir: string,
-  expectedRealDir: string,
-): Promise<fs.Stats> {
-  try {
-    await fs.promises.mkdir(dir);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-  }
-  return verifyWritableDir(dir, expectedRealDir);
-}
-
-/**
- * Materialize and verify the runs root for a project, mirroring the trust
- * boundary the run catalog applies when reading. Every component between the
- * trusted ancestor and the runs directory is created one level at a time and
- * checked with `lstat` plus `realpath`, so a symlinked `.picklab` committed in
- * a target repository cannot redirect `project-local` writes. Existing user
- * data is never migrated or deleted: an unsafe entry raises
- * {@link RunStorageAccessError} and leaves the tree untouched.
- */
-export async function ensureVerifiedRunsRoot(
+async function resolveWriteSpec(
   projectDir: string,
-  env: EnvLike = process.env,
-): Promise<VerifiedRunRoot> {
+  env: EnvLike,
+): Promise<RunWriteSpec> {
   const resolved = await resolveRunStorage(projectDir, env);
   const spec = writeSpecFor(resolved, projectDir, env);
   const expectedDir = path.join(spec.trustedDir, ...spec.components);
@@ -208,50 +126,244 @@ export async function ensureVerifiedRunsRoot(
       `Run storage resolver disagreement: ${resolved.runsDir} vs ${expectedDir}`,
     );
   }
-  let dir = spec.trustedDir;
-  let realDir = await realTrustedDir(spec);
-  let stat: fs.Stats | undefined;
-  for (const component of spec.components) {
-    dir = path.join(dir, component);
-    realDir = path.join(realDir, component);
-    stat = await createVerifiedDir(dir, realDir);
-  }
-  if (stat === undefined) {
-    throw new RunStorageAccessError(`Run storage root has no components: ${dir}`);
-  }
-  return { dir, realDir, stat };
+  return spec;
 }
 
 /**
- * Bind an existing run directory under a verified root: the root must still be
- * the same directory (identity and real path) and the run directory must be a
- * real directory resolving directly below it.
+ * Open the trusted ancestor. A user may legitimately reach it through a
+ * symlink (a linked project directory or Pickforge home), exactly as the
+ * catalog's read side allows, so the final component may be followed here —
+ * and only here. Its real path, read back from the descriptor, anchors every
+ * component below it.
  */
-export async function bindRunDir(
-  root: VerifiedRunRoot,
-  dirName: string,
-): Promise<RunDirIdentity> {
-  const rootNow = await verifyWritableDir(root.dir, root.realDir);
-  if (!sameIdentity(root.stat, rootNow)) {
-    throw new RunStorageAccessError(
-      `Run storage root was replaced while in use: ${root.dir}`,
-    );
+async function openTrustedDir(
+  spec: RunWriteSpec,
+  create: boolean,
+): Promise<DirHandle> {
+  if (spec.createTrusted && create) {
+    await fs.promises.mkdir(spec.trustedDir, { recursive: true });
   }
-  const stat = await verifyWritableDir(
-    path.join(root.dir, dirName),
-    path.join(root.realDir, dirName),
-  );
-  return { root, dirName, stat };
+  try {
+    return await DirHandle.open(spec.trustedDir, { followFinal: true });
+  } catch (error) {
+    if (
+      error instanceof RunStorageAccessError &&
+      /disappeared while being verified/.test(error.message)
+    ) {
+      throw new RunStorageAccessError(
+        `Run storage root does not exist: ${spec.trustedDir}`,
+      );
+    }
+    if (
+      error instanceof RunStorageAccessError &&
+      /is not a directory/.test(error.message)
+    ) {
+      throw new RunStorageAccessError(
+        `Run storage root is not a directory: ${spec.trustedDir}`,
+      );
+    }
+    throw error;
+  }
 }
 
-/** Re-check a bound run directory before writing into it. */
-export async function assertRunDirIntact(
-  identity: RunDirIdentity,
-): Promise<void> {
-  const current = await bindRunDir(identity.root, identity.dirName);
-  if (!sameIdentity(identity.stat, current.stat)) {
+/**
+ * Walk from the trusted ancestor down to the runs directory one descriptor at
+ * a time: each component is created (when it may be) and opened *relative to
+ * the descriptor of its parent* with `O_NOFOLLOW`, so a symlinked `.picklab`,
+ * `runs`, or project-id component is refused and no lookup ever re-traverses
+ * an ancestor that could have been swapped meanwhile.
+ */
+async function openChain(
+  spec: RunWriteSpec,
+  create: boolean,
+): Promise<DirHandle | undefined> {
+  let current = await openTrustedDir(spec, create);
+  let logical = spec.trustedDir;
+  let handedOver = false;
+  try {
+    for (const component of spec.components) {
+      logical = path.join(logical, component);
+      let next: DirHandle;
+      try {
+        next = create
+          ? await current.ensureChildDir(component)
+          : await current.openChild(component);
+      } catch (error) {
+        if (!create && isAbsent(error)) return undefined;
+        throw rewriteChildError(error, logical);
+      }
+      await current.close();
+      current = next;
+    }
+    handedOver = true;
+    return current;
+  } finally {
+    if (!handedOver) await current.close().catch(() => {});
+  }
+}
+
+/** Whether an error means "this component simply is not there (yet)". */
+function isAbsent(error: unknown): boolean {
+  if (isMissing(error)) return true;
+  return (
+    error instanceof RunStorageAccessError &&
+    /disappeared while being verified/.test(error.message)
+  );
+}
+
+/** Re-label an error raised for a capability path with the logical path. */
+function rewriteChildError(error: unknown, logical: string): unknown {
+  if (!(error instanceof RunStorageAccessError)) return error;
+  return new RunStorageAccessError(
+    error.message.replace(/\/proc\/self\/fd\/\d+\/[^\s,;]*/g, logical),
+  );
+}
+
+/**
+ * Materialize the runs root for a project and return an open descriptor on it,
+ * mirroring the trust boundary the run catalog applies when reading. Existing
+ * user data is never migrated or deleted: an unsafe entry raises
+ * {@link RunStorageAccessError} and leaves the tree untouched.
+ *
+ * The caller owns the returned handle and must close it; prefer
+ * {@link withRunsRootDir}.
+ */
+export async function openRunsRootDir(
+  projectDir: string,
+  env: EnvLike = process.env,
+): Promise<DirHandle> {
+  const spec = await resolveWriteSpec(projectDir, env);
+  const handle = await openChain(spec, true);
+  if (handle === undefined) {
     throw new RunStorageAccessError(
-      `Run directory was replaced while in use: ${path.join(identity.root.dir, identity.dirName)}`,
+      `Run storage root could not be created: ${spec.trustedDir}`,
     );
+  }
+  return handle;
+}
+
+/** Run `fn` with an open, verified runs root, always closing the descriptor. */
+export function withRunsRootDir<T>(
+  projectDir: string,
+  env: EnvLike,
+  fn: (root: DirHandle) => Promise<T>,
+): Promise<T> {
+  return withDirHandle(openRunsRootDir(projectDir, env), fn);
+}
+
+/**
+ * Like {@link openRunsRootDir}, but never creates anything: a missing root
+ * yields `undefined` so read-mostly callers (pointer inspection) can report
+ * "absent" without materializing storage. Unsafe entries still raise.
+ */
+export async function openExistingRunsRootDir(
+  projectDir: string,
+  env: EnvLike = process.env,
+): Promise<DirHandle | undefined> {
+  const spec = await resolveWriteSpec(projectDir, env);
+  try {
+    return await openChain(spec, false);
+  } catch (error) {
+    if (
+      error instanceof RunStorageAccessError &&
+      /does not exist|disappeared while being verified/.test(error.message)
+    ) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Run `fn` with the existing verified runs root, or with `undefined` when the
+ * project has none yet. Always closes the descriptor.
+ */
+export async function withExistingRunsRootDir<T>(
+  projectDir: string,
+  env: EnvLike,
+  fn: (root: DirHandle | undefined) => Promise<T>,
+): Promise<T> {
+  const root = await openExistingRunsRootDir(projectDir, env);
+  try {
+    return await fn(root);
+  } finally {
+    if (root !== undefined) await root.close().catch(() => {});
+  }
+}
+
+/**
+ * Materialize and verify the runs root for a project. This reports the root's
+ * verified location and identity; it holds no descriptor, so it is a *read* of
+ * the trust boundary. Writes must go through {@link withRunsRootDir} or a
+ * {@link RunDirBinding}, which bind the write to the descriptor they verified.
+ */
+export async function ensureVerifiedRunsRoot(
+  projectDir: string,
+  env: EnvLike = process.env,
+): Promise<VerifiedRunRoot> {
+  return withRunsRootDir(projectDir, env, async (root) => ({
+    dir: root.dir,
+    realDir: root.realDir,
+    stat: root.stat,
+  }));
+}
+
+/** Describe an open run directory so it can be re-opened at the same identity. */
+export function bindingFor(root: DirHandle, runDir: DirHandle): RunDirBinding {
+  return {
+    rootDir: root.dir,
+    realRootDir: root.realDir,
+    runId: path.basename(runDir.dir),
+    identity: runDir.stat,
+  };
+}
+
+/**
+ * Open a run directory as a child of the verified runs root, refusing a
+ * symlink, a non-directory, and any name that is not a single path component.
+ */
+export async function openRunDirIn(
+  root: DirHandle,
+  runId: string,
+): Promise<DirHandle> {
+  assertSafeEntryName(runId, "run id");
+  try {
+    return await root.openChild(runId);
+  } catch (error) {
+    throw rewriteChildError(error, path.join(root.dir, runId));
+  }
+}
+
+/**
+ * Re-open a bound run directory and run `fn` against its descriptor. The runs
+ * root is re-verified against the real path recorded when the binding was
+ * made, the run directory is re-checked against the identity recorded then,
+ * and `fn` writes exclusively through the descriptor that passed those checks.
+ * A swapped ancestor makes the *open* fail; it can never redirect a write that
+ * the open already accepted.
+ */
+export async function withBoundRunDir<T>(
+  binding: RunDirBinding,
+  fn: (runDir: DirHandle) => Promise<T>,
+): Promise<T> {
+  const root = await DirHandle.open(binding.rootDir, {
+    expectedRealDir: binding.realRootDir,
+  });
+  let runDir: DirHandle;
+  try {
+    runDir = await openRunDirIn(root, binding.runId);
+  } finally {
+    await root.close().catch(() => {});
+  }
+  try {
+    if (!sameIdentity(binding.identity, runDir.stat)) {
+      throw new RunStorageAccessError(
+        `Run directory was replaced while in use: ` +
+          `${path.join(binding.rootDir, binding.runId)}`,
+      );
+    }
+    return await fn(runDir);
+  } finally {
+    await runDir.close().catch(() => {});
   }
 }

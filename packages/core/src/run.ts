@@ -1,13 +1,15 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { writeFileAtomic, type EnvLike } from "./paths.js";
+import { type EnvLike } from "./paths.js";
+import type { DirHandle } from "./dir-handle.js";
+import { RunStorageAccessError } from "./dir-handle.js";
 import {
-  assertRunDirIntact,
-  bindRunDir,
-  ensureVerifiedRunsRoot,
-  verifyWritableDir,
-  type RunDirIdentity,
-  type VerifiedRunRoot,
+  bindingFor,
+  openRunDirIn,
+  withBoundRunDir,
+  withRunsRootDir,
+  type RunDirBinding,
 } from "./run-root.js";
 
 export type RunStatus = "running" | "completed" | "failed";
@@ -84,29 +86,82 @@ function formatTimestamp(date: Date): string {
   );
 }
 
-async function writeManifest(
-  runDir: string,
-  manifest: RunManifest,
-  identity: RunDirIdentity | undefined,
-): Promise<void> {
-  // A handle bound at creation (or adoption) re-verifies the run directory
-  // before every manifest write, so a directory swapped for a symlink after
-  // verification cannot redirect the write. Unbound handles keep the plain
-  // behavior for callers that construct them directly.
-  if (identity !== undefined) await assertRunDirIntact(identity);
-  const target = path.join(runDir, "manifest.json");
-  await writeFileAtomic(target, `${JSON.stringify(manifest, null, 2)}\n`);
+function serializeManifest(manifest: RunManifest): string {
+  return `${JSON.stringify(manifest, null, 2)}\n`;
 }
 
+/**
+ * A handle on one run directory. Every manifest write re-opens the directory
+ * through its binding — the runs root is re-verified against the real path it
+ * was verified at, the run directory against the identity it was bound at —
+ * and the write is then issued through *that* descriptor. Verification and
+ * write therefore share one directory identity: an ancestor swapped after the
+ * open cannot redirect the write, and a swap before it makes the open fail.
+ */
 export class RunHandle {
   readonly dir: string;
   readonly manifest: RunManifest;
-  readonly #identity: RunDirIdentity | undefined;
+  readonly #binding: RunDirBinding;
 
-  constructor(dir: string, manifest: RunManifest, identity?: RunDirIdentity) {
+  constructor(dir: string, manifest: RunManifest, binding: RunDirBinding) {
     this.dir = dir;
     this.manifest = manifest;
-    this.#identity = identity;
+    this.#binding = binding;
+  }
+
+  /** @internal Binding used by evidence writers that need the same descriptor. */
+  get binding(): RunDirBinding {
+    return this.#binding;
+  }
+
+  /**
+   * Capture an artifact into this run, bound to the verified run directory for
+   * the whole capture.
+   *
+   * The destination directory is opened and verified *before* the producer
+   * runs and its descriptor is held until the bytes are published, so an
+   * ancestor swapped while the producer works cannot redirect the artifact.
+   * The producer itself writes into a process-private staging directory (it
+   * cannot be handed a descriptor, and a plain path under the run directory
+   * would be exactly the redirectable pathname this avoids); those bytes are
+   * then copied to an exclusive temp entry through the held descriptor and
+   * renamed into place, so a planted symlink at the destination is replaced
+   * rather than followed.
+   *
+   * Returns the artifact's path inside the run.
+   */
+  async captureArtifact(
+    subdir: string | undefined,
+    name: string,
+    capture: (outPath: string) => Promise<void>,
+  ): Promise<string> {
+    await withBoundRunDir(this.#binding, async (runDir) => {
+      const target =
+        subdir === undefined ? runDir : await runDir.openChild(subdir);
+      const staging = await fs.promises.mkdtemp(
+        path.join(os.tmpdir(), "pickforge-capture-"),
+      );
+      try {
+        const stagedPath = path.join(staging, name);
+        await capture(stagedPath);
+        await target.importFileAtomic(name, stagedPath);
+      } finally {
+        await fs.promises
+          .rm(staging, { recursive: true, force: true })
+          .catch(() => {});
+        if (target !== runDir) await target.close();
+      }
+    });
+    return subdir === undefined
+      ? path.join(this.dir, name)
+      : path.join(this.dir, subdir, name);
+  }
+
+  async #writeManifest(): Promise<void> {
+    const content = serializeManifest(this.manifest);
+    await withBoundRunDir(this.#binding, (runDir) =>
+      runDir.writeFileAtomic("manifest.json", content),
+    );
   }
 
   get runId(): string {
@@ -128,13 +183,13 @@ export class RunHandle {
       createdAt: new Date().toISOString(),
     };
     this.manifest.artifacts.push(artifact);
-    await writeManifest(this.dir, this.manifest, this.#identity);
+    await this.#writeManifest();
     return artifact;
   }
 
   async setStatus(status: RunStatus): Promise<void> {
     this.manifest.status = status;
-    await writeManifest(this.dir, this.manifest, this.#identity);
+    await this.#writeManifest();
   }
 
   async finish(status: RunStatus = "completed"): Promise<void> {
@@ -143,18 +198,16 @@ export class RunHandle {
 }
 
 /**
- * Claim a fresh run directory directly under the verified root. A plain
- * `mkdir` never follows a symlink at the final component, so a planted entry
- * with the same name only produces `EEXIST` and the next suffix is tried.
+ * Claim a fresh run directory directly under the verified root, through the
+ * root's own descriptor. `mkdir` never follows a symlink at the final
+ * component, so a planted entry with the same name only produces `EEXIST` and
+ * the next suffix is tried.
  */
-async function claimRunDir(
-  root: VerifiedRunRoot,
-  baseName: string,
-): Promise<string> {
+async function claimRunDir(root: DirHandle, baseName: string): Promise<string> {
   for (let attempt = 1; ; attempt += 1) {
     const runId = attempt === 1 ? baseName : `${baseName}-${attempt}`;
     try {
-      await fs.promises.mkdir(path.join(root.dir, runId));
+      await root.mkdirChild(runId);
       return runId;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
@@ -162,26 +215,26 @@ async function claimRunDir(
   }
 }
 
+/**
+ * Create the run's subdirectories and (for evidence runs) its empty journal
+ * through the run directory's own descriptor, so the whole layout is created
+ * inside the directory that was just verified — not at a pathname that an
+ * ancestor swap could re-point between two steps.
+ */
 async function createRunLayout(
-  identity: RunDirIdentity,
+  runDir: DirHandle,
   evidence: boolean,
 ): Promise<void> {
-  const runDir = path.join(identity.root.dir, identity.dirName);
-  const realRunDir = path.join(identity.root.realDir, identity.dirName);
   for (const name of RUN_SUBDIRS) {
-    await fs.promises.mkdir(path.join(runDir, name));
-    await verifyWritableDir(path.join(runDir, name), path.join(realRunDir, name));
+    await runDir.mkdirChild(name);
   }
   if (evidence) {
     // Create the empty journal up front so appenders open (not create) it and
     // readers see a real file even before the first action lands. `wx` never
     // follows a symlink at the final component.
-    await fs.promises.writeFile(path.join(runDir, EVIDENCE_ACTION_LOG), "", {
-      encoding: "utf8",
-      flag: "wx",
-    });
+    const handle = await runDir.openFile(EVIDENCE_ACTION_LOG, "wx", 0o600);
+    await handle.close();
   }
-  await assertRunDirIntact(identity);
 }
 
 function buildManifest(
@@ -207,12 +260,14 @@ function buildManifest(
 }
 
 /**
- * Create a new run directory under the project's resolved run storage. The
- * runs root is materialized through {@link ensureVerifiedRunsRoot}, so every
- * ancestor below the trusted directory (project, Pickforge home, or custom
- * base) is verified with the same lstat/realpath discipline the run catalog
- * applies on read. A symlinked `.picklab` or `runs` entry raises instead of
- * redirecting the write, and nothing existing is moved or removed.
+ * Create a new run directory under the project's resolved run storage.
+ *
+ * The runs root is materialized descriptor by descriptor from the trusted
+ * ancestor (project, Pickforge home, or custom base) with the same
+ * lstat/realpath trust boundary the run catalog applies on read, and the run
+ * directory, its layout, its journal, and its first manifest are all created
+ * through those descriptors. A symlinked `.picklab` or `runs` entry raises
+ * instead of redirecting the write, and nothing existing is moved or removed.
  */
 export async function createRun(
   projectDir: string,
@@ -222,30 +277,72 @@ export async function createRun(
 ): Promise<RunHandle> {
   assertValidSlug(slug);
   const now = opts.now ?? new Date();
-  const root = await ensureVerifiedRunsRoot(projectDir, env);
-  const runId = await claimRunDir(root, `${formatTimestamp(now)}-${slug}`);
-  const identity = await bindRunDir(root, runId);
-  await createRunLayout(identity, opts.evidence === true);
-  const runDir = path.join(root.dir, runId);
-  const manifest = buildManifest(runId, slug, now, opts);
-  await writeManifest(runDir, manifest, identity);
-  return new RunHandle(runDir, manifest, identity);
+  return withRunsRootDir(projectDir, env, async (root) => {
+    const runId = await claimRunDir(root, `${formatTimestamp(now)}-${slug}`);
+    const runDir = await openRunDirIn(root, runId);
+    try {
+      await createRunLayout(runDir, opts.evidence === true);
+      const manifest = buildManifest(runId, slug, now, opts);
+      await runDir.writeFileAtomic("manifest.json", serializeManifest(manifest));
+      return new RunHandle(
+        path.join(root.dir, runId),
+        manifest,
+        bindingFor(root, runDir),
+      );
+    } finally {
+      await runDir.close();
+    }
+  });
 }
 
 /**
- * Open a handle on an existing run directory under the project's verified
- * runs root, bound to its current identity. Used when a peer adopts a run it
- * did not create; manifest writes through the handle re-verify the directory.
+ * Adopt an existing run directory under an already verified runs root: the
+ * single internal adoption helper for peers that take over a run they did not
+ * create. `runId` must be one path component naming a real directory directly
+ * under the root, and must be the run the manifest describes — so a
+ * traversing or mismatched id is refused instead of adopting a directory
+ * outside the verified root.
+ *
+ * Deliberately not part of the package's public API: adoption is internal to
+ * evidence bookkeeping, and a path-bearing export would invite exactly the
+ * out-of-root adoption this rejects.
  */
-export async function openRun(
+export async function adoptRunIn(
+  root: DirHandle,
+  runId: string,
+  manifest: RunManifest,
+): Promise<RunHandle> {
+  if (manifest.runId !== runId) {
+    throw new RunStorageAccessError(
+      `Refusing to adopt run "${runId}": its manifest reports ` +
+        `"${manifest.runId}"`,
+    );
+  }
+  const runDir = await openRunDirIn(root, runId);
+  try {
+    return new RunHandle(
+      path.join(root.dir, runId),
+      manifest,
+      bindingFor(root, runDir),
+    );
+  } finally {
+    await runDir.close();
+  }
+}
+
+/**
+ * Adopt a run under the project's verified runs root. Thin wrapper over
+ * {@link adoptRunIn} for callers that hold no root descriptor yet.
+ */
+export async function adoptRun(
   projectDir: string,
   runId: string,
   manifest: RunManifest,
   env: EnvLike = process.env,
 ): Promise<RunHandle> {
-  const root = await ensureVerifiedRunsRoot(projectDir, env);
-  const identity = await bindRunDir(root, runId);
-  return new RunHandle(path.join(root.dir, runId), manifest, identity);
+  return withRunsRootDir(projectDir, env, (root) =>
+    adoptRunIn(root, runId, manifest),
+  );
 }
 
 export { listRuns } from "./run-catalog.js";
