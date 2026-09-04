@@ -67,7 +67,14 @@ describe("desktopEnvironmentRecipe", () => {
       WAYLAND_DEBUG: "1",
     });
 
-    expect(recipe.unset).toEqual(["WAYLAND_DEBUG", "WAYLAND_SOCKET"]);
+    expect(recipe.unset).toEqual([
+      "DBUS_SESSION_BUS_PID",
+      "DBUS_SESSION_BUS_WINDOWID",
+      "DBUS_STARTER_ADDRESS",
+      "DBUS_STARTER_BUS_TYPE",
+      "WAYLAND_DEBUG",
+      "WAYLAND_SOCKET",
+    ]);
     expect(recipe.exports).toEqual({
       DISPLAY: ":92",
       WAYLAND_DISPLAY: "pickforge-no-wayland",

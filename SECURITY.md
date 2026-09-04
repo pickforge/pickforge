@@ -97,6 +97,42 @@ filesystem and network access. Pickforge provisions a dedicated locked
 yet run under that user — uid isolation is planned. Until then, launch only apps
 you trust, and prefer a throwaway user or VM for untrusted binaries.
 
+## Desktop session containment and runtime isolation
+
+A desktop session owns everything it starts, and cleanup is confirmed rather
+than assumed:
+
+- **Containment scope.** Each session gets a cgroup v2 directory inside the
+  delegated cgroup Pickforge already runs in, or, where no delegation exists, a
+  256-bit random token exported as `PICKFORGE_CONTAINMENT_TOKEN`. Apps are
+  started through a supervisor that joins the scope *before* spawning them, so
+  a double-fork or `setsid` descendant cannot be created outside it. Neither
+  mechanism needs `sudo`; MCP never calls it.
+- **Nothing unrelated is ever signalled.** Cleanup selects targets by cgroup
+  membership or by an exact token match read from `/proc/<pid>/environ`,
+  re-checked immediately before each signal, never by a remembered PID alone. A
+  recycled PID is refused instead of killed, and the process performing the
+  cleanup and its ancestors are excluded.
+- **Confirmed cleanup.** `session destroy` reports success only once the scope
+  is empty. Otherwise it fails with the surviving PIDs, leaves the session in
+  `error` with a reaper retry marker, and does not delete session state that a
+  live process could still be writing to.
+- **Per-session runtime and D-Bus.** Each session gets its own
+  `XDG_RUNTIME_DIR` (mode `0700`, inside the session directory) and its own
+  `DBUS_SESSION_BUS_ADDRESS`/`DBUS_SYSTEM_BUS_ADDRESS`, pointing at socket paths
+  that are never created, so toolkits and portals fail closed instead of
+  reaching the real user session. Related `DBUS_*` variables are dropped from
+  the child environment. Removal is refused for any runtime path that is not
+  confined to the session directory, including through a symlink.
+- **Xvfb teardown** uses the same group-signal-and-confirm discipline as the
+  browser supervisor: an exited daemon is not reported gone while a member of
+  its process group is still alive.
+
+Limits to account for: containment holds processes that are descendants of a
+Pickforge launch. It does not sandbox them — see SEC-02 — and it cannot recover
+a descendant that erases its own environment block on a host without cgroup
+delegation.
+
 ## Browser sessions run as you (SEC-03 — known limitation)
 
 Browser sessions launch real headed Chrome/Chromium inside a private Xvfb

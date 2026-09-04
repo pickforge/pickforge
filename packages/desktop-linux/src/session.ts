@@ -5,7 +5,10 @@ import path from "node:path";
 import {
   REAPER_CLEANUP_PENDING_META_KEY,
   clearStaleHumanLease,
+  createContainmentScope,
   createSession,
+  destroyContainmentScope,
+  ensureContainmentScope,
   destroySessionRecord,
   getSession,
   isHumanLeaseStale,
@@ -19,6 +22,7 @@ import {
   stopPid,
   stopProcessGroupVerified,
   updateSession,
+  type ContainmentScope,
   type DesktopSessionInfo,
   type EnvLike,
   type LocalSessionTeardownFinalizer,
@@ -31,6 +35,12 @@ import {
   type XvfbHandle,
   type XvfbPartialStart,
 } from "./display.js";
+import {
+  createDesktopRuntimeDir,
+  desktopRuntimeLayout,
+  removeDesktopRuntimeDir,
+  type DesktopRuntimeLayout,
+} from "./runtime.js";
 import { detectVncBinary, startVnc, type VncHandle } from "./vnc.js";
 
 export interface CreateDesktopSessionOptions {
@@ -47,6 +57,8 @@ export interface DesktopSessionHandle {
   id: string;
   display: string;
   xvfbPid: number;
+  runtimeDir: string;
+  containment: ContainmentScope;
   vncPid?: number;
   vncStartTimeTicks?: number;
   vncPort?: number;
@@ -79,20 +91,188 @@ export function desktopSessionLogDir(
   return sessionDataDir(id, registryEnv);
 }
 
-// eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/pickforge#60
+interface DesktopStartupState {
+  runtime: DesktopRuntimeLayout;
+  containment: ContainmentScope;
+  xvfb?: XvfbHandle;
+  xvfbPartial?: XvfbPartialStart;
+  vnc?: VncHandle;
+}
+
+function requireVncBinary(opts: CreateDesktopSessionOptions): void {
+  if (detectVncBinary({ ...process.env, ...opts.env }) === null) {
+    throw new Error(
+      "VNC was requested but x11vnc was not found on PATH; install x11vnc to enable it",
+    );
+  }
+}
+
+function runningDesktopInfo(
+  state: DesktopStartupState,
+  xvfb: XvfbHandle,
+  viewOnly: boolean,
+): DesktopSessionInfo {
+  const desktop: DesktopSessionInfo = {
+    display: xvfb.display,
+    xvfbPid: xvfb.pid,
+    xvfbStartTimeTicks: xvfb.startTimeTicks,
+    runtimeDir: state.runtime.runtimeDir,
+    containment: state.containment,
+    width: xvfb.width,
+    height: xvfb.height,
+  };
+  if (state.vnc !== undefined) {
+    desktop.vncPid = state.vnc.pid;
+    desktop.vncStartTimeTicks = state.vnc.startTimeTicks;
+    desktop.vncPort = state.vnc.port;
+    desktop.vncViewOnly = viewOnly;
+  }
+  return desktop;
+}
+
+async function startSessionXvfb(
+  recordId: string,
+  opts: CreateDesktopSessionOptions,
+  state: DesktopStartupState,
+  registryEnv: EnvLike,
+): Promise<XvfbHandle> {
+  try {
+    return await startXvfb({
+      width: opts.width,
+      height: opts.height,
+      logDir: desktopSessionLogDir(recordId, registryEnv),
+      env: opts.env,
+      onSpawn: async (partial) => {
+        state.xvfbPartial = partial;
+        await updateSession(
+          recordId,
+          {
+            desktop: {
+              display: partial.display,
+              xvfbPid: partial.pid,
+              xvfbStartTimeTicks: partial.startTimeTicks,
+              runtimeDir: state.runtime.runtimeDir,
+              containment: state.containment,
+              width: partial.width,
+              height: partial.height,
+            },
+          },
+          registryEnv,
+        );
+      },
+    });
+  } catch (error) {
+    if (error instanceof XvfbStartError && error.partial !== undefined) {
+      state.xvfbPartial = error.partial;
+    }
+    throw error;
+  }
+}
+
+async function stopStartupVnc(
+  recordId: string,
+  state: DesktopStartupState,
+): Promise<boolean> {
+  if (state.vnc === undefined) return true;
+  return stopOwnedSessionVnc(recordId, {
+    display: state.xvfb?.display ?? state.xvfbPartial?.display ?? ":0",
+    vncPid: state.vnc.pid,
+    vncStartTimeTicks: state.vnc.startTimeTicks,
+  })
+    .then(() => true)
+    .catch(() => false);
+}
+
+async function stopStartupXvfb(state: DesktopStartupState): Promise<boolean> {
+  const xvfb = state.xvfb;
+  if (xvfb === undefined) return state.xvfbPartial?.cleanupConfirmed ?? true;
+  try {
+    const result = await stopProcessGroupVerified({
+      pid: xvfb.pid,
+      startTicks: xvfb.startTimeTicks,
+    });
+    return result.outcome === "terminated" || result.outcome === "already-dead";
+  } catch {
+    return false;
+  }
+}
+
+/** Error-path desktop info: keep every identity a later reaper retry needs. */
+function pendingDesktopInfo(
+  state: DesktopStartupState,
+): DesktopSessionInfo | undefined {
+  const known = state.xvfb ?? state.xvfbPartial;
+  if (known === undefined) return undefined;
+  const startTicks =
+    state.xvfbPartial?.pid === known.pid
+      ? state.xvfbPartial.startTimeTicks
+      : state.xvfb?.startTimeTicks;
+  return {
+    display: known.display,
+    xvfbPid: known.pid,
+    ...(startTicks === undefined ? {} : { xvfbStartTimeTicks: startTicks }),
+    ...(state.vnc === undefined
+      ? {}
+      : {
+          vncPid: state.vnc.pid,
+          vncStartTimeTicks: state.vnc.startTimeTicks,
+        }),
+    runtimeDir: state.runtime.runtimeDir,
+    containment: state.containment,
+    width: known.width,
+    height: known.height,
+  };
+}
+
+/**
+ * Roll a failed create back. Contained apps and the runtime directory are only
+ * cleaned up once the processes that could still be using them are confirmed
+ * gone; otherwise the record keeps every identity and is marked for a reaper
+ * retry rather than silently dropped.
+ */
+async function rollbackFailedCreate(
+  record: SessionRecord,
+  state: DesktopStartupState,
+  registryEnv: EnvLike,
+): Promise<void> {
+  const vncGone = await stopStartupVnc(record.id, state);
+  const xvfbGone = await stopStartupXvfb(state);
+  const contained = await destroyContainmentScope(state.containment);
+  const runtimeRemoved =
+    contained.confirmed &&
+    (
+      await removeDesktopRuntimeDir(
+        desktopSessionLogDir(record.id, registryEnv),
+        state.runtime.runtimeDir,
+      )
+    ).removed;
+  const cleanupComplete =
+    vncGone && xvfbGone && contained.confirmed && runtimeRemoved;
+  const pending = pendingDesktopInfo(state);
+  const clearedMeta = { ...record.meta };
+  delete clearedMeta[REAPER_CLEANUP_PENDING_META_KEY];
+  await updateSession(
+    record.id,
+    cleanupComplete
+      ? { status: "error", desktop: undefined, meta: clearedMeta }
+      : {
+          status: "error",
+          meta: {
+            ...record.meta,
+            [REAPER_CLEANUP_PENDING_META_KEY]: true,
+          },
+          ...(pending === undefined ? {} : { desktop: pending }),
+        },
+    registryEnv,
+  ).catch(() => {});
+}
+
 export async function createDesktopSession(
   opts: CreateDesktopSessionOptions,
 ): Promise<DesktopSessionHandle> {
   const registryEnv = opts.registryEnv ?? process.env;
   const wantsVnc = opts.vnc === true || opts.vncControl === true;
-  if (
-    wantsVnc &&
-    detectVncBinary({ ...process.env, ...opts.env }) === null
-  ) {
-    throw new Error(
-      "VNC was requested but x11vnc was not found on PATH; install x11vnc to enable it",
-    );
-  }
+  if (wantsVnc) requireVncBinary(opts);
   await reapDeadRunningSessions(registryEnv, {
     desktop: {
       teardown: (id, finalize) =>
@@ -104,146 +284,45 @@ export async function createDesktopSession(
     registryEnv,
   );
   const logDir = desktopSessionLogDir(record.id, registryEnv);
+  const state: DesktopStartupState = {
+    runtime: desktopRuntimeLayout(logDir),
+    containment: createContainmentScope({ id: record.id }),
+  };
 
-  let xvfb: XvfbHandle | undefined;
-  let xvfbPartial: XvfbPartialStart | undefined;
-  let xvfbStartTimeTicks: number | undefined;
-  let vnc: VncHandle | undefined;
   try {
-    try {
-      xvfb = await startXvfb({
-        width: opts.width,
-        height: opts.height,
-        logDir,
-        env: opts.env,
-        onSpawn: async (partial) => {
-          xvfbPartial = partial;
-          await updateSession(
-            record.id,
-            {
-              desktop: {
-                display: partial.display,
-                xvfbPid: partial.pid,
-                xvfbStartTimeTicks: partial.startTimeTicks,
-                width: partial.width,
-                height: partial.height,
-              },
-            },
-            registryEnv,
-          );
-        },
-      });
-    } catch (error) {
-      if (error instanceof XvfbStartError && error.partial !== undefined) {
-        xvfbPartial = error.partial;
-      }
-      throw error;
-    }
-    xvfbStartTimeTicks = xvfb.startTimeTicks;
+    await createDesktopRuntimeDir(state.runtime);
+    const xvfb = await startSessionXvfb(record.id, opts, state, registryEnv);
+    state.xvfb = xvfb;
+    const viewOnly = opts.vncControl !== true;
     if (wantsVnc) {
-      vnc = await startVnc({
+      state.vnc = await startVnc({
         display: xvfb.display,
         logDir,
         env: opts.env,
-        viewOnly: opts.vncControl !== true,
+        viewOnly,
+        runtime: state.runtime,
       });
     }
-
-    const desktop: DesktopSessionInfo = {
-      display: xvfb.display,
-      xvfbPid: xvfb.pid,
-      xvfbStartTimeTicks,
-      width: xvfb.width,
-      height: xvfb.height,
-    };
-    if (vnc !== undefined) {
-      desktop.vncPid = vnc.pid;
-      desktop.vncStartTimeTicks = vnc.startTimeTicks;
-      desktop.vncPort = vnc.port;
-      desktop.vncViewOnly = opts.vncControl !== true;
-    }
+    const desktop = runningDesktopInfo(state, xvfb, viewOnly);
     await updateSession(record.id, { status: "running", desktop }, registryEnv);
 
     const handle: DesktopSessionHandle = {
       id: record.id,
       display: xvfb.display,
       xvfbPid: xvfb.pid,
+      runtimeDir: state.runtime.runtimeDir,
+      containment: state.containment,
       logDir,
     };
-    if (vnc !== undefined) {
-      handle.vncPid = vnc.pid;
-      handle.vncStartTimeTicks = vnc.startTimeTicks;
-      handle.vncPort = vnc.port;
-      handle.vncViewOnly = opts.vncControl !== true;
+    if (state.vnc !== undefined) {
+      handle.vncPid = state.vnc.pid;
+      handle.vncStartTimeTicks = state.vnc.startTimeTicks;
+      handle.vncPort = state.vnc.port;
+      handle.vncViewOnly = viewOnly;
     }
     return handle;
   } catch (error) {
-    let vncGone = vnc === undefined;
-    if (vnc !== undefined) {
-      vncGone = await stopOwnedSessionVnc(record.id, {
-        display: xvfb?.display ?? xvfbPartial?.display ?? ":0",
-        vncPid: vnc.pid,
-        vncStartTimeTicks: vnc.startTimeTicks,
-      })
-        .then(() => true)
-        .catch(() => false);
-    }
-    let xvfbGone =
-      xvfb === undefined
-        ? (xvfbPartial?.cleanupConfirmed ?? true)
-        : false;
-    if (xvfb !== undefined && xvfbStartTimeTicks !== undefined) {
-      try {
-        const result = await stopProcessGroupVerified({
-          pid: xvfb.pid,
-          startTicks: xvfbStartTimeTicks,
-        });
-        xvfbGone =
-          result.outcome === "terminated" || result.outcome === "already-dead";
-      } catch {
-        xvfbGone = false;
-      }
-    }
-    const cleanupComplete = vncGone && xvfbGone;
-    const knownXvfb = xvfb ?? xvfbPartial;
-    const knownXvfbStartTimeTicks =
-      knownXvfb !== undefined && xvfbPartial?.pid === knownXvfb.pid
-        ? xvfbPartial.startTimeTicks
-        : xvfbStartTimeTicks;
-    const clearedMeta = { ...record.meta };
-    delete clearedMeta[REAPER_CLEANUP_PENDING_META_KEY];
-    await updateSession(
-      record.id,
-      cleanupComplete
-        ? { status: "error", desktop: undefined, meta: clearedMeta }
-        : {
-            status: "error",
-            meta: {
-              ...record.meta,
-              [REAPER_CLEANUP_PENDING_META_KEY]: true,
-            },
-            ...(knownXvfb === undefined
-              ? {}
-              : {
-                  desktop: {
-                    display: knownXvfb.display,
-                    xvfbPid: knownXvfb.pid,
-                    ...(knownXvfbStartTimeTicks === undefined
-                      ? {}
-                      : { xvfbStartTimeTicks: knownXvfbStartTimeTicks }),
-                    ...(vnc === undefined
-                      ? {}
-                      : {
-                          vncPid: vnc.pid,
-                          vncStartTimeTicks: vnc.startTimeTicks,
-                        }),
-                    width: knownXvfb.width,
-                    height: knownXvfb.height,
-                  },
-                }),
-          },
-      registryEnv,
-    ).catch(() => {});
+    await rollbackFailedCreate(record, state, registryEnv);
     throw error;
   }
 }
@@ -587,6 +666,136 @@ export async function ensureSessionVnc(
   });
 }
 
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+/**
+ * Stop every app the session launched, including any that double-forked or
+ * called `setsid` out of its process group. Contained processes are identified
+ * by cgroup membership or by the session's containment token, never by a
+ * guessed pid, so cleanup cannot reach an unrelated process.
+ */
+async function stopSessionContainment(
+  desktop: DesktopSessionInfo | undefined,
+  failures: Error[],
+): Promise<boolean> {
+  const containment = desktop?.containment;
+  if (containment === undefined) return true;
+  try {
+    const result = await destroyContainmentScope(containment);
+    if (!result.confirmed) {
+      failures.push(
+        new Error(
+          `Contained apps could not be verified as gone (${result.mechanism}): ${result.reason ?? "unknown reason"}`,
+        ),
+      );
+    }
+    return result.confirmed;
+  } catch (error) {
+    failures.push(asError(error));
+    return false;
+  }
+}
+
+async function stopSessionXvfb(
+  desktop: DesktopSessionInfo | undefined,
+  failures: Error[],
+): Promise<void> {
+  const xvfbPid = desktop?.xvfbPid;
+  if (xvfbPid === undefined) return;
+  const xvfbStartTimeTicks = desktop?.xvfbStartTimeTicks;
+  if (xvfbStartTimeTicks === undefined) {
+    if (isPidAlive(xvfbPid)) {
+      failures.push(
+        new Error(
+          `Refusing to stop Xvfb (pid ${xvfbPid}): process identity is unavailable`,
+        ),
+      );
+    }
+    return;
+  }
+  try {
+    const result = await stopProcessGroupVerified({
+      pid: xvfbPid,
+      startTicks: xvfbStartTimeTicks,
+    });
+    if (result.outcome !== "terminated" && result.outcome !== "already-dead") {
+      failures.push(
+        new Error(
+          `Xvfb process group (pid ${xvfbPid}) could not be verified as gone`,
+        ),
+      );
+    }
+  } catch (error) {
+    failures.push(asError(error));
+  }
+}
+
+/**
+ * Delete the session runtime directory, but only once every process that could
+ * still be writing into it is confirmed gone.
+ */
+async function removeSessionRuntime(
+  id: string,
+  registryEnv: EnvLike,
+  desktop: DesktopSessionInfo | undefined,
+  processesGone: boolean,
+  failures: Error[],
+): Promise<void> {
+  const runtimeDir = desktop?.runtimeDir;
+  if (runtimeDir === undefined) return;
+  if (!processesGone) {
+    failures.push(
+      new Error(
+        `Refusing to delete the runtime directory for ${id}: contained processes are not confirmed gone`,
+      ),
+    );
+    return;
+  }
+  const removal = await removeDesktopRuntimeDir(
+    desktopSessionLogDir(id, registryEnv),
+    runtimeDir,
+  );
+  if (!removal.removed) {
+    failures.push(
+      removal.error ??
+        new Error(`Could not remove the runtime directory for ${id}`),
+    );
+  }
+}
+
+export interface DesktopSessionIsolation {
+  runtime: DesktopRuntimeLayout;
+  /** Absent for sessions created before containment existed (#85). */
+  containment?: ContainmentScope;
+}
+
+/**
+ * The isolation to apply to anything launched into an existing session: the
+ * session's own runtime directory (created if missing, e.g. for a session that
+ * predates it) and its containment scope. The runtime layout is derived from
+ * the session directory rather than read back from the record, so a tampered
+ * record cannot redirect a launch's `XDG_RUNTIME_DIR` outside the session.
+ */
+export async function ensureDesktopSessionIsolation(
+  id: string,
+  registryEnv: EnvLike = process.env,
+): Promise<DesktopSessionIsolation> {
+  const record = await getSession(id, registryEnv);
+  if (record === undefined) {
+    throw new Error(`Desktop session not found: ${id}`);
+  }
+  const runtime = desktopRuntimeLayout(
+    desktopSessionLogDir(id, registryEnv),
+  );
+  await createDesktopRuntimeDir(runtime);
+  const containment = record.desktop?.containment;
+  return containment === undefined
+    ? { runtime }
+    : { runtime, containment: ensureContainmentScope(containment) };
+}
+
 export async function teardownDesktopSession(
   id: string,
   registryEnv: EnvLike,
@@ -602,46 +811,23 @@ export async function teardownDesktopSession(
     }
     const desktop = record.desktop;
     const failures: Error[] = [];
+    // Apps first: they are clients of the display, and killing the display out
+    // from under them would leave the escape this cleanup exists to catch.
+    const containedGone = await stopSessionContainment(desktop, failures);
     try {
       await stopOwnedSessionVnc(id, desktop);
     } catch (error) {
-      failures.push(error instanceof Error ? error : new Error(String(error)));
+      failures.push(asError(error));
     }
+    await stopSessionXvfb(desktop, failures);
+    await removeSessionRuntime(
+      id,
+      registryEnv,
+      desktop,
+      containedGone,
+      failures,
+    );
 
-    const xvfbPid = desktop?.xvfbPid;
-    const xvfbStartTimeTicks = desktop?.xvfbStartTimeTicks;
-    if (xvfbPid !== undefined) {
-      if (xvfbStartTimeTicks === undefined) {
-        if (isPidAlive(xvfbPid)) {
-          failures.push(
-            new Error(
-              `Refusing to stop Xvfb (pid ${xvfbPid}): process identity is unavailable`,
-            ),
-          );
-        }
-      } else {
-        try {
-          const result = await stopProcessGroupVerified({
-            pid: xvfbPid,
-            startTicks: xvfbStartTimeTicks,
-          });
-          if (
-            result.outcome !== "terminated" &&
-            result.outcome !== "already-dead"
-          ) {
-            failures.push(
-              new Error(
-                `Xvfb process group (pid ${xvfbPid}) could not be verified as gone`,
-              ),
-            );
-          }
-        } catch (error) {
-          failures.push(
-            error instanceof Error ? error : new Error(String(error)),
-          );
-        }
-      }
-    }
     if (failures.length > 0) {
       await updateSession(
         id,

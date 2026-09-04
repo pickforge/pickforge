@@ -52,8 +52,18 @@ export {
 export {
   createIsolatedDesktopEnvironment,
   desktopEnvironmentRecipe,
+  type DesktopEnvironmentOptions,
   type DesktopEnvironmentRecipe,
 } from "./environment.js";
+
+export {
+  createDesktopRuntimeDir,
+  desktopRuntimeLayout,
+  DESKTOP_RUNTIME_DIR_NAME,
+  removeDesktopRuntimeDir,
+  type DesktopRuntimeLayout,
+  type RuntimeDirRemoval,
+} from "./runtime.js";
 
 export {
   buildScreenshotCommand,
@@ -101,6 +111,7 @@ export {
   createDesktopSession,
   desktopSessionLogDir,
   destroyDesktopSession,
+  ensureDesktopSessionIsolation,
   ensureSessionVnc,
   getDesktopSessionStatus,
   stopOwnedSessionVnc,
@@ -108,6 +119,7 @@ export {
   withSessionVncLock,
   type CreateDesktopSessionOptions,
   type DesktopSessionHandle,
+  type DesktopSessionIsolation,
   type DesktopSessionStatus,
   type EnsureSessionVncOptions,
   type EnsuredSessionVnc,

@@ -304,6 +304,102 @@ export async function startDaemon(
   });
 }
 
+const OWNED_GROUP_CONFIRM_TIMEOUT_MS = 2_000;
+const OWNED_GROUP_POLL_INTERVAL_MS = 20;
+
+function ownedDaemonExited(daemon: OwnedDaemonHandle): boolean {
+  return daemon.child.exitCode !== null || daemon.child.signalCode !== null;
+}
+
+/**
+ * Signal an owned daemon's whole process group rather than the daemon process
+ * alone, falling back to a direct child kill only if the group signal fails.
+ * `startDaemon` spawns detached, so the daemon's pid doubles as its group id
+ * and every child it forks without `setsid` is a member.
+ */
+function killOwnedDaemonGroup(
+  daemon: OwnedDaemonHandle,
+  signal: NodeJS.Signals,
+): void {
+  try {
+    process.kill(-daemon.pid, signal);
+    return;
+  } catch {
+    // Group signal failed (already gone, or unsupported); fall through so the
+    // daemon itself is at least reaped.
+  }
+  try {
+    daemon.child.kill(signal);
+  } catch {
+    // already gone
+  }
+}
+
+async function confirmOwnedGroupGone(pgid: number): Promise<boolean> {
+  const deadline = Date.now() + OWNED_GROUP_CONFIRM_TIMEOUT_MS;
+  while (isProcessGroupAlive(pgid)) {
+    if (Date.now() >= deadline) return false;
+    await sleep(OWNED_GROUP_POLL_INTERVAL_MS);
+  }
+  return true;
+}
+
+/**
+ * Stop an owned daemon whose `/proc`-backed identity has not been captured (or
+ * never will be, because it died during startup), and confirm no member of its
+ * process group survives. Returns true only once the group is empty, so a
+ * daemon that forked before dying can never be reported as cleaned up.
+ *
+ * `daemon.pid` is used as a process-group id without a verified
+ * `ProcessIdentity`, which is only safe in one of two ways, for different
+ * reasons:
+ *
+ * - Not yet exited: safe by construction. There is no `await` between the exit
+ *   check and the group signal, so no event-loop turn runs in between and the
+ *   pid cannot be reaped and recycled inside that synchronous gap. Keep this
+ *   branch synchronous.
+ * - Already exited: NOT provably safe against pid reuse. libuv reaps a child on
+ *   SIGCHLD independently of the handle we hold, so by the time `exitCode` is
+ *   non-null the pid is reusable in principle. This is a bounded, accepted
+ *   residual risk on a startup-only path where, by construction, no verified
+ *   identity is obtainable. The `isProcessGroupAlive` pre-check avoids
+ *   signalling a group that is already empty but does not close the gap.
+ *
+ * Callers with a verified `ProcessIdentity` must use `stopProcessGroupVerified`
+ * instead, which refuses a reused pid outright.
+ */
+export async function stopOwnedDaemonGroup(
+  daemon: OwnedDaemonHandle,
+): Promise<boolean> {
+  try {
+    if (ownedDaemonExited(daemon)) {
+      if (isProcessGroupAlive(daemon.pid)) {
+        killOwnedDaemonGroup(daemon, "SIGKILL");
+      }
+    } else {
+      const closed = new Promise<void>((resolve) => {
+        daemon.child.once("close", () => resolve());
+      });
+      // No `await` between the exit check above and this signal: see the doc
+      // comment for why that is what keeps this branch safe.
+      killOwnedDaemonGroup(daemon, "SIGTERM");
+      const exitedInTime = await Promise.race([
+        closed.then(() => true),
+        sleep(OWNED_GROUP_CONFIRM_TIMEOUT_MS).then(() => false),
+      ]);
+      if (!exitedInTime) {
+        killOwnedDaemonGroup(daemon, "SIGKILL");
+        await closed;
+      }
+    }
+    return await confirmOwnedGroupGone(daemon.pid);
+  } catch {
+    return false;
+  } finally {
+    daemon.release();
+  }
+}
+
 export function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);

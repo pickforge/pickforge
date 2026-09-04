@@ -669,9 +669,28 @@ describe("pickforge-lab desktop", () => {
     );
     expect(json.code).toBe(0);
     const report = parseJson(json);
-    expect(report.unset).toEqual(["WAYLAND_DEBUG", "WAYLAND_SOCKET"]);
+    expect(report.unset).toEqual([
+      "DBUS_SESSION_BUS_PID",
+      "DBUS_SESSION_BUS_WINDOWID",
+      "DBUS_STARTER_ADDRESS",
+      "DBUS_STARTER_BUS_TYPE",
+      "WAYLAND_DEBUG",
+      "WAYLAND_SOCKET",
+    ]);
+    const runtimeDir = path.join(
+      env.PICKFORGE_HOME,
+      "sessions",
+      id,
+      "runtime",
+    );
     expect(report.exports).toEqual({
       DISPLAY: ":98",
+      XDG_RUNTIME_DIR: runtimeDir,
+      DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(runtimeDir, "bus")}`,
+      DBUS_SYSTEM_BUS_ADDRESS: `unix:path=${path.join(
+        runtimeDir,
+        "system_bus_socket",
+      )}`,
       WAYLAND_DISPLAY: "pickforge-no-wayland",
       ELECTRON_OZONE_PLATFORM_HINT: "x11",
       GDK_BACKEND: "x11",

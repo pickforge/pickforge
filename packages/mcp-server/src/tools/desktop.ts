@@ -7,6 +7,7 @@ import {
   desktopSessionLogDir,
   doubleClick,
   drag,
+  ensureDesktopSessionIsolation,
   execApp,
   launchApp,
   MAX_DOUBLE_CLICK_INTERVAL_MS,
@@ -108,6 +109,7 @@ function registerLaunchTool(server: McpServer, ctx: ServerContext): void {
               args.cwd === undefined
                 ? undefined
                 : await resolveProjectPath(ctx, args.cwd);
+            const isolation = await ensureDesktopSessionIsolation(id, ctx.env);
             const app = await withAgentPermit(id, ctx.env, () =>
               launchApp({
                 display,
@@ -116,6 +118,7 @@ function registerLaunchTool(server: McpServer, ctx: ServerContext): void {
                 env: ctx.env,
                 logDir: desktopSessionLogDir(id, ctx.env),
                 cwd,
+                ...isolation,
               }),
             );
             const data: Record<string, unknown> = {
@@ -123,6 +126,7 @@ function registerLaunchTool(server: McpServer, ctx: ServerContext): void {
               display,
               pid: app.pid,
               logPath: app.logPath,
+              containment: app.containment,
             };
             if (args.waitWindow !== undefined) {
               data.window = await waitForWindow(display, args.waitWindow);
@@ -175,6 +179,7 @@ function registerExecTool(server: McpServer, ctx: ServerContext): void {
               args.cwd === undefined
                 ? undefined
                 : await resolveProjectPath(ctx, args.cwd);
+            const isolation = await ensureDesktopSessionIsolation(id, ctx.env);
             const app = await withAgentPermit(id, ctx.env, () =>
               execApp({
                 display,
@@ -184,6 +189,7 @@ function registerExecTool(server: McpServer, ctx: ServerContext): void {
                 logDir: desktopSessionLogDir(id, ctx.env),
                 cwd,
                 windowTimeoutMs: args.windowTimeoutMs,
+                ...isolation,
               }),
             );
             return {
@@ -192,6 +198,7 @@ function registerExecTool(server: McpServer, ctx: ServerContext): void {
                 display,
                 pid: app.pid,
                 processGroupId: app.processGroupId,
+                containment: app.containment,
                 logPath: app.logPath,
                 windowCount: app.windows.length,
                 windows: app.windows,

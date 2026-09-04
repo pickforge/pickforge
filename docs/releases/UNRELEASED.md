@@ -32,6 +32,26 @@ GitHub release description, then reset it after the release is published.
   SDL, winit, and session backend hints. The poison value prevents libwayland
   from falling back to the user's default `wayland-0` socket when the variable
   is unset.
+- Desktop sessions now contain daemonising apps. Each session owns a
+  containment scope — a private cgroup v2 directory where a delegated cgroup is
+  available, otherwise a per-session random `PICKFORGE_CONTAINMENT_TOKEN` — and
+  apps start through a supervisor that joins the scope before spawning them, so
+  a double-fork or `setsid` descendant cannot escape it. `session destroy`
+  reports success only once the scope is confirmed empty, and refuses to signal
+  any PID whose identity no longer matches. Neither mechanism requires `sudo`.
+- Desktop sessions now get their own `XDG_RUNTIME_DIR` (mode `0700`, inside the
+  session directory) and their own D-Bus addresses, which point at sockets
+  Pickforge never creates, so toolkits and portals fail closed instead of
+  routing work back through the real user session. The directory is removed on
+  destroy, and removal is refused for any path outside the session directory,
+  including through a symlink.
+- `desktop exec`, `desktop launch` and their MCP tools now report the
+  containment mechanism they achieved (`cgroup` or `marker`), and
+  `desktop env` prints the runtime, D-Bus and containment recipe so an app
+  started by hand from that shell is torn down with the session.
+- Xvfb teardown now uses the same group-signal-and-confirm discipline as the
+  browser supervisor, so an exited Xvfb is never reported gone while a member of
+  its process group survives.
 - `pickforge-lab desktop exec`, also available as MCP `desktop_exec`, starts a
   command in its own process group and waits a bounded time for a client
   window. If none appears, it stops the group before reporting a possible

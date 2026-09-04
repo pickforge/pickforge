@@ -8,6 +8,7 @@ import {
 } from "@pickforge/lab-core";
 import { parseDisplayNumber } from "./display.js";
 import { createIsolatedDesktopEnvironment } from "./environment.js";
+import type { DesktopRuntimeLayout } from "./runtime.js";
 import { findOnPath, sleep } from "./util.js";
 
 const VNC_BASE_PORT = 5900;
@@ -26,6 +27,8 @@ export interface StartVncOptions {
   logDir: string;
   env?: EnvLike;
   viewOnly?: boolean;
+  /** Per-session runtime dir and D-Bus endpoints (#86). */
+  runtime?: DesktopRuntimeLayout;
 }
 
 export interface VncHandle {
@@ -64,8 +67,13 @@ export function buildVncArgs(opts: VncArgsOptions): string[] {
 export function buildVncEnv(
   display: string,
   source: EnvLike = process.env,
+  runtime?: DesktopRuntimeLayout,
 ): EnvLike {
-  const env = createIsolatedDesktopEnvironment(display, source);
+  const env = createIsolatedDesktopEnvironment(
+    display,
+    source,
+    runtime === undefined ? {} : { runtime },
+  );
   // x11vnc treats any WAYLAND_DISPLAY value as a Wayland session, including
   // the sentinel used to keep GUI toolkits away from the host compositor.
   delete env.WAYLAND_DISPLAY;
@@ -97,7 +105,11 @@ export async function startVnc(opts: StartVncOptions): Promise<VncHandle> {
     port,
     viewOnly: opts.viewOnly,
   });
-  const env = buildVncEnv(opts.display, { ...process.env, ...opts.env });
+  const env = buildVncEnv(
+    opts.display,
+    { ...process.env, ...opts.env },
+    opts.runtime,
+  );
   const binary = detectVncBinary(env);
   if (binary === null) {
     throw new Error(
