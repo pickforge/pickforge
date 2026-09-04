@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   acquireHumanLease,
   appendAction,
+  captureRunArtifact,
   beginEvidenceRun,
   isEvidenceEnabled,
   getSession,
@@ -304,13 +305,23 @@ export async function endHumanTakeover(
         );
         try {
           const actionId = crypto.randomUUID();
-          const outPath = path.join(run.dir, "screenshots", `${actionId}.png`);
-          await screenshot({ display: handle.display, outPath, env: opts.env });
+          // Captured into private staging and published through the run
+          // directory's own descriptor, so the image cannot land outside the
+          // verified run even if an ancestor is swapped mid-capture.
+          await captureRunArtifact(
+            run,
+            "screenshots",
+            `${actionId}.png`,
+            (outPath) =>
+              screenshot({ display: handle.display, outPath, env: opts.env }).then(
+                () => undefined,
+              ),
+          );
           screenshotPath = path.join("screenshots", `${actionId}.png`);
         } catch {
           // Best-effort: the transition is still recorded without a screenshot.
         }
-        await appendAction(run.dir, {
+        await appendAction(run, {
           actionId: crypto.randomUUID(),
           source: "takeover",
           tool: `takeover_${opts.reason}`,

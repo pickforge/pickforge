@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { finalizeActiveEvidenceRun } from "./evidence.js";
+import { finalizeActiveEvidenceRunHandle } from "./evidence.js";
 import { writeEvidenceReport } from "./evidence-render.js";
 import {
   ensureDir,
@@ -13,7 +13,6 @@ import {
 } from "./paths.js";
 import { isPidAlive, processIdentityMatches } from "./proc.js";
 import type { ContainmentScope } from "./containment.js";
-import { resolveRunStorage } from "./storage.js";
 
 export type SessionType = "desktop" | "android" | "desktop+android" | "browser";
 export type SessionStatus = "starting" | "running" | "stopped" | "error";
@@ -312,18 +311,14 @@ export async function destroySessionRecord(
   }
   const record = await getSession(id, env);
   if (record !== undefined) {
-    const finalized = await finalizeActiveEvidenceRun(
+    const finalized = await finalizeActiveEvidenceRunHandle(
       record.projectDir,
       record.id,
       evidenceStatus,
       env,
     ).catch(() => undefined);
     if (finalized !== undefined) {
-      const parent = (await resolveRunStorage(record.projectDir, env)).runsDir;
-      await writeEvidenceReport(
-        path.join(parent, finalized.runId),
-        finalized,
-      ).catch(() => {});
+      await writeEvidenceReport(finalized).catch(() => {});
     }
   }
   // Remove BOTH the new-home and legacy copies unconditionally. This also

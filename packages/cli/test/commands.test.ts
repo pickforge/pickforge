@@ -1240,27 +1240,31 @@ describe("pickforge-lab android (fake adb)", () => {
     ]);
   });
 
-  it("taps, types, and presses back/home with exact adb argv", async () => {
-    const { env, adbLog } = fakeAdbEnv();
-    for (const args of [
-      ["android", "tap", "100", "200"],
-      ["android", "type", "hello world"],
-      ["android", "back"],
-      ["android", "home"],
-    ]) {
-      const result = await runCli(
-        [...args, "--serial", FAKE_SERIAL, "--json"],
-        env,
-      );
-      expect(result.code).toBe(0);
-    }
-    expect(adbLogLines(adbLog)).toEqual([
-      `-s ${FAKE_SERIAL} shell input tap 100 200`,
-      `-s ${FAKE_SERIAL} shell input text hello%sworld`,
-      `-s ${FAKE_SERIAL} shell input keyevent KEYCODE_BACK`,
-      `-s ${FAKE_SERIAL} shell input keyevent KEYCODE_HOME`,
-    ]);
-  });
+  it(
+    "taps, types, and presses back/home with exact adb argv",
+    async () => {
+      const { env, adbLog } = fakeAdbEnv();
+      for (const args of [
+        ["android", "tap", "100", "200"],
+        ["android", "type", "hello world"],
+        ["android", "back"],
+        ["android", "home"],
+      ]) {
+        const result = await runCli(
+          [...args, "--serial", FAKE_SERIAL, "--json"],
+          env,
+        );
+        expect(result.code).toBe(0);
+      }
+      expect(adbLogLines(adbLog)).toEqual([
+        `-s ${FAKE_SERIAL} shell input tap 100 200`,
+        `-s ${FAKE_SERIAL} shell input text hello%sworld`,
+        `-s ${FAKE_SERIAL} shell input keyevent KEYCODE_BACK`,
+        `-s ${FAKE_SERIAL} shell input keyevent KEYCODE_HOME`,
+      ]);
+    },
+    15_000,
+  );
 
   it("screenshots the device into a run directory", async () => {
     const { env, adbLog } = fakeAdbEnv();

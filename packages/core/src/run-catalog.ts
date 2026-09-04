@@ -7,6 +7,12 @@ import {
   type EnvLike,
 } from "./paths.js";
 import { resolveRunStorage } from "./storage.js";
+import {
+  isMissing,
+  sameIdentity,
+  verifyExistingRoot,
+  type RunStorageRoot,
+} from "./run-root.js";
 import type { RunManifest } from "./run.js";
 
 const SAFE_ENTRY_PATTERN = /^[A-Za-z0-9._-]+$/;
@@ -16,11 +22,9 @@ const MANIFEST_FILE = "manifest.json";
  * One trusted run-storage root. Roots are read in array order; the first valid
  * occurrence of a run id wins. `expectedRealDir` lets the resolver authorize a
  * canonical location without making the catalog trust symlinked ancestors.
+ * The same shape anchors the write path in `run-root.ts`.
  */
-export interface RunCatalogRoot {
-  dir: string;
-  expectedRealDir: string;
-}
+export type RunCatalogRoot = RunStorageRoot;
 
 /** A manifest bound to the real directory entry it was read from. */
 export interface RunCatalogEntry {
@@ -48,15 +52,6 @@ class RunCatalogAccessError extends Error {
     super(message);
     this.missing = missing;
   }
-}
-
-function isMissing(error: unknown): boolean {
-  const code = (error as NodeJS.ErrnoException).code;
-  return code === "ENOENT" || code === "ENOTDIR";
-}
-
-function sameIdentity(left: fs.Stats, right: fs.Stats): boolean {
-  return left.dev === right.dev && left.ino === right.ino;
 }
 
 function compareText(left: string, right: string): number {
@@ -94,21 +89,11 @@ function parseManifest(raw: string, dirName: string): RunManifest | undefined {
   return manifest;
 }
 
+/** The read-side trust boundary, shared with the write path in `run-root.ts`. */
 async function verifiedRoot(
   root: RunCatalogRoot,
 ): Promise<{ stat: fs.Stats; realDir: string } | undefined> {
-  let stat: fs.Stats;
-  let realDir: string;
-  try {
-    stat = await fs.promises.lstat(root.dir);
-    if (stat.isSymbolicLink() || !stat.isDirectory()) return undefined;
-    realDir = await fs.promises.realpath(root.dir);
-  } catch (error) {
-    if (isMissing(error)) return undefined;
-    throw error;
-  }
-  if (realDir !== root.expectedRealDir) return undefined;
-  return { stat, realDir };
+  return verifyExistingRoot(root);
 }
 
 async function rootAndRunStillMatch(

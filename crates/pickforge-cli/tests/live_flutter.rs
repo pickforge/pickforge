@@ -451,7 +451,6 @@ fn live_flutter_cli_and_mcp_end_to_end() {
         "codex",
         "--harness",
         "pi",
-        "--mobile-integration-alpha",
         "--json",
     ];
     let home_before_dry_run = snapshot(&home);

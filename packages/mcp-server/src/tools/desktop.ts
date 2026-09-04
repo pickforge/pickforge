@@ -1,4 +1,3 @@
-import path from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { withAgentPermit } from "@pickforge/lab-core";
@@ -22,6 +21,7 @@ import {
   waitForWindow,
 } from "@pickforge/lab-desktop-linux";
 import {
+  captureRunArtifact,
   captureToTarget,
   imageContent,
   requireDisplay,
@@ -245,31 +245,46 @@ function registerScreenshotTool(server: McpServer, ctx: ServerContext): void {
               typeof result.data?.path === "string" ? [result.data.path] : [],
           },
           async ({ actionId, run }) => {
-            const target =
-              run !== undefined &&
-              args.out === undefined &&
-              args.runSlug === undefined
-                ? {
-                    outPath: path.join(
-                      run.dir,
-                      "screenshots",
-                      `${actionId}.png`,
-                    ),
-                  }
-                : await resolveScreenshotTarget(ctx, args, "desktop", id);
             let tool: string | undefined;
             let windowCount: number | undefined;
             let warnings: string[] = [];
-            const data = await captureToTarget(target, async () => {
+            const capture = async (outPath: string): Promise<void> => {
               const result = await screenshot({
                 display,
-                outPath: target.outPath,
+                outPath,
                 env: ctx.env,
               });
               tool = result.tool;
               windowCount = result.windowCount;
               warnings = result.warnings;
-            });
+            };
+            const intoEvidenceRun =
+              run !== undefined &&
+              args.out === undefined &&
+              args.runSlug === undefined;
+            let data: Record<string, unknown>;
+            let outPath: string;
+            if (intoEvidenceRun && run !== undefined) {
+              // Bound to the evidence run's verified directory. `captureToTarget`
+              // is not used here because it finalizes its run, and the evidence
+              // run stays open for later actions.
+              outPath = await captureRunArtifact(
+                run,
+                "screenshots",
+                `${actionId}.png`,
+                capture,
+              );
+              data = { path: outPath, runId: run.runId, runDir: run.dir };
+            } else {
+              const target = await resolveScreenshotTarget(
+                ctx,
+                args,
+                "desktop",
+                id,
+              );
+              data = await captureToTarget(target, capture);
+              outPath = target.outPath;
+            }
             data.sessionId = id;
             data.display = display;
             data.tool = tool;
@@ -280,11 +295,7 @@ function registerScreenshotTool(server: McpServer, ctx: ServerContext): void {
             if (warnings.length > 0) {
               data.warnings = warnings;
             }
-            if (run !== undefined && target.run === undefined) {
-              data.runId = run.runId;
-              data.runDir = run.dir;
-            }
-            const image = await imageContent(target.outPath);
+            const image = await imageContent(outPath);
             Object.assign(data, image.meta);
             return { data, extraContent: image.content };
           },

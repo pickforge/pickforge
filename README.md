@@ -76,9 +76,9 @@ pickforge doctor
 pickforge init
 ```
 
-`init` enables the Flutter integration by default in this prerelease. It
-configures the official Dart/Flutter MCP server and installs the
-`pickforge-flutter` workflow for Claude Code, Codex, and Pi. Register the lab
+`init` configures the Flutter integration: the official Dart/Flutter MCP
+server and the `pickforge-flutter` workflow for Claude Code, Codex, and Pi.
+`init --dry-run` previews every change first. Register the lab
 MCP with the agent you use, initialize a Linux desktop profile, and start the
 app inside an isolated lab session:
 
@@ -233,6 +233,15 @@ automation and tests; `.picklab/config.json` (project-level) can select
   `{ "storage": { "mode": "custom", "path": "/abs/path" } }` writes runs
   under `<path>/runs/`. A relative path, a path equal to or nested inside the
   project directory, or `custom` mode with no path, is rejected.
+
+Writes and reads share one trust boundary. Every directory between the trusted
+ancestor (the project directory, the Pickforge home, or the custom path) and a
+run must be a real directory: a symlinked `.picklab`, `runs`, or project-id
+entry is refused with an error before anything is created, the same way the
+run catalog ignores such entries when reading. This blocks a `.picklab` symlink
+committed in a cloned repository from redirecting `project-local` artifacts.
+Pickforge never replaces, moves, or deletes the offending entry; fix it and
+rerun.
 
 **`custom` cannot be selected from project-level `.picklab/config.json`.**
 That file is repo-committed and travels with `git clone`; honoring a

@@ -296,15 +296,23 @@ fn init_human_output_escapes_path_control_characters() {
 }
 
 #[test]
-fn mobile_alpha_flag_is_visible_and_prerelease_default_requires_dart() {
+fn init_is_the_flutter_integration_by_default_and_requires_dart() {
     let temp = TempDir::new().unwrap();
     let project_dir = flutter_project(temp.path());
     let help = pickforge(temp.path(), &[])
         .args(["init", "--help"])
         .assert()
         .success();
-    assert!(String::from_utf8_lossy(&help.get_output().stdout).contains("mobile-integration-alpha"));
+    let help_text = String::from_utf8_lossy(&help.get_output().stdout).into_owned();
+    assert!(
+        !help_text.contains("mobile-integration-alpha"),
+        "{help_text}"
+    );
+    assert!(help_text.contains("Flutter integration"), "{help_text}");
 
+    // No `dart` on PATH: the Flutter pack is required, so init refuses before
+    // writing anything. (`fake_bin` accumulates tools under the same root, so
+    // this check runs before the fake `dart` is created below.)
     let missing = pickforge(temp.path(), &[])
         .args(["init", "--project-dir"])
         .arg(&project_dir)
@@ -313,11 +321,21 @@ fn mobile_alpha_flag_is_visible_and_prerelease_default_requires_dart() {
     assert!(String::from_utf8_lossy(&missing.get_output().stdout).contains("requires dart on PATH"));
     assert!(!temp.path().join("state").exists());
     assert!(!temp.path().join("home").exists());
+
+    let dry_run = pickforge(temp.path(), &["dart"])
+        .args(["init", "--dry-run", "--json", "--project-dir"])
+        .arg(&project_dir)
+        .assert()
+        .success();
+    let value: serde_json::Value = serde_json::from_slice(&dry_run.get_output().stdout).unwrap();
+    assert_eq!(value["plan"]["pack"]["name"], "pickforge-flutter");
+    assert_eq!(value["plan"]["pack"]["version"], 2);
+    assert!(!temp.path().join("state").exists());
 }
 
 #[cfg(unix)]
 #[test]
-fn mobile_alpha_never_executes_dart_and_keeps_the_project_clean() {
+fn init_never_executes_dart_and_keeps_the_project_clean() {
     let temp = TempDir::new().unwrap();
     let project_dir = flutter_project(temp.path());
     git(&project_dir, &["init", "--quiet"]);
@@ -344,14 +362,7 @@ fn mobile_alpha_never_executes_dart_and_keeps_the_project_clean() {
 
     let output = pickforge(temp.path(), &[])
         .env("PATH", bin)
-        .args([
-            "init",
-            "--mobile-integration-alpha",
-            "--harness",
-            "codex",
-            "--json",
-            "--project-dir",
-        ])
+        .args(["init", "--harness", "codex", "--json", "--project-dir"])
         .arg(&project_dir)
         .assert()
         .success();
@@ -429,19 +440,11 @@ fn evidence_record_supports_stdin_path_human_json_and_errors() {
             && stderr.contains("project.json"),
         "{stderr}"
     );
-    assert!(
-        stderr.contains("pickforge init --mobile-integration-alpha"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("run `pickforge init`"), "{stderr}");
+    assert!(!stderr.contains("mobile-integration-alpha"), "{stderr}");
 
     pickforge(temp.path(), &["dart"])
-        .args([
-            "init",
-            "--mobile-integration-alpha",
-            "--harness",
-            "codex",
-            "--project-dir",
-        ])
+        .args(["init", "--harness", "codex", "--project-dir"])
         .arg(&project_dir)
         .assert()
         .success();

@@ -69,13 +69,20 @@ describe("real separate-process concurrency", () => {
   it(
     "loses zero actions across concurrent appender processes",
     async () => {
-      const { run: handle } = await beginEvidenceRun(project, "desk-append0");
+      const sessionId = "desk-append0";
+      const { run: handle } = await beginEvidenceRun(project, sessionId);
       const workerCount = 4;
       const perWorker = 150;
 
       const results = await Promise.all(
         Array.from({ length: workerCount }, (_unused, worker) =>
-          run([appendWorker, handle.dir, `w${worker}`, String(perWorker)]),
+          run([
+            appendWorker,
+            project,
+            sessionId,
+            `w${worker}`,
+            String(perWorker),
+          ]),
         ),
       );
       for (const result of results) {
@@ -151,7 +158,8 @@ describe("real separate-process concurrency", () => {
   it(
     "writes exactly one truncation marker across concurrent processes",
     async () => {
-      const { run: handle } = await beginEvidenceRun(project, "desk-trunc0");
+      const sessionId = "desk-trunc0";
+      const { run: handle } = await beginEvidenceRun(project, sessionId);
       const maxBytes = 4096;
       // Push the run over its cap on disk before the workers start, so every
       // worker's first append is already in the truncation path and they
@@ -166,7 +174,8 @@ describe("real separate-process concurrency", () => {
         Array.from({ length: workerCount }, (_unused, worker) =>
           run([
             truncateWorker,
-            handle.dir,
+            project,
+            sessionId,
             `t${worker}`,
             String(perWorker),
             String(maxBytes),
@@ -195,7 +204,8 @@ describe("real separate-process concurrency", () => {
   it(
     "recovers the marker after a process crashes mid-claim",
     async () => {
-      const { run: handle } = await beginEvidenceRun(project, "desk-crash0");
+      const sessionId = "desk-crash0";
+      const { run: handle } = await beginEvidenceRun(project, sessionId);
       const maxBytes = 4096;
       await fs.promises.writeFile(
         path.join(handle.dir, "screenshots", "big.bin"),
@@ -204,7 +214,12 @@ describe("real separate-process concurrency", () => {
 
       // A worker crosses the cap, stamps the marker claim, then exits abruptly
       // (code 42) before appending the marker — the P3 crash window.
-      const crashed = await run([crashWorker, handle.dir, String(maxBytes)]);
+      const crashed = await run([
+        crashWorker,
+        project,
+        sessionId,
+        String(maxBytes),
+      ]);
       expect(crashed.code).toBe(42);
       // It left an uncommitted claim and no marker: unrecovered, this would gate
       // truncation forever.
@@ -214,7 +229,7 @@ describe("real separate-process concurrency", () => {
       // A later append sees the dead owner, reclaims the stale claim, and writes
       // the marker exactly once.
       const recovered = await appendAction(
-        handle.dir,
+        handle,
         {
           actionId: "after",
           source: "test",

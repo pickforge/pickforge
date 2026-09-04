@@ -1,11 +1,12 @@
-import fs from "node:fs";
 import path from "node:path";
+import { RunStorageAccessError, type DirHandle } from "./dir-handle.js";
 import { redactSecrets } from "./redact.js";
-import type { RunManifest } from "./run.js";
+import { RunHandle, type RunManifest } from "./run.js";
+import { withBoundRunDir } from "./run-root.js";
 import {
   isEvidenceRun,
   isTruncationRecord,
-  readActions,
+  readActionsIn,
   type EvidenceAction,
   type EvidenceRecord,
 } from "./evidence.js";
@@ -237,61 +238,63 @@ ${steps === "" ? '<p class="empty">No recorded actions.</p>' : steps}
 `;
 }
 
+async function openScreenshotsDir(
+  runDir: DirHandle,
+): Promise<DirHandle | undefined> {
+  const stat = await runDir.lstatChild("screenshots");
+  if (stat === undefined || stat.isSymbolicLink() || !stat.isDirectory()) {
+    return undefined;
+  }
+  return runDir.openChild("screenshots");
+}
+
 async function collectSafeScreenshots(
-  runDir: string,
+  runDir: DirHandle,
   records: readonly EvidenceRecord[],
 ): Promise<Set<string>> {
   const safe = new Set<string>();
-  const realRunDir = await fs.promises.realpath(runDir);
+  const screenshots = await openScreenshotsDir(runDir);
+  if (screenshots === undefined) return safe;
   const candidates = new Set(
     records.flatMap((record) =>
       isTruncationRecord(record) ? [] : (record.artifacts ?? []),
     ),
   );
-  for (const relative of candidates) {
-    if (!safeScreenshotPath(relative)) continue;
-    const candidate = path.join(runDir, relative);
-    try {
-      const stat = await fs.promises.lstat(candidate);
-      if (stat.isSymbolicLink() || !stat.isFile()) continue;
-      const realCandidate = await fs.promises.realpath(candidate);
-      if (realCandidate !== path.join(realRunDir, relative)) continue;
-      safe.add(relative);
-    } catch {
-      continue;
+  try {
+    for (const relative of candidates) {
+      if (!safeScreenshotPath(relative)) continue;
+      const name = relative.slice("screenshots/".length);
+      const stat = await screenshots.lstatChild(name);
+      if (stat?.isFile() === true && !stat.isSymbolicLink()) safe.add(relative);
     }
+  } finally {
+    await screenshots.close().catch(() => {});
   }
   return safe;
 }
 
-let reportTmpCounter = 0;
-
 export async function writeEvidenceReport(
-  runDir: string,
-  manifest: RunManifest,
+  run: RunHandle,
+  manifest: RunManifest = run.manifest,
 ): Promise<string> {
+  if (!(run instanceof RunHandle)) {
+    throw new RunStorageAccessError(
+      "writeEvidenceReport requires a verified RunHandle; run directory paths are refused",
+    );
+  }
   if (!isEvidenceRun(manifest)) {
     throw new Error(`Run ${manifest.runId} is not an evidence run`);
   }
-  const runStat = await fs.promises.lstat(runDir);
-  if (runStat.isSymbolicLink() || !runStat.isDirectory()) {
-    throw new Error(`Unsafe evidence run directory: ${runDir}`);
+  if (manifest.runId !== run.runId) {
+    throw new RunStorageAccessError(
+      `Refusing report manifest ${manifest.runId} for run ${run.runId}`,
+    );
   }
-  const records = await readActions(runDir);
-  const safeScreenshots = await collectSafeScreenshots(runDir, records);
-  const html = renderEvidenceHtml(manifest, records, safeScreenshots);
-  const target = path.join(runDir, EVIDENCE_REPORT);
-  reportTmpCounter += 1;
-  const tmp = path.join(
-    runDir,
-    `.${EVIDENCE_REPORT}.tmp-${process.pid}-${reportTmpCounter}`,
-  );
-  await fs.promises.writeFile(tmp, html, { encoding: "utf8", flag: "wx" });
-  try {
-    await fs.promises.rename(tmp, target);
-  } catch (error) {
-    await fs.promises.unlink(tmp).catch(() => {});
-    throw error;
-  }
-  return target;
+  await withBoundRunDir(run.binding, async (runDir) => {
+    const records = await readActionsIn(runDir);
+    const safeScreenshots = await collectSafeScreenshots(runDir, records);
+    const html = renderEvidenceHtml(manifest, records, safeScreenshots);
+    await runDir.writeFileAtomic(EVIDENCE_REPORT, html);
+  });
+  return path.join(run.dir, EVIDENCE_REPORT);
 }
