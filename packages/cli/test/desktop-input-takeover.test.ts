@@ -10,6 +10,7 @@ import {
 } from "@pickforge/picklab-core";
 import {
   runDesktopClick,
+  runDesktopExec,
   runDesktopLaunch,
   runDesktopScreenshot,
   runDesktopType,
@@ -73,12 +74,21 @@ describe("desktop input commands fail closed under human control", () => {
     await releaseHumanLease(id, lease.leaseId, env);
   });
 
-  it("rejects desktop launch (a new client can grab focus on the shared display)", async () => {
+  it("rejects desktop launch and exec while a client could grab focus", async () => {
     const id = await createDesktop();
     const lease = await acquireHumanLease(id, env);
 
     expect(
       await runDesktopLaunch("xterm", [], { session: id, projectDir: root, json: true }),
+    ).toBe(1);
+    expect(lastReport().errors[0]).toContain("human control is active");
+
+    expect(
+      await runDesktopExec("xterm", [], {
+        session: id,
+        projectDir: root,
+        json: true,
+      }),
     ).toBe(1);
     expect(lastReport().errors[0]).toContain("human control is active");
 

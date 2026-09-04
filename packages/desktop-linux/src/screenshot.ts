@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { runCommand, type EnvLike } from "@pickforge/picklab-core";
+import { listWindows } from "./apps.js";
 import { parseDisplayNumber } from "./display.js";
 import { findOnPath } from "./util.js";
 
@@ -26,6 +27,8 @@ export interface ScreenshotOptions {
 export interface ScreenshotResult {
   path: string;
   tool: ScreenshotTool;
+  windowCount: number | undefined;
+  warnings: string[];
 }
 
 export function detectScreenshotTool(
@@ -166,5 +169,16 @@ export async function screenshot(
   }
 
   await assertPngFile(opts.outPath, tool);
-  return { path: opts.outPath, tool };
+  if (findOnPath("xdotool", env) === null) {
+    return {
+      path: opts.outPath,
+      tool,
+      windowCount: undefined,
+      warnings: [
+        "xdotool is missing from PATH; the client-window count is unavailable",
+      ],
+    };
+  }
+  const windows = await listWindows(opts.display, env);
+  return { path: opts.outPath, tool, windowCount: windows.length, warnings: [] };
 }

@@ -5,6 +5,21 @@ GitHub release description, then reset it after the release is published.
 
 ## User-facing changes
 
+- Desktop commands now share one isolated X11 environment that points
+  `WAYLAND_DISPLAY` at the non-existent `picklab-no-wayland` socket, removes
+  other inherited `WAYLAND_*` variables, and sets Electron, GLFW, GTK, Qt,
+  SDL, winit, and session backend hints. The poison value prevents libwayland
+  from falling back to the user's default `wayland-0` socket when the variable
+  is unset.
+  New `picklab desktop exec` (also available as MCP `desktop_exec`) starts a
+  command in its own process group. If no client window appears within a
+  bounded wait, it stops the group before reporting a possible real-desktop
+  escape and suggests `--window-timeout` for slow first builds. `picklab desktop env`
+  prints the same recipe for parent shells, with JSON output available.
+  Desktop screenshots now include the client-window count and warn when it is
+  zero instead of leaving a black frame unexplained. Without `xdotool`, capture
+  still succeeds and warns that the count is unavailable without raising the
+  zero-window escape warning.
 - Experimental `pickforge doctor` (new Rust binary, not yet released or
   published): read-only readiness diagnostics for a Flutter project —
   `pickforge doctor [--project-dir <path>] [--json]`. Reports the resolved
@@ -44,6 +59,11 @@ GitHub release description, then reset it after the release is published.
   Flutter workflow skill into Claude's skill root and/or the shared Codex/Pi
   agent-skill root. It requires discoverable `dart` but never executes it; the
   default base pack and every release surface remain unchanged.
+- Added an opt-in live Rust end-to-end test
+  (`crates/pickforge-cli/tests/live_flutter.rs`) that creates a real Flutter
+  project and drives `doctor`, `init`, a real `dart mcp-server` handshake and
+  `evidence record` against it. It is gated on `PICKFORGE_LIVE_FLUTTER=1` and
+  skips without `flutter`/`dart`, so CI and the default suite are unchanged.
 - Raised the vulnerable `fast-uri` and `hono` overrides, plus lockfile
   resolutions for both `brace-expansion` majors, `fast-uri`, `hono`,
   `ip-address`, and `nanoid`, to patched releases.
@@ -61,7 +81,7 @@ GitHub release description, then reset it after the release is published.
   one skips, coverage passes at 82.48% lines, and build passes.
 - The pinned OSV Scanner v2.3.8 image reports no unfiltered advisories.
 - `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D
-  warnings`, and `cargo test --workspace --locked` pass with 78 tests covering
+  warnings`, and `cargo test --workspace --locked` pass with 84 tests covering
   project/framework detection, tool and harness discovery, state and project-id
   boundaries, adapter preservation/refusal, transaction rollback and drift,
   dry-run, receipt ownership, file modes, idempotency, Git-tree cleanliness,
@@ -72,14 +92,24 @@ GitHub release description, then reset it after the release is published.
   receipt compatibility, and concurrent first use. Exact local validation also includes `cargo check --workspace --all-targets --locked
   --target x86_64-pc-windows-msvc` and target-specific clippy with `-D warnings`.
   Windows-native tests run in the CI matrix.
+- The opt-in live end-to-end test (`PICKFORGE_LIVE_FLUTTER=1 cargo test -p
+  pickforge-cli --test live_flutter`) passes on Linux against a project made by
+  the real Flutter SDK (`flutter create --offline`, Flutter 3.41.6): doctor
+  reports the project ready as Flutter, `init` plans and applies Claude
+  Code/Codex/Pi configs and skills and is idempotent on a second run, a real
+  `dart mcp-server` completes an initialize and tools/list handshake, and
+  evidence is recorded outside the project with the planted secret redacted and
+  the real home untouched. Without `PICKFORGE_LIVE_FLUTTER=1`, or without
+  `flutter`/`dart` on PATH, the test skips, so the default suite stays hermetic.
 - Manual smoke runs of `pickforge doctor` and `pickforge doctor --json`
   against temporary fake Flutter and non-Flutter projects with an isolated
   `PATH`/`PICKFORGE_HOME`.
 
 ### Not tested yet
 
-- macOS for the Rust binary.
+- macOS for the Rust binary, including the opt-in live Flutter/MCP path.
 - No packaging, installer, or distribution path for `pickforge` yet.
+- The live end-to-end test is not run in CI; it stays a local, opt-in check.
 
 ### Release blockers
 
