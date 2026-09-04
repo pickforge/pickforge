@@ -178,6 +178,32 @@ describe.skipIf(!hasXvfb)("built CLI browser lifecycle", () => {
   );
 
   it(
+    "returns captured Chrome diagnostics when browser creation fails",
+    async () => {
+      writeFakeChrome(path.join(root, "bin"), "crash");
+
+      const failed = await runCli([
+        "session",
+        "create",
+        "--type",
+        "browser",
+        "--json",
+      ]);
+
+      expect(failed.code).toBe(1);
+      const report = parseJson(failed);
+      expect(report.errors).toHaveLength(1);
+      expect(report.errors[0]).toContain(
+        "file was not created before the Chrome process exited",
+      );
+      expect(report.errors[0]).toContain(
+        "fake Chrome crashed before publishing a port",
+      );
+    },
+    60_000,
+  );
+
+  it(
     "creates a browser session with an asynchronous read-only viewer",
     async () => {
       const binDir = path.join(root, "bin");
