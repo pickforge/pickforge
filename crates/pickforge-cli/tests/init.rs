@@ -30,6 +30,14 @@ fn pack() -> IntegrationPack {
     }
 }
 
+/// `pickforge init` defaults to the Flutter pack; these receipt-focused tests
+/// opt into the empty base pack so they need no tools on PATH.
+fn receipt_only_request(project: &Path) -> InitRequest {
+    let mut request = InitRequest::new(project);
+    request.pack = IntegrationPack::base();
+    request
+}
+
 fn fake_tool(root: &Path, name: &str) -> std::path::PathBuf {
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -60,7 +68,7 @@ fn fixture() -> (TempDir, std::path::PathBuf, Environment) {
 #[test]
 fn empty_pack_only_plans_and_applies_a_deterministic_receipt() {
     let (temp, project, env) = fixture();
-    let request = InitRequest::new(&project);
+    let request = receipt_only_request(&project);
     let plan = plan_init(&request, &env).unwrap();
     assert_eq!(plan.report.actions.len(), 1);
     assert!(!temp.path().join("state").exists());
@@ -94,7 +102,7 @@ fn foreign_or_malformed_receipts_are_never_overwritten() {
         br#"{"schemaVersion":1,"projectPath":"/other","projectId":"other"}"#.as_slice(),
     ] {
         let (_temp, project, env) = fixture();
-        let request = InitRequest::new(&project);
+        let request = receipt_only_request(&project);
         let initial_plan = plan_init(&request, &env).unwrap();
         let receipt = Path::new(&initial_plan.report.state_dir).join("project.json");
         std::fs::create_dir_all(receipt.parent().unwrap()).unwrap();
@@ -108,7 +116,7 @@ fn foreign_or_malformed_receipts_are_never_overwritten() {
 #[test]
 fn nonempty_unowned_state_directory_is_refused() {
     let (_temp, project, env) = fixture();
-    let request = InitRequest::new(&project);
+    let request = receipt_only_request(&project);
     let initial_plan = plan_init(&request, &env).unwrap();
     let state_dir = Path::new(&initial_plan.report.state_dir);
     std::fs::create_dir_all(state_dir).unwrap();
@@ -124,7 +132,7 @@ fn nonempty_unowned_state_directory_is_refused() {
 #[test]
 fn runs_directory_without_a_receipt_is_foreign() {
     let (_temp, project, env) = fixture();
-    let request = InitRequest::new(&project);
+    let request = receipt_only_request(&project);
     let initial = plan_init(&request, &env).unwrap();
     let runs = Path::new(&initial.report.state_dir).join("runs");
     std::fs::create_dir_all(&runs).unwrap();
@@ -136,7 +144,7 @@ fn runs_directory_without_a_receipt_is_foreign() {
 #[test]
 fn empty_or_owned_interruption_state_allows_receipt_recovery() {
     let (_temp, project, env) = fixture();
-    let request = InitRequest::new(&project);
+    let request = receipt_only_request(&project);
     let initial_plan = plan_init(&request, &env).unwrap();
     let state_dir = Path::new(&initial_plan.report.state_dir);
     std::fs::create_dir_all(state_dir).unwrap();
@@ -675,7 +683,7 @@ fn dangling_state_artifact_symlinks_are_refused_as_foreign_state() {
     use std::os::unix::fs::symlink;
 
     let (_temp, project, env) = fixture();
-    let request = InitRequest::new(&project);
+    let request = receipt_only_request(&project);
     let initial = plan_init(&request, &env).unwrap();
     let state_dir = Path::new(&initial.report.state_dir);
     std::fs::create_dir_all(state_dir).unwrap();

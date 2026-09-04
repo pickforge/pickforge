@@ -1,127 +1,42 @@
-# Pickforge 0.4.0-alpha.1
+# Pickforge 0.4.0-alpha.2
 
-Draft release notes for the first Pickforge prerelease. Use this file as the
-GitHub release description, then reset it after the release is published.
+Draft release notes for the second Pickforge prerelease. `0.4.0-alpha.1` is
+published; its notes live on the GitHub release. Use this file as the next
+release description, then reset it after that release is published.
 
-## PickLab is now Pickforge
+## Flutter integration is the normal path
 
-- The npm package is now `pickforge`. This alpha is published under the `next`
-  dist-tag.
-- The TypeScript commands are now `pickforge-lab` and `pickforge-mcp`. Agent
-  config uses `pickforge-lab`, and linking replaces an owned legacy `picklab`
-  MCP entry in the same config update.
-- The durable Rust command remains `pickforge` and now ships beside the npm
-  commands through `install.sh`.
-- `PICKFORGE_*` environment variables fall back to `PICKLAB_*` for one release
-  and print one deprecation warning to stderr per process.
-- New TypeScript state is written under `~/.pickforge/lab/`, or
-  `PICKFORGE_HOME`. Existing state under `~/.pickforge/picklab/` and
-  `~/.picklab/` remains readable in place. Nothing is silently migrated or
-  deleted.
-- After installing `pickforge`, remove the old package with
-  `npm uninstall -g @pickforge/picklab` or
-  `bun remove -g @pickforge/picklab`.
+- `pickforge init` always configures the Flutter integration: the owned
+  `pickforge-dart` server as `dart mcp-server` and the portable
+  `pickforge-flutter` workflow for Claude Code, Codex, and Pi. It requires
+  `dart` on PATH and fails before writing anything otherwise.
+- The temporary `--mobile-integration-alpha` flag is removed, along with its
+  prerelease-only default. Stable and prerelease builds behave the same.
+- Receipt remediation messages now point at plain `pickforge init`.
+- Legacy `PICKLAB_*` environment variables keep working with a deprecation
+  warning through the 0.4 release train.
 
-## Lab isolation
+## Run storage hardening
 
-- x11vnc now uses the isolated lab X11 environment instead of inheriting a
-  Wayland host session that prevents it from starting.
-- Desktop commands now share one isolated X11 environment that points
-  `WAYLAND_DISPLAY` at the non-existent `pickforge-no-wayland` socket, removes
-  other inherited `WAYLAND_*` variables, and sets Electron, GLFW, GTK, Qt,
-  SDL, winit, and session backend hints. The poison value prevents libwayland
-  from falling back to the user's default `wayland-0` socket when the variable
-  is unset.
-- `pickforge-lab desktop exec`, also available as MCP `desktop_exec`, starts a
-  command in its own process group and waits a bounded time for a client
-  window. If none appears, it stops the group before reporting a possible
-  real-desktop escape and suggests `--window-timeout` for slow first builds.
-  `pickforge-lab desktop env` prints the same recipe for parent shells, with
-  JSON output available.
-- Desktop screenshots now include the client-window count and warn when it is
-  zero instead of leaving a black frame unexplained. Without `xdotool`, capture
-  still succeeds and warns that the count is unavailable without raising the
-  zero-window escape warning.
-
-## Flutter integration alpha
-
-- `pickforge doctor` provides read-only readiness diagnostics for a Flutter
-  project, local Flutter and Dart tools, and supported agent harnesses. Human
-  and JSON reports include the resolved project and external state paths.
-- `pickforge init` provides dry-run planning and transactional, backed-up,
-  idempotent config updates for Claude Code, Codex, and Pi. It configures the
-  owned `pickforge-dart` server as `dart mcp-server` and installs the portable
-  `pickforge-flutter` workflow outside the project.
-- `--mobile-integration-alpha` is now visible. It defaults on when the Rust
-  crate version has a prerelease tag, including `0.4.0-alpha.1`; stable builds
-  continue to require the flag while it exists.
-- Flag lifecycle: keep the flag through this first enabled release, verify the
-  alpha on real devices, then remove the flag after the enabled release is
-  confirmed. The Flutter integration becomes the normal path at removal.
-- `pickforge evidence record` validates one bounded JSON envelope, checks the
-  owned Flutter init receipt, redacts text secrets, copies validated
-  screenshots into an external private run directory, and writes canonical
-  `evidence.json` plus `report.md`. Evidence schema v3 supports up to 32 ordered
-  intermediate steps between `before` and `after`, with optional check-to-step
-  references. It retains v2 source dimensions and bounded PNG previews for
-  oversized screenshots, links the full capture, deduplicates artifacts across
-  steps, and counts previews toward the total budget.
-- The README documents the proven loop in order: doctor, init, isolated
-  `pickforge-lab desktop exec`, inspect, click, source edit, hot reload, visual
-  verification, and evidence recording.
-- An opt-in live Rust end-to-end test creates a real Flutter project and drives
-  `doctor`, `init`, a real `dart mcp-server` handshake, and `evidence record`.
-  It is gated on `PICKFORGE_LIVE_FLUTTER=1` and skips without `flutter` or
-  `dart`, so CI and the default suite remain hermetic.
-
-## Installation and release
-
-- `install.sh` installs `pickforge@next`, then downloads the matching Rust
-  `pickforge` binary into the same global bin directory. It verifies the
-  release-provided SHA-256 before replacing the binary.
-- Rust release assets are `pickforge-linux-x86_64` and
-  `pickforge-macos-arm64`, each with a same-named `.sha256` file.
-- The release workflow builds and strips both Rust binaries, keeps npm OIDC
-  trusted publishing, uses the `next` dist-tag only for prerelease versions,
-  and attaches the binaries and checksums to the GitHub release.
-- The Cargo workspace has Linux and Windows CI jobs for formatting, clippy with
-  warnings denied, and tests. The Rust binary is not published through npm.
-- Vulnerable `fast-uri` and `hono` overrides were raised, along with lockfile
-  resolutions for both `brace-expansion` majors, `fast-uri`, `hono`,
-  `ip-address`, and `nanoid`.
+- Run directories are now created through the same lstat/realpath trust
+  boundary the run catalog uses when reading (#54). In `project-local` mode a
+  symlinked `.picklab` or `.picklab/runs`, whether committed in the repository
+  or planted later, is refused with a clear error instead of redirecting
+  screenshots and manifests. `home` and `custom` modes verify their
+  `projects/<id>/runs` and `runs` components the same way.
+- Manifest writes through a run handle re-verify the run directory's identity,
+  so a directory swapped for a symlink after creation cannot redirect later
+  writes. Evidence runs adopt and finalize through the same bound handles.
+- Nothing is migrated, replaced, or deleted when an unsafe entry is found; the
+  offending path is named in the error.
 
 ## Validation
 
-- Local Bun install, typecheck, lint, test, and build pass. The full test run
-  has 1,169 passing and four skipped tests, including real Xvfb desktop and
-  headed Chrome coverage.
-- `cargo fmt --check`,
-  `cargo clippy --workspace --all-targets --locked -- -D warnings`, and
-  `cargo test -p pickforge-cli` pass with 86 tests covering readiness,
-  transactions, receipts, Flutter integration, evidence schema v3, bounded
-  previews, redaction, and concurrent first use.
-- The pinned OSV Scanner v2.3.8 image reports no unfiltered advisories.
-- The opt-in live end-to-end test has passed on Linux with Flutter 3.41.6. It
-  covers project creation, doctor, idempotent init for Claude Code, Codex, and
-  Pi, a real Dart MCP handshake, evidence recording, redaction, and home
-  isolation.
-- Manual smoke runs of `pickforge doctor` and `pickforge doctor --json` passed
-  against temporary fake Flutter and non-Flutter projects with an isolated
-  `PATH` and `PICKFORGE_HOME`.
+- Updated during release preparation.
 
 ## Known limits
 
-- Desktop, browser, and Android lab sessions remain Linux-only. The macOS arm64
-  Rust binary supports the durable `doctor`, `init`, and evidence flow but does
-  not make the TypeScript lab cross-platform.
-- Windows has no Rust release artifact in this alpha.
-- The mobile integration flag is temporary by policy and is not the permanent
-  user interface.
-- The macOS opt-in live Flutter and MCP path has not been tested.
-- The live end-to-end test is not run in CI; it stays a local, opt-in check.
-- No npm publish, repository rename, package deprecation, or other external
-  runbook step was executed while preparing these notes.
-
-## Release blockers
-
-- None known.
+- Node.js has no directory-handle-relative `mkdir`, so a swap between the
+  verification and the creation of one directory level is detected after the
+  fact and reported rather than prevented; no manifest or artifact is written
+  through a redirected path.

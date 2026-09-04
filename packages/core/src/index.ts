@@ -48,6 +48,7 @@ export {
   createRun,
   EVIDENCE_ACTION_LOG,
   EVIDENCE_VERSION,
+  openRun,
   RunHandle,
   type ArtifactType,
   type CreateRunOptions,
@@ -55,6 +56,14 @@ export {
   type RunManifest,
   type RunStatus,
 } from "./run.js";
+
+export {
+  ensureVerifiedRunsRoot,
+  RunStorageAccessError,
+  type RunDirIdentity,
+  type RunStorageRoot,
+  type VerifiedRunRoot,
+} from "./run-root.js";
 
 export {
   listRuns,

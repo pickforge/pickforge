@@ -1,8 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { ensureDir, writeFileAtomic, type EnvLike } from "./paths.js";
+import { writeFileAtomic, type EnvLike } from "./paths.js";
 import { openRunCatalog } from "./run-catalog.js";
+import {
+  bindRunDir,
+  ensureVerifiedRunsRoot,
+  type VerifiedRunRoot,
+} from "./run-root.js";
 import { resolveRunStorage } from "./storage.js";
 import {
   isPidAlive,
@@ -14,6 +19,7 @@ import {
   EVIDENCE_VERSION,
   RunHandle,
   createRun,
+  openRun,
   type RunManifest,
   type RunStatus,
 } from "./run.js";
@@ -615,7 +621,6 @@ async function withJournalLock<T>(
  * just-created run is finalized (`failed`) and the claim released, so no
  * permanent running orphan is ever left behind.
  */
-// eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function beginEvidenceRun(
   projectDir: string,
   sessionId: string,
@@ -623,187 +628,34 @@ export async function beginEvidenceRun(
   env: EnvLike = process.env,
 ): Promise<BeginEvidenceRunResult> {
   assertSafeSessionId(sessionId);
-  const parent = (await resolveRunStorage(projectDir, env)).runsDir;
-  await ensureDir(parent);
-  const pointerPath = path.join(parent, `.active-${sessionId}.json`);
+  // The runs root is materialized through the same lstat/realpath trust
+  // boundary the catalog reads with (#54), so a symlinked `.picklab` can never
+  // redirect the pointer file or the run directory created below.
+  const root = await ensureVerifiedRunsRoot(projectDir, env);
   const ownerPid = process.pid;
-  const ownerStartTicks = readProcessStartTicks(ownerPid);
-  const deadline = Date.now() + CLAIM_TOTAL_DEADLINE_MS;
-
-  const adopt = (
-    pointer: ActiveEvidencePointer,
-    manifest: RunManifest,
-  ): BeginEvidenceRunResult => ({
-    run: new RunHandle(path.join(parent, pointer.runId), manifest),
-    adopted: true,
-  });
+  const ctx: ClaimContext = {
+    projectDir,
+    sessionId,
+    env,
+    root,
+    pointerPath: path.join(root.dir, `.active-${sessionId}.json`),
+    ownerPid,
+    ownerStartTicks: readProcessStartTicks(ownerPid),
+    deadline: Date.now() + CLAIM_TOTAL_DEADLINE_MS,
+  };
 
   for (let attempt = 0; attempt < MAX_CLAIM_ATTEMPTS; attempt += 1) {
-    let handle: fs.promises.FileHandle | undefined;
-    try {
-      handle = await fs.promises.open(pointerPath, "wx");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const resolution = await resolveActivePointer(projectDir, sessionId, env);
-      if (resolution.status === "active") {
-        return adopt(resolution.pointer, resolution.manifest);
-      }
-      if (resolution.status === "claiming") {
-        // A peer holds the claim. If its owner identity is present and the owner
-        // is alive, it is merely slow — wait, never steal. Only reclaim a claim
-        // whose owner is provably dead, or an owner-unknown (empty) claim that
-        // outlives a short grace (a claimer that died in the microscopic window
-        // between the wx create and its identity stamp).
-        const owner = resolution.claim;
-        if (owner !== undefined) {
-          // eslint-disable-next-line max-depth -- Legacy gate debt: pickforge/pickforge#60
-          if (identityIsAlive(owner.ownerPid, owner.ownerStartTicks)) {
-            // eslint-disable-next-line max-depth -- Legacy gate debt: pickforge/pickforge#60
-            if (Date.now() >= deadline) break;
-            await delay(claimBackoff(attempt));
-            continue;
-          }
-          await clearActivePointer(
-            projectDir,
-            sessionId,
-            { expectRaw: resolution.raw },
-            env,
-          );
-          continue;
-        }
-        if (attempt >= EMPTY_CLAIM_GRACE_ATTEMPTS) {
-          await clearActivePointer(
-            projectDir,
-            sessionId,
-            { expectRaw: resolution.raw },
-            env,
-          );
-        }
-        if (Date.now() >= deadline) break;
-        await delay(claimBackoff(attempt));
-        continue;
-      }
-      if (resolution.status === "absent") {
-        // The pointer vanished between our failed claim and the read; retry.
-        continue;
-      }
-      // stale or corrupt: clear exactly this content, then retry the claim.
-      await clearActivePointer(
-        projectDir,
-        sessionId,
-        { expectRaw: resolution.raw },
-        env,
-      );
+    const step = await tryClaimPointer(ctx, attempt);
+    if (step.kind === "adopt") return adoptRun(ctx, step.pointer, step.manifest);
+    if (step.kind === "retry") continue;
+    if (step.kind === "wait") {
+      if (Date.now() >= ctx.deadline) break;
+      await delay(claimBackoff(attempt));
       continue;
     }
-
-    // We own the claim. Stamp our verifiable identity synchronously so peers can
-    // tell we are alive, closing the owner-unknown window as fast as possible.
-    const claimRecord: ActiveEvidenceClaim = {
-      evidenceVersion: EVIDENCE_VERSION,
-      sessionId,
-      ownerPid,
-      claim: true,
-      claimedAt: new Date().toISOString(),
-    };
-    if (ownerStartTicks !== undefined) {
-      claimRecord.ownerStartTicks = ownerStartTicks;
-    }
-    const claimContent = `${JSON.stringify(claimRecord)}\n`;
-    try {
-      const buf = Buffer.from(claimContent, "utf8");
-      const { bytesWritten } = await handle.write(buf, 0, buf.length, 0);
-      if (bytesWritten !== buf.length) {
-        throw new Error(
-          `short claim write: ${bytesWritten}/${buf.length} bytes`,
-        );
-      }
-    } catch (error) {
-      await handle.close().catch(() => {});
-      await clearActivePointer(
-        projectDir,
-        sessionId,
-        { expectRaw: claimContent },
-        env,
-      ).catch(() => {});
-      // Fall back to unconditional cleanup if the claim was never readable.
-      await unlinkIfMatches(pointerPath, "").catch(() => {});
-      throw error;
-    }
-    await handle.close().catch(() => {});
-
-    // Create the run, then publish the pointer over our claim.
-    let run: RunHandle | undefined;
-    try {
-      if (opts._afterClaim !== undefined) await opts._afterClaim();
-      run = await createRun(
-        projectDir,
-        opts.slug ?? "evidence",
-        { now: opts.now, sessionId, meta: opts.meta, evidence: true },
-        env,
-      );
-
-      const pointer: ActiveEvidencePointer = {
-        evidenceVersion: EVIDENCE_VERSION,
-        sessionId,
-        runId: run.runId,
-        ownerPid,
-        createdAt: new Date().toISOString(),
-      };
-      if (ownerStartTicks !== undefined) {
-        pointer.ownerStartTicks = ownerStartTicks;
-      }
-      const pointerContent = `${JSON.stringify(pointer)}\n`;
-
-      // Confirm we still own the claim before publishing. A live owner is never
-      // reclaimed, so this passes in practice; it is defense in depth against a
-      // reclaim we did not expect.
-      const current = await readTextIfPresent(pointerPath);
-      if (current !== claimContent) throw new ClaimLostError();
-
-      // Publish atomically (temp + rename) so a concurrent reader never sees a
-      // torn pointer — only the intact claim or the intact full pointer.
-      await writeFileAtomic(pointerPath, pointerContent);
-
-      // Final confirmation that the published pointer is ours.
-      const publishedRaw = await readTextIfPresent(pointerPath);
-      const published =
-        publishedRaw === undefined ? undefined : parsePointer(publishedRaw);
-      if (
-        published === undefined ||
-        published.runId !== run.runId ||
-        published.ownerPid !== ownerPid ||
-        published.ownerStartTicks !== ownerStartTicks
-      ) {
-        throw new ClaimLostError();
-      }
-      return { run, adopted: false };
-    } catch (error) {
-      // Publication/verification failed. Finalize the just-created run so it is
-      // never a permanent running orphan, then release our claim (a no-op if a
-      // peer already replaced it) so the session can recover.
-      if (run !== undefined) {
-        await run.finish("failed").catch(() => {});
-      }
-      await clearActivePointer(
-        projectDir,
-        sessionId,
-        { expectRaw: claimContent },
-        env,
-      ).catch(() => {});
-
-      if (error instanceof ClaimLostError) {
-        // Another owner took the session. Adopt it if it is active; otherwise
-        // fall through to retry within the remaining budget.
-        const resolution = await resolveActivePointer(projectDir, sessionId, env);
-        if (resolution.status === "active") {
-          return adopt(resolution.pointer, resolution.manifest);
-        }
-        if (Date.now() >= deadline) break;
-        continue;
-      }
-      throw error;
-    }
+    const result = await completeOwnedClaim(ctx, step.handle, opts);
+    if (result !== undefined) return result;
+    if (Date.now() >= ctx.deadline) break;
   }
   throw new Error(
     `Failed to acquire an active evidence run for session ${sessionId} ` +
@@ -811,107 +663,383 @@ export async function beginEvidenceRun(
   );
 }
 
+interface ClaimContext {
+  projectDir: string;
+  sessionId: string;
+  env: EnvLike;
+  root: VerifiedRunRoot;
+  pointerPath: string;
+  ownerPid: number;
+  ownerStartTicks: number | undefined;
+  deadline: number;
+}
+
+type ClaimStep =
+  | { kind: "claimed"; handle: fs.promises.FileHandle }
+  | { kind: "adopt"; pointer: ActiveEvidencePointer; manifest: RunManifest }
+  /** Retry the claim immediately. */
+  | { kind: "retry" }
+  /** Back off, or give up at the deadline, then retry the claim. */
+  | { kind: "wait" };
+
+async function adoptRun(
+  ctx: ClaimContext,
+  pointer: ActiveEvidencePointer,
+  manifest: RunManifest,
+): Promise<BeginEvidenceRunResult> {
+  return {
+    run: new RunHandle(
+      path.join(ctx.root.dir, pointer.runId),
+      manifest,
+      await bindRunDir(ctx.root, pointer.runId),
+    ),
+    adopted: true,
+  };
+}
+
+function clearClaim(ctx: ClaimContext, expectRaw: string): Promise<boolean> {
+  return clearActivePointer(
+    ctx.projectDir,
+    ctx.sessionId,
+    { expectRaw },
+    ctx.env,
+  );
+}
+
+/**
+ * A peer holds the claim. If its owner identity is present and the owner is
+ * alive, it is merely slow: wait, never steal. Only reclaim a claim whose
+ * owner is provably dead, or an owner-unknown (empty) claim that outlives a
+ * short grace (a claimer that died in the microscopic window between the wx
+ * create and its identity stamp).
+ */
+async function stepPastForeignClaim(
+  ctx: ClaimContext,
+  attempt: number,
+  raw: string,
+  owner: ActiveEvidenceClaim | undefined,
+): Promise<ClaimStep> {
+  if (owner !== undefined) {
+    if (identityIsAlive(owner.ownerPid, owner.ownerStartTicks)) {
+      return { kind: "wait" };
+    }
+    await clearClaim(ctx, raw);
+    return { kind: "retry" };
+  }
+  if (attempt >= EMPTY_CLAIM_GRACE_ATTEMPTS) await clearClaim(ctx, raw);
+  return { kind: "wait" };
+}
+
+/** Decide the next step when the `wx` claim failed because a pointer exists. */
+async function stepPastExistingPointer(
+  ctx: ClaimContext,
+  attempt: number,
+): Promise<ClaimStep> {
+  const resolution = await resolveActivePointer(
+    ctx.projectDir,
+    ctx.sessionId,
+    ctx.env,
+  );
+  switch (resolution.status) {
+    case "active":
+      return {
+        kind: "adopt",
+        pointer: resolution.pointer,
+        manifest: resolution.manifest,
+      };
+    case "claiming":
+      return stepPastForeignClaim(ctx, attempt, resolution.raw, resolution.claim);
+    case "absent":
+      // The pointer vanished between our failed claim and the read; retry.
+      return { kind: "retry" };
+    default:
+      // stale or corrupt: clear exactly this content, then retry the claim.
+      await clearClaim(ctx, resolution.raw);
+      return { kind: "retry" };
+  }
+}
+
+async function tryClaimPointer(
+  ctx: ClaimContext,
+  attempt: number,
+): Promise<ClaimStep> {
+  try {
+    const handle = await fs.promises.open(ctx.pointerPath, "wx");
+    return { kind: "claimed", handle };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    return stepPastExistingPointer(ctx, attempt);
+  }
+}
+
+function claimRecordFor(ctx: ClaimContext): string {
+  const claimRecord: ActiveEvidenceClaim = {
+    evidenceVersion: EVIDENCE_VERSION,
+    sessionId: ctx.sessionId,
+    ownerPid: ctx.ownerPid,
+    claim: true,
+    claimedAt: new Date().toISOString(),
+  };
+  if (ctx.ownerStartTicks !== undefined) {
+    claimRecord.ownerStartTicks = ctx.ownerStartTicks;
+  }
+  return `${JSON.stringify(claimRecord)}\n`;
+}
+
+/**
+ * We own the claim. Stamp our verifiable identity synchronously so peers can
+ * tell we are alive, closing the owner-unknown window as fast as possible.
+ */
+async function stampClaim(
+  ctx: ClaimContext,
+  handle: fs.promises.FileHandle,
+  claimContent: string,
+): Promise<void> {
+  try {
+    const buf = Buffer.from(claimContent, "utf8");
+    const { bytesWritten } = await handle.write(buf, 0, buf.length, 0);
+    if (bytesWritten !== buf.length) {
+      throw new Error(`short claim write: ${bytesWritten}/${buf.length} bytes`);
+    }
+  } catch (error) {
+    await handle.close().catch(() => {});
+    await clearClaim(ctx, claimContent).catch(() => {});
+    // Fall back to unconditional cleanup if the claim was never readable.
+    await unlinkIfMatches(ctx.pointerPath, "").catch(() => {});
+    throw error;
+  }
+  await handle.close().catch(() => {});
+}
+
+function pointerRecordFor(ctx: ClaimContext, runId: string): string {
+  const pointer: ActiveEvidencePointer = {
+    evidenceVersion: EVIDENCE_VERSION,
+    sessionId: ctx.sessionId,
+    runId,
+    ownerPid: ctx.ownerPid,
+    createdAt: new Date().toISOString(),
+  };
+  if (ctx.ownerStartTicks !== undefined) {
+    pointer.ownerStartTicks = ctx.ownerStartTicks;
+  }
+  return `${JSON.stringify(pointer)}\n`;
+}
+
+/** Publish the full pointer over our claim and confirm we are the owner. */
+async function publishPointer(
+  ctx: ClaimContext,
+  runId: string,
+  claimContent: string,
+): Promise<void> {
+  // Confirm we still own the claim before publishing. A live owner is never
+  // reclaimed, so this passes in practice; it is defense in depth against a
+  // reclaim we did not expect.
+  const current = await readTextIfPresent(ctx.pointerPath);
+  if (current !== claimContent) throw new ClaimLostError();
+
+  // Publish atomically (temp + rename) so a concurrent reader never sees a
+  // torn pointer: only the intact claim or the intact full pointer.
+  await writeFileAtomic(ctx.pointerPath, pointerRecordFor(ctx, runId));
+
+  // Final confirmation that the published pointer is ours.
+  const publishedRaw = await readTextIfPresent(ctx.pointerPath);
+  const published =
+    publishedRaw === undefined ? undefined : parsePointer(publishedRaw);
+  if (
+    published === undefined ||
+    published.runId !== runId ||
+    published.ownerPid !== ctx.ownerPid ||
+    published.ownerStartTicks !== ctx.ownerStartTicks
+  ) {
+    throw new ClaimLostError();
+  }
+}
+
+/**
+ * Create the run, then publish the pointer over our claim. If publication or
+ * verification fails, the just-created run is finalized (`failed`) so it is
+ * never a permanent running orphan, and the claim is released (a no-op if a
+ * peer already replaced it) so the session can recover.
+ */
+async function createAndPublishRun(
+  ctx: ClaimContext,
+  opts: BeginEvidenceRunOptions,
+  claimContent: string,
+): Promise<RunHandle> {
+  let run: RunHandle | undefined;
+  try {
+    if (opts._afterClaim !== undefined) await opts._afterClaim();
+    run = await createRun(
+      ctx.projectDir,
+      opts.slug ?? "evidence",
+      {
+        now: opts.now,
+        sessionId: ctx.sessionId,
+        meta: opts.meta,
+        evidence: true,
+      },
+      ctx.env,
+    );
+    await publishPointer(ctx, run.runId, claimContent);
+    return run;
+  } catch (error) {
+    if (run !== undefined) await run.finish("failed").catch(() => {});
+    await clearClaim(ctx, claimContent).catch(() => {});
+    throw error;
+  }
+}
+
+/**
+ * Own the claim end to end. Returns the new run, the adopted run of an owner
+ * that took the session meanwhile, or `undefined` when the claim was lost and
+ * nothing is active yet (the caller retries within the remaining budget).
+ */
+async function completeOwnedClaim(
+  ctx: ClaimContext,
+  handle: fs.promises.FileHandle,
+  opts: BeginEvidenceRunOptions,
+): Promise<BeginEvidenceRunResult | undefined> {
+  const claimContent = claimRecordFor(ctx);
+  await stampClaim(ctx, handle, claimContent);
+  try {
+    const run = await createAndPublishRun(ctx, opts, claimContent);
+    return { run, adopted: false };
+  } catch (error) {
+    if (!(error instanceof ClaimLostError)) throw error;
+    const resolution = await resolveActivePointer(
+      ctx.projectDir,
+      ctx.sessionId,
+      ctx.env,
+    );
+    if (resolution.status === "active") {
+      return adoptRun(ctx, resolution.pointer, resolution.manifest);
+    }
+    return undefined;
+  }
+}
+
 /**
  * Finalize and release the evidence run currently associated with a session.
  * The pointer is compare-cleared only after the manifest is durable, so a
  * concurrently replaced pointer is never removed.
  */
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function finalizeActiveEvidenceRun(
   projectDir: string,
   sessionId: string,
   status: RunStatus = "completed",
   env: EnvLike = process.env,
 ): Promise<RunManifest | undefined> {
-  const parent = (await resolveRunStorage(projectDir, env)).runsDir;
+  const ctx: FinalizeContext = {
+    projectDir,
+    sessionId,
+    env,
+    parent: (await resolveRunStorage(projectDir, env)).runsDir,
+  };
   for (let attempt = 0; attempt < MAX_CLAIM_ATTEMPTS; attempt += 1) {
-    const resolution = await resolveActivePointer(projectDir, sessionId, env);
-    if (resolution.status === "absent") return undefined;
+    const step = await resolveFinalizableRun(ctx, attempt);
+    if (step.kind === "done") return undefined;
+    if (step.kind === "retry") continue;
 
-    if (resolution.status === "claiming") {
-      const owner = resolution.claim;
-      if (
-        owner !== undefined &&
-        identityIsAlive(owner.ownerPid, owner.ownerStartTicks)
-      ) {
-        await delay(claimBackoff(attempt));
-        continue;
-      }
-      if (owner === undefined && attempt < EMPTY_CLAIM_GRACE_ATTEMPTS) {
-        await delay(claimBackoff(attempt));
-        continue;
-      }
-      if (
-        await clearActivePointer(
-          projectDir,
-          sessionId,
-          { expectRaw: resolution.raw },
-          env,
-        )
-      ) {
-        return undefined;
-      }
-      continue;
-    }
-    if (resolution.status === "corrupt") {
-      if (
-        await clearActivePointer(
-          projectDir,
-          sessionId,
-          { expectRaw: resolution.raw },
-          env,
-        )
-      ) {
-        return undefined;
-      }
-      continue;
-    }
-
-    const pointer = resolution.pointer;
-    if (pointer === undefined) continue;
-    const runDir = path.join(parent, pointer.runId);
-    const manifest =
-      resolution.status === "active"
-        ? resolution.manifest
-        : await readManifest(runDir);
-    if (
-      manifest === undefined ||
-      !isEvidenceRun(manifest) ||
-      !manifestMatchesPointer(manifest, pointer, sessionId)
-    ) {
-      if (
-        await clearActivePointer(
-          projectDir,
-          sessionId,
-          { expectRaw: resolution.raw },
-          env,
-        )
-      ) {
-        return undefined;
-      }
-      continue;
-    }
-
+    const { pointer, manifest } = step;
     if (manifest.status === "running") {
+      const runDir = path.join(ctx.parent, pointer.runId);
       manifest.evidenceTruncated = await isEvidenceTruncated(runDir);
-      await new RunHandle(runDir, manifest).finish(status);
+      const run = await openRun(projectDir, pointer.runId, manifest, env);
+      await run.finish(status);
     }
-    if (
-      !(await clearActivePointer(
-        projectDir,
-        sessionId,
-        { expectRaw: resolution.raw },
-        env,
-      ))
-    ) {
-      continue;
-    }
+    const cleared = await clearActivePointer(
+      projectDir,
+      sessionId,
+      { expectRaw: step.raw },
+      env,
+    );
+    if (!cleared) continue;
     await pruneFinalizedEvidenceRuns(projectDir, {}, env);
     return manifest;
   }
   throw new Error(
     `Failed to finalize the active evidence run for session ${sessionId}`,
   );
+}
+
+interface FinalizeContext {
+  projectDir: string;
+  sessionId: string;
+  env: EnvLike;
+  parent: string;
+}
+
+type FinalizeStep =
+  | { kind: "done" }
+  | { kind: "retry" }
+  | {
+      kind: "ready";
+      raw: string;
+      pointer: ActiveEvidencePointer;
+      manifest: RunManifest;
+    };
+
+/** Compare-clear the pointer: done if it was ours to clear, else retry. */
+async function clearOrRetry(
+  ctx: FinalizeContext,
+  raw: string,
+): Promise<FinalizeStep> {
+  const cleared = await clearActivePointer(
+    ctx.projectDir,
+    ctx.sessionId,
+    { expectRaw: raw },
+    ctx.env,
+  );
+  return { kind: cleared ? "done" : "retry" };
+}
+
+/** Wait out a live or freshly made claim; reclaim only a provably dead one. */
+async function waitOutForeignClaim(
+  ctx: FinalizeContext,
+  attempt: number,
+  raw: string,
+  owner: ActiveEvidenceClaim | undefined,
+): Promise<FinalizeStep> {
+  const live =
+    owner !== undefined &&
+    identityIsAlive(owner.ownerPid, owner.ownerStartTicks);
+  const inGrace = owner === undefined && attempt < EMPTY_CLAIM_GRACE_ATTEMPTS;
+  if (live || inGrace) {
+    await delay(claimBackoff(attempt));
+    return { kind: "retry" };
+  }
+  return clearOrRetry(ctx, raw);
+}
+
+async function resolveFinalizableRun(
+  ctx: FinalizeContext,
+  attempt: number,
+): Promise<FinalizeStep> {
+  const resolution = await resolveActivePointer(
+    ctx.projectDir,
+    ctx.sessionId,
+    ctx.env,
+  );
+  if (resolution.status === "absent") return { kind: "done" };
+  if (resolution.status === "claiming") {
+    return waitOutForeignClaim(ctx, attempt, resolution.raw, resolution.claim);
+  }
+  if (resolution.status === "corrupt") return clearOrRetry(ctx, resolution.raw);
+
+  const pointer = resolution.pointer;
+  if (pointer === undefined) return { kind: "retry" };
+  const manifest =
+    resolution.status === "active"
+      ? resolution.manifest
+      : await readManifest(path.join(ctx.parent, pointer.runId));
+  if (
+    manifest === undefined ||
+    !isEvidenceRun(manifest) ||
+    !manifestMatchesPointer(manifest, pointer, ctx.sessionId)
+  ) {
+    return clearOrRetry(ctx, resolution.raw);
+  }
+  return { kind: "ready", raw: resolution.raw, pointer, manifest };
 }
 
 function encodeRecord(record: EvidenceRecord): string {

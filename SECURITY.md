@@ -23,6 +23,11 @@ fuller model.
 Computer-use evidence is stored as local run data, by default under
 `~/.pickforge/lab/projects/<projectId>/runs/<runId>/` (outside the
 project; see the README's "Run storage" section for storage modes).
+Run directories are created and read through the same trust boundary: every
+entry below the project directory, the Pickforge home, or the custom path must
+be a real directory, so a symlinked `.picklab` committed in a repository cannot
+redirect `project-local` artifact writes. An unsafe entry is reported, never
+replaced or removed.
 `actions.jsonl` is the authoritative sanitized timeline; finalization
 produces an escaped, no-script `report.html` with a restrictive content
 security policy and no external requests.

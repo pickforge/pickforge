@@ -64,10 +64,10 @@ pickforge doctor
 pickforge init
 ```
 
-For `0.4.0-alpha.1`, the visible `--mobile-integration-alpha` flag is enabled
-by default because this is a prerelease build. `init --dry-run` previews every
-change. Normal `init` configures the official Dart/Flutter MCP server and the
-portable Flutter workflow for Claude Code, Codex, and Pi.
+`init --dry-run` previews every change. `init` configures the official
+Dart/Flutter MCP server and the portable Flutter workflow for Claude Code,
+Codex, and Pi. It needs `dart` on PATH and refuses to run otherwise; there is no
+opt-in flag.
 
 ## 3. Register the lab MCP server with the agent the user uses
 
