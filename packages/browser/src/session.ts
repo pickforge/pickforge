@@ -44,7 +44,9 @@ import { waitForDevToolsPort } from "./devtools.js";
 import { buildSupervisedBrowserCommand } from "./supervisor.js";
 import { asError, sleep } from "./util.js";
 
-const DEFAULT_CDP_TIMEOUT_MS = 20_000;
+// A cold Chrome can need more than 20 seconds under shared CI load. Keep the
+// budget bounded; failures print the redacted log tail and readiness state.
+const DEFAULT_CDP_TIMEOUT_MS = 45_000;
 // A browser session also launches a heavy real Chrome, so its private Xvfb can
 // be scheduled slowly on a busy host. Give the display generous headroom rather
 // than the display supervisor's default so a loaded machine does not fail the
@@ -196,6 +198,243 @@ async function stopOwnedBrowserDaemon(
   return stopOwnedDaemonGroup(daemon);
 }
 
+interface BrowserCreationContext {
+  opts: CreateBrowserSessionOptions;
+  registryEnv: EnvLike;
+  spawnEnv: EnvLike;
+  binaryPath: string;
+  record: SessionRecord;
+  logDir: string;
+  layout: BrowserRuntimeLayout;
+}
+
+interface BrowserCreationState {
+  xvfb?: XvfbHandle;
+  xvfbPartial?: XvfbPartialStart;
+  xvfbIdentity?: ProcessIdentity;
+  browserIdentity?: ProcessIdentity;
+  browserDaemon?: OwnedDaemonHandle;
+}
+
+async function launchBrowserDaemon(
+  ctx: BrowserCreationContext,
+  xvfb: XvfbHandle,
+): Promise<OwnedDaemonHandle> {
+  const args = buildChromeArgs({
+    profileDir: ctx.layout.profileDir,
+    width: xvfb.width,
+    height: xvfb.height,
+    noSandbox:
+      ctx.opts.noSandbox ??
+      readPickforgeEnv(ctx.spawnEnv, "CHROME_NO_SANDBOX") === "1",
+    ...(ctx.opts.extraArgs === undefined
+      ? {}
+      : { extraArgs: ctx.opts.extraArgs }),
+    ...(ctx.opts.startUrl === undefined
+      ? {}
+      : { startUrl: ctx.opts.startUrl }),
+  });
+  const childEnv = buildBrowserEnv({
+    display: xvfb.display,
+    layout: ctx.layout,
+    sourceEnv: ctx.spawnEnv,
+  });
+  assertNotAborted(ctx.opts.signal);
+  const supervised = buildSupervisedBrowserCommand(
+    process.execPath,
+    ctx.binaryPath,
+    args,
+  );
+  return startDaemon(supervised.command, supervised.args, {
+    logDir: ctx.logDir,
+    name: "chrome",
+    env: childEnv,
+    cleanEnv: true,
+    owned: true,
+  });
+}
+
+async function waitForReadyPort(
+  ctx: BrowserCreationContext,
+  state: BrowserCreationState,
+): Promise<number> {
+  const { browserDaemon, browserIdentity } = state;
+  if (browserDaemon === undefined || browserIdentity === undefined) {
+    throw new Error("Chrome startup state is incomplete");
+  }
+  const timeoutMs = ctx.opts.cdpTimeoutMs ?? DEFAULT_CDP_TIMEOUT_MS;
+  const waited = await waitForDevToolsPort({
+    profileDir: ctx.layout.profileDir,
+    logPath: browserDaemon.logPath,
+    timeoutMs,
+    isAlive: () => processIdentityMatches(browserIdentity),
+    signal: ctx.opts.signal,
+  });
+  if (waited.ok) return waited.port;
+  if (waited.reason === "aborted") {
+    throw new Error("Browser session creation aborted by the client");
+  }
+  const failureSummary =
+    waited.reason === "exited"
+      ? "Chrome exited during startup"
+      : `Chrome startup timed out after ${timeoutMs}ms`;
+  throw new Error(`${failureSummary}.\n${waited.diagnostics}`);
+}
+
+async function finishBrowserStartup(
+  ctx: BrowserCreationContext,
+  state: BrowserCreationState,
+  desktop: DesktopSessionInfo,
+): Promise<BrowserSessionHandle> {
+  const xvfb = state.xvfb;
+  if (xvfb === undefined) throw new Error("Xvfb startup state is incomplete");
+  const browserDaemon = await launchBrowserDaemon(ctx, xvfb);
+  state.browserDaemon = browserDaemon;
+  const browserIdentity = await waitForOwnedIdentity(browserDaemon);
+  if (browserIdentity === undefined) {
+    await stopOwnedBrowserDaemon(browserDaemon);
+    throw new Error(
+      `Chrome process ${browserDaemon.pid} could not be identified during startup; ` +
+        `check the log at ${browserDaemon.logPath}`,
+    );
+  }
+  state.browserIdentity = browserIdentity;
+  const startingBrowser: BrowserSessionInfo = {
+    browserPid: browserIdentity.pid,
+    browserStartTimeTicks: browserIdentity.startTicks,
+    binaryPath: ctx.binaryPath,
+    profileMode: "ephemeral",
+    profileDir: ctx.layout.profileDir,
+  };
+  await updateSession(
+    ctx.record.id,
+    { desktop, browser: startingBrowser },
+    ctx.registryEnv,
+  );
+  browserDaemon.release();
+
+  const cdpPort = await waitForReadyPort(ctx, state);
+  if (!processIdentityMatches(browserIdentity)) {
+    throw new Error(
+      `Chrome process ${browserDaemon.pid} vanished right after startup; ` +
+        `check the log at ${browserDaemon.logPath}`,
+    );
+  }
+  const browser: BrowserSessionInfo = { ...startingBrowser, cdpPort };
+  assertNotAborted(ctx.opts.signal);
+  await updateSession(
+    ctx.record.id,
+    { status: "running", desktop, browser },
+    ctx.registryEnv,
+  );
+  assertNotAborted(ctx.opts.signal);
+
+  return {
+    id: ctx.record.id,
+    display: xvfb.display,
+    xvfbPid: xvfb.pid,
+    browserPid: browserIdentity.pid,
+    cdpPort,
+    profileDir: ctx.layout.profileDir,
+    binaryPath: ctx.binaryPath,
+    logDir: ctx.logDir,
+  };
+}
+
+async function stopFailedBrowser(
+  state: BrowserCreationState,
+): Promise<boolean> {
+  if (state.browserIdentity !== undefined) {
+    return (await stopBrowserGroup(state.browserIdentity)).gone;
+  }
+  if (state.browserDaemon !== undefined) {
+    return stopOwnedBrowserDaemon(state.browserDaemon);
+  }
+  return true;
+}
+
+async function stopFailedXvfb(
+  state: BrowserCreationState,
+  browserGone: boolean,
+): Promise<boolean> {
+  if (state.xvfb === undefined) {
+    return state.xvfbPartial?.cleanupConfirmed ?? true;
+  }
+  if (!browserGone || state.xvfbIdentity === undefined) return false;
+  return (await stopBrowserGroup(state.xvfbIdentity)).gone;
+}
+
+function failedDesktopInfo(
+  state: BrowserCreationState,
+): DesktopSessionInfo | undefined {
+  const knownXvfb = state.xvfb ?? state.xvfbPartial;
+  if (knownXvfb === undefined) return undefined;
+  const startTicks =
+    state.xvfbPartial?.pid === knownXvfb.pid
+      ? state.xvfbPartial.startTimeTicks
+      : state.xvfbIdentity?.startTicks;
+  return {
+    display: knownXvfb.display,
+    xvfbPid: knownXvfb.pid,
+    ...(startTicks === undefined ? {} : { xvfbStartTimeTicks: startTicks }),
+    width: knownXvfb.width,
+    height: knownXvfb.height,
+  };
+}
+
+function failedBrowserInfo(
+  ctx: BrowserCreationContext,
+  state: BrowserCreationState,
+): BrowserSessionInfo | undefined {
+  if (state.browserIdentity === undefined) return undefined;
+  return {
+    browserPid: state.browserIdentity.pid,
+    browserStartTimeTicks: state.browserIdentity.startTicks,
+    binaryPath: ctx.binaryPath,
+    profileMode: "ephemeral",
+    profileDir: ctx.layout.profileDir,
+  };
+}
+
+async function failBrowserCreation(
+  ctx: BrowserCreationContext,
+  state: BrowserCreationState,
+  error: unknown,
+): Promise<never> {
+  const browserGone = await stopFailedBrowser(state);
+  state.browserDaemon?.release();
+  const xvfbGone = await stopFailedXvfb(state, browserGone);
+  const runtimeFailures =
+    browserGone && xvfbGone ? await removeRuntimeData(ctx.layout) : [];
+  const cleanupComplete =
+    browserGone && xvfbGone && runtimeFailures.length === 0;
+  const desktop = failedDesktopInfo(state);
+  const browser = failedBrowserInfo(ctx, state);
+  const clearedMeta = { ...ctx.record.meta };
+  delete clearedMeta[REAPER_CLEANUP_PENDING_META_KEY];
+  await updateSession(
+    ctx.record.id,
+    cleanupComplete
+      ? {
+          status: "error",
+          desktop: undefined,
+          browser: undefined,
+          meta: clearedMeta,
+        }
+      : {
+          status: "error",
+          meta: {
+            ...ctx.record.meta,
+            [REAPER_CLEANUP_PENDING_META_KEY]: true,
+          },
+          ...(desktop === undefined ? {} : { desktop }),
+          ...(browser === undefined ? {} : { browser }),
+        },
+    ctx.registryEnv,
+  ).catch(() => {});
+  throw error;
+}
+
 /**
  * Create an isolated headed-Chrome session: a private Xvfb display plus headed
  * Chrome on an ephemeral profile with a loopback CDP endpoint. A partial
@@ -203,7 +442,6 @@ async function stopOwnedBrowserDaemon(
  * If cleanup cannot be confirmed, the error record retains every known
  * identity and is marked for a later reaper retry.
  */
-// eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function createBrowserSession(
   opts: CreateBrowserSessionOptions,
 ): Promise<BrowserSessionHandle> {
@@ -229,17 +467,22 @@ export async function createBrowserSession(
   const logDir = browserSessionLogDir(record.id, registryEnv);
   const layout = browserRuntimeLayout(logDir);
 
-  let xvfb: XvfbHandle | undefined;
-  let xvfbPartial: XvfbPartialStart | undefined;
-  let xvfbIdentity: ProcessIdentity | undefined;
-  let browserIdentity: ProcessIdentity | undefined;
-  let browserDaemon: OwnedDaemonHandle | undefined;
+  const ctx: BrowserCreationContext = {
+    opts,
+    registryEnv,
+    spawnEnv,
+    binaryPath,
+    record,
+    logDir,
+    layout,
+  };
+  const state: BrowserCreationState = {};
   try {
     assertNotAborted(opts.signal);
     await makeRuntimeDirs(layout);
 
     try {
-      xvfb = await startXvfb({
+      state.xvfb = await startXvfb({
         ...(opts.width !== undefined ? { width: opts.width } : {}),
         ...(opts.height !== undefined ? { height: opts.height } : {}),
         logDir,
@@ -248,7 +491,7 @@ export async function createBrowserSession(
         displayStart: BROWSER_DISPLAY_START,
         signal: opts.signal,
         onSpawn: async (partial) => {
-          xvfbPartial = partial;
+          state.xvfbPartial = partial;
           await updateSession(
             record.id,
             {
@@ -266,187 +509,27 @@ export async function createBrowserSession(
       });
     } catch (error) {
       if (error instanceof XvfbStartError && error.partial !== undefined) {
-        xvfbPartial = error.partial;
+        state.xvfbPartial = error.partial;
       }
       throw error;
     }
-    xvfbIdentity = {
+    const xvfb = state.xvfb;
+    if (xvfb === undefined) throw new Error("Xvfb did not return a handle");
+    state.xvfbIdentity = {
       pid: xvfb.pid,
       startTicks: xvfb.startTimeTicks,
     };
     const desktop: DesktopSessionInfo = {
       display: xvfb.display,
       xvfbPid: xvfb.pid,
-      xvfbStartTimeTicks: xvfbIdentity.startTicks,
+      xvfbStartTimeTicks: state.xvfbIdentity.startTicks,
       width: xvfb.width,
       height: xvfb.height,
     };
 
-    const args = buildChromeArgs({
-      profileDir: layout.profileDir,
-      width: xvfb.width,
-      height: xvfb.height,
-      noSandbox:
-        opts.noSandbox ??
-        readPickforgeEnv(spawnEnv, "CHROME_NO_SANDBOX") === "1",
-      ...(opts.extraArgs !== undefined ? { extraArgs: opts.extraArgs } : {}),
-      ...(opts.startUrl !== undefined ? { startUrl: opts.startUrl } : {}),
-    });
-    const childEnv = buildBrowserEnv({
-      display: xvfb.display,
-      layout,
-      sourceEnv: spawnEnv,
-    });
-    assertNotAborted(opts.signal);
-    const supervised = buildSupervisedBrowserCommand(
-      process.execPath,
-      binaryPath,
-      args,
-    );
-    browserDaemon = await startDaemon(supervised.command, supervised.args, {
-      logDir,
-      name: "chrome",
-      env: childEnv,
-      cleanEnv: true,
-      owned: true,
-    });
-    browserIdentity = await waitForOwnedIdentity(browserDaemon);
-    if (browserIdentity === undefined) {
-      await stopOwnedBrowserDaemon(browserDaemon);
-      throw new Error(
-        `Chrome process ${browserDaemon.pid} could not be identified during startup; ` +
-          `check the log at ${browserDaemon.logPath}`,
-      );
-    }
-    const startingBrowser: BrowserSessionInfo = {
-      browserPid: browserIdentity.pid,
-      browserStartTimeTicks: browserIdentity.startTicks,
-      binaryPath,
-      profileMode: "ephemeral",
-      profileDir: layout.profileDir,
-    };
-    await updateSession(
-      record.id,
-      { desktop, browser: startingBrowser },
-      registryEnv,
-    );
-    browserDaemon.release();
-
-    const waited = await waitForDevToolsPort({
-      profileDir: layout.profileDir,
-      timeoutMs: opts.cdpTimeoutMs ?? DEFAULT_CDP_TIMEOUT_MS,
-      isAlive: () =>
-        browserIdentity !== undefined && processIdentityMatches(browserIdentity),
-      signal: opts.signal,
-    });
-    if (!waited.ok) {
-      if (waited.reason === "aborted") {
-        throw new Error("Browser session creation aborted by the client");
-      }
-      throw new Error(
-        waited.reason === "exited"
-          ? `Chrome exited during startup before exposing a DevTools port; ` +
-            `check the log at ${browserDaemon.logPath}`
-          : `Chrome did not expose a DevTools port within ` +
-            `${opts.cdpTimeoutMs ?? DEFAULT_CDP_TIMEOUT_MS}ms; ` +
-            `check the log at ${browserDaemon.logPath}`,
-      );
-    }
-
-    if (!processIdentityMatches(browserIdentity)) {
-      throw new Error(
-        `Chrome process ${browserDaemon.pid} vanished right after startup; ` +
-          `check the log at ${browserDaemon.logPath}`,
-      );
-    }
-    const browser: BrowserSessionInfo = {
-      ...startingBrowser,
-      cdpPort: waited.port,
-    };
-    assertNotAborted(opts.signal);
-    await updateSession(
-      record.id,
-      { status: "running", desktop, browser },
-      registryEnv,
-    );
-    assertNotAborted(opts.signal);
-
-    return {
-      id: record.id,
-      display: xvfb.display,
-      xvfbPid: xvfb.pid,
-      browserPid: browserIdentity.pid,
-      cdpPort: waited.port,
-      profileDir: layout.profileDir,
-      binaryPath,
-      logDir,
-    };
+    return await finishBrowserStartup(ctx, state, desktop);
   } catch (error) {
-    const browserGone =
-      browserIdentity === undefined && browserDaemon !== undefined
-        ? await stopOwnedBrowserDaemon(browserDaemon)
-        : (await stopBrowserGroup(browserIdentity)).gone;
-    browserDaemon?.release();
-    const xvfbGone =
-      xvfb === undefined
-        ? (xvfbPartial?.cleanupConfirmed ?? true)
-        : browserGone && xvfbIdentity !== undefined
-          ? (await stopBrowserGroup(xvfbIdentity)).gone
-          : false;
-    const runtimeFailures =
-      browserGone && xvfbGone ? await removeRuntimeData(layout) : [];
-    const cleanupComplete =
-      browserGone && xvfbGone && runtimeFailures.length === 0;
-    const knownXvfb = xvfb ?? xvfbPartial;
-    const knownXvfbStartTimeTicks =
-      knownXvfb !== undefined && xvfbPartial?.pid === knownXvfb.pid
-        ? xvfbPartial.startTimeTicks
-        : xvfbIdentity?.startTicks;
-    const desktop =
-      knownXvfb === undefined
-        ? undefined
-        : {
-            display: knownXvfb.display,
-            xvfbPid: knownXvfb.pid,
-            ...(knownXvfbStartTimeTicks === undefined
-              ? {}
-              : { xvfbStartTimeTicks: knownXvfbStartTimeTicks }),
-            width: knownXvfb.width,
-            height: knownXvfb.height,
-          };
-    const browser =
-      browserIdentity === undefined
-        ? undefined
-        : {
-            browserPid: browserIdentity.pid,
-            browserStartTimeTicks: browserIdentity.startTicks,
-            binaryPath,
-            profileMode: "ephemeral" as const,
-            profileDir: layout.profileDir,
-          };
-    const clearedMeta = { ...record.meta };
-    delete clearedMeta[REAPER_CLEANUP_PENDING_META_KEY];
-    await updateSession(
-      record.id,
-      cleanupComplete
-        ? {
-            status: "error",
-            desktop: undefined,
-            browser: undefined,
-            meta: clearedMeta,
-          }
-        : {
-            status: "error",
-            meta: {
-              ...record.meta,
-              [REAPER_CLEANUP_PENDING_META_KEY]: true,
-            },
-            ...(desktop === undefined ? {} : { desktop }),
-            ...(browser === undefined ? {} : { browser }),
-          },
-      registryEnv,
-    ).catch(() => {});
-    throw error;
+    return failBrowserCreation(ctx, state, error);
   }
 }
 

@@ -80,6 +80,16 @@ function spawnEnvFor(
   return { PATH: fakePath(binDir), ...extra };
 }
 
+async function rejectionMessage(promise: Promise<unknown>): Promise<string> {
+  return promise.then(
+    () => {
+      throw new Error("Expected promise to reject");
+    },
+    (error: unknown) =>
+      error instanceof Error ? error.message : String(error),
+  );
+}
+
 function isPortListening(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const socket = net.connect({ host: "127.0.0.1", port });
@@ -624,9 +634,14 @@ describe.skipIf(!hasXvfb)("destroyBrowserSession (fake binaries)", () => {
 describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
   it("cleans up when Chrome crashes during startup", async () => {
     const env = spawnEnvFor("crash");
-    await expect(
+    const failure = await rejectionMessage(
       createBrowserSession({ projectDir, registryEnv, env, cdpTimeoutMs: 3000 }),
-    ).rejects.toThrow(/exited during startup/);
+    );
+    expect(failure).toContain("Chrome exited during startup");
+    expect(failure).toContain(
+      "file was not created before the Chrome process exited",
+    );
+    expect(failure).toContain("fake Chrome crashed before publishing a port");
 
     // Exactly one record exists (status error), its profile is gone, and its
     // Xvfb leg was stopped.
@@ -651,9 +666,13 @@ describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
 
   it("rejects Chrome that exits after publishing a DevTools port", async () => {
     const env = spawnEnvFor("crash-after-port");
-    await expect(
+    const failure = await rejectionMessage(
       createBrowserSession({ projectDir, registryEnv, env, cdpTimeoutMs: 3000 }),
-    ).rejects.toThrow(/exited during startup/);
+    );
+    expect(failure).toMatch(/published port \d+, then the Chrome process exited/);
+    expect(failure).toContain("fake Chrome crashed after publishing a port");
+    expect(failure).not.toContain("HTTP endpoint");
+    expect(failure).not.toContain("did not become ready");
 
     const recordFile = fs
       .readdirSync(path.join(home, "sessions"))
@@ -920,9 +939,12 @@ describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
 
   it("kills the process group and removes the profile when Chrome stalls", async () => {
     const env = spawnEnvFor("stall");
-    await expect(
+    const failure = await rejectionMessage(
       createBrowserSession({ projectDir, registryEnv, env, cdpTimeoutMs: 500 }),
-    ).rejects.toThrow(/did not expose a DevTools port/);
+    );
+    expect(failure).toContain("Chrome startup timed out after 500ms");
+    expect(failure).toContain("file was not created before timeout");
+    expect(failure).toContain("fake Chrome stalled before publishing a port");
 
     const sessions = fs
       .readdirSync(path.join(home, "sessions"))
