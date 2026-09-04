@@ -33,10 +33,11 @@ GitHub release description, then reset it after the release is published.
 - Experimental, unpublished `pickforge evidence record` accepts a bounded JSON
   document from stdin or `--input`, verifies the existing Flutter init receipt,
   copies validated screenshots byte-for-byte into an external private run directory,
-  and writes canonical `evidence.json` plus Markdown `report.md`. Evidence schema v2
-  records source dimensions and adds a 1568px bounded PNG preview for oversized
-  screenshots; reports use the preview while preserving the original artifact. Text
-  secrets are redacted, Markdown is escaped without changing canonical JSON strings,
+  and writes canonical `evidence.json` plus Markdown `report.md`. Evidence schema v3
+  adds up to 32 ordered intermediate steps between `before` and `after`, with optional
+  check-to-step references. It retains v2 source dimensions and 1568px bounded PNG
+  previews for oversized screenshots; reports link the full capture and nest its preview.
+  Text secrets are redacted, Markdown is escaped without changing canonical JSON strings,
   and the command
   accepts a valid owned Flutter receipt v1 or newer and fails closed when it is
   missing or belongs elsewhere; the Flutter integration pack itself is now v2.
@@ -86,9 +87,9 @@ GitHub release description, then reset it after the release is published.
   dry-run, receipt ownership, file modes, idempotency, Git-tree cleanliness,
   JSON/text safety, CLI exits, owned Flutter MCP configuration, per-harness
   arguments, workflow targeting/deduplication, alpha tool preconditions, evidence
-  storage/redaction, bounded screenshot previews, byte-identical source retention,
-  preview deduplication and budgeting, receipt compatibility, and concurrent first
-  use. Exact local validation also includes `cargo check --workspace --all-targets --locked
+  storage/redaction, ordered evidence steps and check references, bounded screenshot
+  previews, byte-identical source retention, cross-step deduplication and budgeting,
+  receipt compatibility, and concurrent first use. Exact local validation also includes `cargo check --workspace --all-targets --locked
   --target x86_64-pc-windows-msvc` and target-specific clippy with `-D warnings`.
   Windows-native tests run in the CI matrix.
 - The opt-in live end-to-end test (`PICKFORGE_LIVE_FLUTTER=1 cargo test -p
