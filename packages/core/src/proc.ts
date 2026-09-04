@@ -414,6 +414,19 @@ export function readProcessIdentity(pid: number): ProcessIdentity | undefined {
 }
 
 /**
+ * Snapshot a process-group leader for cleanup, including a zombie leader whose
+ * descendants may still be running in its group.
+ */
+export function readProcessGroupLeaderIdentity(
+  pid: number,
+): ProcessIdentity | undefined {
+  const stat = readProcStat(pid);
+  return stat === undefined || stat.pgrp !== pid
+    ? undefined
+    : { pid, startTicks: stat.startTicks };
+}
+
+/**
  * Confirm the PID still refers to the same process it did when the identity
  * was captured. Returns false if the process exited or the PID was reused.
  */

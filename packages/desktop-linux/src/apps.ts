@@ -1,16 +1,22 @@
 import {
-  isPidAlive,
+  isProcessGroupAlive,
+  readProcessGroupLeaderIdentity,
+  readProcessIdentity,
   runCommand,
   startDaemon,
+  stopProcessGroupVerified,
   type EnvLike,
+  type ProcessIdentity,
   type RunCommandResult,
 } from "@pickforge/lab-core";
 import { parseDisplayNumber } from "./display.js";
+import { createIsolatedDesktopEnvironment } from "./environment.js";
 import { sleep } from "./util.js";
 
 const XDOTOOL_TIMEOUT_MS = 5_000;
 const WINDOW_POLL_INTERVAL_MS = 100;
 const DEFAULT_WAIT_TIMEOUT_MS = 10_000;
+export const DEFAULT_EXEC_WINDOW_TIMEOUT_MS = 30_000;
 const LAUNCH_GRACE_MS = 300;
 const LAUNCH_POLL_INTERVAL_MS = 50;
 
@@ -28,39 +34,151 @@ export interface AppHandle {
   logPath: string;
 }
 
+interface StartedApp extends AppHandle {
+  identity: ProcessIdentity;
+}
+
+interface AppWaitOwnership extends AppHandle {
+  identity?: ProcessIdentity;
+}
+
+export interface ExecAppOptions extends LaunchAppOptions {
+  windowTimeoutMs?: number;
+}
+
+export interface ExecAppHandle extends AppHandle {
+  processGroupId: number;
+  windows: WindowInfo[];
+}
+
 export interface WindowInfo {
   id: string;
   name: string;
 }
 
-export async function launchApp(opts: LaunchAppOptions): Promise<AppHandle> {
+async function stopAfterFailedAppWait(app: AppWaitOwnership): Promise<void> {
+  const identity =
+    app.identity ?? readProcessGroupLeaderIdentity(app.pid);
+  if (identity === undefined) {
+    if (!isProcessGroupAlive(app.pid)) return;
+    throw new Error(
+      `Could not verify the identity of process group ${app.pid} before stopping it`,
+    );
+  }
+  const stopped = await stopProcessGroupVerified(identity);
+  if (stopped.outcome !== "terminated" && stopped.outcome !== "already-dead") {
+    throw new Error(`Could not verify that process group ${app.pid} was stopped`);
+  }
+}
+
+async function startApp(opts: LaunchAppOptions): Promise<StartedApp> {
   parseDisplayNumber(opts.display);
   const daemon = await startDaemon(opts.command, opts.args ?? [], {
     logDir: opts.logDir,
     cwd: opts.cwd,
-    env: {
+    env: createIsolatedDesktopEnvironment(opts.display, {
+      ...process.env,
       ...opts.env,
-      DISPLAY: opts.display,
-      // Toolkits (GTK, Qt, Electron, Flutter) try Wayland first, which would
-      // open the app on the user's real desktop instead of the isolated lab
-      // display. Merely unsetting WAYLAND_DISPLAY is not enough: libwayland
-      // then falls back to the default "wayland-0" socket, so point it at a
-      // socket that cannot exist to force the X11 fallback.
-      WAYLAND_DISPLAY: "pickforge-no-wayland",
-      WAYLAND_SOCKET: undefined,
-    },
+    }),
+    cleanEnv: true,
   });
-  const graceDeadline = Date.now() + LAUNCH_GRACE_MS;
-  while (Date.now() < graceDeadline) {
-    if (!isPidAlive(daemon.pid)) {
+  const ownershipIdentity = readProcessGroupLeaderIdentity(daemon.pid);
+  let identity = readProcessIdentity(daemon.pid);
+  let succeeded = false;
+  try {
+    const graceDeadline = Date.now() + LAUNCH_GRACE_MS;
+    while (Date.now() < graceDeadline) {
+      if (!isProcessGroupAlive(daemon.pid)) {
+        throw new Error(
+          `${opts.command} exited immediately after launch on ${opts.display}; ` +
+            `check the log at ${daemon.logPath}`,
+        );
+      }
+      identity ??= readProcessIdentity(daemon.pid);
+      await sleep(LAUNCH_POLL_INTERVAL_MS);
+    }
+    if (identity === undefined) {
       throw new Error(
-        `${opts.command} exited immediately after launch on ${opts.display}; ` +
-          `check the log at ${daemon.logPath}`,
+        `Could not capture the process identity for ${opts.command} on ${opts.display}`,
       );
     }
-    await sleep(LAUNCH_POLL_INTERVAL_MS);
+    succeeded = true;
+    return { pid: daemon.pid, logPath: daemon.logPath, identity };
+  } finally {
+    if (!succeeded) {
+      await stopAfterFailedAppWait({
+        pid: daemon.pid,
+        logPath: daemon.logPath,
+        identity: identity ?? ownershipIdentity,
+      });
+    }
   }
-  return { pid: daemon.pid, logPath: daemon.logPath };
+}
+
+export async function launchApp(opts: LaunchAppOptions): Promise<AppHandle> {
+  const app = await startApp(opts);
+  return { pid: app.pid, logPath: app.logPath };
+}
+
+export async function execApp(opts: ExecAppOptions): Promise<ExecAppHandle> {
+  const existingWindowIds = new Set(
+    (await listWindows(opts.display, opts.env)).map((window) => window.id),
+  );
+  const app = await startApp(opts);
+  const timeoutMs = opts.windowTimeoutMs ?? DEFAULT_EXEC_WINDOW_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
+  let succeeded = false;
+  try {
+    for (;;) {
+      const windows = (await listWindows(opts.display, opts.env)).filter(
+        (window) => !existingWindowIds.has(window.id),
+      );
+      if (windows.length > 0) {
+        succeeded = true;
+        return {
+          pid: app.pid,
+          logPath: app.logPath,
+          processGroupId: app.pid,
+          windows,
+        };
+      }
+      if (!isProcessGroupAlive(app.pid)) {
+        throw new Error(
+          `${opts.command} process group exited before opening a client window on ${opts.display}, ` +
+            "but a daemonising child may have escaped the lab and opened on your real desktop. " +
+            "Check your real desktop, find any stray process with `pgrep -af <app-name>`, " +
+            "and stop it with `kill <pid>`. " +
+            "Containment is tracked at https://github.com/pickforge/pickforge/issues/85. " +
+            `Log: ${app.logPath}`,
+        );
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `No new client window appeared on ${opts.display} within ${timeoutMs}ms ` +
+            `while ${opts.command} was still running. Pickforge stopped process ` +
+            `group ${app.pid} because the app may have escaped the lab and ` +
+            "opened on your real desktop. If this was a slow first build, " +
+            "retry with `--window-timeout <ms>`. " +
+            `Log: ${app.logPath}`,
+        );
+      }
+      await sleep(WINDOW_POLL_INTERVAL_MS);
+    }
+  } finally {
+    if (!succeeded) await stopAfterFailedAppWait(app);
+  }
+}
+
+export function noClientWindowsWarning(
+  display: string,
+  sessionId: string,
+): string {
+  return (
+    `No client windows are visible on ${display}. If the screenshot is black, ` +
+    "the app may have escaped the lab and opened on your real desktop. " +
+    `Start it with \`pickforge-lab desktop exec --session ${sessionId} -- <command>\` ` +
+    `or run \`eval "$(pickforge-lab desktop env --session ${sessionId})"\` before launching it.`
+  );
 }
 
 async function runXdotoolQuery(

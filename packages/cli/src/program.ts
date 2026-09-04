@@ -30,6 +30,8 @@ import {
   runDesktopClick,
   runDesktopDoubleClick,
   runDesktopDrag,
+  runDesktopEnv,
+  runDesktopExec,
   runDesktopKey,
   runDesktopLaunch,
   runDesktopMove,
@@ -284,6 +286,35 @@ function registerDesktopLaunchCommands(desktop: Command): void {
     ),
   ).action(async (command, args, opts) => {
     process.exitCode = await runDesktopLaunch(command, args, opts);
+  });
+
+  withJson(
+    withDesktopSession(
+      desktop
+        .command("exec")
+        .description(
+          "Start a command in the desktop session and wait for a client window",
+        )
+        .argument("<command>", "executable to start")
+        .argument("[args...]", "arguments for the executable (use -- before flags)")
+        .option("--cwd <dir>", "working directory for the command")
+        .option(
+          "--window-timeout <ms>",
+          "maximum time to wait for a client window (default 30000)",
+        ),
+    ),
+  ).action(async (command, args, opts) => {
+    process.exitCode = await runDesktopExec(command, args, opts);
+  });
+
+  withJson(
+    withDesktopSession(
+      desktop
+        .command("env")
+        .description("Print shell exports and unsets for the desktop session"),
+    ),
+  ).action(async (opts) => {
+    process.exitCode = await runDesktopEnv(opts);
   });
 
   withJson(
