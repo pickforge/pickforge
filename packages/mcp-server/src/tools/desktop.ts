@@ -7,11 +7,13 @@ import {
   desktopSessionLogDir,
   doubleClick,
   drag,
+  execApp,
   launchApp,
   MAX_DOUBLE_CLICK_INTERVAL_MS,
   MAX_DRAG_DURATION_MS,
   MAX_SCROLL_STEPS,
   move,
+  noClientWindowsWarning,
   pressKey,
   screenshot,
   scroll,
@@ -22,6 +24,7 @@ import {
   captureToTarget,
   imageContent,
   requireDisplay,
+  resolveProjectPath,
   resolveScreenshotTarget,
   resolveSessionRecord,
   runTool,
@@ -59,11 +62,7 @@ async function resolveDesktop(
   return { id: record.id, display: requireDisplay(record) };
 }
 
-// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/picklab#60
-export function registerDesktopTools(
-  server: McpServer,
-  ctx: ServerContext,
-): void {
+function registerLaunchTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "desktop_launch",
     {
@@ -105,6 +104,10 @@ export function registerDesktopTools(
             // A newly launched client on the shared display can grab input
             // focus — gated the same as direct input, so it can never land
             // while a human holds the takeover lease (pickforge/picklab#21 P1-E).
+            const cwd =
+              args.cwd === undefined
+                ? undefined
+                : await resolveProjectPath(ctx, args.cwd);
             const app = await withAgentPermit(id, ctx.env, () =>
               launchApp({
                 display,
@@ -112,10 +115,7 @@ export function registerDesktopTools(
                 args: args.args ?? [],
                 env: ctx.env,
                 logDir: desktopSessionLogDir(id, ctx.env),
-                cwd:
-                  args.cwd === undefined
-                    ? undefined
-                    : path.resolve(ctx.projectDir, args.cwd),
+                cwd,
               }),
             );
             const data: Record<string, unknown> = {
@@ -132,7 +132,78 @@ export function registerDesktopTools(
         );
       }),
   );
+}
 
+function registerExecTool(server: McpServer, ctx: ServerContext): void {
+  server.registerTool(
+    "desktop_exec",
+    {
+      title: "Execute desktop command",
+      description:
+        "Start a command in the isolated desktop environment and process " +
+        "group, then wait a bounded time for a client window to appear.",
+      inputSchema: {
+        ...sessionArg,
+        command: z.string().min(1).describe("Executable to start"),
+        args: z.array(z.string()).optional().describe("Arguments for the executable"),
+        cwd: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Working directory (relative to the project dir)"),
+        windowTimeoutMs: z
+          .number()
+          .int()
+          .min(0)
+          .max(300_000)
+          .optional()
+          .describe("Maximum time to wait for a client window (default 30000)"),
+      },
+    },
+    (args) =>
+      runTool(async () => {
+        const { id, display } = await resolveDesktop(ctx, args.session);
+        return withMcpEvidence(
+          ctx,
+          {
+            sessionId: id,
+            tool: "desktop_exec",
+            target: { name: args.command },
+          },
+          async () => {
+            const cwd =
+              args.cwd === undefined
+                ? undefined
+                : await resolveProjectPath(ctx, args.cwd);
+            const app = await withAgentPermit(id, ctx.env, () =>
+              execApp({
+                display,
+                command: args.command,
+                args: args.args ?? [],
+                env: ctx.env,
+                logDir: desktopSessionLogDir(id, ctx.env),
+                cwd,
+                windowTimeoutMs: args.windowTimeoutMs,
+              }),
+            );
+            return {
+              data: {
+                sessionId: id,
+                display,
+                pid: app.pid,
+                processGroupId: app.processGroupId,
+                logPath: app.logPath,
+                windowCount: app.windows.length,
+                windows: app.windows,
+              },
+            };
+          },
+        );
+      }),
+  );
+}
+
+function registerScreenshotTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "desktop_screenshot",
     {
@@ -180,6 +251,8 @@ export function registerDesktopTools(
                   }
                 : await resolveScreenshotTarget(ctx, args, "desktop", id);
             let tool: string | undefined;
+            let windowCount: number | undefined;
+            let warnings: string[] = [];
             const data = await captureToTarget(target, async () => {
               const result = await screenshot({
                 display,
@@ -187,10 +260,19 @@ export function registerDesktopTools(
                 env: ctx.env,
               });
               tool = result.tool;
+              windowCount = result.windowCount;
+              warnings = result.warnings;
             });
             data.sessionId = id;
             data.display = display;
             data.tool = tool;
+            data.windowCount = windowCount;
+            if (windowCount === 0) {
+              warnings.push(noClientWindowsWarning(display, id));
+            }
+            if (warnings.length > 0) {
+              data.warnings = warnings;
+            }
             if (run !== undefined && target.run === undefined) {
               data.runId = run.runId;
               data.runDir = run.dir;
@@ -202,7 +284,9 @@ export function registerDesktopTools(
         );
       }),
   );
+}
 
+function registerClickTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "desktop_click",
     {
@@ -247,7 +331,9 @@ export function registerDesktopTools(
         );
       }),
   );
+}
 
+function registerMoveTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "desktop_move",
     {
@@ -280,7 +366,9 @@ export function registerDesktopTools(
         );
       }),
   );
+}
 
+function registerScrollTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "desktop_scroll",
     {
@@ -349,7 +437,9 @@ export function registerDesktopTools(
         );
       }),
   );
+}
 
+function registerDragTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "desktop_drag",
     {
@@ -410,7 +500,9 @@ export function registerDesktopTools(
         );
       }),
   );
+}
 
+function registerDoubleClickTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "desktop_double_click",
     {
@@ -463,7 +555,9 @@ export function registerDesktopTools(
         );
       }),
   );
+}
 
+function registerTypeTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "desktop_type",
     {
@@ -493,7 +587,9 @@ export function registerDesktopTools(
         );
       }),
   );
+}
 
+function registerKeyTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "desktop_key",
     {
@@ -523,4 +619,20 @@ export function registerDesktopTools(
         );
       }),
   );
+}
+
+export function registerDesktopTools(
+  server: McpServer,
+  ctx: ServerContext,
+): void {
+  registerLaunchTool(server, ctx);
+  registerExecTool(server, ctx);
+  registerScreenshotTool(server, ctx);
+  registerClickTool(server, ctx);
+  registerMoveTool(server, ctx);
+  registerScrollTool(server, ctx);
+  registerDragTool(server, ctx);
+  registerDoubleClickTool(server, ctx);
+  registerTypeTool(server, ctx);
+  registerKeyTool(server, ctx);
 }

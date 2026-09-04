@@ -126,6 +126,15 @@ describe("desktop input tools fail closed under human control", () => {
     expect(launched.ok).toBe(false);
     expect(launched.errors.join("\n")).toContain("human control is active");
 
+    const executed = parseToolJson(
+      await lab.client.callTool({
+        name: "desktop_exec",
+        arguments: { session: id, command: "xterm" },
+      }),
+    );
+    expect(executed.ok).toBe(false);
+    expect(executed.errors.join("\n")).toContain("human control is active");
+
     await releaseHumanLease(id, lease.leaseId, env);
   });
 

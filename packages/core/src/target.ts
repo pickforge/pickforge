@@ -132,6 +132,44 @@ async function realpathNearest(target: string): Promise<string> {
   }
 }
 
+export interface ResolveConfinedPathOptions {
+  baseDir: string;
+  requestedPath: string;
+  errorMessage: string;
+  rejectBase?: boolean;
+  rejectFinalSymlink?: boolean;
+}
+
+function isOutside(base: string, target: string): boolean {
+  const relative = path.relative(base, target);
+  return relative.startsWith("..") || path.isAbsolute(relative);
+}
+
+export async function resolveConfinedPath(
+  opts: ResolveConfinedPathOptions,
+): Promise<string> {
+  const base = path.resolve(opts.baseDir);
+  const target = path.resolve(base, opts.requestedPath);
+  if ((opts.rejectBase === true && target === base) || isOutside(base, target)) {
+    throw new Error(opts.errorMessage);
+  }
+  if (opts.rejectFinalSymlink === true) {
+    try {
+      if ((await lstat(target)).isSymbolicLink()) {
+        throw new Error(opts.errorMessage);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  const realBase = await realpathNearest(base);
+  const realTarget = await realpathNearest(target);
+  if (realTarget !== realBase && isOutside(realBase, realTarget)) {
+    throw new Error(opts.errorMessage);
+  }
+  return target;
+}
+
 export interface ScreenshotTarget {
   outPath: string;
   run?: RunHandle;
@@ -148,7 +186,6 @@ export interface ResolveScreenshotTargetOptions {
   env?: EnvLike;
 }
 
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/picklab#60
 export async function resolveScreenshotTarget(
   opts: ResolveScreenshotTargetOptions,
 ): Promise<ScreenshotTarget> {
@@ -159,45 +196,17 @@ export async function resolveScreenshotTarget(
     if (opts.outBaseDir === undefined) {
       return { outPath: path.resolve(opts.out) };
     }
-    const base = path.resolve(opts.outBaseDir);
-    const outPath = path.resolve(base, opts.out);
-    const relative = path.relative(base, outPath);
-    if (
-      relative === "" ||
-      relative.startsWith("..") ||
-      path.isAbsolute(relative)
-    ) {
-      throw new Error(
-        `Refusing to write screenshot outside the project directory: ${opts.out}`,
-      );
-    }
-    // Reject a dangling final symlink: realpathNearest cannot resolve a
-    // symlink whose target does not exist, so check lstat directly. A symlink
-    // here would be followed by the subsequent write, creating a file outside
-    // the base dir.
-    try {
-      const outStat = await lstat(outPath);
-      if (outStat.isSymbolicLink()) {
-        throw new Error(
-          `Refusing to write screenshot outside the project directory: ${opts.out}`,
-        );
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        throw error;
-      }
-    }
-    const realBase = await realpathNearest(base);
-    const realProbe = await realpathNearest(outPath);
-    const realRelative = path.relative(realBase, realProbe);
-    if (
-      realProbe !== realBase &&
-      (realRelative.startsWith("..") || path.isAbsolute(realRelative))
-    ) {
-      throw new Error(
-        `Refusing to write screenshot outside the project directory: ${opts.out}`,
-      );
-    }
+    const errorMessage =
+      `Refusing to write screenshot outside the project directory: ${opts.out}`;
+    const outPath = await resolveConfinedPath({
+      baseDir: opts.outBaseDir,
+      requestedPath: opts.out,
+      errorMessage,
+      rejectBase: true,
+      // A final symlink could be swapped before the subsequent write. Output
+      // paths therefore reject it even when its current target is confined.
+      rejectFinalSymlink: true,
+    });
     return { outPath };
   }
   const run = await createRun(

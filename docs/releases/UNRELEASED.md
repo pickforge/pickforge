@@ -5,6 +5,21 @@ GitHub release description, then reset it after the release is published.
 
 ## User-facing changes
 
+- Desktop commands now share one isolated X11 environment that points
+  `WAYLAND_DISPLAY` at the non-existent `picklab-no-wayland` socket, removes
+  other inherited `WAYLAND_*` variables, and sets Electron, GLFW, GTK, Qt,
+  SDL, winit, and session backend hints. The poison value prevents libwayland
+  from falling back to the user's default `wayland-0` socket when the variable
+  is unset.
+  New `picklab desktop exec` (also available as MCP `desktop_exec`) starts a
+  command in its own process group. If no client window appears within a
+  bounded wait, it stops the group before reporting a possible real-desktop
+  escape and suggests `--window-timeout` for slow first builds. `picklab desktop env`
+  prints the same recipe for parent shells, with JSON output available.
+  Desktop screenshots now include the client-window count and warn when it is
+  zero instead of leaving a black frame unexplained. Without `xdotool`, capture
+  still succeeds and warns that the count is unavailable without raising the
+  zero-window escape warning.
 - Experimental `pickforge doctor` (new Rust binary, not yet released or
   published): read-only readiness diagnostics for a Flutter project —
   `pickforge doctor [--project-dir <path>] [--json]`. Reports the resolved

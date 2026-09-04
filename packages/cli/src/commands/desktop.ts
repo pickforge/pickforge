@@ -1,14 +1,17 @@
 import { withAgentPermit } from "@pickforge/picklab-core";
 import {
   click,
+  desktopEnvironmentRecipe,
   desktopSessionLogDir,
   doubleClick,
   drag,
+  execApp,
   launchApp,
   MAX_DOUBLE_CLICK_INTERVAL_MS,
   MAX_DRAG_DURATION_MS,
   MAX_SCROLL_STEPS,
   move,
+  noClientWindowsWarning,
   pressKey,
   screenshot,
   scroll,
@@ -26,6 +29,8 @@ import {
   type BaseCliOptions,
   type ScreenshotTargetOptions,
 } from "./shared.js";
+
+const MAX_EXEC_WINDOW_TIMEOUT_MS = 300_000;
 
 export interface DesktopCommandOptions extends BaseCliOptions {
   session?: string;
@@ -81,6 +86,71 @@ export async function runDesktopLaunch(
   });
 }
 
+export interface DesktopExecOptions extends DesktopCommandOptions {
+  cwd?: string;
+  windowTimeout?: string;
+}
+
+export async function runDesktopExec(
+  command: string,
+  args: string[],
+  opts: DesktopExecOptions,
+): Promise<number> {
+  return runReported(opts, async () => {
+    const { id, display } = await resolveDesktop(opts);
+    const windowTimeoutMs = parseBoundedMsOption(
+      opts.windowTimeout,
+      "--window-timeout",
+      MAX_EXEC_WINDOW_TIMEOUT_MS,
+    );
+    const app = await withAgentPermit(id, process.env, () =>
+      execApp({
+        display,
+        command,
+        args,
+        logDir: desktopSessionLogDir(id),
+        cwd: opts.cwd,
+        windowTimeoutMs,
+      }),
+    );
+    return {
+      data: {
+        sessionId: id,
+        display,
+        pid: app.pid,
+        processGroupId: app.processGroupId,
+        logPath: app.logPath,
+        windowCount: app.windows.length,
+        windows: app.windows,
+      },
+      lines: [
+        `started ${command} (process group ${app.processGroupId}) on ${display}`,
+        `client windows: ${app.windows.length}`,
+        `log: ${app.logPath}`,
+      ],
+    };
+  });
+}
+
+export async function runDesktopEnv(
+  opts: DesktopCommandOptions,
+): Promise<number> {
+  return runReported(opts, async () => {
+    const { id, display } = await resolveDesktop(opts);
+    const recipe = desktopEnvironmentRecipe(display, process.env);
+    return {
+      data: {
+        sessionId: id,
+        display,
+        exports: recipe.exports,
+        unset: recipe.unset,
+        script: recipe.lines.join("\n"),
+      },
+      lines: recipe.lines,
+    };
+  });
+}
+
 export interface DesktopScreenshotOptions
   extends DesktopCommandOptions,
     ScreenshotTargetOptions {}
@@ -92,14 +162,29 @@ export async function runDesktopScreenshot(
     const { id, display } = await resolveDesktop(opts);
     const target = await resolveScreenshotTarget(opts, "desktop", id);
     let tool: string | undefined;
+    let windowCount: number | undefined;
+    let warnings: string[] = [];
     const data = await captureToTarget(target, async () => {
       const result = await screenshot({ display, outPath: target.outPath });
       tool = result.tool;
+      windowCount = result.windowCount;
+      warnings = result.warnings;
     });
     data.sessionId = id;
     data.display = display;
     data.tool = tool;
+    data.windowCount = windowCount;
     const lines = [`screenshot saved to ${target.outPath}`];
+    if (windowCount !== undefined) {
+      lines.push(`client windows: ${windowCount}`);
+    }
+    if (windowCount === 0) {
+      warnings.push(noClientWindowsWarning(display, id));
+    }
+    if (warnings.length > 0) {
+      data.warnings = warnings;
+      lines.push(...warnings.map((warning) => `warning: ${warning}`));
+    }
     if (data.runId !== undefined) {
       lines.push(`run: ${data.runId}`);
     }

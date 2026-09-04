@@ -87,6 +87,10 @@ describe.skipIf(!hasDesktopStack)("desktop flow (real Xvfb)", () => {
       const shot = parseToolJson(shotResult);
       expect(shot.ok).toBe(true);
       expect(shot.sessionId).toBe(session.id);
+      expect(shot.windowCount).toBe(0);
+      expect(shot.warnings).toEqual([
+        expect.stringContaining("may have escaped the lab"),
+      ]);
       expect(shot.runId).toBeDefined();
       expect(
         shot.path.startsWith(path.join(dirs.projectDir, ".picklab", "runs")),
