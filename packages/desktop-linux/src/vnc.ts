@@ -7,6 +7,7 @@ import {
   type EnvLike,
 } from "@pickforge/lab-core";
 import { parseDisplayNumber } from "./display.js";
+import { createIsolatedDesktopEnvironment } from "./environment.js";
 import { findOnPath, sleep } from "./util.js";
 
 const VNC_BASE_PORT = 5900;
@@ -60,6 +61,17 @@ export function buildVncArgs(opts: VncArgsOptions): string[] {
   return args;
 }
 
+export function buildVncEnv(
+  display: string,
+  source: EnvLike = process.env,
+): EnvLike {
+  const env = createIsolatedDesktopEnvironment(display, source);
+  // x11vnc treats any WAYLAND_DISPLAY value as a Wayland session, including
+  // the sentinel used to keep GUI toolkits away from the host compositor.
+  delete env.WAYLAND_DISPLAY;
+  return env;
+}
+
 export function detectVncBinary(env: EnvLike = process.env): string | null {
   return findOnPath("x11vnc", env);
 }
@@ -85,7 +97,8 @@ export async function startVnc(opts: StartVncOptions): Promise<VncHandle> {
     port,
     viewOnly: opts.viewOnly,
   });
-  const binary = detectVncBinary({ ...process.env, ...opts.env });
+  const env = buildVncEnv(opts.display, { ...process.env, ...opts.env });
+  const binary = detectVncBinary(env);
   if (binary === null) {
     throw new Error(
       "x11vnc was not found on PATH; install x11vnc to enable VNC",
@@ -99,7 +112,8 @@ export async function startVnc(opts: StartVncOptions): Promise<VncHandle> {
   const daemon = await startDaemon(binary, args, {
     logDir: opts.logDir,
     name: "x11vnc",
-    env: opts.env,
+    env,
+    cleanEnv: true,
   });
 
   const deadline = Date.now() + STARTUP_TIMEOUT_MS;
