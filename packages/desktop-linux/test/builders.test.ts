@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildXvfbArgs, parseDisplayNumber } from "../src/display.js";
-import { buildVncArgs } from "../src/vnc.js";
+import { buildVncArgs, buildVncEnv } from "../src/vnc.js";
 import { buildScreenshotCommand } from "../src/screenshot.js";
 import {
   buildClickArgs,
@@ -98,6 +98,23 @@ describe("buildVncArgs", () => {
       /port/i,
     );
     expect(() => buildVncArgs({ display: ":92", port: 1.5 })).toThrow(/port/i);
+  });
+});
+
+describe("buildVncEnv", () => {
+  it("isolates x11vnc from the host Wayland session", () => {
+    const env = buildVncEnv(":92", {
+      PATH: "/test/bin",
+      WAYLAND_DISPLAY: "wayland-1",
+      WAYLAND_SOCKET: "42",
+      XDG_SESSION_TYPE: "wayland",
+    });
+
+    expect(env.DISPLAY).toBe(":92");
+    expect(env).not.toHaveProperty("WAYLAND_DISPLAY");
+    expect(env).not.toHaveProperty("WAYLAND_SOCKET");
+    expect(env.XDG_SESSION_TYPE).toBe("x11");
+    expect(env.PATH).toBe("/test/bin");
   });
 });
 

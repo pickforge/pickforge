@@ -24,6 +24,8 @@ GitHub release description, then reset it after the release is published.
 
 ## Lab isolation
 
+- x11vnc now uses the isolated lab X11 environment instead of inheriting a
+  Wayland host session that prevents it from starting.
 - Desktop commands now share one isolated X11 environment that points
   `WAYLAND_DISPLAY` at the non-existent `pickforge-no-wayland` socket, removes
   other inherited `WAYLAND_*` variables, and sets Electron, GLFW, GTK, Qt,
