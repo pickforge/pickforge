@@ -99,6 +99,39 @@ interface DesktopStartupState {
   vnc?: VncHandle;
 }
 
+export interface StartSessionVncOptions {
+  display: string;
+  port?: number;
+  env?: EnvLike;
+  viewOnly: boolean;
+}
+
+/**
+ * The one way x11vnc is started for a session, whether at create time, by
+ * `desktop watch`, or by a human takeover and its revert: every path attaches
+ * the session's own runtime directory and D-Bus endpoints (#86), so a server
+ * started after create never keeps the caller's `XDG_RUNTIME_DIR` or bus
+ * addresses. The layout is derived from the session directory, never read back
+ * from the record.
+ */
+export async function startSessionVnc(
+  id: string,
+  registryEnv: EnvLike,
+  opts: StartSessionVncOptions,
+): Promise<VncHandle> {
+  const logDir = desktopSessionLogDir(id, registryEnv);
+  const runtime = desktopRuntimeLayout(logDir);
+  await createDesktopRuntimeDir(runtime);
+  return startVnc({
+    display: opts.display,
+    port: opts.port,
+    logDir,
+    env: opts.env,
+    viewOnly: opts.viewOnly,
+    runtime,
+  });
+}
+
 function requireVncBinary(opts: CreateDesktopSessionOptions): void {
   if (detectVncBinary({ ...process.env, ...opts.env }) === null) {
     throw new Error(
@@ -240,6 +273,8 @@ async function rollbackFailedCreate(
   const contained = await destroyContainmentScope(state.containment);
   const runtimeRemoved =
     contained.confirmed &&
+    vncGone &&
+    xvfbGone &&
     (
       await removeDesktopRuntimeDir(
         desktopSessionLogDir(record.id, registryEnv),
@@ -295,12 +330,10 @@ export async function createDesktopSession(
     state.xvfb = xvfb;
     const viewOnly = opts.vncControl !== true;
     if (wantsVnc) {
-      state.vnc = await startVnc({
+      state.vnc = await startSessionVnc(record.id, registryEnv, {
         display: xvfb.display,
-        logDir,
         env: opts.env,
         viewOnly,
-        runtime: state.runtime,
       });
     }
     const desktop = runningDesktopInfo(state, xvfb, viewOnly);
@@ -633,10 +666,9 @@ export async function ensureSessionVnc(
       }
     }
 
-    const vnc = await startVnc({
+    const vnc = await startSessionVnc(id, registryEnv, {
       display: desktop.display,
       port: desktop.vncPort,
-      logDir: desktopSessionLogDir(id, registryEnv),
       env: opts.env,
       viewOnly: true,
     });
@@ -698,43 +730,60 @@ async function stopSessionContainment(
   }
 }
 
+/** Stop the session's VNC server; true when it is confirmed gone. */
+async function stopSessionVnc(
+  id: string,
+  desktop: DesktopSessionInfo | undefined,
+  failures: Error[],
+): Promise<boolean> {
+  try {
+    await stopOwnedSessionVnc(id, desktop);
+    return true;
+  } catch (error) {
+    failures.push(asError(error));
+    return false;
+  }
+}
+
+/** Stop the session's Xvfb group; true when it is confirmed gone. */
 async function stopSessionXvfb(
   desktop: DesktopSessionInfo | undefined,
   failures: Error[],
-): Promise<void> {
+): Promise<boolean> {
   const xvfbPid = desktop?.xvfbPid;
-  if (xvfbPid === undefined) return;
+  if (xvfbPid === undefined) return true;
   const xvfbStartTimeTicks = desktop?.xvfbStartTimeTicks;
   if (xvfbStartTimeTicks === undefined) {
-    if (isPidAlive(xvfbPid)) {
-      failures.push(
-        new Error(
-          `Refusing to stop Xvfb (pid ${xvfbPid}): process identity is unavailable`,
-        ),
-      );
-    }
-    return;
+    if (!isPidAlive(xvfbPid)) return true;
+    failures.push(
+      new Error(
+        `Refusing to stop Xvfb (pid ${xvfbPid}): process identity is unavailable`,
+      ),
+    );
+    return false;
   }
   try {
     const result = await stopProcessGroupVerified({
       pid: xvfbPid,
       startTicks: xvfbStartTimeTicks,
     });
-    if (result.outcome !== "terminated" && result.outcome !== "already-dead") {
-      failures.push(
-        new Error(
-          `Xvfb process group (pid ${xvfbPid}) could not be verified as gone`,
-        ),
-      );
+    if (result.outcome === "terminated" || result.outcome === "already-dead") {
+      return true;
     }
+    failures.push(
+      new Error(
+        `Xvfb process group (pid ${xvfbPid}) could not be verified as gone`,
+      ),
+    );
   } catch (error) {
     failures.push(asError(error));
   }
+  return false;
 }
 
 /**
  * Delete the session runtime directory, but only once every process that could
- * still be writing into it is confirmed gone.
+ * still be writing into it (contained apps, x11vnc and Xvfb) is confirmed gone.
  */
 async function removeSessionRuntime(
   id: string,
@@ -748,7 +797,7 @@ async function removeSessionRuntime(
   if (!processesGone) {
     failures.push(
       new Error(
-        `Refusing to delete the runtime directory for ${id}: contained processes are not confirmed gone`,
+        `Refusing to delete the runtime directory for ${id}: session processes are not confirmed gone`,
       ),
     );
     return;
@@ -814,17 +863,13 @@ export async function teardownDesktopSession(
     // Apps first: they are clients of the display, and killing the display out
     // from under them would leave the escape this cleanup exists to catch.
     const containedGone = await stopSessionContainment(desktop, failures);
-    try {
-      await stopOwnedSessionVnc(id, desktop);
-    } catch (error) {
-      failures.push(asError(error));
-    }
-    await stopSessionXvfb(desktop, failures);
+    const vncGone = await stopSessionVnc(id, desktop, failures);
+    const xvfbGone = await stopSessionXvfb(desktop, failures);
     await removeSessionRuntime(
       id,
       registryEnv,
       desktop,
-      containedGone,
+      containedGone && vncGone && xvfbGone,
       failures,
     );
 

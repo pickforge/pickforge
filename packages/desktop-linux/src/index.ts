@@ -114,6 +114,7 @@ export {
   ensureDesktopSessionIsolation,
   ensureSessionVnc,
   getDesktopSessionStatus,
+  startSessionVnc,
   stopOwnedSessionVnc,
   teardownDesktopSession,
   withSessionVncLock,
@@ -123,6 +124,7 @@ export {
   type DesktopSessionStatus,
   type EnsureSessionVncOptions,
   type EnsuredSessionVnc,
+  type StartSessionVncOptions,
 } from "./session.js";
 
 export { findOnPath } from "./util.js";

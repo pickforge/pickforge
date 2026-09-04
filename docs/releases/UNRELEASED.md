@@ -36,15 +36,23 @@ GitHub release description, then reset it after the release is published.
   containment scope — a private cgroup v2 directory where a delegated cgroup is
   available, otherwise a per-session random `PICKFORGE_CONTAINMENT_TOKEN` — and
   apps start through a supervisor that joins the scope before spawning them, so
-  a double-fork or `setsid` descendant cannot escape it. `session destroy`
-  reports success only once the scope is confirmed empty, and refuses to signal
-  any PID whose identity no longer matches. Neither mechanism requires `sudo`.
+  a double-fork or `setsid` descendant cannot escape it, and that verifies its
+  cgroup membership from `/proc/self/cgroup` before spawning anything.
+  `session destroy` reports success only once the scope is confirmed empty,
+  treats a PID that exited during cleanup as gone, refuses to signal a live PID
+  whose identity no longer matches, and never kills the process running it:
+  a `session destroy` typed into a contained shell moves its own process chain
+  out of the session cgroup first, or refuses with an actionable reason.
+  `NODE_OPTIONS` and related code-injection variables are stripped from the
+  desktop environment. Neither mechanism requires `sudo`.
 - Desktop sessions now get their own `XDG_RUNTIME_DIR` (mode `0700`, inside the
   session directory) and their own D-Bus addresses, which point at sockets
   Pickforge never creates, so toolkits and portals fail closed instead of
-  routing work back through the real user session. The directory is removed on
-  destroy, and removal is refused for any path outside the session directory,
-  including through a symlink.
+  routing work back through the real user session. x11vnc gets the same
+  runtime whenever it is started, including by `desktop watch` and by a human
+  takeover. The directory is removed on destroy only once contained apps,
+  x11vnc and Xvfb are confirmed gone, and removal is refused for any path
+  outside the session directory, including through a symlink.
 - `desktop exec`, `desktop launch` and their MCP tools now report the
   containment mechanism they achieved (`cgroup` or `marker`), and
   `desktop env` prints the runtime, D-Bus and containment recipe so an app

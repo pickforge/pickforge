@@ -49,6 +49,25 @@ describe("createIsolatedDesktopEnvironment", () => {
     });
   });
 
+  it("strips Node and Bun code-injection variables so nothing runs inside the supervisor", () => {
+    const result = createIsolatedDesktopEnvironment(":93", {
+      PATH: "/usr/bin",
+      NODE_OPTIONS: "--require /tmp/evil.cjs",
+      NODE_PATH: "/tmp/evil-modules",
+      NODE_REPL_EXTERNAL_MODULE: "/tmp/evil.cjs",
+      BUN_OPTIONS: "--preload /tmp/evil.ts",
+      NODE_EXTRA_CA_CERTS: "/etc/ssl/extra.pem",
+    });
+
+    expect(result.NODE_OPTIONS).toBeUndefined();
+    expect(result.NODE_PATH).toBeUndefined();
+    expect(result.NODE_REPL_EXTERNAL_MODULE).toBeUndefined();
+    expect(result.BUN_OPTIONS).toBeUndefined();
+    // Only code-injection variables go; harmless runtime settings stay.
+    expect(result.NODE_EXTRA_CA_CERTS).toBe("/etc/ssl/extra.pem");
+    expect(result.PATH).toBe("/usr/bin");
+  });
+
   it("does not mutate process.env when it is the default source", () => {
     const before = { ...process.env };
     const result = createIsolatedDesktopEnvironment(":91");
@@ -68,10 +87,14 @@ describe("desktopEnvironmentRecipe", () => {
     });
 
     expect(recipe.unset).toEqual([
+      "BUN_OPTIONS",
       "DBUS_SESSION_BUS_PID",
       "DBUS_SESSION_BUS_WINDOWID",
       "DBUS_STARTER_ADDRESS",
       "DBUS_STARTER_BUS_TYPE",
+      "NODE_OPTIONS",
+      "NODE_PATH",
+      "NODE_REPL_EXTERNAL_MODULE",
       "WAYLAND_DEBUG",
       "WAYLAND_SOCKET",
     ]);

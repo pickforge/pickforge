@@ -170,7 +170,10 @@ start the app inside it:
 
 Both report which mechanism was used (`containment: cgroup` or
 `containment: marker`) and neither ever needs `sudo`. `session destroy` stops
-every contained process and only reports success once none remains.
+every contained process and only reports success once none remains. It never
+kills the shell it was typed into: run from inside a contained shell, it moves
+its own process chain out of the session first, or refuses and tells you to run
+it from outside.
 
 When a shell or another parent process must launch the app itself, apply the
 same environment first:

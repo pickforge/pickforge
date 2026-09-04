@@ -34,6 +34,22 @@ const DBUS_VARIABLES_TO_UNSET = [
   "DBUS_STARTER_BUS_TYPE",
 ] as const;
 
+/**
+ * Variables that make a Node.js or Bun runtime execute code before the script
+ * it was asked to run (`--require`, `--import`, loaders, module paths). The
+ * containment supervisor is a Node process started with the app's environment,
+ * so any of these would run inside it before it joins the scope. They are
+ * removed for the app as well: the browser environment allowlist never passed
+ * them, and a lab app must not depend on injecting code into the tooling that
+ * contains it.
+ */
+const RUNTIME_INJECTION_VARIABLES_TO_UNSET = [
+  "BUN_OPTIONS",
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "NODE_REPL_EXTERNAL_MODULE",
+] as const;
+
 function isWaylandVariable(name: string): boolean {
   return name.startsWith("WAYLAND_");
 }
@@ -71,6 +87,7 @@ export function createIsolatedDesktopEnvironment(
     if (isWaylandVariable(name)) delete env[name];
   }
   for (const name of DBUS_VARIABLES_TO_UNSET) delete env[name];
+  for (const name of RUNTIME_INJECTION_VARIABLES_TO_UNSET) delete env[name];
   delete env[CONTAINMENT_TOKEN_ENV];
   return {
     ...env,
@@ -123,6 +140,7 @@ export function desktopEnvironmentRecipe(
     ...new Set([
       ...WAYLAND_VARIABLES_TO_UNSET,
       ...DBUS_VARIABLES_TO_UNSET,
+      ...RUNTIME_INJECTION_VARIABLES_TO_UNSET,
       ...Object.keys(source).filter(
         (name) => isWaylandVariable(name) && name !== "WAYLAND_DISPLAY",
       ),

@@ -12,6 +12,7 @@ export {
   listContainedProcesses,
   processCarriesToken,
   readOwnCgroupPath,
+  scopeCgroupProblem,
   type ContainedCommand,
   type ContainmentCleanupResult,
   type ContainmentMechanism,

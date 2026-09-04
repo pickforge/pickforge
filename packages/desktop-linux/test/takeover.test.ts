@@ -39,6 +39,7 @@ import {
   readHumanLeaseRaw,
   resolveActivePointer,
   resolveRunStorage,
+  sessionDataDir,
   stopPid,
   type EnvLike,
 } from "@pickforge/lab-core";
@@ -54,6 +55,7 @@ let root: string;
 let binDir: string;
 let env: EnvLike;
 let argvLogPath: string;
+let envLogPath: string;
 // Monotonic across the whole file (never reset per test) so a test that fails
 // before releasing its port never collides with the next test's port.
 let syntheticPort = 15_900;
@@ -70,6 +72,12 @@ async function installFakeVnc(): Promise<void> {
     "const fs = require('node:fs');",
     "const args = process.argv.slice(2);",
     "fs.appendFileSync(process.env.ARGV_LOG, JSON.stringify(args) + '\\n');",
+    "if (process.env.ENV_LOG) fs.appendFileSync(process.env.ENV_LOG, JSON.stringify({",
+    "  XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,",
+    "  DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS,",
+    "  DBUS_SYSTEM_BUS_ADDRESS: process.env.DBUS_SYSTEM_BUS_ADDRESS,",
+    "  NODE_OPTIONS: process.env.NODE_OPTIONS,",
+    "}) + '\\n');",
     "const port = Number(args[args.indexOf('-rfbport') + 1]);",
     "const server = net.createServer((socket) => socket.end());",
     "server.listen(port, '127.0.0.1');",
@@ -85,6 +93,43 @@ async function readArgvLog(): Promise<string[][]> {
     .split("\n")
     .filter((line) => line.trim() !== "")
     .map((line) => JSON.parse(line) as string[]);
+}
+
+interface SeenVncEnv {
+  XDG_RUNTIME_DIR?: string;
+  DBUS_SESSION_BUS_ADDRESS?: string;
+  DBUS_SYSTEM_BUS_ADDRESS?: string;
+  NODE_OPTIONS?: string;
+}
+
+async function readEnvLog(): Promise<SeenVncEnv[]> {
+  const raw = await fs.promises.readFile(envLogPath, "utf8").catch(() => "");
+  return raw
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line) => JSON.parse(line) as SeenVncEnv);
+}
+
+/** A caller environment that still carries the real user session's endpoints. */
+function hostileCallerEnv(): EnvLike {
+  return {
+    ...env,
+    XDG_RUNTIME_DIR: "/run/user/1000",
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+    DBUS_SYSTEM_BUS_ADDRESS: "unix:path=/run/dbus/system_bus_socket",
+    NODE_OPTIONS: "--require /tmp/evil.cjs",
+  };
+}
+
+function expectSessionRuntime(seen: SeenVncEnv, id: string): void {
+  const runtimeDir = path.join(sessionDataDir(id, env), "runtime");
+  expect(seen.XDG_RUNTIME_DIR).toBe(runtimeDir);
+  expect(seen.DBUS_SESSION_BUS_ADDRESS).toBe(`unix:path=${path.join(runtimeDir, "bus")}`);
+  expect(seen.DBUS_SYSTEM_BUS_ADDRESS).toBe(
+    `unix:path=${path.join(runtimeDir, "system_bus_socket")}`,
+  );
+  expect(seen.NODE_OPTIONS).toBeUndefined();
+  expect(fs.statSync(runtimeDir).mode & 0o777).toBe(0o700);
 }
 
 async function createDesktop(desktop: Record<string, unknown> = {}): Promise<string> {
@@ -105,11 +150,13 @@ beforeEach(async () => {
   binDir = path.join(root, "bin");
   await fs.promises.mkdir(binDir, { recursive: true });
   argvLogPath = path.join(root, "argv.log");
+  envLogPath = path.join(root, "env.log");
   env = {
     ...process.env,
     PICKFORGE_HOME: path.join(root, "home"),
     PATH: binDir,
     ARGV_LOG: argvLogPath,
+    ENV_LOG: envLogPath,
   };
   await installFakeVnc();
 });
@@ -201,6 +248,18 @@ describe("startHumanTakeover / endHumanTakeover", () => {
       expect(tools).toContain("takeover_start");
       expect(tools).toContain("takeover_cancelled");
     }
+  });
+
+  it("starts the writable and the reverted read-only x11vnc with the session runtime, never the caller's bus", async () => {
+    const id = await createDesktop({ vncPort: nextPort() });
+    const hostile = hostileCallerEnv();
+
+    const handle = await startHumanTakeover(id, { registryEnv: env, env: hostile });
+    await endHumanTakeover(handle, { registryEnv: env, env: hostile, reason: "return" });
+
+    const seen = await readEnvLog();
+    expect(seen).toHaveLength(2);
+    for (const entry of seen) expectSessionRuntime(entry, id);
   });
 
   it("refuses a second takeover while the first is live", async () => {
@@ -452,6 +511,17 @@ describe("ensureSessionVnc recovery integration", () => {
     expect(isPidAlive(staleVncPid)).toBe(false);
     const record = await getSession(id, env);
     expect(record?.desktop?.vncViewOnly).toBe(true);
+  });
+
+  it("starts a late (watch-time) x11vnc with the session runtime, never the caller's bus", async () => {
+    const { ensureSessionVnc } = await import("../src/session.js");
+    const id = await createDesktop({ vncPort: nextPort() });
+
+    const ensured = await ensureSessionVnc(id, { registryEnv: env, env: hostileCallerEnv() });
+    expect(ensured.reused).toBe(false);
+    const seen = await readEnvLog();
+    expect(seen).toHaveLength(1);
+    expectSessionRuntime(seen[0] as SeenVncEnv, id);
   });
 
   it("still refuses to watch while a live human lease holds writable VNC", async () => {

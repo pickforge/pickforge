@@ -16,7 +16,12 @@ vi.mock("@pickforge/lab-core", async (importOriginal) => {
   };
 });
 
-import { isProcessGroupAlive } from "@pickforge/lab-core";
+import { spawnSync } from "node:child_process";
+import {
+  createContainmentScope,
+  destroyContainmentScope,
+  isProcessGroupAlive,
+} from "@pickforge/lab-core";
 import { execApp, launchApp } from "../src/apps.js";
 
 const DISPLAY = ":219";
@@ -109,6 +114,54 @@ describe("app wait cleanup", () => {
     ).rejects.toThrow(/Could not capture the process identity/);
 
     await expectGroupGone(readStartedGroup(pidFile));
+  });
+
+  it("still joins and spawns when the caller's NODE_OPTIONS would hijack the supervisor", async () => {
+    const die = path.join(root, "die.cjs");
+    writeExecutable(die, "process.exit(99);\n");
+    const hostile = `--require ${die}`;
+    // Control: the injection really does take over a plain node process, so a
+    // supervisor that inherited it could never reach its join.
+    expect(
+      spawnSync(process.execPath, ["-e", "0"], {
+        env: { ...process.env, NODE_OPTIONS: hostile },
+      }).status,
+    ).toBe(99);
+
+    const scope = createContainmentScope({ id: "desk-node-options", useCgroup: false });
+    const command = path.join(root, "node-options-app");
+    const dump = `${command}.env`;
+    writeExecutable(
+      command,
+      `#!/bin/sh\necho $$ > '${command}.pid'\nenv > '${dump}'\nexec /bin/sleep 30\n`,
+    );
+    try {
+      const app = await launchApp({
+        display: DISPLAY,
+        command,
+        env: {
+          NODE_OPTIONS: hostile,
+          NODE_PATH: root,
+          BUN_OPTIONS: `--preload ${die}`,
+        },
+        logDir: path.join(root, "node-options-logs"),
+        containment: scope,
+      });
+      liveGroups.add(app.pid);
+      expect(app.containment).toBe("marker");
+      const deadline = Date.now() + 5_000;
+      while (!fs.existsSync(dump) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      const appEnv = fs.readFileSync(dump, "utf8").split("\n");
+      expect(appEnv.some((line) => line.startsWith("NODE_OPTIONS="))).toBe(false);
+      expect(appEnv.some((line) => line.startsWith("NODE_PATH="))).toBe(false);
+      expect(appEnv.some((line) => line.startsWith("BUN_OPTIONS="))).toBe(false);
+      expect(appEnv).toContain(`PICKFORGE_CONTAINMENT_TOKEN=${scope.token}`);
+      readStartedGroup(`${command}.pid`);
+    } finally {
+      await destroyContainmentScope(scope, { termTimeoutMs: 500, killTimeoutMs: 500 });
+    }
   });
 
   it("stops the process group when the window wait times out", async () => {

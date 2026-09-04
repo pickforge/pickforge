@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { isPidAlive } from "./proc.js";
 
 /**
  * Containment for apps launched into a lab session.
@@ -14,14 +15,26 @@ import path from "node:path";
  *   cgroup this process already lives in. A process cannot leave a cgroup
  *   without privileges, so `fork`/`setsid` descendants stay members, and
  *   `cgroup.kill` terminates every member atomically. Membership is the proof
- *   of ownership: nothing that is not our descendant is ever in the directory
- *   we created, so a kill cannot reach an unrelated process.
+ *   of ownership, and it is always read back from the kernel rather than
+ *   inferred from a successful write: the supervisor confirms its join through
+ *   `/proc/self/cgroup`, and cleanup refuses any path that is not a
+ *   `pickforge-*` directory on a cgroup v2 filesystem.
  * - `marker`: a 256-bit random token exported as `PICKFORGE_CONTAINMENT_TOKEN`.
  *   Descendants inherit the environment across `fork`, `setsid` and `exec`, so
  *   `/proc/<pid>/environ` identifies them. The token is unguessable, so a
- *   matching process is our descendant by construction. Signals are still gated
- *   on a re-read of the token and on the recorded `ProcessIdentity`, so a
- *   recycled PID is refused rather than killed.
+ *   matching process is our descendant by construction. Every signal is gated
+ *   on a re-read of the token immediately before `kill(2)`: a PID that exited
+ *   in between is treated as gone, and a live PID that no longer carries the
+ *   exact token is refused, never killed.
+ *
+ * A lab command run from inside a contained shell (for example `session
+ * destroy` typed into a `desktop exec xterm`) carries the token and, on a
+ * cgroup host, is itself a member of the scope. Cleanup therefore excludes its
+ * own process chain from every signal: on the marker path by skipping those
+ * PIDs, on the cgroup path by moving the chain into the parent cgroup and
+ * confirming from `cgroup.procs` that it is no longer a member before
+ * `cgroup.kill` is written. If the chain cannot be moved out, cleanup refuses
+ * with an actionable reason rather than terminating the caller.
  *
  * The marker sweep always runs, including after a cgroup kill, so cleanup is
  * confirmed by a mechanism that does not depend on the cgroup being intact.
@@ -29,11 +42,16 @@ import path from "node:path";
 
 const TOKEN_ENV = "PICKFORGE_CONTAINMENT_TOKEN";
 const CGROUP_ROOT = "/sys/fs/cgroup";
+/** `CGROUP2_SUPER_MAGIC` from `<linux/magic.h>`. */
+const CGROUP2_SUPER_MAGIC = 0x63677270;
 const TOKEN_BYTES = 32;
 const POLL_INTERVAL_MS = 25;
 const DEFAULT_TERM_TIMEOUT_MS = 3_000;
 const DEFAULT_KILL_TIMEOUT_MS = 2_000;
 const CGROUP_RMDIR_ATTEMPTS = 20;
+const SCOPE_PREFIX = "pickforge-";
+const INSIDE_SCOPE_ADVICE =
+  "Run the command from a shell outside the session, not from one started by `desktop exec`.";
 
 export type ContainmentMechanism = "cgroup" | "marker";
 
@@ -54,7 +72,10 @@ export interface ContainmentCleanupResult {
   signaled: number[];
   /** Contained PIDs still alive when the deadline passed. */
   survivors: number[];
-  /** PIDs skipped because their identity no longer matched (PID reuse). */
+  /**
+   * PIDs skipped because they were still alive without this scope's token
+   * (PID reuse). A PID that had simply exited is not listed here.
+   */
   refused: number[];
   /** Human-readable reason when `confirmed` is false. */
   reason?: string;
@@ -64,6 +85,10 @@ export const CONTAINMENT_TOKEN_ENV = TOKEN_ENV;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /** The current process's cgroup v2 path, e.g. `/user.slice/....scope`. */
@@ -82,15 +107,21 @@ export function readOwnCgroupPath(): string | undefined {
   return undefined;
 }
 
+function ownCgroupDir(): string | undefined {
+  const own = readOwnCgroupPath();
+  return own === undefined
+    ? undefined
+    : path.resolve(path.join(CGROUP_ROOT, own));
+}
+
 /**
  * Resolve the delegated cgroup directory we may create children in, or
  * undefined when this host gives us none (no cgroup v2, a root-owned cgroup,
  * a container without delegation, or a kernel without `cgroup.kill`).
  */
 function findDelegatedCgroupDir(): string | undefined {
-  const own = readOwnCgroupPath();
-  if (own === undefined) return undefined;
-  const dir = path.resolve(path.join(CGROUP_ROOT, own));
+  const dir = ownCgroupDir();
+  if (dir === undefined) return undefined;
   if (dir !== CGROUP_ROOT && !dir.startsWith(`${CGROUP_ROOT}/`)) return undefined;
   try {
     fs.accessSync(dir, fs.constants.W_OK | fs.constants.X_OK);
@@ -124,7 +155,34 @@ function tryCreateCgroup(parent: string, name: string): string | undefined {
   }
 }
 
-const SCOPE_PREFIX = "pickforge-";
+/**
+ * Why a recorded cgroup path may not be used as a containment scope, or
+ * undefined when it has the shape of one: an absolute, normalised path under
+ * the cgroup v2 mount whose last component carries the `pickforge-` prefix.
+ * This keeps a tampered session record from pointing cleanup at the lab's own
+ * delegated cgroup, or at any directory outside the cgroup filesystem.
+ */
+export function scopeCgroupProblem(cgroupDir: string): string | undefined {
+  if (
+    path.resolve(cgroupDir) !== cgroupDir ||
+    !cgroupDir.startsWith(`${CGROUP_ROOT}/`)
+  ) {
+    return `${cgroupDir} is not a normalised absolute path under ${CGROUP_ROOT}`;
+  }
+  if (!path.basename(cgroupDir).startsWith(SCOPE_PREFIX)) {
+    return `${cgroupDir} is not a ${SCOPE_PREFIX}* scope cgroup`;
+  }
+  return undefined;
+}
+
+/** Whether a directory really lives on a cgroup v2 filesystem. */
+function isCgroup2Dir(dir: string): boolean {
+  try {
+    return fs.statfsSync(dir).type === CGROUP2_SUPER_MAGIC;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Remove empty leftover scope cgroups beside the one we are about to create.
@@ -181,6 +239,9 @@ export function createContainmentScope(
  * that has not launched anything yet; re-creating it on demand makes that
  * harmless. The token is unchanged, so the marker sweep still covers anything
  * started before or after.
+ *
+ * Throws when the recorded path does not have the shape of a scope cgroup: a
+ * launch must never join whatever directory a tampered record names.
  */
 export function ensureContainmentScope(
   scope: ContainmentScope,
@@ -188,10 +249,15 @@ export function ensureContainmentScope(
   if (scope.mechanism !== "cgroup" || scope.cgroupDir === undefined) {
     return scope;
   }
+  const problem = scopeCgroupProblem(scope.cgroupDir);
+  if (problem !== undefined) {
+    throw new Error(
+      `Refusing to launch into a containment scope that is not a Pickforge cgroup: ${problem}`,
+    );
+  }
   if (fs.existsSync(scope.cgroupDir)) return scope;
   const parent = path.dirname(scope.cgroupDir);
   const name = path.basename(scope.cgroupDir);
-  if (!name.startsWith(SCOPE_PREFIX)) return scope;
   const dir = tryCreateCgroup(parent, name);
   return dir === undefined ? scope : { ...scope, cgroupDir: dir };
 }
@@ -203,26 +269,7 @@ export function containmentEnv(
   return { [TOKEN_ENV]: scope.token };
 }
 
-/**
- * Read a process's environment as NUL-separated entries. Returns undefined when
- * the process is gone or belongs to another user (whose processes can never be
- * ours: nothing here changes uid).
- */
-function readProcEnviron(pid: number): string[] | undefined {
-  try {
-    return fs.readFileSync(`/proc/${pid}/environ`, "latin1").split("\0");
-  } catch {
-    return undefined;
-  }
-}
-
-/** Whether a live process carries this scope's exact token entry. */
-export function processCarriesToken(pid: number, token: string): boolean {
-  const entries = readProcEnviron(pid);
-  return entries !== undefined && entries.includes(`${TOKEN_ENV}=${token}`);
-}
-
-function readParentPid(pid: number): number | undefined {
+function readProcStatFields(pid: number): string[] | undefined {
   let content: string;
   try {
     content = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
@@ -231,7 +278,45 @@ function readParentPid(pid: number): number | undefined {
   }
   const close = content.lastIndexOf(")");
   if (close === -1) return undefined;
-  const fields = content.slice(close + 1).trim().split(/\s+/);
+  // fields[0] is field 3 (state); field N maps to fields[N - 3].
+  return content.slice(close + 1).trim().split(/\s+/);
+}
+
+function isZombie(pid: number): boolean {
+  return readProcStatFields(pid)?.[0] === "Z";
+}
+
+type TokenProbe = "match" | "gone" | "mismatch";
+
+/**
+ * Whether `pid` carries this scope's exact token entry, distinguishing a PID
+ * that has exited (`gone`: `/proc/<pid>` is missing, or the process is a
+ * zombie whose environment block has been released) from a live process whose
+ * environment does not contain the token (`mismatch`: the PID was recycled, or
+ * the process has become unreadable, for example after exec of a setuid
+ * binary). Only a mismatch is ever refused; a gone PID is simply skipped.
+ */
+function probeToken(pid: number, token: string): TokenProbe {
+  let entries: string[];
+  try {
+    entries = fs.readFileSync(`/proc/${pid}/environ`, "latin1").split("\0");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ESRCH") return "gone";
+    return isPidAlive(pid) && !isZombie(pid) ? "mismatch" : "gone";
+  }
+  if (entries.includes(`${TOKEN_ENV}=${token}`)) return "match";
+  return isPidAlive(pid) && !isZombie(pid) ? "mismatch" : "gone";
+}
+
+/** Whether a live process carries this scope's exact token entry. */
+export function processCarriesToken(pid: number, token: string): boolean {
+  return probeToken(pid, token) === "match";
+}
+
+function readParentPid(pid: number): number | undefined {
+  const fields = readProcStatFields(pid);
+  if (fields === undefined) return undefined;
   const ppid = Number(fields[4 - 3]);
   return Number.isFinite(ppid) ? ppid : undefined;
 }
@@ -278,7 +363,8 @@ export function listContainedProcesses(token: string): number[] {
   return found;
 }
 
-function readCgroupProcs(cgroupDir: string): number[] {
+/** Members of a cgroup, or undefined when the list cannot be read at all. */
+function readCgroupProcs(cgroupDir: string): number[] | undefined {
   try {
     return fs
       .readFileSync(path.join(cgroupDir, "cgroup.procs"), "utf8")
@@ -286,8 +372,73 @@ function readCgroupProcs(cgroupDir: string): number[] {
       .filter((line) => /^\d+$/.test(line))
       .map(Number);
   } catch {
-    return [];
+    return undefined;
   }
+}
+
+function isInsideCgroup(cgroupDir: string): boolean {
+  const own = ownCgroupDir();
+  return (
+    own !== undefined && (own === cgroupDir || own.startsWith(`${cgroupDir}/`))
+  );
+}
+
+/** PIDs of this process's own chain that are members of the scope cgroup. */
+function ownChainInside(cgroupDir: string, members: number[]): number[] {
+  const chain = selfAndAncestors();
+  const inside = new Set(members.filter((pid) => chain.has(pid)));
+  if (isInsideCgroup(cgroupDir)) inside.add(process.pid);
+  return [...inside];
+}
+
+/**
+ * Move this process's own chain out of the scope cgroup into its parent, and
+ * confirm from the kernel that none of it is still a member. Returns the
+ * reason cleanup must refuse when that cannot be established.
+ */
+function evacuateOwnChain(cgroupDir: string, pids: number[]): string | undefined {
+  const parentProcs = path.join(path.dirname(cgroupDir), "cgroup.procs");
+  for (const pid of pids) {
+    try {
+      fs.writeFileSync(parentProcs, String(pid));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") continue;
+      return (
+        `this command is running inside the session's containment cgroup ` +
+        `(pid ${pid}) and could not be moved out: ${errorMessage(error)}. ` +
+        INSIDE_SCOPE_ADVICE
+      );
+    }
+  }
+  const remaining = readCgroupProcs(cgroupDir);
+  const chain = selfAndAncestors();
+  const still =
+    remaining === undefined ? pids : remaining.filter((pid) => chain.has(pid));
+  if (still.length > 0 || isInsideCgroup(cgroupDir)) {
+    return (
+      `this command is still a member of the session's containment cgroup ` +
+      `(pid(s) ${still.join(", ") || process.pid}) after moving out; ` +
+      `refusing to write cgroup.kill. ${INSIDE_SCOPE_ADVICE}`
+    );
+  }
+  return undefined;
+}
+
+/**
+ * Everything that must hold before `cgroup.kill` may be written: the path is
+ * a real cgroup, its member list is readable, and none of this process's own
+ * chain is (any longer) a member.
+ */
+function guardCgroupKill(cgroupDir: string): string | undefined {
+  if (!isCgroup2Dir(cgroupDir)) {
+    return `refusing cgroup cleanup: ${cgroupDir} is not on a cgroup v2 filesystem`;
+  }
+  const members = readCgroupProcs(cgroupDir);
+  if (members === undefined) {
+    return `could not read ${cgroupDir}/cgroup.procs`;
+  }
+  const inside = ownChainInside(cgroupDir, members);
+  return inside.length === 0 ? undefined : evacuateOwnChain(cgroupDir, inside);
 }
 
 function killCgroup(cgroupDir: string): boolean {
@@ -305,7 +456,10 @@ async function waitForCgroupEmpty(
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    if (readCgroupProcs(cgroupDir).length === 0) return true;
+    const members = readCgroupProcs(cgroupDir);
+    if (members === undefined ? !fs.existsSync(cgroupDir) : members.length === 0) {
+      return true;
+    }
     if (Date.now() >= deadline) return false;
     await sleep(POLL_INTERVAL_MS);
   }
@@ -331,8 +485,9 @@ interface SweepState {
 
 /**
  * Signal one contained PID, re-verifying immediately before the signal that it
- * still carries the token. A PID that no longer matches is refused, never
- * killed: after a PID recycle the number belongs to an unrelated process.
+ * still carries the token. A PID that exited since the scan is skipped; a live
+ * PID that no longer matches is refused, never killed, because after a PID
+ * recycle the number belongs to an unrelated process.
  */
 function signalContained(
   pid: number,
@@ -340,7 +495,9 @@ function signalContained(
   signal: NodeJS.Signals,
   state: SweepState,
 ): void {
-  if (!processCarriesToken(pid, token)) {
+  const probe = probeToken(pid, token);
+  if (probe === "gone") return;
+  if (probe === "mismatch") {
     state.refused.add(pid);
     return;
   }
@@ -392,7 +549,11 @@ async function destroyCgroupMembers(
 ): Promise<string | undefined> {
   const cgroupDir = scope.cgroupDir;
   if (cgroupDir === undefined) return "containment cgroup path is missing";
+  const problem = scopeCgroupProblem(cgroupDir);
+  if (problem !== undefined) return `refusing cgroup cleanup: ${problem}`;
   if (!fs.existsSync(cgroupDir)) return undefined;
+  const blocked = guardCgroupKill(cgroupDir);
+  if (blocked !== undefined) return blocked;
   if (!killCgroup(cgroupDir)) return `could not write ${cgroupDir}/cgroup.kill`;
   if (!(await waitForCgroupEmpty(cgroupDir, timeoutMs))) {
     return `cgroup ${cgroupDir} still has members after cgroup.kill`;
@@ -403,15 +564,36 @@ async function destroyCgroupMembers(
   return undefined;
 }
 
+function unconfirmed(
+  mechanism: ContainmentMechanism,
+  reason: string,
+): ContainmentCleanupResult {
+  return {
+    mechanism,
+    confirmed: false,
+    signaled: [],
+    survivors: [],
+    refused: [],
+    reason,
+  };
+}
+
 /**
  * Terminate every process in a containment scope and confirm the scope is
  * empty. Cleanup is confirmed only when no process carrying the token remains
- * and no PID had to be refused for an identity mismatch.
+ * and no live PID had to be refused for an identity mismatch. The process
+ * performing the cleanup and its ancestors are never signalled.
  */
 export async function destroyContainmentScope(
   scope: ContainmentScope,
   opts: DestroyContainmentOptions = {},
 ): Promise<ContainmentCleanupResult> {
+  if (process.platform !== "linux") {
+    return unconfirmed(
+      scope.mechanism,
+      `containment cleanup needs Linux /proc; cannot confirm on ${process.platform}`,
+    );
+  }
   const termTimeoutMs = opts.termTimeoutMs ?? DEFAULT_TERM_TIMEOUT_MS;
   const killTimeoutMs = opts.killTimeoutMs ?? DEFAULT_KILL_TIMEOUT_MS;
   const state: SweepState = { signaled: new Set(), refused: new Set() };
@@ -439,7 +621,7 @@ export async function destroyContainmentScope(
     survivors.length > 0
       ? `${survivors.length} contained process(es) survived SIGKILL: ${survivors.join(", ")}`
       : state.refused.size > 0
-        ? `refused to signal ${state.refused.size} PID(s) whose identity no longer matched`
+        ? `refused to signal ${state.refused.size} live PID(s) that no longer carry the session token: ${[...state.refused].join(", ")}`
         : cgroupReason;
   return {
     mechanism: scope.mechanism,
@@ -454,14 +636,40 @@ export async function destroyContainmentScope(
 const SUPERVISOR_SCRIPT = String.raw`
 import * as fs from "node:fs";
 import { spawn } from "node:child_process";
+const CGROUP_ROOT = "/sys/fs/cgroup";
 const [cgroupDir, binary, ...args] = process.argv.slice(1);
 if (!binary) process.exit(127);
+
+function fail(message) {
+  console.error("pickforge: " + message);
+  process.exit(126);
+}
+
+function ownCgroupPath() {
+  let content;
+  try {
+    content = fs.readFileSync("/proc/self/cgroup", "utf8");
+  } catch {
+    return undefined;
+  }
+  for (const line of content.split("\n")) {
+    if (line.startsWith("0::")) return line.slice(3);
+  }
+  return undefined;
+}
+
 if (cgroupDir !== "-") {
   // Join before spawning anything, retrying through the narrow window where a
   // concurrent session create may have pruned this (still empty) cgroup: the
   // directory is re-created rather than treated as a lost scope. Failing to
   // join is fatal by design — a silently uncontained app is the bug this
-  // supervisor exists to prevent.
+  // supervisor exists to prevent. A successful write proves nothing on its
+  // own (a regular file accepts it too), so membership is read back from the
+  // kernel before anything is spawned; a path outside the cgroup filesystem
+  // can never pass that check.
+  const expected = cgroupDir.startsWith(CGROUP_ROOT + "/")
+    ? cgroupDir.slice(CGROUP_ROOT.length)
+    : undefined;
   let joined = false;
   let lastError = "unknown error";
   for (let attempt = 0; attempt < 3 && !joined; attempt += 1) {
@@ -472,14 +680,21 @@ if (cgroupDir !== "-") {
     }
     try {
       fs.writeFileSync(cgroupDir + "/cgroup.procs", String(process.pid));
-      joined = true;
     } catch (error) {
       lastError = error.message;
+      continue;
+    }
+    const actual = ownCgroupPath();
+    joined = expected !== undefined && actual === expected;
+    if (!joined) {
+      lastError =
+        "membership was not reflected in /proc/self/cgroup (now in " +
+        (actual === undefined ? "<unreadable>" : actual) +
+        ")";
     }
   }
   if (!joined) {
-    console.error("pickforge: could not join containment cgroup:", lastError);
-    process.exit(126);
+    fail("could not join containment cgroup " + cgroupDir + ": " + lastError);
   }
 }
 
@@ -524,10 +739,20 @@ child.once("exit", (code) => {
   childExited = true;
   childCode = code == null ? 1 : code;
 });
-// Stay alive while the app or any same-group descendant lives, so the caller's
-// process-group liveness check tracks the app rather than this supervisor.
+// A termination signal is forwarded to the app rather than ending this
+// supervisor: it stays alive while the app or any same-group descendant lives,
+// so the caller's process-group liveness check tracks the app rather than this
+// process, and it exits within one poll of the app going away instead of
+// making a sweep wait out its whole SIGTERM budget.
 for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
-  process.on(signal, () => {});
+  process.on(signal, () => {
+    if (childExited) return;
+    try {
+      child.kill(signal);
+    } catch {
+      // already gone
+    }
+  });
 }
 const timer = setInterval(() => {
   if (childExited && !hasLiveGroupMembers()) {
@@ -560,10 +785,16 @@ export function buildContainedCommand(
   if (command === "") {
     throw new Error("Containment supervisor requires a command to run");
   }
-  const cgroupDir =
-    scope.mechanism === "cgroup" && scope.cgroupDir !== undefined
-      ? scope.cgroupDir
-      : "-";
+  let cgroupDir = "-";
+  if (scope.mechanism === "cgroup" && scope.cgroupDir !== undefined) {
+    const problem = scopeCgroupProblem(scope.cgroupDir);
+    if (problem !== undefined) {
+      throw new Error(
+        `Containment supervisor refuses a scope that is not a Pickforge cgroup: ${problem}`,
+      );
+    }
+    cgroupDir = scope.cgroupDir;
+  }
   return {
     command: nodePath,
     args: [

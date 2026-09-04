@@ -670,10 +670,14 @@ describe("pickforge-lab desktop", () => {
     expect(json.code).toBe(0);
     const report = parseJson(json);
     expect(report.unset).toEqual([
+      "BUN_OPTIONS",
       "DBUS_SESSION_BUS_PID",
       "DBUS_SESSION_BUS_WINDOWID",
       "DBUS_STARTER_ADDRESS",
       "DBUS_STARTER_BUS_TYPE",
+      "NODE_OPTIONS",
+      "NODE_PATH",
+      "NODE_REPL_EXTERNAL_MODULE",
       "WAYLAND_DEBUG",
       "WAYLAND_SOCKET",
     ]);

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import {
   REAPER_CLEANUP_PENDING_META_KEY,
@@ -19,6 +20,13 @@ import {
   ensureDesktopSessionIsolation,
   type DesktopSessionHandle,
 } from "../src/index.js";
+
+// The repo's test runtime for separate-process workers; see takeover.test.ts
+// for why `--conditions=development` is needed.
+const BUN = /[\\/]bun$/.test(process.execPath) ? process.execPath : "bun";
+const destroyInsideWorker = fileURLToPath(
+  new URL("./workers/destroy-inside-worker.ts", import.meta.url),
+);
 
 /**
  * End-to-end isolation and containment for a real desktop session
@@ -244,6 +252,76 @@ describeWithXvfb("desktop session containment", () => {
     expect(fs.existsSync(handle.runtimeDir)).toBe(false);
   }, 90_000);
 
+  it("survives `session destroy` run from inside the session, and still tears everything down", async () => {
+    const handle = await createSessionHandle();
+    const isolation = await ensureDesktopSessionIsolation(handle.id, env);
+    const bystanderPidFile = path.join(tmpRoot, "inside-bystander.pid");
+    const bystander = await launchApp({
+      display: handle.display,
+      command: writeExecutable(
+        "inside-bystander.sh",
+        `echo $$ > "${bystanderPidFile}"\nexec /bin/sleep 300`,
+      ),
+      logDir: desktopSessionLogDir(handle.id, env),
+      env,
+      ...isolation,
+    });
+    strays.add(bystander.pid);
+    expect(await waitUntil(() => readPidFile(bystanderPidFile) !== undefined)).toBe(true);
+    const bystanderPid = readPidFile(bystanderPidFile) as number;
+    strays.add(bystanderPid);
+
+    // The destroyer is launched *into* the session like any other app: it
+    // carries the token and, on a cgroup host, is a member of the cgroup. A
+    // fast teardown can finish inside the launch grace window, in which case
+    // `launchApp` reports the group as exited; that is the app-launch
+    // liveness check doing its job, not a failure of the destroyer.
+    const report = path.join(tmpRoot, "destroy-inside.json");
+    const logPath = path.join(desktopSessionLogDir(handle.id, env), "bun.log");
+    const launched = await launchApp({
+      display: handle.display,
+      command: BUN,
+      args: [
+        "--conditions=development",
+        destroyInsideWorker,
+        handle.id,
+        env.PICKFORGE_HOME as string,
+        report,
+      ],
+      logDir: desktopSessionLogDir(handle.id, env),
+      env,
+      ...isolation,
+    }).then(
+      (app) => ({ app }),
+      (error: unknown) => ({ error }),
+    );
+    if ("app" in launched) {
+      strays.add(launched.app.pid);
+      expect(launched.app.containment).toBe(handle.containment.mechanism);
+    } else {
+      expect(String(launched.error)).toMatch(/exited immediately/);
+    }
+
+    expect(await waitUntil(() => fs.existsSync(report), 60_000)).toBe(true);
+    const written = JSON.parse(fs.readFileSync(report, "utf8"));
+    const log = fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf8") : "";
+    expect(written, log).toMatchObject({ ok: true });
+    sessions.delete(handle.id);
+
+    // The caller survived; everything else the session owned is gone.
+    expect(isPidAlive(bystanderPid)).toBe(false);
+    expect(await waitUntil(() => !isPidAlive(handle.xvfbPid), 5_000)).toBe(true);
+    expect(fs.existsSync(handle.runtimeDir)).toBe(false);
+    expect(await getSession(handle.id, env)).toBeUndefined();
+    if (handle.containment.cgroupDir !== undefined) {
+      expect(fs.existsSync(handle.containment.cgroupDir)).toBe(false);
+    }
+    // The destroyer and its supervisor exit on their own once done.
+    expect(
+      await waitUntil(() => listContainedProcesses(handle.containment.token).length === 0),
+    ).toBe(true);
+  }, 120_000);
+
   it("never touches the caller's real runtime dir", async () => {
     const realRuntimeDir = process.env.XDG_RUNTIME_DIR;
     const handle = await createSessionHandle();
@@ -273,10 +351,10 @@ describeWithXvfb("desktop teardown failure reporting", () => {
   it("fails loudly and keeps the runtime dir when containment is unconfirmed", async () => {
     const handle = await createSessionHandle();
     const record = await getSession(handle.id, env);
+    // A record pointing at a directory that is not a Pickforge scope cgroup:
+    // the cleanup refuses to kill through it and cannot be confirmed, and
+    // teardown must say so rather than report success.
     const unkillable = fs.mkdtempSync(path.join(tmpRoot, "unkillable-cgroup-"));
-    // Read-only, so `cgroup.kill` cannot be written: the cleanup cannot be
-    // confirmed, and teardown must say so rather than report success.
-    fs.chmodSync(unkillable, 0o500);
     await updateSession(
       handle.id,
       {
@@ -302,7 +380,6 @@ describeWithXvfb("desktop teardown failure reporting", () => {
     // Nothing was deleted while processes could not be confirmed gone.
     expect(fs.existsSync(handle.runtimeDir)).toBe(true);
 
-    fs.chmodSync(unkillable, 0o700);
     await updateSession(
       handle.id,
       { desktop: { display: handle.display, xvfbPid: handle.xvfbPid } },
