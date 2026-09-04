@@ -479,14 +479,19 @@ export async function startXvfb(opts: StartXvfbOptions): Promise<XvfbHandle> {
  * Stop an Xvfb by pid, with the group discipline of #57: the recorded process
  * must still be the leader of its own group with its recorded start identity,
  * or the signal is refused rather than aimed at a recycled pid.
+ *
+ * `startTicks` is what makes that guarantee possible, so without it a *live*
+ * pid is refused (returns false) instead of being verified against a snapshot
+ * taken now — which would prove nothing about the Xvfb the caller meant and
+ * would happily kill whatever unrelated process-group leader inherited the
+ * number. A pid that is already gone still reports success: there is nothing
+ * left to confuse it with. Session teardown passes the recorded ticks.
  */
 export async function stopXvfb(
   pid: number,
   startTicks?: number,
 ): Promise<boolean> {
-  const identity =
-    startTicks === undefined ? readProcessIdentity(pid) : { pid, startTicks };
-  if (identity === undefined) return !isPidAlive(pid);
-  const result = await stopProcessGroupVerified(identity);
+  if (startTicks === undefined) return !isPidAlive(pid);
+  const result = await stopProcessGroupVerified({ pid, startTicks });
   return result.outcome === "terminated" || result.outcome === "already-dead";
 }

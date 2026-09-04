@@ -20,9 +20,12 @@ export {
   buildVncArgs,
   detectVncBinary,
   startVnc,
+  VncStartError,
   type StartVncOptions,
   type VncArgsOptions,
   type VncHandle,
+  type VncPartialStart,
+  type VncStartFailureReason,
 } from "./vnc.js";
 
 export {

@@ -41,7 +41,13 @@ import {
   removeDesktopRuntimeDir,
   type DesktopRuntimeLayout,
 } from "./runtime.js";
-import { detectVncBinary, startVnc, type VncHandle } from "./vnc.js";
+import {
+  VncStartError,
+  detectVncBinary,
+  startVnc,
+  type VncHandle,
+  type VncPartialStart,
+} from "./vnc.js";
 
 export interface CreateDesktopSessionOptions {
   projectDir: string;
@@ -97,6 +103,7 @@ interface DesktopStartupState {
   xvfb?: XvfbHandle;
   xvfbPartial?: XvfbPartialStart;
   vnc?: VncHandle;
+  vncPartial?: VncPartialStart;
 }
 
 export interface StartSessionVncOptions {
@@ -202,11 +209,20 @@ async function startSessionXvfb(
   }
 }
 
+/**
+ * Whether no x11vnc this create started is still running. A startup that threw
+ * after spawning reports through its partial handle: `startVnc` has already
+ * stopped that process group, and `cleanupConfirmed` is the only honest answer
+ * about whether it succeeded. Assuming "no handle means nothing to stop" is
+ * what would let rollback delete the runtime under a live server.
+ */
 async function stopStartupVnc(
   recordId: string,
   state: DesktopStartupState,
 ): Promise<boolean> {
-  if (state.vnc === undefined) return true;
+  if (state.vnc === undefined) {
+    return state.vncPartial?.cleanupConfirmed ?? true;
+  }
   return stopOwnedSessionVnc(recordId, {
     display: state.xvfb?.display ?? state.xvfbPartial?.display ?? ":0",
     vncPid: state.vnc.pid,
@@ -230,6 +246,20 @@ async function stopStartupXvfb(state: DesktopStartupState): Promise<boolean> {
   }
 }
 
+/** Error-path VNC identity, from a started server or a failed startup. */
+function pendingVncInfo(
+  state: DesktopStartupState,
+): Partial<DesktopSessionInfo> {
+  const vnc = state.vnc ?? state.vncPartial;
+  if (vnc === undefined) return {};
+  const startTicks =
+    state.vnc?.startTimeTicks ?? state.vncPartial?.startTimeTicks;
+  return {
+    vncPid: vnc.pid,
+    ...(startTicks === undefined ? {} : { vncStartTimeTicks: startTicks }),
+  };
+}
+
 /** Error-path desktop info: keep every identity a later reaper retry needs. */
 function pendingDesktopInfo(
   state: DesktopStartupState,
@@ -244,12 +274,7 @@ function pendingDesktopInfo(
     display: known.display,
     xvfbPid: known.pid,
     ...(startTicks === undefined ? {} : { xvfbStartTimeTicks: startTicks }),
-    ...(state.vnc === undefined
-      ? {}
-      : {
-          vncPid: state.vnc.pid,
-          vncStartTimeTicks: state.vnc.startTimeTicks,
-        }),
+    ...pendingVncInfo(state),
     runtimeDir: state.runtime.runtimeDir,
     containment: state.containment,
     width: known.width,
@@ -334,6 +359,13 @@ export async function createDesktopSession(
         display: xvfb.display,
         env: opts.env,
         viewOnly,
+      }).catch((error: unknown) => {
+        // A failed startup still owns whatever it spawned: keep the partial so
+        // rollback can decide about the runtime dir and the retry record.
+        if (error instanceof VncStartError && error.partial !== undefined) {
+          state.vncPartial = error.partial;
+        }
+        throw error;
       });
     }
     const desktop = runningDesktopInfo(state, xvfb, viewOnly);
