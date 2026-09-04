@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { formatChromeStartupDiagnostics } from "./startup-diagnostics.js";
 import { sleep } from "./util.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 100;
@@ -11,10 +12,10 @@ const DEFAULT_POLL_INTERVAL_MS = 100;
  * persisted, so this function never returns or exposes the second line.
  */
 export function parseDevToolsActivePort(content: string): number | undefined {
-  const firstLine = content.split("\n", 1)[0]?.trim();
-  if (firstLine === undefined || firstLine === "") {
-    return undefined;
-  }
+  const firstLineEnd = content.indexOf("\n");
+  if (firstLineEnd === -1) return undefined;
+  const firstLine = content.slice(0, firstLineEnd).trim();
+  if (firstLine === "") return undefined;
   const port = Number(firstLine);
   if (!Number.isInteger(port) || port <= 0 || port > 65535) {
     return undefined;
@@ -38,7 +39,12 @@ export function readDevToolsActivePort(profileDir: string): number | undefined {
 
 export type DevToolsPortResult =
   | { ok: true; port: number }
-  | { ok: false; reason: "aborted" | "exited" | "timeout" };
+  | { ok: false; reason: "aborted" }
+  | {
+      ok: false;
+      reason: "exited" | "timeout";
+      diagnostics: string;
+    };
 
 /** Verify that the loopback DevTools HTTP endpoint is accepting requests. */
 export async function probeDevToolsHttp(
@@ -76,6 +82,8 @@ export async function probeDevToolsHttp(
 
 export interface WaitForDevToolsPortOptions {
   profileDir: string;
+  /** Authoritative Chrome daemon log path used for durable diagnostics. */
+  logPath?: string;
   timeoutMs: number;
   /** Liveness probe for the Chrome process; a dead process ends the wait. */
   isAlive: () => boolean;
@@ -84,6 +92,23 @@ export interface WaitForDevToolsPortOptions {
   isReady?: (port: number) => boolean | Promise<boolean>;
   probeTimeoutMs?: number;
   pollIntervalMs?: number;
+}
+
+function startupFailure(
+  reason: "exited" | "timeout",
+  opts: WaitForDevToolsPortOptions,
+  port?: number,
+): DevToolsPortResult {
+  return {
+    ok: false,
+    reason,
+    diagnostics: formatChromeStartupDiagnostics({
+      profileDir: opts.profileDir,
+      reason,
+      ...(opts.logPath === undefined ? {} : { logPath: opts.logPath }),
+      ...(port === undefined ? {} : { port }),
+    }),
+  };
 }
 
 /**
@@ -114,7 +139,7 @@ export async function waitForDevToolsPort(
     const port = readDevToolsActivePort(opts.profileDir);
     if (port !== undefined) {
       if (!opts.isAlive()) {
-        return { ok: false, reason: "exited" };
+        return startupFailure("exited", opts, port);
       }
       const ready = await isReady(port);
       if (creationAborted()) {
@@ -124,10 +149,10 @@ export async function waitForDevToolsPort(
         return { ok: true, port };
       }
     } else if (!opts.isAlive()) {
-      return { ok: false, reason: "exited" };
+      return startupFailure("exited", opts);
     }
     if (Date.now() >= deadline) {
-      return { ok: false, reason: "timeout" };
+      return startupFailure("timeout", opts, port);
     }
     try {
       await sleep(poll, opts.signal);
