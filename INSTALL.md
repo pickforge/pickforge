@@ -145,6 +145,29 @@ pickforge-lab desktop screenshot
 pickforge-lab session destroy --all
 ```
 
+For a desktop development runner that launches its own GUI, do not set only
+`DISPLAY`. Use the session environment so `WAYLAND_DISPLAY` points at the
+non-existent `pickforge-no-wayland` socket, other inherited `WAYLAND_*` variables
+are removed, and Electron, GLFW, GTK, Qt, SDL, winit, and the session type use
+X11. The poison value is required
+because libwayland falls back to `wayland-0` when `WAYLAND_DISPLAY` is unset:
+
+```sh
+pickforge-lab desktop exec --session <id> -- flutter run -d linux
+# Or, when the current shell must be the parent:
+eval "$(pickforge-lab desktop env --session <id>)"
+flutter run -d linux
+```
+
+`desktop exec` waits a bounded time for a client window. If none appears while
+the command is alive, it stops the process group and reports a possible
+real-desktop escape. Increase `--window-timeout` for a slow first build. Desktop
+screenshots also report the client-window count and warn when it is zero. If
+`xdotool` is missing, capture still succeeds and warns that the count is
+unavailable instead of reporting a possible escape. XDG runtime and D-Bus
+isolation for desktop sessions is tracked in
+[#86](https://github.com/pickforge/pickforge/issues/86).
+
 Finally, remind the user to restart the agent so the `pickforge-lab` MCP tools load, and that `session_status` over MCP is the quickest end-to-end check.
 
 ## Report back

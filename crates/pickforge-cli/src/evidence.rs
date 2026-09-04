@@ -1,6 +1,6 @@
 //! Single-shot, external Flutter evidence recording.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -16,12 +16,12 @@ use time::{format_description, OffsetDateTime};
 
 use crate::{adapters::Harness, init::INIT_SCHEMA_VERSION, project, state, Environment};
 
-// Version 2 adds source dimensions and optional bounded preview metadata to the recorded
-// document. Those fields are derived, never submitted, so the input shape is unchanged and a
-// v1 document still records — only the document this writes carries the new version.
-pub const EVIDENCE_SCHEMA_VERSION: u32 = 2;
+// Version 3 adds ordered intermediate steps and optional check-to-step references. Versions 1
+// and 2 remain valid inputs; only the document this writes carries the current version.
+pub const EVIDENCE_SCHEMA_VERSION: u32 = 3;
 const EVIDENCE_INPUT_MIN_VERSION: u32 = 1;
 pub const MAX_INPUT_BYTES: u64 = 1024 * 1024;
+pub const MAX_EVIDENCE_STEPS: usize = 32;
 const PREVIEW_MAX_EDGE: u32 = 1568;
 const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_TOTAL_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
@@ -50,6 +50,8 @@ pub struct EvidenceInput {
     scenario: String,
     outcome: Outcome,
     before: PhaseInput,
+    #[serde(default)]
+    steps: Vec<StepInput>,
     after: PhaseInput,
     #[serde(default)]
     source_changes: Vec<String>,
@@ -62,6 +64,17 @@ pub struct EvidenceInput {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PhaseInput {
+    summary: String,
+    #[serde(default)]
+    observations: Vec<Observation>,
+    #[serde(default)]
+    artifacts: Vec<ArtifactInput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StepInput {
+    label: String,
     summary: String,
     #[serde(default)]
     observations: Vec<Observation>,
@@ -96,6 +109,8 @@ struct CheckInput {
     name: String,
     status: CheckStatus,
     summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    step: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -109,6 +124,7 @@ struct EvidenceDocument<'a> {
     scenario: &'a str,
     outcome: Outcome,
     before: &'a Phase,
+    steps: &'a [Step],
     after: &'a Phase,
     source_changes: &'a [String],
     checks: &'a [CheckInput],
@@ -117,6 +133,14 @@ struct EvidenceDocument<'a> {
 
 #[derive(Debug, Serialize)]
 struct Phase {
+    summary: String,
+    observations: Vec<Observation>,
+    artifacts: Vec<Artifact>,
+}
+
+#[derive(Debug, Serialize)]
+struct Step {
+    label: String,
     summary: String,
     observations: Vec<Observation>,
     artifacts: Vec<Artifact>,
@@ -408,8 +432,21 @@ fn validate_input(input: &EvidenceInput) -> Result<(), EvidenceError> {
     }
     bounded_line(&input.scenario, 120, "scenario")?;
     validate_phase(&input.before, "before")?;
+    if input.steps.len() > MAX_EVIDENCE_STEPS {
+        return bad(&format!("steps exceeds {MAX_EVIDENCE_STEPS} entries"));
+    }
+    for (index, step) in input.steps.iter().enumerate() {
+        validate_step(step, index)?;
+    }
     validate_phase(&input.after, "after")?;
-    if input.before.artifacts.len() + input.after.artifacts.len() > 16 {
+    let artifact_count = input.before.artifacts.len()
+        + input
+            .steps
+            .iter()
+            .map(|step| step.artifacts.len())
+            .sum::<usize>()
+        + input.after.artifacts.len();
+    if artifact_count > 16 {
         return bad("at most 16 artifacts are allowed");
     }
     if input.source_changes.len() > 64 {
@@ -424,7 +461,12 @@ fn validate_input(input: &EvidenceInput) -> Result<(), EvidenceError> {
     for check in &input.checks {
         bounded_line(&check.name, 120, "check name")?;
         bounded_text(&check.summary, 1000, "check summary")?;
+        if let Some(step) = &check.step {
+            bounded_line(step, 120, "check step")?;
+        }
     }
+    validate_step_references(input)?;
+    validate_redacted_step_references(input)?;
     if input.limitations.len() > 32 {
         return bad("limitations exceeds 32 entries");
     }
@@ -434,15 +476,32 @@ fn validate_input(input: &EvidenceInput) -> Result<(), EvidenceError> {
     Ok(())
 }
 fn validate_phase(phase: &PhaseInput, name: &str) -> Result<(), EvidenceError> {
-    bounded_text(&phase.summary, 2000, &format!("{name} summary"))?;
-    if phase.observations.len() > 32 || phase.artifacts.len() > 8 {
+    validate_phase_parts(&phase.summary, &phase.observations, &phase.artifacts, name)
+}
+fn validate_step(step: &StepInput, index: usize) -> Result<(), EvidenceError> {
+    bounded_line(&step.label, 120, "step label")?;
+    validate_phase_parts(
+        &step.summary,
+        &step.observations,
+        &step.artifacts,
+        &format!("step {}", index + 1),
+    )
+}
+fn validate_phase_parts(
+    summary: &str,
+    observations: &[Observation],
+    artifacts: &[ArtifactInput],
+    name: &str,
+) -> Result<(), EvidenceError> {
+    bounded_text(summary, 2000, &format!("{name} summary"))?;
+    if observations.len() > 32 || artifacts.len() > 8 {
         return bad(&format!("{name} exceeds observation or artifact limits"));
     }
-    for item in &phase.observations {
+    for item in observations {
         bounded_line(&item.label, 120, "observation label")?;
         bounded_text(&item.value, 2000, "observation value")?;
     }
-    for artifact in &phase.artifacts {
+    for artifact in artifacts {
         bounded_line(&artifact.label, 120, "artifact label")?;
         if !artifact.source.is_absolute() {
             return bad("artifact source must be absolute");
@@ -454,6 +513,38 @@ fn validate_phase(phase: &PhaseInput, name: &str) -> Result<(), EvidenceError> {
             .any(|character| character.is_control() || is_bidi_control(character))
         {
             return bad("artifact source contains a control or bidi-control character");
+        }
+    }
+    Ok(())
+}
+fn validate_step_references(input: &EvidenceInput) -> Result<(), EvidenceError> {
+    let mut labels = BTreeSet::new();
+    for step in &input.steps {
+        if !labels.insert(step.label.as_str()) {
+            return bad("step labels must be unique");
+        }
+    }
+    for check in &input.checks {
+        if let Some(step) = &check.step {
+            if !labels.contains(step.as_str()) {
+                return bad("check references unknown step label");
+            }
+        }
+    }
+    Ok(())
+}
+fn validate_redacted_step_references(input: &EvidenceInput) -> Result<(), EvidenceError> {
+    let mut labels = BTreeSet::new();
+    for step in &input.steps {
+        if !labels.insert(redact_secrets(&step.label)) {
+            return bad("step labels must remain unique after redaction");
+        }
+    }
+    for check in &input.checks {
+        if let Some(step) = &check.step {
+            if !labels.contains(&redact_secrets(step)) {
+                return bad("check references unknown step label after redaction");
+            }
         }
     }
     Ok(())
@@ -521,6 +612,12 @@ fn bad<T>(message: &str) -> Result<T, EvidenceError> {
 fn sanitize_input(input: &mut EvidenceInput) {
     input.scenario = redact_secrets(&input.scenario);
     sanitize_phase(&mut input.before);
+    for step in &mut input.steps {
+        step.label = redact_secrets(&step.label);
+        step.summary = redact_secrets(&step.summary);
+        sanitize_observations(&mut step.observations);
+        sanitize_artifacts(&mut step.artifacts);
+    }
     sanitize_phase(&mut input.after);
     for path in &mut input.source_changes {
         *path = redact_secrets(path);
@@ -530,6 +627,9 @@ fn sanitize_input(input: &mut EvidenceInput) {
     for check in &mut input.checks {
         check.name = redact_secrets(&check.name);
         check.summary = redact_secrets(&check.summary);
+        if let Some(step) = &mut check.step {
+            *step = redact_secrets(step);
+        }
     }
     for value in &mut input.limitations {
         *value = redact_secrets(value);
@@ -537,11 +637,17 @@ fn sanitize_input(input: &mut EvidenceInput) {
 }
 fn sanitize_phase(phase: &mut PhaseInput) {
     phase.summary = redact_secrets(&phase.summary);
-    for item in &mut phase.observations {
+    sanitize_observations(&mut phase.observations);
+    sanitize_artifacts(&mut phase.artifacts);
+}
+fn sanitize_observations(observations: &mut [Observation]) {
+    for item in observations {
         item.label = redact_secrets(&item.label);
         item.value = redact_secrets(&item.value);
     }
-    for item in &mut phase.artifacts {
+}
+fn sanitize_artifacts(artifacts: &mut [ArtifactInput]) {
+    for item in artifacts {
         item.label = redact_secrets(&item.label);
     }
 }
@@ -588,6 +694,16 @@ fn build_run(
         &mut total,
         &mut known,
     )?;
+    let mut steps = Vec::with_capacity(input.steps.len());
+    for (index, step) in input.steps.into_iter().enumerate() {
+        steps.push(materialize_step(
+            step,
+            index,
+            &artifacts_dir,
+            &mut total,
+            &mut known,
+        )?);
+    }
     let after = materialize_phase(input.after, "after", &artifacts_dir, &mut total, &mut known)?;
     let doc = EvidenceDocument {
         schema_version: EVIDENCE_SCHEMA_VERSION,
@@ -598,6 +714,7 @@ fn build_run(
         scenario: &input.scenario,
         outcome: input.outcome,
         before: &before,
+        steps: &steps,
         after: &after,
         source_changes: &input.source_changes,
         checks: &input.checks,
@@ -608,6 +725,37 @@ fn build_run(
     write_private(&temp.join("evidence.json"), &json)?;
     write_private(&temp.join("report.md"), render_report(&doc).as_bytes())?;
     Ok(())
+}
+fn materialize_step(
+    input: StepInput,
+    index: usize,
+    dir: &Path,
+    total: &mut u64,
+    known: &mut BTreeMap<String, Artifact>,
+) -> Result<Step, EvidenceError> {
+    let StepInput {
+        label,
+        summary,
+        observations,
+        artifacts,
+    } = input;
+    let phase = materialize_phase(
+        PhaseInput {
+            summary,
+            observations,
+            artifacts,
+        },
+        &format!("step-{}", index + 1),
+        dir,
+        total,
+        known,
+    )?;
+    Ok(Step {
+        label,
+        summary: phase.summary,
+        observations: phase.observations,
+        artifacts: phase.artifacts,
+    })
 }
 fn materialize_phase(
     input: PhaseInput,
@@ -631,7 +779,8 @@ fn materialize_phase(
                 });
             }
             let slug = slug(&source.label);
-            let basename = format!("{phase}-{slug}-{}", &hash[..12]);
+            let hash_prefix = &hash[..12];
+            let basename = format!("{phase}-{slug}-{hash_prefix}");
             let relative = format!("artifacts/{basename}.{ext}");
             let preview = make_preview(&source.source, &image, &basename)?;
             let preview_bytes = preview.as_ref().map_or(0, |(_, bytes)| bytes.len() as u64);
@@ -935,6 +1084,16 @@ fn render_report(doc: &EvidenceDocument<'_>) -> String {
         normalize_markdown(&doc.before.summary)
     );
     render_observations(&mut out, &doc.before.observations);
+    for step in doc.steps {
+        out.push_str("\n## Step: ");
+        out.push_str(&normalize_markdown(&step.label));
+        out.push_str("\n\n");
+        out.push_str(&normalize_markdown(&step.summary));
+        out.push('\n');
+        render_observations(&mut out, &step.observations);
+        out.push_str("\n### Artifacts\n\n");
+        render_artifacts(&mut out, step.artifacts.iter());
+    }
     out.push_str("\n## After\n\n");
     out.push_str(&normalize_markdown(&doc.after.summary));
     out.push('\n');
@@ -948,56 +1107,61 @@ fn render_report(doc: &EvidenceDocument<'_>) -> String {
     if doc.checks.is_empty() {
         out.push_str("- None\n");
     } else {
-        for c in doc.checks {
+        for check in doc.checks {
+            let step = check
+                .step
+                .as_ref()
+                .map(|label| format!("; step: {}", normalize_markdown(label)))
+                .unwrap_or_default();
             out.push_str(&format!(
-                "- **{}** ({:?}): {}\n",
-                normalize_markdown(&c.name),
-                c.status,
-                normalize_markdown(&c.summary)
+                "- **{}** ({:?}{step}): {}\n",
+                normalize_markdown(&check.name),
+                check.status,
+                normalize_markdown(&check.summary)
             ));
         }
     }
     out.push_str("\n## Artifacts\n\n");
-    let all = doc
-        .before
-        .artifacts
-        .iter()
-        .chain(&doc.after.artifacts)
-        .collect::<Vec<_>>();
-    if all.is_empty() {
-        out.push_str("- None\n");
-    } else {
-        for a in all {
-            // The full capture is the evidence and is always what the entry links and hashes.
-            // A preview is a derivative offered alongside it, never in place of it: a reader
-            // of this report alone must still be able to reach and verify the original.
-            out.push_str(&format!(
-                "- [{}]({}) ({}x{}, {} bytes, `{}`)\n",
-                normalize_markdown(&a.label),
-                normalize_markdown(&a.path),
-                a.width,
-                a.height,
-                a.bytes,
-                a.sha256,
-            ));
-            if let Some(preview) = &a.preview {
-                out.push_str(&format!(
-                    "  - [preview]({}) ({}x{}, {} bytes, `{}`)\n",
-                    normalize_markdown(&preview.path),
-                    preview.width,
-                    preview.height,
-                    preview.bytes,
-                    preview.sha256,
-                ));
-            }
-        }
-    }
+    render_artifacts(
+        &mut out,
+        doc.before.artifacts.iter().chain(&doc.after.artifacts),
+    );
     out.push_str("\n## Limitations\n\n");
     render_list(
         &mut out,
         doc.limitations.iter().map(|s| normalize_markdown(s)),
     );
     out
+}
+fn render_artifacts<'a>(out: &mut String, artifacts: impl Iterator<Item = &'a Artifact>) {
+    let artifacts = artifacts.collect::<Vec<_>>();
+    if artifacts.is_empty() {
+        out.push_str("- None\n");
+        return;
+    }
+    for artifact in artifacts {
+        // The full capture is the evidence and is always what the entry links and hashes.
+        // A preview is a derivative offered alongside it, never in place of it.
+        out.push_str(&format!(
+            "- [{}]({}) ({}x{}, {} bytes, `{}`)\n",
+            normalize_markdown(&artifact.label),
+            normalize_markdown(&artifact.path),
+            artifact.width,
+            artifact.height,
+            artifact.bytes,
+            artifact.sha256,
+        ));
+        if let Some(preview) = &artifact.preview {
+            out.push_str(&format!(
+                "  - [preview]({}) ({}x{}, {} bytes, `{}`)\n",
+                normalize_markdown(&preview.path),
+                preview.width,
+                preview.height,
+                preview.bytes,
+                preview.sha256,
+            ));
+        }
+    }
 }
 fn render_observations(out: &mut String, items: &[Observation]) {
     if !items.is_empty() {

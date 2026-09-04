@@ -23,6 +23,7 @@ import {
   detectVncBinary,
   doubleClick,
   drag,
+  execApp,
   findOnPath,
   getDesktopSessionStatus,
   isDisplayAlive,
@@ -45,6 +46,7 @@ const hasXdotool = findOnPath("xdotool") !== null;
 const hasDesktopStack = hasXvfb && hasXdotool;
 const screenshotTool = detectScreenshotTool();
 const hasXterm = findOnPath("xterm") !== null;
+const hasZenity = findOnPath("zenity") !== null;
 const hasVnc = detectVncBinary() !== null;
 
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -258,30 +260,63 @@ describe("screenshot output validation", () => {
       }),
     ).rejects.toThrow(/PNG signature/);
   });
+
+  it("captures without xdotool and warns that the window count is unavailable", async () => {
+    const fakeBin = path.join(tmpRoot, "fake-import-without-xdotool");
+    writeExecutable(
+      path.join(fakeBin, "import"),
+      '#!/bin/sh\nfor a in "$@"; do out="$a"; done\nprintf "\\211PNG\\r\\n\\032\\n" > "$out"\n',
+    );
+
+    const result = await screenshot({
+      display: DEAD_DISPLAY,
+      outPath: path.join(tmpRoot, "without-xdotool.png"),
+      env: { PATH: fakeBin },
+    });
+
+    expect(result.windowCount).toBeUndefined();
+    expect(result.warnings).toEqual([expect.stringContaining("xdotool")]);
+    expect(result.warnings[0]).toContain("missing");
+  });
 });
 
 describe("launchApp display isolation", () => {
-  it("redirects Wayland variables so apps render on the lab display", async () => {
+  it("uses the shared X11 environment contract", async () => {
     const outFile = path.join(tmpRoot, "env-capture.txt");
     const binDir = path.join(tmpRoot, "env-capture-bin");
     writeExecutable(
       path.join(binDir, "capture-env"),
       "#!/bin/sh\n" +
-        "printf 'DISPLAY=%s\\nWAYLAND_DISPLAY=%s\\n' " +
-        '"$DISPLAY" "${WAYLAND_DISPLAY-unset}" > ' +
+        "printf 'DISPLAY=%s\\nWAYLAND_DISPLAY=%s\\nWAYLAND_SOCKET=%s\\n" +
+        "ELECTRON_OZONE_PLATFORM_HINT=%s\\nGDK_BACKEND=%s\\nGLFW_PLATFORM=%s\\n" +
+        "QT_QPA_PLATFORM=%s\\nSDL_VIDEODRIVER=%s\\nWINIT_UNIX_BACKEND=%s\\n" +
+        "XDG_SESSION_TYPE=%s\\n' " +
+        '"$DISPLAY" "${WAYLAND_DISPLAY-unset}" "${WAYLAND_SOCKET-unset}" ' +
+        '"$ELECTRON_OZONE_PLATFORM_HINT" "$GDK_BACKEND" "$GLFW_PLATFORM" ' +
+        '"$QT_QPA_PLATFORM" "$SDL_VIDEODRIVER" "$WINIT_UNIX_BACKEND" ' +
+        '"$XDG_SESSION_TYPE" > ' +
         `'${outFile}'\n` +
         "sleep 5\n",
     );
     const app = await launchApp({
       display: DEAD_DISPLAY,
       command: path.join(binDir, "capture-env"),
-      env: { ...process.env, WAYLAND_DISPLAY: "wayland-1" },
+      env: {
+        ...process.env,
+        WAYLAND_DISPLAY: "wayland-1",
+        WAYLAND_SOCKET: "42",
+      },
       logDir: path.join(tmpRoot, "env-capture-logs"),
     });
     try {
-      const captured = fs.readFileSync(outFile, "utf8");
-      expect(captured).toContain(`DISPLAY=${DEAD_DISPLAY}`);
-      expect(captured).toContain("WAYLAND_DISPLAY=pickforge-no-wayland");
+      expect(fs.readFileSync(outFile, "utf8")).toBe(
+        `DISPLAY=${DEAD_DISPLAY}\n` +
+          "WAYLAND_DISPLAY=pickforge-no-wayland\nWAYLAND_SOCKET=unset\n" +
+          "ELECTRON_OZONE_PLATFORM_HINT=x11\nGDK_BACKEND=x11\n" +
+          "GLFW_PLATFORM=x11\nQT_QPA_PLATFORM=xcb\n" +
+          "SDL_VIDEODRIVER=x11\nWINIT_UNIX_BACKEND=x11\n" +
+          "XDG_SESSION_TYPE=x11\n",
+      );
     } finally {
       await stopPid(app.pid);
     }
@@ -551,6 +586,58 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
       expect(isPidAlive(session.xvfbPid)).toBe(false);
       expect(isDisplayAlive(session.display)).toBe(false);
       expect(await getSession(session.id, env)).toBeUndefined();
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it.skipIf(!hasZenity)(
+    "keeps a GTK exec client on Xvfb despite inherited Wayland variables",
+    async () => {
+      const session = await createDesktopSession({
+        projectDir,
+        registryEnv: env,
+      });
+      const guardedZenity = path.join(tmpRoot, "guarded-zenity");
+      writeExecutable(
+        guardedZenity,
+        "#!/bin/sh\n" +
+          '[ "$WAYLAND_DISPLAY" = pickforge-no-wayland ] || exit 20\n' +
+          '[ "${WAYLAND_SOCKET+set}" != set ] || exit 21\n' +
+          '[ "$ELECTRON_OZONE_PLATFORM_HINT" = x11 ] || exit 22\n' +
+          '[ "$GDK_BACKEND" = x11 ] || exit 23\n' +
+          '[ "$GLFW_PLATFORM" = x11 ] || exit 24\n' +
+          '[ "$QT_QPA_PLATFORM" = xcb ] || exit 25\n' +
+          '[ "$SDL_VIDEODRIVER" = x11 ] || exit 26\n' +
+          '[ "$WINIT_UNIX_BACKEND" = x11 ] || exit 27\n' +
+          '[ "$XDG_SESSION_TYPE" = x11 ] || exit 28\n' +
+          'exec zenity --info --text pickforge --title pickforge-exec-itest\n',
+      );
+      try {
+        const app = await execApp({
+          display: session.display,
+          command: guardedZenity,
+          env: {
+            ...process.env,
+            WAYLAND_DISPLAY: "wayland-0",
+            WAYLAND_SOCKET: "42",
+          },
+          logDir: session.logDir,
+          windowTimeoutMs: 15_000,
+        });
+        expect(app.processGroupId).toBe(app.pid);
+        expect(app.windows).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ name: "pickforge-exec-itest" }),
+          ]),
+        );
+        expect(await listWindows(session.display)).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ name: "pickforge-exec-itest" }),
+          ]),
+        );
+      } finally {
+        await destroyDesktopSession(session.id, env);
+      }
     },
     TEST_TIMEOUT_MS,
   );

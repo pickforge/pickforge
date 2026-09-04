@@ -4,7 +4,9 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use image::{DynamicImage, GenericImageView, ImageBuffer, ImageFormat, Rgb, RgbImage};
 use pickforge_cli::adapters::{Harness, IntegrationPack};
-use pickforge_cli::evidence::{record_at, EvidenceError, EVIDENCE_SCHEMA_VERSION};
+use pickforge_cli::evidence::{
+    record_at, EvidenceError, EVIDENCE_SCHEMA_VERSION, MAX_EVIDENCE_STEPS,
+};
 use pickforge_cli::project::{canonical_project_path, derive_project_id};
 use pickforge_cli::{apply_init, plan_init, Environment, InitRequest};
 use sha2::{Digest, Sha256};
@@ -120,7 +122,8 @@ fn golden_documents_are_byte_exact_and_aliases_dedupe() {
     let canonical_project = canonical_project_path(&project);
     let project_id = derive_project_id(&canonical_project).unwrap();
     let hash = format!("{:x}", Sha256::digest(&source_bytes));
-    let artifact_path = format!("artifacts/before-initial-shot-{}.png", &hash[..12]);
+    let hash_prefix = &hash[..12];
+    let artifact_path = format!("artifacts/before-initial-shot-{hash_prefix}.png");
     let artifact = serde_json::json!({
         "kind":"screenshot","label":"Initial *shot*",
         "path":artifact_path.clone(),
@@ -136,6 +139,7 @@ fn golden_documents_are_byte_exact_and_aliases_dedupe() {
         "projectPath":canonical_project.to_str().unwrap(),"createdAt":"2024-01-01T00:00:00Z",
         "scenario":"Counter *increments*","outcome":"passed",
         "before":{"summary":"Counter was **zero**.\nSecond line.","observations":[{"label":"Counter_[raw]","value":"0\nstill zero"}],"artifacts":[artifact]},
+        "steps":[],
         "after":{"summary":"Counter is one.","observations":[{"label":"Counter","value":"1"}],"artifacts":[final_artifact]},
         "sourceChanges":["lib/main.dart"],"checks":[{"name":"flutter test","status":"passed","summary":"Passed."}],
         "limitations":["Pixel review was manual."]
@@ -152,6 +156,88 @@ fn golden_documents_are_byte_exact_and_aliases_dedupe() {
     let report = std::fs::read_to_string(&result.report_path).unwrap();
     let expected_report = format!("# Flutter evidence: Counter \\*increments\\*\n\n**Outcome:** passed\n\n## Before\n\nCounter was \\*\\*zero\\*\\*. Second line.\n\n- **Counter\\_\\[raw\\]:** 0 still zero\n\n## After\n\nCounter is one.\n\n- **Counter:** 1\n\n## Source changes\n\n- lib/main.dart\n\n## Checks\n\n- **flutter test** (Passed): Passed.\n\n## Artifacts\n\n- [Initial \\*shot\\*]({artifact_path}) (1x1, {} bytes, `{hash}`)\n- [Final \\[shot\\]]({artifact_path}) (1x1, {} bytes, `{hash}`)\n\n## Limitations\n\n- Pixel review was manual.\n", source_bytes.len(), source_bytes.len());
     assert_eq!(report, expected_report);
+}
+
+#[test]
+fn records_steps_in_order_with_deduplicated_artifacts_and_check_references() {
+    let (_temp, project, env, state) = fixture();
+    let source = state.parent().unwrap().join("clicked.png");
+    let alias = state.parent().unwrap().join("clicked-alias.png");
+    let source_bytes = solid_png(2000, 1000);
+    std::fs::write(&source, &source_bytes).unwrap();
+    std::fs::write(&alias, &source_bytes).unwrap();
+    let mut input: serde_json::Value = serde_json::from_slice(&envelope(&[], &[])).unwrap();
+    input["steps"] = serde_json::json!([
+        {
+            "label":"Clicks complete",
+            "summary":"Counter reached two with the old theme.",
+            "observations":[{"label":"Counter","value":"2"}],
+            "artifacts":[{"kind":"screenshot","label":"Clicked frame","source":source}]
+        },
+        {
+            "label":"Hot reload complete",
+            "summary":"The new theme appeared without resetting the counter.",
+            "observations":[{"label":"Theme","value":"teal"}],
+            "artifacts":[{"kind":"screenshot","label":"Reloaded frame","source":alias}]
+        }
+    ]);
+    input["checks"] = serde_json::json!([{
+        "name":"desktop click",
+        "status":"passed",
+        "summary":"Counter advanced to two.",
+        "step":"Clicks complete"
+    }]);
+
+    let result = record_at(
+        &project,
+        &env,
+        &serde_json::to_vec(&input).unwrap(),
+        UNIX_EPOCH,
+    )
+    .unwrap();
+    let document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&result.evidence_path).unwrap()).unwrap();
+    assert_eq!(document["steps"][0]["label"], "Clicks complete");
+    assert_eq!(document["steps"][1]["label"], "Hot reload complete");
+    assert_eq!(document["checks"][0]["step"], "Clicks complete");
+    assert_eq!(
+        document["steps"][0]["artifacts"][0]["path"],
+        document["steps"][1]["artifacts"][0]["path"]
+    );
+    assert_eq!(
+        document["steps"][0]["artifacts"][0]["preview"],
+        document["steps"][1]["artifacts"][0]["preview"]
+    );
+    let artifact_dir = Path::new(&result.evidence_path)
+        .parent()
+        .unwrap()
+        .join("artifacts");
+    assert_eq!(std::fs::read_dir(artifact_dir).unwrap().count(), 2);
+
+    let report = std::fs::read_to_string(result.report_path).unwrap();
+    let before = report.find("## Before").unwrap();
+    let clicks = report.find("## Step: Clicks complete").unwrap();
+    let clicked_artifact = report.find("[Clicked frame]").unwrap();
+    let reload = report.find("## Step: Hot reload complete").unwrap();
+    let reloaded_artifact = report.find("[Reloaded frame]").unwrap();
+    let after = report.find("## After").unwrap();
+    assert!(
+        before < clicks
+            && clicks < clicked_artifact
+            && clicked_artifact < reload
+            && reload < reloaded_artifact
+            && reloaded_artifact < after,
+        "{report}"
+    );
+    assert!(
+        report.contains("Counter reached two with the old theme.")
+            && report.contains("- **Counter:** 2")
+            && report.contains("The new theme appeared without resetting the counter.")
+            && report.contains("- **Theme:** teal")
+            && report.contains("  - [preview]")
+            && report.contains("(Passed; step: Clicks complete)"),
+        "{report}"
+    );
 }
 
 #[test]
@@ -224,12 +310,24 @@ fn preview_bytes_count_toward_the_total_budget() {
         std::fs::write(&path, bytes).unwrap();
         paths.push(path);
     }
-    let artifacts = paths
-        .iter()
-        .map(|path| ("noise", path.as_path()))
-        .collect::<Vec<_>>();
+    let mut input: serde_json::Value = serde_json::from_slice(&envelope(
+        &[("noise", paths[0].as_path())],
+        &[("noise", paths[4].as_path())],
+    ))
+    .unwrap();
+    input["steps"] = serde_json::json!([
+        {"label":"one","summary":"","observations":[],"artifacts":[{"kind":"screenshot","label":"noise","source":paths[1]}]},
+        {"label":"two","summary":"","observations":[],"artifacts":[{"kind":"screenshot","label":"noise","source":paths[2]}]},
+        {"label":"three","summary":"","observations":[],"artifacts":[{"kind":"screenshot","label":"noise","source":paths[3]}]}
+    ]);
 
-    let error = record_at(&project, &env, &envelope(&artifacts, &[]), UNIX_EPOCH).unwrap_err();
+    let error = record_at(
+        &project,
+        &env,
+        &serde_json::to_vec(&input).unwrap(),
+        UNIX_EPOCH,
+    )
+    .unwrap_err();
     assert!(
         error
             .to_string()
@@ -284,7 +382,8 @@ fn rejects_receipt_schema_paths_controls_unknown_fields_and_limits() {
         serde_json::json!({"schemaVersion":EVIDENCE_SCHEMA_VERSION,"scenario":"x","outcome":"passed","before":{"summary":"","observations":[],"artifacts":[]},"after":{"summary":"","observations":[],"artifacts":[]},"sourceChanges":["../secret"]}),
         serde_json::json!({"schemaVersion":EVIDENCE_SCHEMA_VERSION,"scenario":"x","outcome":"passed","before":{"summary":"safe\u{202e}spoof","observations":[],"artifacts":[]},"after":{"summary":"","observations":[] ,"artifacts":[]}}),
         serde_json::json!({"schemaVersion":EVIDENCE_SCHEMA_VERSION,"scenario":"x","outcome":"passed","before":{"summary":"","observations":[],"artifacts":[]},"after":{"summary":"","observations":[],"artifacts":[]},"sourceChanges":["lib/safe\u{2066}spoof.dart"]}),
-        serde_json::json!({"schemaVersion":EVIDENCE_SCHEMA_VERSION,"scenario":"x","outcome":"passed","before":{"summary":"","observations":[],"artifacts":[],"unknown":1},"after":{"summary":"","observations":[],"artifacts":[]}}),
+        serde_json::json!({"schemaVersion":EVIDENCE_SCHEMA_VERSION,"scenario":"x","outcome":"passed","before":{"summary":"","observations":[],"artifacts":[]},"steps":[{"label":"safe\u{202e}spoof","summary":"","observations":[],"artifacts":[]}],"after":{"summary":"","observations":[],"artifacts":[]}}),
+        serde_json::json!({"schemaVersion":EVIDENCE_SCHEMA_VERSION,"scenario":"x","outcome":"passed","before":{"summary":"","observations":[],"artifacts":[]},"after":{"summary":"","observations":[],"artifacts":[]},"unknown":1}),
     ];
     for case in cases {
         assert!(
@@ -298,18 +397,25 @@ fn rejects_receipt_schema_paths_controls_unknown_fields_and_limits() {
             "{case}"
         );
     }
-    // A caller written against version 1 keeps working; the recorded document carries the
-    // current version because the added fields are derived here, not submitted.
-    let mut legacy: serde_json::Value = serde_json::from_slice(&valid).unwrap();
-    legacy["schemaVersion"] = serde_json::json!(1);
-    let recorded = record_at(
-        &project,
-        &env,
-        &serde_json::to_vec(&legacy).unwrap(),
-        UNIX_EPOCH,
-    )
-    .expect("a version 1 document still records");
-    assert_eq!(recorded.schema_version, EVIDENCE_SCHEMA_VERSION);
+    // Callers written against versions 1 and 2 keep working. Recorded documents carry v3 and
+    // project the absent intermediate states as an empty ordered array.
+    for (offset, version) in [1, 2].into_iter().enumerate() {
+        let mut legacy: serde_json::Value = serde_json::from_slice(&valid).unwrap();
+        legacy["schemaVersion"] = serde_json::json!(version);
+        legacy.as_object_mut().unwrap().remove("steps");
+        let recorded = record_at(
+            &project,
+            &env,
+            &serde_json::to_vec(&legacy).unwrap(),
+            UNIX_EPOCH + Duration::from_secs(offset as u64),
+        )
+        .unwrap_or_else(|error| panic!("a version {version} document failed: {error}"));
+        assert_eq!(recorded.schema_version, EVIDENCE_SCHEMA_VERSION);
+        let document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(recorded.evidence_path).unwrap()).unwrap();
+        assert_eq!(document["schemaVersion"], 3);
+        assert_eq!(document["steps"], serde_json::json!([]));
+    }
 
     let bidi_artifact = project.join("image\u{202e}.png");
     let bidi_input = envelope(&[("image", &bidi_artifact)], &[]);
@@ -348,6 +454,97 @@ fn rejects_receipt_schema_paths_controls_unknown_fields_and_limits() {
         record_at(&project, &env, &valid, UNIX_EPOCH),
         Err(EvidenceError::Receipt(_))
     ));
+}
+
+#[test]
+fn enforces_step_limit_and_rejects_ambiguous_check_references() {
+    let (_temp, project, env, _state) = fixture();
+    let valid: serde_json::Value = serde_json::from_slice(&envelope(&[], &[])).unwrap();
+
+    let mut too_many = valid.clone();
+    too_many["steps"] = serde_json::Value::Array(
+        (0..=MAX_EVIDENCE_STEPS)
+            .map(|index| {
+                serde_json::json!({
+                    "label":format!("step {index}"),
+                    "summary":"",
+                    "observations":[],
+                    "artifacts":[]
+                })
+            })
+            .collect(),
+    );
+    let error = record_at(
+        &project,
+        &env,
+        &serde_json::to_vec(&too_many).unwrap(),
+        UNIX_EPOCH,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("steps exceeds {MAX_EVIDENCE_STEPS} entries")),
+        "{error}"
+    );
+
+    let mut duplicate = valid.clone();
+    duplicate["steps"] = serde_json::json!([
+        {"label":"clicked","summary":"first","observations":[],"artifacts":[]},
+        {"label":"clicked","summary":"second","observations":[],"artifacts":[]}
+    ]);
+    duplicate["checks"] = serde_json::json!([{
+        "name":"desktop click","status":"passed","summary":"done","step":"clicked"
+    }]);
+    let error = record_at(
+        &project,
+        &env,
+        &serde_json::to_vec(&duplicate).unwrap(),
+        UNIX_EPOCH,
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("step labels must be unique"),
+        "{error}"
+    );
+
+    let mut redacted_duplicate = valid.clone();
+    redacted_duplicate["steps"] = serde_json::json!([
+        {"label":"token=first-secret","summary":"","observations":[],"artifacts":[]},
+        {"label":"token=second-secret","summary":"","observations":[],"artifacts":[]}
+    ]);
+    let error = record_at(
+        &project,
+        &env,
+        &serde_json::to_vec(&redacted_duplicate).unwrap(),
+        UNIX_EPOCH,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("must remain unique after redaction"),
+        "{error}"
+    );
+
+    let mut unknown = valid;
+    unknown["steps"] = serde_json::json!([
+        {"label":"clicked","summary":"","observations":[],"artifacts":[]}
+    ]);
+    unknown["checks"] = serde_json::json!([{
+        "name":"hot reload","status":"passed","summary":"done","step":"reloaded"
+    }]);
+    let error = record_at(
+        &project,
+        &env,
+        &serde_json::to_vec(&unknown).unwrap(),
+        UNIX_EPOCH,
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("references unknown step"),
+        "{error}"
+    );
 }
 
 #[cfg(windows)]
@@ -400,9 +597,12 @@ fn v1_flutter_receipt_remains_compatible_with_pack_v2_and_future_fields() {
 
 #[test]
 fn every_supported_secret_shape_is_absent_from_both_outputs() {
-    let (_temp, project, env, _state) = fixture();
+    let (_temp, project, env, state) = fixture();
+    let source = state.parent().unwrap().join("redaction.png");
+    std::fs::write(&source, solid_png(1, 1)).unwrap();
     let secrets = "safe-before token: \"quotedsecret\" safe-middle password='singlesecret' api_key=abc123 {\"token\":\"jsonsecret\"} Authorization: Bearer authsecret safe-after eyJabc.def.ghi ghp_123456789 sk-123456789 AKIA1234567890123456 Cookie: sid=cookiesecret";
-    let input = serde_json::to_vec(&serde_json::json!({"schemaVersion":EVIDENCE_SCHEMA_VERSION,"scenario":"Secrets test","outcome":"inconclusive","before":{"summary":secrets,"observations":[{"label":"safe","value":secrets}],"artifacts":[]},"after":{"summary":secrets,"observations":[],"artifacts":[]},"sourceChanges":[],"checks":[{"name":"check","status":"skipped","summary":secrets}],"limitations":[secrets]})).unwrap();
+    let step_label = "Clicked token=step-label-secret";
+    let input = serde_json::to_vec(&serde_json::json!({"schemaVersion":EVIDENCE_SCHEMA_VERSION,"scenario":"Secrets test","outcome":"inconclusive","before":{"summary":secrets,"observations":[{"label":"safe","value":secrets}],"artifacts":[]},"steps":[{"label":step_label,"summary":secrets,"observations":[{"label":"token=observation-label-secret","value":secrets}],"artifacts":[{"kind":"screenshot","label":"token=artifact-label-secret","source":source}]}],"after":{"summary":secrets,"observations":[],"artifacts":[]},"sourceChanges":[],"checks":[{"name":"check","status":"skipped","summary":secrets,"step":step_label}],"limitations":[secrets]})).unwrap();
     let result = record_at(&project, &env, &input, UNIX_EPOCH).unwrap();
     let outputs = [
         std::fs::read_to_string(result.evidence_path).unwrap(),
@@ -423,6 +623,9 @@ fn every_supported_secret_shape_is_absent_from_both_outputs() {
         "jsonsecret",
         "authsecret",
         "cookiesecret",
+        "step-label-secret",
+        "observation-label-secret",
+        "artifact-label-secret",
         "eyJabc.def.ghi",
         "ghp_123456789",
         "sk-123456789",
@@ -455,6 +658,26 @@ fn enforces_image_magic_size_count_and_total_limits() {
         .map(|_| ("image", small.as_path()))
         .collect::<Vec<_>>();
     assert!(record_at(&project, &env, &envelope(&too_many, &too_many), UNIX_EPOCH).is_err());
+
+    let artifact = || serde_json::json!({"kind":"screenshot","label":"image","source":small});
+    let mut distributed: serde_json::Value = serde_json::from_slice(&envelope(&[], &[])).unwrap();
+    distributed["before"]["artifacts"] = serde_json::json!([artifact()]);
+    distributed["steps"] = serde_json::json!([
+        {"label":"one","summary":"","observations":[],"artifacts":(0..8).map(|_| artifact()).collect::<Vec<_>>()},
+        {"label":"two","summary":"","observations":[],"artifacts":(0..7).map(|_| artifact()).collect::<Vec<_>>()}
+    ]);
+    distributed["after"]["artifacts"] = serde_json::json!([artifact()]);
+    let error = record_at(
+        &project,
+        &env,
+        &serde_json::to_vec(&distributed).unwrap(),
+        UNIX_EPOCH,
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("at most 16 artifacts"),
+        "{error}"
+    );
 
     let mut paths = Vec::new();
     for index in 0..9u8 {

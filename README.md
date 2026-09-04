@@ -89,9 +89,10 @@ pickforge-lab session create --type desktop
 pickforge-lab desktop exec -- flutter run -d linux
 ```
 
-`desktop exec` is the isolation-safe alias of `desktop launch`. It detaches the
-process and writes its output to the session log. Restart the coding agent if
-it did not already have the Pickforge MCP servers loaded.
+`desktop exec` starts the command in an isolated process group and waits for a
+client window on the lab display. If none appears before the timeout, it stops
+the group and reports a possible escape. Restart the coding agent if it did not
+already have the Pickforge MCP servers loaded.
 
 Now inspect the running widget tree and runtime with the official Dart/Flutter
 MCP tools. Capture the initial screen, inspect the image, and click the target
@@ -130,6 +131,48 @@ pickforge-lab session destroy --all
 Every screenshot, log, and action lands in a run directory with a manifest, so
 a run is inspectable and reproducible after the fact. By default that run
 directory lives outside your project. See [Run storage](#run-storage) below.
+
+### Running development commands in a desktop session
+
+Use `desktop exec` for commands that build and start their own GUI process, such
+as Flutter. It starts a separate process group with `WAYLAND_DISPLAY` pointed
+at the non-existent `pickforge-no-wayland` socket, removes other inherited
+`WAYLAND_*` variables, and sets X11 backend hints for Electron, GLFW, GTK, Qt,
+SDL, winit, and the session type.
+The poison value matters because libwayland falls back to `wayland-0` when
+`WAYLAND_DISPLAY` is unset. Pickforge then waits up to 30 seconds for a client
+window on the lab display:
+
+```sh
+pickforge-lab desktop exec --session <id> -- flutter run -d linux
+# For a slower first build:
+pickforge-lab desktop exec --session <id> --window-timeout 120000 -- flutter run -d linux
+```
+
+If no client window appears while the command is still alive, Pickforge stops
+its process group and reports that the app may have escaped to the real desktop
+instead of leaving a silent black frame. Process-group stopping does not contain
+daemonising apps that double-fork or start a new session. Check the real desktop
+and stop any stray process if the original group exits without a lab window.
+Full containment is tracked in [#85](https://github.com/pickforge/pickforge/issues/85).
+Increase `--window-timeout` for a slow first build. `desktop launch` uses the
+same isolated environment and remains the shorter path for an already-built app.
+
+When a shell or another parent process must launch the app itself, apply the
+same environment first:
+
+```sh
+eval "$(pickforge-lab desktop env --session <id>)"
+flutter run -d linux
+```
+
+`desktop env --json` returns the same `exports`, `unset`, and `script` recipe
+without including unrelated environment variables or secrets. Desktop sessions
+still inherit the user's XDG runtime and D-Bus; isolation is tracked in
+[#86](https://github.com/pickforge/pickforge/issues/86). Desktop
+screenshots report the visible client-window count and warn when it is zero.
+If `xdotool` is missing, capture still succeeds and warns that the count is
+unavailable instead of reporting a possible escape.
 
 ### Run storage
 
@@ -243,8 +286,9 @@ with a fresh screenshot and an evidence record once the viewer closes (or the
 terminal is interrupted). Unlike `--vnc-control`'s persistent writable
 session, control here is leased: while a human holds it, every desktop input
 tool (`desktop_click`/`move`/`scroll`/`drag`/`double_click`/`type`/`key`),
-`desktop_launch` (a newly launched client could otherwise grab input focus),
-and every DevTools relay request fail closed with a stable busy error —
+`desktop_launch`/`desktop_exec` (a newly launched client could otherwise grab
+input focus), and every DevTools relay request fail closed with a stable busy
+error —
 `takeover_status` (MCP) / `pickforge-lab takeover status` (CLI) let an agent check
 before retrying, and `request_user_input` is the recommended way to ask a
 human to run it. `desktop_screenshot` is the only desktop tool left ungated
@@ -319,7 +363,7 @@ pickforge-lab agents add --name my-agent --mcp-command "pickforge-lab mcp serve"
 | Sessions | `session create`, `session status [id]`, `session destroy <id\|--all>` |
 | Watch | `watch [--session <id>] [--control]` |
 | Takeover | `takeover status [--session <id>]` |
-| Desktop | `desktop exec <cmd>` (`desktop launch` is equivalent), `desktop screenshot`, `desktop click <x> <y>`, `desktop move <x> <y>`, `desktop scroll <deltaX> <deltaY>`, `desktop drag <fromX> <fromY> <toX> <toY>`, `desktop double-click <x> <y>`, `desktop type <text>`, `desktop key <keys>` |
+| Desktop | `desktop launch <cmd>`, `desktop exec <cmd>`, `desktop env`, `desktop screenshot`, `desktop click <x> <y>`, `desktop move <x> <y>`, `desktop scroll <deltaX> <deltaY>`, `desktop drag <fromX> <fromY> <toX> <toY>`, `desktop double-click <x> <y>`, `desktop type <text>`, `desktop key <keys>` |
 | Android | `android start`, `android install-apk <apk>`, `android launch-app <pkg>`, `android screenshot`, `android tap <x> <y>`, `android type <text>`, `android back`, `android home`, `android ui-tree`, `android logcat`, `android adb [args...]` |
 | Artifacts | `artifacts list`, `artifacts open <runId>`, `artifacts report [runId]` |
 | Agents | `agents list`, `agents install <agent>`, `agents link <agent>`, `agents unlink <agent>`, `agents doctor`, `agents add` |
@@ -368,10 +412,10 @@ reported as suppressed for an explicitly writable `--vnc-control` session.
 
 ## MCP surface
 
-`pickforge-lab mcp serve` exposes 27 tools over stdio:
+`pickforge-lab mcp serve` exposes 28 tools over stdio:
 
 - Sessions: `session_create`, `session_status`, `session_destroy`
-- Desktop: `desktop_launch`, `desktop_screenshot`, `desktop_click`, `desktop_move`, `desktop_scroll`, `desktop_drag`, `desktop_double_click`, `desktop_type`, `desktop_key` — all fail closed with a busy error while a human lease is active except `desktop_screenshot` (read-only). `desktop_launch` is gated too: a newly launched client can grab input focus on the shared display, which is exactly what the lease protects against.
+- Desktop: `desktop_launch`, `desktop_exec`, `desktop_screenshot`, `desktop_click`, `desktop_move`, `desktop_scroll`, `desktop_drag`, `desktop_double_click`, `desktop_type`, `desktop_key` — all fail closed with a busy error while a human lease is active except `desktop_screenshot` (read-only). `desktop_launch` and `desktop_exec` are gated too: a newly launched client can grab input focus on the shared display, which is exactly what the lease protects against. `desktop_exec` applies the isolated X11 environment and waits for a client window; `desktop_screenshot` reports the client-window count and warns when it is zero, or reports that the count is unavailable when `xdotool` is missing.
 - Android: `android_start`, `android_install_apk`, `android_launch_app`, `android_screenshot`, `android_tap`, `android_type`, `android_back`, `android_home`, `android_get_ui_tree`, `android_logcat`, `android_run_adb`
 - Artifacts: `artifact_list`, `artifact_report`
 - Takeover: `takeover_status` — check whether a session is under human control (see [Supervised pause and human takeover](#supervised-pause-and-human-takeover)); read-only, always safe to call
@@ -412,7 +456,7 @@ A TypeScript monorepo. `pickforge` is the published package; the rest are intern
 - All user inputs are spawned as argument arrays — never interpolated into shell strings.
 - The DevTools relay validates the installed upstream package name, exact version, declared bin, and confined real path before spawning Node with an argument array. Its browser URL is always derived as `http://127.0.0.1:<session-cdp-port>`.
 - Relay stdout is protocol-only. A pending JSON-RPC record is capped at 16 MiB. Upstream diagnostic lines are capped at 64 KiB, redacted, and forwarded only to stderr; an over-limit line is dropped with a safe notice. Upstream update checks and usage statistics are disabled.
-- VNC binds to loopback only by default: `x11vnc` is started with `-localhost`, so the server listens on `127.0.0.1` and is not reachable from the network. Tunnel over SSH for remote access. Normal `--vnc` and `pickforge-lab watch` observation is server-enforced read-only (`-viewonly`); viewer exit never stops the session or its Xvfb/VNC processes. `--vnc-control` is an explicit, persistent writable escape hatch for human secret entry and does not coordinate with agent input. `pickforge-lab watch --control` is the coordinated alternative: an atomic, TTL-bounded lease gates a temporary writable VNC server, and every agent desktop-input call (including `desktop_launch`, which could otherwise grab input focus on the shared display) and DevTools relay request fails closed (a live human lease is checked immediately before delivery) for as long as it is held. A crash on either side is reclaimed actively — the controlling process force-ends on the first failed lease renewal (never waiting for the viewer to close) and carries a hard deadline timer at the lease's `expiresAt` as a backstop; a detached watchdog process, immune to a `SIGKILL` of its parent, independently polls and stops a stale writable VNC. Writable VNC never outlives its lease in wall-clock terms, on any exit path.
+- VNC binds to loopback only by default: `x11vnc` is started with `-localhost`, so the server listens on `127.0.0.1` and is not reachable from the network. Tunnel over SSH for remote access. Normal `--vnc` and `pickforge-lab watch` observation is server-enforced read-only (`-viewonly`); viewer exit never stops the session or its Xvfb/VNC processes. `--vnc-control` is an explicit, persistent writable escape hatch for human secret entry and does not coordinate with agent input. `pickforge-lab watch --control` is the coordinated alternative: an atomic, TTL-bounded lease gates a temporary writable VNC server, and every agent desktop-input call (including `desktop_launch` and `desktop_exec`, which could otherwise grab input focus on the shared display) and DevTools relay request fails closed (a live human lease is checked immediately before delivery) for as long as it is held. A crash on either side is reclaimed actively — the controlling process force-ends on the first failed lease renewal (never waiting for the viewer to close) and carries a hard deadline timer at the lease's `expiresAt` as a backstop; a detached watchdog process, immune to a `SIGKILL` of its parent, independently polls and stops a stale writable VNC. Writable VNC never outlives its lease in wall-clock terms, on any exit path.
 - Artifacts are redacted by default: logcat output strips tokens and secrets before it is stored or returned. Only `android adb` is raw, and it says so.
 - Evidence timelines persist only allowlisted metadata; typed values become length/type metadata, and network headers, bodies, and URL queries are dropped. Static HTML reports escape page-controlled text and use a no-script, no-network CSP.
 - Screenshot files contain raw pixels and cannot be redacted. Avoid explicit captures on screens containing secrets, and use `evidence.enabled: false` when an action timeline is not appropriate. See [SECURITY.md](SECURITY.md#recorded-evidence-and-screenshots).

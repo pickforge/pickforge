@@ -22,6 +22,25 @@ GitHub release description, then reset it after the release is published.
   `npm uninstall -g @pickforge/picklab` or
   `bun remove -g @pickforge/picklab`.
 
+## Lab isolation
+
+- Desktop commands now share one isolated X11 environment that points
+  `WAYLAND_DISPLAY` at the non-existent `pickforge-no-wayland` socket, removes
+  other inherited `WAYLAND_*` variables, and sets Electron, GLFW, GTK, Qt,
+  SDL, winit, and session backend hints. The poison value prevents libwayland
+  from falling back to the user's default `wayland-0` socket when the variable
+  is unset.
+- `pickforge-lab desktop exec`, also available as MCP `desktop_exec`, starts a
+  command in its own process group and waits a bounded time for a client
+  window. If none appears, it stops the group before reporting a possible
+  real-desktop escape and suggests `--window-timeout` for slow first builds.
+  `pickforge-lab desktop env` prints the same recipe for parent shells, with
+  JSON output available.
+- Desktop screenshots now include the client-window count and warn when it is
+  zero instead of leaving a black frame unexplained. Without `xdotool`, capture
+  still succeeds and warns that the count is unavailable without raising the
+  zero-window escape warning.
+
 ## Flutter integration alpha
 
 - `pickforge doctor` provides read-only readiness diagnostics for a Flutter
@@ -37,14 +56,21 @@ GitHub release description, then reset it after the release is published.
 - Flag lifecycle: keep the flag through this first enabled release, verify the
   alpha on real devices, then remove the flag after the enabled release is
   confirmed. The Flutter integration becomes the normal path at removal.
-- `pickforge evidence record` validates one bounded before/after JSON envelope,
-  checks the owned Flutter init receipt, redacts text secrets, copies validated
+- `pickforge evidence record` validates one bounded JSON envelope, checks the
+  owned Flutter init receipt, redacts text secrets, copies validated
   screenshots into an external private run directory, and writes canonical
-  `evidence.json` plus `report.md`. Oversized screenshots retain the original
-  and add a bounded PNG preview.
-- The README now documents the proven loop in order: doctor, init, isolated
+  `evidence.json` plus `report.md`. Evidence schema v3 supports up to 32 ordered
+  intermediate steps between `before` and `after`, with optional check-to-step
+  references. It retains v2 source dimensions and bounded PNG previews for
+  oversized screenshots, links the full capture, deduplicates artifacts across
+  steps, and counts previews toward the total budget.
+- The README documents the proven loop in order: doctor, init, isolated
   `pickforge-lab desktop exec`, inspect, click, source edit, hot reload, visual
   verification, and evidence recording.
+- An opt-in live Rust end-to-end test creates a real Flutter project and drives
+  `doctor`, `init`, a real `dart mcp-server` handshake, and `evidence record`.
+  It is gated on `PICKFORGE_LIVE_FLUTTER=1` and skips without `flutter` or
+  `dart`, so CI and the default suite remain hermetic.
 
 ## Installation and release
 
@@ -56,6 +82,30 @@ GitHub release description, then reset it after the release is published.
 - The release workflow builds and strips both Rust binaries, keeps npm OIDC
   trusted publishing, uses the `next` dist-tag only for prerelease versions,
   and attaches the binaries and checksums to the GitHub release.
+- The Cargo workspace has Linux and Windows CI jobs for formatting, clippy with
+  warnings denied, and tests. The Rust binary is not published through npm.
+- Vulnerable `fast-uri` and `hono` overrides were raised, along with lockfile
+  resolutions for both `brace-expansion` majors, `fast-uri`, `hono`,
+  `ip-address`, and `nanoid`.
+
+## Validation
+
+- Local Bun install, typecheck, lint, test, and build pass. The full test run
+  has 1,169 passing and four skipped tests, including real Xvfb desktop and
+  headed Chrome coverage.
+- `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets --locked -- -D warnings`, and
+  `cargo test -p pickforge-cli` pass with 86 tests covering readiness,
+  transactions, receipts, Flutter integration, evidence schema v3, bounded
+  previews, redaction, and concurrent first use.
+- The pinned OSV Scanner v2.3.8 image reports no unfiltered advisories.
+- The opt-in live end-to-end test has passed on Linux with Flutter 3.41.6. It
+  covers project creation, doctor, idempotent init for Claude Code, Codex, and
+  Pi, a real Dart MCP handshake, evidence recording, redaction, and home
+  isolation.
+- Manual smoke runs of `pickforge doctor` and `pickforge doctor --json` passed
+  against temporary fake Flutter and non-Flutter projects with an isolated
+  `PATH` and `PICKFORGE_HOME`.
 
 ## Known limits
 
@@ -65,3 +115,11 @@ GitHub release description, then reset it after the release is published.
 - Windows has no Rust release artifact in this alpha.
 - The mobile integration flag is temporary by policy and is not the permanent
   user interface.
+- The macOS opt-in live Flutter and MCP path has not been tested.
+- The live end-to-end test is not run in CI; it stays a local, opt-in check.
+- No npm publish, repository rename, package deprecation, or other external
+  runbook step was executed while preparing these notes.
+
+## Release blockers
+
+- None known.
