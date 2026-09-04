@@ -887,7 +887,8 @@ export async function teardownDesktopSession(
       ).catch(() => {});
       throw new AggregateError(
         failures,
-        `Failed to stop ${failures.length} process(es) of desktop session ${id}`,
+        `Failed to stop ${failures.length} process(es) of desktop session ${id}: ` +
+          failures.map((failure) => failure.message).join("; "),
       );
     }
     await finalize();

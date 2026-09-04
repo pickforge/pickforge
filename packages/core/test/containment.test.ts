@@ -479,20 +479,29 @@ describe("containment identity safety", () => {
     expect(result.reason).toBeUndefined();
   }, 20_000);
 
-  it("refuses a live pid whose token vanished between the scan and the re-read (pid reuse)", async () => {
+  it("refuses a pid that a different process now owns (pid reuse)", async () => {
     const scope = createContainmentScope({ id: "desk-id04", useCgroup: false });
     const pid = spawnInScope(scope, "/bin/sleep", ["300"]);
     expect(await waitFor(() => processCarriesToken(pid, scope.token))).toBe(true);
 
-    // After the scan, the pid's environment is that of an unrelated process:
-    // the number was recycled. It is alive, so it must be refused, not killed.
+    // After the scan, the pid belongs to an unrelated process: a different
+    // start time (field 22 of /proc/<pid>/stat) and an environment without
+    // the token. It is alive, so it must be refused, not killed.
     const environ = `/proc/${pid}/environ`;
+    const stat = `/proc/${pid}/stat`;
     const realRead = fs.readFileSync;
     let environReads = 0;
     vi.spyOn(fs, "readFileSync").mockImplementation(((file, ...rest) => {
       if (file === environ) {
         environReads += 1;
         if (environReads >= 2) return "PATH=/usr/bin\0HOME=/nowhere\0";
+      }
+      if (file === stat && environReads >= 2) {
+        const real = realRead.call(fs, file, "utf8") as string;
+        const close = real.lastIndexOf(")");
+        const fields = real.slice(close + 1).trim().split(/\s+/);
+        fields[22 - 3] = String(Number(fields[22 - 3]) + 12_345);
+        return `${real.slice(0, close + 1)} ${fields.join(" ")}\n`;
       }
       return realRead.call(fs, file, ...rest);
     }) as typeof fs.readFileSync);
@@ -506,6 +515,41 @@ describe("containment identity safety", () => {
     expect(result.confirmed).toBe(false);
     expect(result.reason).toMatch(/refused to signal 1 live PID/);
     expect(isPidAlive(pid)).toBe(true);
+  }, 20_000);
+
+  it("re-checks, rather than refuses, the same process when its environ is momentarily unreadable", async () => {
+    const scope = createContainmentScope({ id: "desk-id05", useCgroup: false });
+    const pid = spawnInScope(scope, "/bin/sleep", ["300"]);
+    expect(await waitFor(() => processCarriesToken(pid, scope.token))).toBe(true);
+
+    // A process tearing down its address space after a signal makes the
+    // environ read fail with EACCES; one mid-execve exposes an empty or
+    // truncated environ. In both, the identity (start time) is unchanged. The
+    // scan listed the pid; the pre-signal re-read and the next scan see those
+    // windows; later reads see the token again.
+    const environ = `/proc/${pid}/environ`;
+    const realRead = fs.readFileSync;
+    let environReads = 0;
+    vi.spyOn(fs, "readFileSync").mockImplementation(((file, ...rest) => {
+      if (file === environ) {
+        environReads += 1;
+        if (environReads === 2) {
+          throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+        }
+        if (environReads === 3) return "PATH=/usr/bin\0PICKFORGE_CONTAINMENT_TOK";
+      }
+      return realRead.call(fs, file, ...rest);
+    }) as typeof fs.readFileSync);
+
+    const result = await destroyContainmentScope(scope, {
+      termTimeoutMs: 2_000,
+      killTimeoutMs: 1_000,
+    });
+    expect(environReads).toBeGreaterThanOrEqual(3);
+    expect(result.refused).toEqual([]);
+    expect(result.signaled).toContain(pid);
+    expect(result.confirmed).toBe(true);
+    expect(isPidAlive(pid)).toBe(false);
   }, 20_000);
 
   it("does not match a process whose token is only a prefix", async () => {

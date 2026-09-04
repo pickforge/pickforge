@@ -1,7 +1,8 @@
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { isPidAlive } from "./proc.js";
+import { readPickforgeEnv } from "./env-compat.js";
+import { readProcessStartTicks, type ProcessIdentity } from "./proc.js";
 
 /**
  * Containment for apps launched into a lab session.
@@ -23,9 +24,12 @@ import { isPidAlive } from "./proc.js";
  *   Descendants inherit the environment across `fork`, `setsid` and `exec`, so
  *   `/proc/<pid>/environ` identifies them. The token is unguessable, so a
  *   matching process is our descendant by construction. Every signal is gated
- *   on a re-read of the token immediately before `kill(2)`: a PID that exited
- *   in between is treated as gone, and a live PID that no longer carries the
- *   exact token is refused, never killed.
+ *   on a re-read immediately before `kill(2)` of both the token and the start
+ *   time recorded when the scan found the process: a PID that exited in
+ *   between is treated as gone, a PID whose start time changed belongs to an
+ *   unrelated process and is refused, never killed, and the same process
+ *   whose token is momentarily unreadable (dying, mid-exec) is decided on a
+ *   later pass.
  *
  * A lab command run from inside a contained shell (for example `session
  * destroy` typed into a `desktop exec xterm`) carries the token and, on a
@@ -216,6 +220,16 @@ export interface CreateContainmentScopeOptions {
 }
 
 /**
+ * `PICKFORGE_CONTAINMENT=marker` forces the marker mechanism on a host that
+ * would otherwise get a cgroup. It exists so the marker path (what CI runners
+ * and containers without cgroup delegation get) can be exercised end to end on
+ * a delegated host; it never claims more than the scope actually achieved.
+ */
+function markerForcedByEnvironment(): boolean {
+  return readPickforgeEnv(process.env, "CONTAINMENT") === "marker";
+}
+
+/**
  * Create a containment scope. Never throws: a host without a delegated cgroup
  * degrades to the marker mechanism instead of failing session creation.
  */
@@ -223,7 +237,9 @@ export function createContainmentScope(
   opts: CreateContainmentScopeOptions,
 ): ContainmentScope {
   const token = randomBytes(TOKEN_BYTES).toString("hex");
-  if (opts.useCgroup === false) return { token, mechanism: "marker" };
+  if (opts.useCgroup === false || markerForcedByEnvironment()) {
+    return { token, mechanism: "marker" };
+  }
   const parent = findDelegatedCgroupDir();
   if (parent === undefined) return { token, mechanism: "marker" };
   pruneEmptyScopeCgroups(parent);
@@ -282,36 +298,59 @@ function readProcStatFields(pid: number): string[] | undefined {
   return content.slice(close + 1).trim().split(/\s+/);
 }
 
-function isZombie(pid: number): boolean {
-  return readProcStatFields(pid)?.[0] === "Z";
-}
+type EnvironRead =
+  | { kind: "entries"; entries: string[] }
+  | { kind: "gone" }
+  | { kind: "unreadable" };
 
-type TokenProbe = "match" | "gone" | "mismatch";
-
-/**
- * Whether `pid` carries this scope's exact token entry, distinguishing a PID
- * that has exited (`gone`: `/proc/<pid>` is missing, or the process is a
- * zombie whose environment block has been released) from a live process whose
- * environment does not contain the token (`mismatch`: the PID was recycled, or
- * the process has become unreadable, for example after exec of a setuid
- * binary). Only a mismatch is ever refused; a gone PID is simply skipped.
- */
-function probeToken(pid: number, token: string): TokenProbe {
-  let entries: string[];
+function readEnviron(pid: number): EnvironRead {
   try {
-    entries = fs.readFileSync(`/proc/${pid}/environ`, "latin1").split("\0");
+    return {
+      kind: "entries",
+      entries: fs.readFileSync(`/proc/${pid}/environ`, "latin1").split("\0"),
+    };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "ESRCH") return "gone";
-    return isPidAlive(pid) && !isZombie(pid) ? "mismatch" : "gone";
+    return code === "ENOENT" || code === "ESRCH"
+      ? { kind: "gone" }
+      : { kind: "unreadable" };
   }
-  if (entries.includes(`${TOKEN_ENV}=${token}`)) return "match";
-  return isPidAlive(pid) && !isZombie(pid) ? "mismatch" : "gone";
 }
 
 /** Whether a live process carries this scope's exact token entry. */
 export function processCarriesToken(pid: number, token: string): boolean {
-  return probeToken(pid, token) === "match";
+  const read = readEnviron(pid);
+  return read.kind === "entries" && read.entries.includes(`${TOKEN_ENV}=${token}`);
+}
+
+type TokenProbe = "match" | "gone" | "mismatch" | "same-process";
+
+/**
+ * Re-verify, immediately before a signal, that `identity` (a PID and the
+ * start time recorded when the scan found it carrying the token) is still the
+ * process that was scanned and still carries the token.
+ *
+ * - `match`: the token is there. Signal it.
+ * - `gone`: `/proc/<pid>` is missing or the process is a zombie. Skip.
+ * - `mismatch`: the PID is alive with a *different* start time: the number
+ *   was recycled by an unrelated process. Refused, never signalled.
+ * - `same-process`: the same start time, but the token is not readable. A
+ *   process that is dying reads like this for a moment (its address space is
+ *   already released while it is still in state R, and the kernel then
+ *   refuses the environ read with EACCES); so does one mid-`execve`, one
+ *   that wiped its own environment, or one that exec'd a setuid image. It is
+ *   the process the scan saw, so it is never refused; it is also not
+ *   signalled on this pass. The sweep decides it later, by which time a dying
+ *   process is gone and an exec'ing one carries the token again.
+ */
+function probeToken(identity: ProcessIdentity, token: string): TokenProbe {
+  const read = readEnviron(identity.pid);
+  if (read.kind === "gone") return "gone";
+  const startTicks = readProcessStartTicks(identity.pid);
+  if (startTicks === undefined) return "gone";
+  if (startTicks !== identity.startTicks) return "mismatch";
+  if (read.kind !== "entries") return "same-process";
+  return read.entries.includes(`${TOKEN_ENV}=${token}`) ? "match" : "same-process";
 }
 
 function readParentPid(pid: number): number | undefined {
@@ -319,6 +358,24 @@ function readParentPid(pid: number): number | undefined {
   if (fields === undefined) return undefined;
   const ppid = Number(fields[4 - 3]);
   return Number.isFinite(ppid) ? ppid : undefined;
+}
+
+/**
+ * Every live process carrying this scope's token, excluding the caller's own
+ * process chain, each with the start time that pins its identity for the
+ * pre-signal re-check. A process that exits between the environ read and the
+ * start-time read is not listed.
+ */
+function listContainedIdentities(token: string): ProcessIdentity[] {
+  const excluded = selfAndAncestors();
+  const found: ProcessIdentity[] = [];
+  for (const pid of listProcPids()) {
+    if (excluded.has(pid)) continue;
+    if (!processCarriesToken(pid, token)) continue;
+    const startTicks = readProcessStartTicks(pid);
+    if (startTicks !== undefined) found.push({ pid, startTicks });
+  }
+  return found;
 }
 
 /**
@@ -483,31 +540,35 @@ interface SweepState {
   refused: Set<number>;
 }
 
+type SignalOutcome = "signaled" | "refused" | "skipped";
+
 /**
- * Signal one contained PID, re-verifying immediately before the signal that it
- * still carries the token. A PID that exited since the scan is skipped; a live
- * PID that no longer matches is refused, never killed, because after a PID
- * recycle the number belongs to an unrelated process.
+ * Signal one contained process, re-verifying immediately before the signal
+ * that the PID is still the scanned process and still carries the token. A
+ * process that exited since the scan is skipped; a PID now owned by a
+ * different process is refused, never killed; the same process without a
+ * readable token (dying or mid-exec) is skipped and decided on a later pass.
  */
 function signalContained(
-  pid: number,
+  identity: ProcessIdentity,
   token: string,
   signal: NodeJS.Signals,
   state: SweepState,
-): void {
-  const probe = probeToken(pid, token);
-  if (probe === "gone") return;
+): SignalOutcome {
+  const probe = probeToken(identity, token);
+  if (probe === "gone" || probe === "same-process") return "skipped";
   if (probe === "mismatch") {
-    state.refused.add(pid);
-    return;
+    state.refused.add(identity.pid);
+    return "refused";
   }
   try {
-    process.kill(pid, signal);
-    state.signaled.add(pid);
+    process.kill(identity.pid, signal);
+    state.signaled.add(identity.pid);
+    return "signaled";
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
-      state.refused.add(pid);
-    }
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return "skipped";
+    state.refused.add(identity.pid);
+    return "refused";
   }
 }
 
@@ -515,7 +576,8 @@ function signalContained(
  * Signal every contained process once, then wait for the scope to empty. New
  * PIDs that appear while waiting (a descendant forked mid-shutdown) are
  * signalled too, but an already-signalled PID is not signalled again, so a
- * graceful SIGTERM handler is not interrupted by a second SIGTERM.
+ * graceful SIGTERM handler is not interrupted by a second SIGTERM. A process
+ * that could not be decided on one pass is decided on a later one.
  */
 async function sweepUntilEmpty(
   token: string,
@@ -524,14 +586,24 @@ async function sweepUntilEmpty(
   state: SweepState,
 ): Promise<number[]> {
   const deadline = Date.now() + timeoutMs;
-  const sentThisPass = new Set<number>();
+  const settledThisPass = new Set<number>();
+  let emptyScans = 0;
   for (;;) {
-    const remaining = listContainedProcesses(token);
-    if (remaining.length === 0) return [];
-    for (const pid of remaining) {
-      if (sentThisPass.has(pid)) continue;
-      sentThisPass.add(pid);
-      signalContained(pid, token, signal, state);
+    const remaining = listContainedIdentities(token);
+    // A process mid-exec is invisible to one scan; only two consecutive empty
+    // scans, a poll apart, mean the scope is empty.
+    if (remaining.length === 0) {
+      emptyScans += 1;
+      if (emptyScans >= 2) return [];
+      await sleep(POLL_INTERVAL_MS);
+      continue;
+    }
+    emptyScans = 0;
+    for (const identity of remaining) {
+      if (settledThisPass.has(identity.pid)) continue;
+      if (signalContained(identity, token, signal, state) !== "skipped") {
+        settledThisPass.add(identity.pid);
+      }
     }
     if (Date.now() >= deadline) return listContainedProcesses(token);
     await sleep(POLL_INTERVAL_MS);

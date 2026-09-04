@@ -305,7 +305,9 @@ describeWithXvfb("desktop session containment", () => {
     expect(await waitUntil(() => fs.existsSync(report), 60_000)).toBe(true);
     const written = JSON.parse(fs.readFileSync(report, "utf8"));
     const log = fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf8") : "";
-    expect(written, log).toMatchObject({ ok: true });
+    expect(written, `worker: ${JSON.stringify(written)}\nlog: ${log}`).toMatchObject({
+      ok: true,
+    });
     sessions.delete(handle.id);
 
     // The caller survived; everything else the session owned is gone.

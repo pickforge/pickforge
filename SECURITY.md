@@ -113,9 +113,12 @@ than assumed:
   needs `sudo`; MCP never calls it.
 - **Nothing unrelated is ever signalled.** Cleanup selects targets by cgroup
   membership or by an exact token match read from `/proc/<pid>/environ`,
-  re-checked immediately before each signal, never by a remembered PID alone. A
-  PID that exited between the scan and the re-check is treated as gone; a PID
-  that is still alive without the exact token is refused instead of killed. A
+  re-checked immediately before each signal together with the process start
+  time recorded by the scan, never by a remembered PID alone. A PID that exited
+  between the scan and the re-check is treated as gone; a PID whose start time
+  changed belongs to an unrelated process and is refused instead of killed; the
+  same process whose token is momentarily unreadable (dying, mid-exec) is
+  neither killed nor refused but decided on a later pass. A
   recorded cgroup path is only used when it is a `pickforge-*` directory on
   the cgroup v2 filesystem, so a tampered session record cannot aim
   `cgroup.kill` at the lab's own cgroup or at any other directory.
@@ -154,9 +157,12 @@ than assumed:
 
 Limits to account for: containment holds processes that are descendants of a
 Pickforge launch. It does not sandbox them — see SEC-02 — and it cannot recover
-a descendant that erases its own environment block on a host without cgroup
-delegation. On the marker path there is an irreducible window between the last
-token re-read and `kill(2)`; the cgroup path has no such window.
+a descendant that erases its own environment block, or execs a setuid image,
+on a host without cgroup delegation. On the marker path there is an irreducible
+window between the last token re-read and `kill(2)`; the cgroup path has no
+such window. `PICKFORGE_CONTAINMENT=marker` forces the marker mechanism on a
+host that would get a cgroup; it exists to exercise the fallback path in tests
+and is reported as `marker` like any other degraded scope.
 
 ## Browser sessions run as you (SEC-03 — known limitation)
 
