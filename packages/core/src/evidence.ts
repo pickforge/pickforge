@@ -933,20 +933,29 @@ export async function finalizeActiveEvidenceRun(
   status: RunStatus = "completed",
   env: EnvLike = process.env,
 ): Promise<RunManifest | undefined> {
+  return (
+    await finalizeActiveEvidenceRunHandle(projectDir, sessionId, status, env)
+  )?.manifest;
+}
+
+/** @internal Finalize and retain the verified run handle for bound follow-up writes. */
+export async function finalizeActiveEvidenceRunHandle(
+  projectDir: string,
+  sessionId: string,
+  status: RunStatus = "completed",
+  env: EnvLike = process.env,
+): Promise<RunHandle | undefined> {
   const finalized = await withExistingRunsRootDir(
     projectDir,
     env,
     async (root) => {
       if (root === undefined) return { done: true as const };
-      return finalizeUnderRoot(
-        { projectDir, sessionId, env, root },
-        status,
-      );
+      return finalizeUnderRoot({ projectDir, sessionId, env, root }, status);
     },
   );
   if (finalized.done) return undefined;
   await pruneFinalizedEvidenceRuns(projectDir, {}, env);
-  return finalized.manifest;
+  return finalized.run;
 }
 
 /**
@@ -957,15 +966,15 @@ export async function finalizeActiveEvidenceRun(
 async function finalizeUnderRoot(
   ctx: FinalizeContext,
   status: RunStatus,
-): Promise<{ done: true } | { done: false; manifest: RunManifest }> {
+): Promise<{ done: true } | { done: false; run: RunHandle }> {
   for (let attempt = 0; attempt < MAX_CLAIM_ATTEMPTS; attempt += 1) {
     const step = await resolveFinalizableRun(ctx, attempt);
     if (step.kind === "done") return { done: true };
     if (step.kind === "retry") continue;
 
     const { pointer, manifest } = step;
+    const run = await adoptRunIn(ctx.root, pointer.runId, manifest);
     if (manifest.status === "running") {
-      const run = await adoptRunIn(ctx.root, pointer.runId, manifest);
       manifest.evidenceTruncated = await isEvidenceTruncatedIn(run.binding);
       await run.finish(status);
     }
@@ -973,7 +982,7 @@ async function finalizeUnderRoot(
       expectRaw: step.raw,
     });
     if (!cleared) continue;
-    return { done: false, manifest };
+    return { done: false, run };
   }
   throw new Error(
     `Failed to finalize the active evidence run for session ${ctx.sessionId}`,
@@ -1329,9 +1338,9 @@ async function appendLine(
  * across processes.
  */
 export async function isEvidenceTruncated(
-  run: EvidenceRunTarget,
+  run: EvidenceReadTarget,
 ): Promise<boolean> {
-  return withEvidenceDir(run, sentinelExists);
+  return withEvidenceReadDir(run, sentinelExists);
 }
 
 /** {@link isEvidenceTruncated} for a run that is already bound. */
@@ -1351,18 +1360,11 @@ async function sentinelExists(dir: DirHandle): Promise<boolean> {
   }
 }
 
-/**
- * A run to write evidence into: a {@link RunHandle}, whose binding re-verifies
- * the runs root and the run directory identity before handing out a
- * descriptor, or a run directory path for callers that only have one. Either
- * way every journal, lock, sentinel, and marker write of a single call is
- * issued through one descriptor opened with `O_DIRECTORY|O_NOFOLLOW`, so the
- * writes of that call cannot be split across two directories by a swap.
- */
-export type EvidenceRunTarget = string | RunHandle;
+/** A run target used only to inspect truncation state. */
+type EvidenceReadTarget = string | RunHandle;
 
-function withEvidenceDir<T>(
-  run: EvidenceRunTarget,
+function withEvidenceReadDir<T>(
+  run: EvidenceReadTarget,
   fn: (dir: DirHandle) => Promise<T>,
 ): Promise<T> {
   if (typeof run !== "string") return withBoundRunDir(run.binding, fn);
@@ -1384,10 +1386,15 @@ function withEvidenceDir<T>(
  * Over-long records are rejected with a `RangeError` before any write.
  */
 export async function appendAction(
-  run: EvidenceRunTarget,
+  run: RunHandle,
   record: EvidenceRecord,
   opts: AppendActionOptions = {},
 ): Promise<AppendResult> {
+  if (!(run instanceof RunHandle)) {
+    throw new RunStorageAccessError(
+      "appendAction requires a verified RunHandle; run directory paths are refused",
+    );
+  }
   const maxLineBytes = opts.maxLineBytes ?? EVIDENCE_MAX_LINE_BYTES;
   const maxBytes = opts.maxBytes ?? EVIDENCE_MAX_BYTES;
   const externalBytes = opts.externalBytes ?? 0;
@@ -1405,7 +1412,7 @@ export async function appendAction(
     );
   }
 
-  return withEvidenceDir(run, (dir) =>
+  return withBoundRunDir(run.binding, (dir) =>
     withJournalLock(dir, async () => {
       const handle = await dir.openFile(
         EVIDENCE_ACTION_LOG,
@@ -1633,119 +1640,186 @@ async function commitTruncationSentinel(
  *
  * Returns true only for the process that actually appended the marker.
  */
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
+interface TruncationWriterContext {
+  dir: DirHandle;
+  journal: fs.promises.FileHandle;
+  usedBytes: number;
+  maxBytes: number;
+  hooks: MarkerHooks;
+  ownerPid: number;
+  ownerStartTicks: number | undefined;
+  deadline: number;
+}
+
+type TruncationClaimStep =
+  | { kind: "owned"; handle: fs.promises.FileHandle }
+  | { kind: "retry" }
+  | { kind: "done" };
+
+function claimOwnedByWriter(
+  ctx: TruncationWriterContext,
+  claim: TruncationClaim,
+): boolean {
+  return (
+    claim.ownerPid === ctx.ownerPid &&
+    claim.ownerStartTicks === ctx.ownerStartTicks
+  );
+}
+
+async function stepPastExistingTruncationClaim(
+  ctx: TruncationWriterContext,
+  attempt: number,
+): Promise<TruncationClaimStep> {
+  const raw = await ctx.dir.readFileIfPresent(TRUNCATION_SENTINEL);
+  if (raw === undefined) return { kind: "retry" };
+  const state = parseTruncationSentinel(raw);
+  if (state?.kind === "committed") return { kind: "done" };
+  if (state?.kind === "claim") {
+    if (identityIsAlive(state.claim.ownerPid, state.claim.ownerStartTicks)) {
+      if (
+        claimOwnedByWriter(ctx, state.claim) &&
+        (await journalHasTruncationMarker(ctx.dir))
+      ) {
+        await commitTruncationSentinel(
+          ctx.dir,
+          ctx.ownerPid,
+          ctx.ownerStartTicks,
+        );
+      }
+      return { kind: "done" };
+    }
+    await unlinkIfMatchesIn(ctx.dir, TRUNCATION_SENTINEL, raw).catch(() => {});
+    return { kind: "retry" };
+  }
+  if (attempt >= EMPTY_CLAIM_GRACE_ATTEMPTS) {
+    await unlinkIfMatchesIn(ctx.dir, TRUNCATION_SENTINEL, raw).catch(() => {});
+    return { kind: "retry" };
+  }
+  if (Date.now() >= ctx.deadline) return { kind: "done" };
+  await delay(claimBackoff(attempt));
+  return { kind: "retry" };
+}
+
+async function tryTruncationClaim(
+  ctx: TruncationWriterContext,
+  attempt: number,
+): Promise<TruncationClaimStep> {
+  try {
+    return {
+      kind: "owned",
+      handle: await ctx.dir.openFile(TRUNCATION_SENTINEL, "wx"),
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    return stepPastExistingTruncationClaim(ctx, attempt);
+  }
+}
+
+function truncationClaimContent(ctx: TruncationWriterContext): string {
+  const claim: TruncationClaim = {
+    evidenceVersion: EVIDENCE_VERSION,
+    ownerPid: ctx.ownerPid,
+    claim: true,
+    claimedAt: new Date().toISOString(),
+  };
+  if (ctx.ownerStartTicks !== undefined) {
+    claim.ownerStartTicks = ctx.ownerStartTicks;
+  }
+  return `${JSON.stringify(claim)}\n`;
+}
+
+async function stampTruncationClaim(
+  sentinel: fs.promises.FileHandle,
+  content: string,
+): Promise<void> {
+  try {
+    const buf = Buffer.from(content, "utf8");
+    const { bytesWritten } = await sentinel.write(buf, 0, buf.length, 0);
+    if (bytesWritten !== buf.length) {
+      throw new Error(
+        `short truncation claim write: ${bytesWritten}/${buf.length} bytes`,
+      );
+    }
+  } finally {
+    await sentinel.close().catch(() => {});
+  }
+}
+
+async function appendTruncationMarker(
+  ctx: TruncationWriterContext,
+): Promise<void> {
+  if (ctx.hooks.failAppend !== undefined) {
+    await ctx.hooks.failAppend();
+    return;
+  }
+  await appendLine(
+    ctx.journal,
+    encodeRecord(buildTruncationMarker(ctx.usedBytes, ctx.maxBytes)),
+  );
+}
+
+async function completeTruncationClaim(
+  ctx: TruncationWriterContext,
+  sentinel: fs.promises.FileHandle,
+): Promise<boolean> {
+  const claimContent = truncationClaimContent(ctx);
+  await stampTruncationClaim(sentinel, claimContent);
+  let appended = false;
+  try {
+    if (ctx.hooks.afterClaim !== undefined) await ctx.hooks.afterClaim();
+    if (await journalHasTruncationMarker(ctx.dir)) {
+      await commitTruncationSentinel(
+        ctx.dir,
+        ctx.ownerPid,
+        ctx.ownerStartTicks,
+      );
+      return false;
+    }
+    await appendTruncationMarker(ctx);
+    appended = true;
+    await commitTruncationSentinel(
+      ctx.dir,
+      ctx.ownerPid,
+      ctx.ownerStartTicks,
+    );
+    return true;
+  } catch (error) {
+    // A failed append is safe to retry. A failed commit is not: its marker is
+    // already durable, so leave the recoverable claim for the next writer.
+    if (!appended) {
+      await unlinkIfMatchesIn(
+        ctx.dir,
+        TRUNCATION_SENTINEL,
+        claimContent,
+      ).catch(() => {});
+    }
+    throw error;
+  }
+}
+
 async function writeTruncationMarkerOnce(
   dir: DirHandle,
-  handle: fs.promises.FileHandle,
+  journal: fs.promises.FileHandle,
   usedBytes: number,
   maxBytes: number,
   hooks: MarkerHooks = {},
 ): Promise<boolean> {
   const ownerPid = process.pid;
-  const ownerStartTicks = readProcessStartTicks(ownerPid);
-  const deadline = Date.now() + CLAIM_TOTAL_DEADLINE_MS;
-
+  const ctx: TruncationWriterContext = {
+    dir,
+    journal,
+    usedBytes,
+    maxBytes,
+    hooks,
+    ownerPid,
+    ownerStartTicks: readProcessStartTicks(ownerPid),
+    deadline: Date.now() + CLAIM_TOTAL_DEADLINE_MS,
+  };
   for (let attempt = 0; attempt < MAX_CLAIM_ATTEMPTS; attempt += 1) {
-    let sentinel: fs.promises.FileHandle;
-    try {
-      sentinel = await dir.openFile(TRUNCATION_SENTINEL, "wx");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const raw = await dir.readFileIfPresent(TRUNCATION_SENTINEL);
-      if (raw === undefined) continue; // Vanished between wx and read; retry.
-      const state = parseTruncationSentinel(raw);
-      if (state?.kind === "committed") return false; // Marker durably written.
-      if (state?.kind === "claim") {
-        // A live owner is writing (or will write) the marker — never duplicate.
-        // Only a provably dead owner's claim is reclaimed, so a slow-but-live
-        // writer is never stolen from.
-        if (identityIsAlive(state.claim.ownerPid, state.claim.ownerStartTicks)) {
-          const ownedByCaller =
-            state.claim.ownerPid === ownerPid &&
-            state.claim.ownerStartTicks === ownerStartTicks;
-          // eslint-disable-next-line max-depth -- Legacy gate debt: pickforge/pickforge#60
-          if (ownedByCaller && (await journalHasTruncationMarker(dir))) {
-            await commitTruncationSentinel(dir, ownerPid, ownerStartTicks);
-          }
-          return false;
-        }
-        await unlinkIfMatchesIn(dir, TRUNCATION_SENTINEL, raw).catch(() => {});
-        continue;
-      }
-      // Owner-unknown (empty/torn/unparseable) claim: a winner stamps identity
-      // synchronously, so this only persists if the claimer died in the tiny
-      // window between the `wx` create and its stamp. Tolerate a short grace,
-      // then reclaim.
-      if (attempt >= EMPTY_CLAIM_GRACE_ATTEMPTS) {
-        await unlinkIfMatchesIn(dir, TRUNCATION_SENTINEL, raw).catch(() => {});
-        continue;
-      }
-      if (Date.now() >= deadline) return false;
-      await delay(claimBackoff(attempt));
-      continue;
-    }
-
-    // We own a fresh claim. Stamp verifiable identity synchronously so peers can
-    // tell we are alive, closing the owner-unknown window as fast as possible.
-    const claimRecord: TruncationClaim = {
-      evidenceVersion: EVIDENCE_VERSION,
-      ownerPid,
-      claim: true,
-      claimedAt: new Date().toISOString(),
-    };
-    if (ownerStartTicks !== undefined) {
-      claimRecord.ownerStartTicks = ownerStartTicks;
-    }
-    const claimContent = `${JSON.stringify(claimRecord)}\n`;
-    try {
-      const buf = Buffer.from(claimContent, "utf8");
-      const { bytesWritten } = await sentinel.write(buf, 0, buf.length, 0);
-      if (bytesWritten !== buf.length) {
-        throw new Error(
-          `short truncation claim write: ${bytesWritten}/${buf.length} bytes`,
-        );
-      }
-    } finally {
-      await sentinel.close().catch(() => {});
-    }
-
-    let appended = false;
-    try {
-      if (hooks.afterClaim !== undefined) await hooks.afterClaim();
-
-      // A prior crashed writer may have appended the marker before it could
-      // commit its sentinel (crash between append and commit). Never write a
-      // second one: recover by committing the sentinel over the existing marker.
-      if (await journalHasTruncationMarker(dir)) {
-        await commitTruncationSentinel(dir, ownerPid, ownerStartTicks);
-        return false;
-      }
-
-      if (hooks.failAppend !== undefined) {
-        await hooks.failAppend();
-      } else {
-        await appendLine(
-          handle,
-          encodeRecord(buildTruncationMarker(usedBytes, maxBytes)),
-        );
-      }
-      appended = true;
-      await commitTruncationSentinel(dir, ownerPid, ownerStartTicks);
-      return true;
-    } catch (error) {
-      // The append failed, so no marker was written: clear our claim so the
-      // sentinel never persists as a permanent gate with no truncation action —
-      // the next append retries cleanly. If instead the append succeeded and only
-      // the commit failed, the marker is already durable; leave the (recoverable)
-      // claim so `isEvidenceTruncated` stays true and a later append commits it
-      // or, once we exit, reclaims and commits it.
-      if (!appended) {
-        await unlinkIfMatchesIn(dir, TRUNCATION_SENTINEL, claimContent).catch(
-          () => {},
-        );
-      }
-      throw error;
-    }
+    const step = await tryTruncationClaim(ctx, attempt);
+    if (step.kind === "done") return false;
+    if (step.kind === "retry") continue;
+    return completeTruncationClaim(ctx, step.handle);
   }
   return false;
 }
@@ -1794,6 +1868,37 @@ export function parseActionsJournal(
   return records;
 }
 
+async function readActionsFromHandle(
+  handle: fs.promises.FileHandle,
+  label: string,
+): Promise<EvidenceRecord[]> {
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) {
+      throw new Error(`Unsafe evidence journal in ${label}: not a regular file`);
+    }
+    return parseActionsJournal(await handle.readFile("utf8"), label);
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Read the action journal through an already verified run descriptor. */
+export async function readActionsIn(
+  runDir: DirHandle,
+): Promise<EvidenceRecord[]> {
+  try {
+    const handle = await runDir.openFile(
+      EVIDENCE_ACTION_LOG,
+      fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+    );
+    return readActionsFromHandle(handle, runDir.dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+}
+
 /**
  * Read the run's action journal deterministically. Records are returned in file
  * (append) order. A missing/empty journal yields `[]`. Only a torn final line
@@ -1801,28 +1906,17 @@ export function parseActionsJournal(
  * dropped; any malformed or blank line before the end is rejected.
  */
 export async function readActions(runDir: string): Promise<EvidenceRecord[]> {
-  const journalPath = path.join(runDir, EVIDENCE_ACTION_LOG);
   let handle: fs.promises.FileHandle;
   try {
     handle = await fs.promises.open(
-      journalPath,
+      path.join(runDir, EVIDENCE_ACTION_LOG),
       fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
     );
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw error;
   }
-  let raw: string;
-  try {
-    const stat = await handle.stat();
-    if (!stat.isFile()) {
-      throw new Error(`Unsafe evidence journal in ${runDir}: not a regular file`);
-    }
-    raw = await handle.readFile("utf8");
-  } finally {
-    await handle.close();
-  }
-  return parseActionsJournal(raw, runDir);
+  return readActionsFromHandle(handle, runDir);
 }
 
 export function isEvidenceRun(manifest: RunManifest): boolean {

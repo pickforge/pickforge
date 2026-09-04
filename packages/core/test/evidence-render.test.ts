@@ -193,7 +193,7 @@ describe("writeEvidenceReport", () => {
     fs.writeFileSync(outside, "secret");
     fs.symlinkSync(outside, path.join(run.dir, "screenshots", "escape.png"));
     await appendAction(
-      run.dir,
+      run,
       action({
         artifacts: [
           "screenshots/good.png",
@@ -203,7 +203,7 @@ describe("writeEvidenceReport", () => {
       }),
     );
 
-    const reportPath = await writeEvidenceReport(run.dir, run.manifest);
+    const reportPath = await writeEvidenceReport(run);
     const html = fs.readFileSync(reportPath, "utf8");
 
     expect(reportPath).toBe(path.join(run.dir, EVIDENCE_REPORT));
@@ -222,25 +222,29 @@ describe("writeEvidenceReport", () => {
     const target = path.join(run.dir, EVIDENCE_REPORT);
     fs.symlinkSync(outside, target);
 
-    await writeEvidenceReport(run.dir, run.manifest);
+    await writeEvidenceReport(run);
 
     expect(fs.lstatSync(target).isSymbolicLink()).toBe(false);
     expect(fs.readFileSync(outside, "utf8")).toBe("outside-secret");
   });
 
-  it("rejects a symlinked run directory", async () => {
+  it("rejects pathname targets even when they currently name the run", async () => {
     const run = await createRun(projectDir, "real-run", { evidence: true });
     const linked = path.join(root, "linked-run");
     fs.symlinkSync(run.dir, linked);
+    const writeByPath = writeEvidenceReport as unknown as (
+      runDir: string,
+      manifest: RunManifest,
+    ) => Promise<string>;
 
-    await expect(writeEvidenceReport(linked, run.manifest)).rejects.toThrow(
-      /Unsafe evidence run directory/,
+    await expect(writeByPath(linked, run.manifest)).rejects.toThrow(
+      /verified RunHandle/,
     );
   });
 
   it("rejects legacy runs and corrupt evidence journals", async () => {
     const legacy = await createRun(projectDir, "legacy");
-    await expect(writeEvidenceReport(legacy.dir, legacy.manifest)).rejects.toThrow(
+    await expect(writeEvidenceReport(legacy)).rejects.toThrow(
       /not an evidence run/,
     );
 
@@ -250,7 +254,7 @@ describe("writeEvidenceReport", () => {
       '{"actionId":"ok"}\nnot-json\n',
     );
     await expect(
-      writeEvidenceReport(evidence.dir, evidence.manifest),
+      writeEvidenceReport(evidence),
     ).rejects.toThrow(/Corrupt evidence journal/);
   });
 });

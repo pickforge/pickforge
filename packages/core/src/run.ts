@@ -3,7 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import { type EnvLike } from "./paths.js";
 import type { DirHandle } from "./dir-handle.js";
-import { RunStorageAccessError } from "./dir-handle.js";
+import {
+  assertSafeEntryName,
+  RunStorageAccessError,
+} from "./dir-handle.js";
 import {
   bindingFor,
   openRunDirIn,
@@ -135,26 +138,69 @@ export class RunHandle {
     name: string,
     capture: (outPath: string) => Promise<void>,
   ): Promise<string> {
+    assertSafeEntryName(name, "artifact name");
+    if (subdir !== undefined) assertSafeEntryName(subdir, "artifact directory");
+
     await withBoundRunDir(this.#binding, async (runDir) => {
-      const target =
-        subdir === undefined ? runDir : await runDir.openChild(subdir);
-      const staging = await fs.promises.mkdtemp(
-        path.join(os.tmpdir(), "pickforge-capture-"),
-      );
+      let target = runDir;
       try {
-        const stagedPath = path.join(staging, name);
-        await capture(stagedPath);
-        await target.importFileAtomic(name, stagedPath);
+        if (subdir !== undefined) target = await runDir.openChild(subdir);
+        const staging = await fs.promises.mkdtemp(
+          path.join(os.tmpdir(), "pickforge-capture-"),
+        );
+        try {
+          const stagedPath = path.join(staging, name);
+          await capture(stagedPath);
+          await target.importFileAtomic(name, stagedPath);
+        } finally {
+          await fs.promises
+            .rm(staging, { recursive: true, force: true })
+            .catch(() => {});
+        }
       } finally {
-        await fs.promises
-          .rm(staging, { recursive: true, force: true })
-          .catch(() => {});
-        if (target !== runDir) await target.close();
+        if (target !== runDir) await target.close().catch(() => {});
       }
     });
     return subdir === undefined
       ? path.join(this.dir, name)
       : path.join(this.dir, subdir, name);
+  }
+
+  /** Remove a direct run artifact through the verified directory descriptor. */
+  async removeArtifact(
+    subdir: string | undefined,
+    name: string,
+  ): Promise<boolean> {
+    assertSafeEntryName(name, "artifact name");
+    if (subdir !== undefined) assertSafeEntryName(subdir, "artifact directory");
+    return withBoundRunDir(this.#binding, async (runDir) => {
+      if (subdir === undefined) return runDir.unlinkChild(name);
+      const target = await runDir.openChild(subdir);
+      try {
+        return await target.unlinkChild(name);
+      } finally {
+        await target.close().catch(() => {});
+      }
+    });
+  }
+
+  /** Read and validate this run's manifest through its verified descriptor. */
+  async readManifest(): Promise<RunManifest> {
+    const raw = await withBoundRunDir(this.#binding, (runDir) =>
+      runDir.readFileIfPresent("manifest.json"),
+    );
+    if (raw === undefined) {
+      throw new RunStorageAccessError(`Run manifest is missing: ${this.dir}`);
+    }
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      (parsed as RunManifest).runId !== this.runId
+    ) {
+      throw new RunStorageAccessError(`Invalid run manifest: ${this.dir}`);
+    }
+    return parsed as RunManifest;
   }
 
   async #writeManifest(): Promise<void> {

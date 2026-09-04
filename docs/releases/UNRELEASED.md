@@ -27,14 +27,15 @@ release description, then reset it after that release is published.
 - Sensitive run writes are now bound to the verified *directory*, not to its
   pathname. Each directory is opened once with `O_DIRECTORY|O_NOFOLLOW` and
   verified through that descriptor, and the manifest, the evidence journal (and
-  its lock and truncation sentinel), the session's active-run pointer, and
-  screenshots and other run artifacts are all written through the same
-  descriptor. Swapping an ancestor after verification can no longer redirect
+  its lock and truncation sentinel), the session's active-run pointer, HTML
+  report, and screenshots and other run artifacts are all written through the
+  same descriptor. Swapping an ancestor after verification can no longer redirect
   those writes: they land in the verified directory or fail with a named error.
 - Screenshots are captured into a process-private staging directory and
   published into the run through the descriptor held across the capture, so an
   external capture tool can no longer be pointed outside the run directory by a
-  swap while it runs.
+  swap while it runs. Artifact names and subdirectories are validated before
+  staging starts, so traversal cannot write outside that private directory.
 - Run adoption stays internal: `openRun` is no longer exported. Adoption goes
   through one helper that requires a single-component run id naming a real
   directory directly under the verified root, and a manifest that describes
@@ -52,9 +53,10 @@ release description, then reset it after that release is published.
   Node exposes no `openat`/`mkdirat` family. The TypeScript lab is Linux-only;
   on any other platform run-storage writes now fail closed with a clear error
   instead of falling back to pathname writes.
-- The binding covers run-storage writes. Reads (run listing, manifest and
-  journal reads, report rendering) and retention pruning still apply the
-  lstat/realpath trust boundary by pathname and are not descriptor-bound.
+- The binding covers run-storage writes and report rendering. General reads
+  (run listing and catalog manifest/journal reads) and retention pruning still
+  apply the lstat/realpath trust boundary by pathname and are not
+  descriptor-bound.
 - A swap performed *before* an operation opens its directory is not silently
   tolerated: the open fails verification and the operation reports the unsafe
   path. Only the redirection of an already verified write is prevented.

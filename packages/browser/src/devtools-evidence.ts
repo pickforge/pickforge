@@ -204,7 +204,116 @@ function structuredContent(message: JsonRpcMessage): Record<string, unknown> | u
     : undefined;
 }
 
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
+function numericNetworkStatus(value: unknown): number | undefined {
+  if (typeof value === "number") return value;
+  if (typeof value === "string" && /^\d{3}$/.test(value)) return Number(value);
+  return undefined;
+}
+
+function networkError(
+  rawStatus: unknown,
+  numericStatus: number | undefined,
+): string | undefined {
+  if (
+    typeof rawStatus !== "string" ||
+    numericStatus !== undefined ||
+    rawStatus === "pending"
+  ) {
+    return undefined;
+  }
+  return /^net::[A-Z0-9_]+$/.test(rawStatus)
+    ? rawStatus
+    : "Network request failed";
+}
+
+function networkDiagnostic(
+  request: Record<string, unknown>,
+  sessionId: string,
+  startedAt: string,
+): EvidenceAction | undefined {
+  const status = numericNetworkStatus(request.status);
+  const error = networkError(request.status, status);
+  if ((status === undefined || status < 400) && error === undefined) {
+    return undefined;
+  }
+  return {
+    actionId: crypto.randomUUID(),
+    source: "devtools",
+    tool: "network_failure",
+    sessionId,
+    startedAt,
+    status: "error",
+    target: {
+      ...sanitizeNetworkFailure({
+        method: typeof request.method === "string" ? request.method : undefined,
+        url: typeof request.url === "string" ? request.url : undefined,
+        status,
+        resourceType:
+          typeof request.resourceType === "string"
+            ? request.resourceType
+            : undefined,
+        durationMs:
+          typeof request.durationMs === "number"
+            ? request.durationMs
+            : undefined,
+        error,
+      }),
+    },
+  };
+}
+
+function addNetworkDiagnostics(
+  actions: EvidenceAction[],
+  requests: unknown,
+  sessionId: string,
+  startedAt: string,
+): void {
+  if (!Array.isArray(requests)) return;
+  for (const request of requests) {
+    if (actions.length >= MAX_DIAGNOSTICS_PER_RESPONSE) return;
+    if (!isObject(request)) continue;
+    const action = networkDiagnostic(request, sessionId, startedAt);
+    if (action !== undefined) actions.push(action);
+  }
+}
+
+function consoleDiagnostic(
+  message: unknown,
+  sessionId: string,
+  startedAt: string,
+): EvidenceAction | undefined {
+  if (
+    !isObject(message) ||
+    (message.type !== "error" && message.type !== "warning")
+  ) {
+    return undefined;
+  }
+  return {
+    actionId: crypto.randomUUID(),
+    source: "devtools",
+    tool: "console_message",
+    sessionId,
+    startedAt,
+    status: "error",
+    target: { role: message.type },
+    error: `Console ${message.type}`,
+  };
+}
+
+function addConsoleDiagnostics(
+  actions: EvidenceAction[],
+  messages: unknown,
+  sessionId: string,
+  startedAt: string,
+): void {
+  if (!Array.isArray(messages)) return;
+  for (const message of messages) {
+    if (actions.length >= MAX_DIAGNOSTICS_PER_RESPONSE) return;
+    const action = consoleDiagnostic(message, sessionId, startedAt);
+    if (action !== undefined) actions.push(action);
+  }
+}
+
 function diagnosticActions(
   message: JsonRpcMessage,
   sessionId: string,
@@ -213,165 +322,14 @@ function diagnosticActions(
   const structured = structuredContent(message);
   if (structured === undefined) return [];
   const actions: EvidenceAction[] = [];
-  if (Array.isArray(structured.networkRequests)) {
-    for (const request of structured.networkRequests) {
-      if (actions.length >= MAX_DIAGNOSTICS_PER_RESPONSE) break;
-      if (!isObject(request)) continue;
-      const rawStatus = request.status;
-      const numericStatus =
-        typeof rawStatus === "number"
-          ? rawStatus
-          : typeof rawStatus === "string" && /^\d{3}$/.test(rawStatus)
-            ? Number(rawStatus)
-            : undefined;
-      const failedWithoutStatus =
-        typeof rawStatus === "string" &&
-        numericStatus === undefined &&
-        rawStatus !== "pending";
-      const error = failedWithoutStatus
-        ? /^net::[A-Z0-9_]+$/.test(rawStatus)
-          ? rawStatus
-          : "Network request failed"
-        : undefined;
-      if (
-        (numericStatus === undefined || numericStatus < 400) &&
-        error === undefined
-      ) {
-        continue;
-      }
-      actions.push({
-        actionId: crypto.randomUUID(),
-        source: "devtools",
-        tool: "network_failure",
-        sessionId,
-        startedAt,
-        status: "error",
-        target: {
-          ...sanitizeNetworkFailure({
-            method:
-              typeof request.method === "string" ? request.method : undefined,
-            url: typeof request.url === "string" ? request.url : undefined,
-            status: numericStatus,
-            resourceType:
-              typeof request.resourceType === "string"
-                ? request.resourceType
-                : undefined,
-            durationMs:
-              typeof request.durationMs === "number"
-                ? request.durationMs
-                : undefined,
-            error,
-          }),
-        },
-      });
-    }
-  }
-  if (Array.isArray(structured.consoleMessages)) {
-    for (const message of structured.consoleMessages) {
-      if (actions.length >= MAX_DIAGNOSTICS_PER_RESPONSE) break;
-      if (!isObject(message) || (message.type !== "error" && message.type !== "warning")) {
-        continue;
-      }
-      actions.push({
-        actionId: crypto.randomUUID(),
-        source: "devtools",
-        tool: "console_message",
-        sessionId,
-        startedAt,
-        status: "error",
-        target: { role: message.type },
-        error: `Console ${message.type}`,
-      });
-    }
-  }
+  addNetworkDiagnostics(actions, structured.networkRequests, sessionId, startedAt);
+  addConsoleDiagnostics(actions, structured.consoleMessages, sessionId, startedAt);
   return actions;
-}
-
-interface RunIdentity {
-  dev: number;
-  ino: number;
-}
-
-function descriptorRoot(): string {
-  if (process.platform === "linux") return "/proc/self/fd";
-  if (process.platform === "darwin") return "/dev/fd";
-  throw new Error(
-    `Safe inline screenshot writes are unsupported on ${process.platform}`,
-  );
-}
-
-async function withPinnedScreenshotDirectory<T>(
-  runDir: string,
-  runIdentity: RunIdentity,
-  operation: (directoryPath: string) => Promise<T>,
-): Promise<T> {
-  const fdRoot = descriptorRoot();
-  const directoryFlags =
-    fs.constants.O_RDONLY |
-    fs.constants.O_DIRECTORY |
-    fs.constants.O_NOFOLLOW;
-  const runHandle = await fs.promises.open(runDir, directoryFlags);
-  try {
-    const stat = await runHandle.stat();
-    if (
-      !stat.isDirectory() ||
-      stat.dev !== runIdentity.dev ||
-      stat.ino !== runIdentity.ino
-    ) {
-      throw new Error("Evidence run directory changed before screenshot access");
-    }
-    const screenshotsHandle = await fs.promises.open(
-      path.join(fdRoot, String(runHandle.fd), "screenshots"),
-      directoryFlags,
-    );
-    try {
-      return await operation(
-        path.join(fdRoot, String(screenshotsHandle.fd)),
-      );
-    } finally {
-      await screenshotsHandle.close();
-    }
-  } finally {
-    await runHandle.close();
-  }
-}
-
-async function writePinnedScreenshot(
-  runDir: string,
-  runIdentity: RunIdentity,
-  filename: string,
-  bytes: Buffer,
-): Promise<void> {
-  await withPinnedScreenshotDirectory(
-    runDir,
-    runIdentity,
-    async (directoryPath) => {
-      await fs.promises.writeFile(path.join(directoryPath, filename), bytes, {
-        flag: "wx",
-        mode: 0o600,
-      });
-    },
-  );
-}
-
-async function removePinnedScreenshot(
-  runDir: string,
-  runIdentity: RunIdentity,
-  filename: string,
-): Promise<void> {
-  await withPinnedScreenshotDirectory(
-    runDir,
-    runIdentity,
-    async (directoryPath) => {
-      await fs.promises.rm(path.join(directoryPath, filename), { force: true });
-    },
-  );
 }
 
 async function captureInlinePng(
   message: JsonRpcMessage,
   run: RunHandle,
-  runIdentity: RunIdentity,
   actionId: string,
 ): Promise<string | undefined> {
   if (!isObject(message.result) || !Array.isArray(message.result.content)) {
@@ -393,11 +351,205 @@ async function captureInlinePng(
     return undefined;
   }
   const filename = `devtools-${actionId}.png`;
-  await writePinnedScreenshot(run.dir, runIdentity, filename, bytes);
+  await run.captureArtifact("screenshots", filename, async (outPath) => {
+    await fs.promises.writeFile(outPath, bytes, { flag: "wx", mode: 0o600 });
+  });
   return path.join("screenshots", filename);
 }
 
-// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/pickforge#60
+function removeInlineScreenshot(
+  run: RunHandle,
+  artifact: string,
+): Promise<boolean> {
+  return run.removeArtifact("screenshots", path.basename(artifact));
+}
+
+interface RecorderContext {
+  opts: CreateDevtoolsEvidenceRecorderOptions;
+  run: RunHandle;
+  pending: Map<string | number, PendingAction>;
+}
+
+function reportRecorderFailure(ctx: RecorderContext, error: unknown): void {
+  const detail = sanitizeErrorText(
+    error instanceof Error ? error.message : String(error),
+  );
+  try {
+    ctx.opts.reportFailure?.(detail);
+  } catch {
+    // Evidence diagnostics must never break the relay.
+  }
+}
+
+async function appendRecorderAction(
+  ctx: RecorderContext,
+  action: EvidenceAction,
+): Promise<AppendOutcome | undefined> {
+  try {
+    return (
+      await appendAction(ctx.run, action, { maxBytes: ctx.opts.maxBytes })
+    ).outcome;
+  } catch (error) {
+    reportRecorderFailure(ctx, error);
+    return undefined;
+  }
+}
+
+function pendingAction(call: NonNullable<ReturnType<typeof toolCall>>): PendingAction {
+  return {
+    actionId: crypto.randomUUID(),
+    startedAt: new Date(),
+    tool: persistedToolName(call.name),
+    target: actionTarget(call.name, call.args),
+  };
+}
+
+async function beforeForward(
+  ctx: RecorderContext,
+  message: JsonRpcMessage,
+): Promise<void> {
+  try {
+    const call = toolCall(message);
+    if (call === undefined || ctx.pending.size >= MAX_PENDING_ACTIONS) return;
+    ctx.pending.set(call.id, pendingAction(call));
+  } catch (error) {
+    reportRecorderFailure(ctx, error);
+  }
+}
+
+function takePendingAction(
+  ctx: RecorderContext,
+  message: JsonRpcMessage,
+): PendingAction | undefined {
+  const id = requestId(message);
+  if (id === undefined) return undefined;
+  const action = ctx.pending.get(id);
+  if (action !== undefined) ctx.pending.delete(id);
+  return action;
+}
+
+function isScreenshotAction(action: PendingAction): boolean {
+  return (
+    action.tool === "chrome_devtools/take_screenshot" ||
+    action.tool === "chrome_devtools/screenshot"
+  );
+}
+
+async function responseArtifacts(
+  ctx: RecorderContext,
+  message: JsonRpcMessage,
+  action: PendingAction,
+  error: string | undefined,
+): Promise<string[]> {
+  if (!isScreenshotAction(action) || error !== undefined) return [];
+  try {
+    const screenshot = await captureInlinePng(
+      message,
+      ctx.run,
+      action.actionId,
+    );
+    return screenshot === undefined ? [] : [screenshot];
+  } catch (captureError) {
+    reportRecorderFailure(ctx, captureError);
+    return [];
+  }
+}
+
+function responseActionRecord(
+  ctx: RecorderContext,
+  action: PendingAction,
+  artifacts: string[],
+  error: string | undefined,
+): EvidenceAction {
+  const record: EvidenceAction = {
+    actionId: action.actionId,
+    source: "devtools",
+    tool: action.tool,
+    sessionId: ctx.opts.sessionId,
+    startedAt: action.startedAt.toISOString(),
+    durationMs: Date.now() - action.startedAt.getTime(),
+    status: error === undefined ? "ok" : "error",
+  };
+  if (action.target !== undefined) record.target = action.target;
+  if (artifacts.length > 0) record.artifacts = artifacts;
+  if (error !== undefined) record.error = error;
+  return record;
+}
+
+async function removeRejectedArtifacts(
+  ctx: RecorderContext,
+  artifacts: string[],
+  outcome: AppendOutcome | undefined,
+): Promise<void> {
+  if (outcome !== "capped" && outcome !== undefined) return;
+  for (const artifact of artifacts) {
+    await removeInlineScreenshot(ctx.run, artifact).catch((error) =>
+      reportRecorderFailure(ctx, error),
+    );
+  }
+}
+
+async function appendResponseDiagnostics(
+  ctx: RecorderContext,
+  message: JsonRpcMessage,
+): Promise<void> {
+  const diagnostics = diagnosticActions(
+    message,
+    ctx.opts.sessionId,
+    new Date().toISOString(),
+  );
+  for (const diagnostic of diagnostics) {
+    await appendRecorderAction(ctx, diagnostic);
+  }
+}
+
+async function recordResponse(
+  ctx: RecorderContext,
+  message: JsonRpcMessage,
+  action: PendingAction,
+): Promise<void> {
+  const error = responseError(message);
+  const artifacts = await responseArtifacts(ctx, message, action, error);
+  const record = responseActionRecord(ctx, action, artifacts, error);
+  const outcome = await appendRecorderAction(ctx, record);
+  await removeRejectedArtifacts(ctx, artifacts, outcome);
+  await appendResponseDiagnostics(ctx, message);
+}
+
+async function afterResponse(
+  ctx: RecorderContext,
+  message: JsonRpcMessage,
+): Promise<void> {
+  try {
+    const action = takePendingAction(ctx, message);
+    if (action === undefined) return;
+    await recordResponse(ctx, message, action);
+  } catch (error) {
+    reportRecorderFailure(ctx, error);
+  }
+}
+
+async function flushPending(
+  ctx: RecorderContext,
+  status: EvidenceAction["status"],
+): Promise<void> {
+  const unfinished = [...ctx.pending.values()];
+  ctx.pending.clear();
+  for (const action of unfinished) {
+    await appendRecorderAction(ctx, {
+      actionId: action.actionId,
+      source: "devtools",
+      tool: action.tool,
+      sessionId: ctx.opts.sessionId,
+      startedAt: action.startedAt.toISOString(),
+      durationMs: Date.now() - action.startedAt.getTime(),
+      status,
+      ...(action.target === undefined ? {} : { target: action.target }),
+      error: "DevTools relay ended before the tool returned",
+    });
+  }
+}
+
 export async function createDevtoolsEvidenceRecorder(
   opts: CreateDevtoolsEvidenceRecorderOptions,
 ): Promise<DevtoolsEvidenceRecorder | undefined> {
@@ -409,130 +561,10 @@ export async function createDevtoolsEvidenceRecorder(
     { slug: "computer-use" },
     opts.env,
   );
-  const runStat = await fs.promises.lstat(run.dir);
-  if (!runStat.isDirectory() || runStat.isSymbolicLink()) {
-    throw new Error("Evidence run directory is not a real directory");
-  }
-  const runIdentity: RunIdentity = { dev: runStat.dev, ino: runStat.ino };
-  const pending = new Map<string | number, PendingAction>();
-  const report = (error: unknown): void => {
-    const detail = sanitizeErrorText(
-      error instanceof Error ? error.message : String(error),
-    );
-    try {
-      opts.reportFailure?.(detail);
-    } catch {
-      // Evidence diagnostics must never break the relay.
-    }
-  };
-  const append = async (
-    action: EvidenceAction,
-  ): Promise<AppendOutcome | undefined> => {
-    try {
-      const result = await appendAction(run, action, {
-        maxBytes: opts.maxBytes,
-      });
-      return result.outcome;
-    } catch (error) {
-      report(error);
-      return undefined;
-    }
-  };
-
+  const ctx: RecorderContext = { opts, run, pending: new Map() };
   return {
-    beforeForward: async (message) => {
-      try {
-        const call = toolCall(message);
-        if (call === undefined || pending.size >= MAX_PENDING_ACTIONS) return;
-        pending.set(call.id, {
-          actionId: crypto.randomUUID(),
-          startedAt: new Date(),
-          tool: persistedToolName(call.name),
-          target: actionTarget(call.name, call.args),
-        });
-      } catch (error) {
-        report(error);
-      }
-    },
-    // eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
-    afterResponse: async (message) => {
-      try {
-        const id = requestId(message);
-        if (id === undefined) return;
-        const action = pending.get(id);
-        if (action === undefined) return;
-        pending.delete(id);
-        const error = responseError(message);
-        const artifacts: string[] = [];
-        if (
-          (action.tool === "chrome_devtools/take_screenshot" ||
-            action.tool === "chrome_devtools/screenshot") &&
-          error === undefined
-        ) {
-          try {
-            const screenshot = await captureInlinePng(
-              message,
-              run,
-              runIdentity,
-              action.actionId,
-            );
-            if (screenshot !== undefined) artifacts.push(screenshot);
-          } catch (captureError) {
-            report(captureError);
-          }
-        }
-        const record: EvidenceAction = {
-          actionId: action.actionId,
-          source: "devtools",
-          tool: action.tool,
-          sessionId: opts.sessionId,
-          startedAt: action.startedAt.toISOString(),
-          durationMs: Date.now() - action.startedAt.getTime(),
-          status: error === undefined ? "ok" : "error",
-        };
-        if (action.target !== undefined) record.target = action.target;
-        if (artifacts.length > 0) record.artifacts = artifacts;
-        if (error !== undefined) record.error = error;
-        const outcome = await append(record);
-        if (
-          artifacts.length > 0 &&
-          (outcome === "capped" || outcome === undefined)
-        ) {
-          for (const artifact of artifacts) {
-            await removePinnedScreenshot(
-              run.dir,
-              runIdentity,
-              path.basename(artifact),
-            ).catch(report);
-          }
-        }
-        for (const diagnostic of diagnosticActions(
-          message,
-          opts.sessionId,
-          new Date().toISOString(),
-        )) {
-          await append(diagnostic);
-        }
-      } catch (error) {
-        report(error);
-      }
-    },
-    flushPending: async (status = "cancelled") => {
-      const unfinished = [...pending.values()];
-      pending.clear();
-      for (const action of unfinished) {
-        await append({
-          actionId: action.actionId,
-          source: "devtools",
-          tool: action.tool,
-          sessionId: opts.sessionId,
-          startedAt: action.startedAt.toISOString(),
-          durationMs: Date.now() - action.startedAt.getTime(),
-          status,
-          ...(action.target === undefined ? {} : { target: action.target }),
-          error: "DevTools relay ended before the tool returned",
-        });
-      }
-    },
+    beforeForward: (message) => beforeForward(ctx, message),
+    afterResponse: (message) => afterResponse(ctx, message),
+    flushPending: (status = "cancelled") => flushPending(ctx, status),
   };
 }

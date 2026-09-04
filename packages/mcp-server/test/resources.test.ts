@@ -4,8 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import os from "node:os";
 import {
   appendAction,
+  createRun,
   writeEvidenceReport,
-  type RunManifest,
 } from "@pickforge/lab-core";
 import {
   connectLab,
@@ -27,16 +27,23 @@ function first(contents: unknown): Record<string, any> {
 }
 
 async function seedEvidenceRun(projectDir: string): Promise<string> {
-  const runDir = path.join(projectDir, ".picklab", "runs", RUN_ID);
-  const manifestPath = path.join(runDir, "manifest.json");
-  const manifest = JSON.parse(
-    fs.readFileSync(manifestPath, "utf8"),
-  ) as RunManifest;
-  manifest.evidenceVersion = 1;
-  manifest.actionLog = "actions.jsonl";
-  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-  fs.writeFileSync(path.join(runDir, "actions.jsonl"), "");
-  await appendAction(runDir, {
+  const run = await createRun(
+    projectDir,
+    "synthetic",
+    { evidence: true, now: new Date("2026-06-09T12:00:00.000Z") },
+    { PICKFORGE_STORAGE_MODE: "project-local" },
+  );
+  fs.writeFileSync(
+    path.join(run.dir, "screenshots", "screenshot.png"),
+    Buffer.concat([PNG_MAGIC, Buffer.from([0x00, 0x01, 0x02])]),
+  );
+  fs.writeFileSync(
+    path.join(run.dir, "logs", "app.log"),
+    `boot ok\ntoken=${PLANTED_TOKEN}\ndone\n`,
+  );
+  await run.addArtifact("screenshot", "screenshot.png", "screenshots/screenshot.png");
+  await run.addArtifact("log", "app.log", "logs/app.log");
+  await appendAction(run, {
     actionId: "second",
     source: '<img src="https://evil.invalid/leak">',
     tool: "desktop_type",
@@ -45,15 +52,16 @@ async function seedEvidenceRun(projectDir: string): Promise<string> {
     target: { label: "</dd><script>alert(1)</script>" },
     error: `Authorization: Bearer ${PLANTED_TOKEN}`,
   });
-  await appendAction(runDir, {
+  await appendAction(run, {
     actionId: "first",
     source: "mcp",
     tool: "desktop_click",
     startedAt: "2026-06-09T12:00:03.000Z",
     status: "ok",
   });
-  await writeEvidenceReport(runDir, manifest);
-  return runDir;
+  await run.finish("completed");
+  await writeEvidenceReport(run);
+  return run.dir;
 }
 
 let dirs: LabDirs;
@@ -62,7 +70,6 @@ let sessionId: string;
 
 beforeEach(async () => {
   dirs = makeLabDirs();
-  writeSyntheticRun(dirs.projectDir, RUN_ID);
   await seedEvidenceRun(dirs.projectDir);
   sessionId = writeDesktopSessionRecord(dirs.home, dirs.projectDir);
   lab = await connectLab({

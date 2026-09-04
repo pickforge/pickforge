@@ -8,7 +8,9 @@ import {
   finalizeActiveEvidenceRun,
   readActions,
 } from "../src/evidence.js";
-import { createRun } from "../src/run.js";
+import { recordTakeoverEvidence } from "../src/takeover.js";
+import { writeEvidenceReport } from "../src/evidence-render.js";
+import { createRun, type RunManifest } from "../src/run.js";
 import { captureToTarget, resolveScreenshotTarget } from "../src/target.js";
 
 // Ancestor-swap coverage for #54.
@@ -18,8 +20,8 @@ import { captureToTarget, resolveScreenshotTarget } from "../src/target.js";
 // a re-check before the write cannot close, because the re-check and the write
 // are two separate pathname lookups. They are written against the public API
 // and plain `fs` patching only, so they also run against the pre-fix head:
-// there, the manifest case leaks `outside/manifest.json` and the screenshot
-// case leaks `outside/screenshots/screenshot.png`.
+// there, manifests, screenshots, takeover journals, and reports leak outside,
+// while a traversing artifact name writes outside its staging directory.
 
 let root: string;
 let project: string;
@@ -212,6 +214,66 @@ describe("ancestor swapped while a screenshot capture is in flight", () => {
 });
 
 describe("ancestor swapped around evidence writes", () => {
+  it("keeps best-effort takeover evidence out of a swapped ancestor", async () => {
+    const realOpen = fs.promises.open.bind(fs.promises);
+    let moved: string | undefined;
+    let runId: string | undefined;
+    const logicalRunsRoot = path.join(project, ".picklab", "runs");
+    const open = vi.spyOn(fs.promises, "open").mockImplementation((async (
+      target: Parameters<typeof fs.promises.open>[0],
+      flags: Parameters<typeof fs.promises.open>[1],
+      mode?: Parameters<typeof fs.promises.open>[2],
+    ) => {
+      const targetPath = String(target);
+      const isLogicalRunOpen =
+        targetPath === logicalRunsRoot || path.dirname(targetPath) === logicalRunsRoot;
+      if (moved === undefined && isLogicalRunOpen) {
+        const entries = await fs.promises.readdir(logicalRunsRoot);
+        runId = entries.find((entry) => !entry.startsWith("."));
+        if (runId === undefined) throw new Error("takeover run was not created");
+        moved = await swapPicklabForOutsideLink(runId);
+      }
+      return realOpen(target, flags, mode);
+    }) as typeof fs.promises.open);
+
+    try {
+      await recordTakeoverEvidence(project, "desk-take00", "takeover_start");
+    } finally {
+      open.mockRestore();
+    }
+    expect(moved).toBeDefined();
+    expect(await outsideFiles()).toEqual([]);
+
+    await fs.promises.unlink(path.join(project, ".picklab"));
+    await fs.promises.rename(moved!, path.join(project, ".picklab"));
+    expect((await readActions(path.join(logicalRunsRoot, runId!))).map((r) => r.actionId))
+      .toEqual([]);
+  });
+
+  it("refuses the legacy pathname journal target after an ancestor swap", async () => {
+    const { run } = await beginEvidenceRun(project, "desk-swap00");
+    const moved = await swapPicklabForOutsideLink(run.runId);
+    const appendByPath = appendAction as unknown as (
+      runDir: string,
+      record: Parameters<typeof appendAction>[1],
+    ) => ReturnType<typeof appendAction>;
+
+    await expect(
+      appendByPath(run.dir, {
+        actionId: "path-target",
+        source: "test",
+        tool: "swap",
+        startedAt: new Date().toISOString(),
+        status: "ok",
+      }),
+    ).rejects.toThrow(/verified RunHandle/);
+    expect(await outsideFiles()).toEqual([]);
+
+    await fs.promises.unlink(path.join(project, ".picklab"));
+    await fs.promises.rename(moved, path.join(project, ".picklab"));
+    expect(await readActions(run.dir)).toEqual([]);
+  });
+
   it("keeps journal appends inside the verified run directory", async () => {
     const { run } = await beginEvidenceRun(project, "desk-swap01");
     const moved = await swapPicklabForOutsideLink(run.runId);
@@ -231,6 +293,72 @@ describe("ancestor swapped around evidence writes", () => {
     await fs.promises.unlink(path.join(project, ".picklab"));
     await fs.promises.rename(moved, path.join(project, ".picklab"));
     expect(await readActions(run.dir)).toEqual([]);
+  });
+
+  it("refuses pathname reports and fails bound reports closed after a swap", async () => {
+    const { run } = await beginEvidenceRun(project, "desk-report0");
+    await appendAction(run, {
+      actionId: "before-swap",
+      source: "test",
+      tool: "report",
+      startedAt: new Date().toISOString(),
+      status: "ok",
+    });
+    await swapPicklabForOutsideLink(run.runId);
+    const writeByPath = writeEvidenceReport as unknown as (
+      runDir: string,
+      manifest: RunManifest,
+    ) => Promise<string>;
+
+    await expect(writeByPath(run.dir, run.manifest)).rejects.toThrow(
+      /verified RunHandle/,
+    );
+    await expect(writeEvidenceReport(run)).rejects.toThrow();
+    expect(await outsideFiles()).toEqual([]);
+  });
+
+  it("keeps an in-flight report in the verified run directory", async () => {
+    const { run } = await beginEvidenceRun(project, "desk-report1");
+    await appendAction(run, {
+      actionId: "report-step",
+      source: "test",
+      tool: "report",
+      startedAt: new Date().toISOString(),
+      status: "ok",
+    });
+    const realWriteFile = fs.promises.writeFile.bind(fs.promises);
+    let moved: string | undefined;
+    vi.spyOn(fs.promises, "writeFile").mockImplementation((async (
+      target: Parameters<typeof fs.promises.writeFile>[0],
+      data: Parameters<typeof fs.promises.writeFile>[1],
+      options?: Parameters<typeof fs.promises.writeFile>[2],
+    ) => {
+      if (
+        moved === undefined &&
+        typeof target === "string" &&
+        path.basename(target).startsWith(".report.html.tmp-")
+      ) {
+        moved = await swapPicklabForOutsideLink(run.runId);
+      }
+      return realWriteFile(target, data, options);
+    }) as typeof fs.promises.writeFile);
+    const writeAtEitherHead = writeEvidenceReport as unknown as (
+      target: typeof run | string,
+      manifest?: RunManifest,
+    ) => Promise<string>;
+
+    await writeAtEitherHead(
+      writeEvidenceReport.length === 1 ? run : run.dir,
+      run.manifest,
+    );
+
+    expect(moved).toBeDefined();
+    expect(await outsideFiles()).toEqual([]);
+    const report = await fs.promises.readFile(
+      path.join(moved!, "runs", run.runId, "report.html"),
+      "utf8",
+    );
+    expect(report).toContain("test / report");
   });
 
   it("keeps the active pointer and finalization inside the verified root", async () => {
@@ -255,5 +383,26 @@ describe("ancestor swapped around evidence writes", () => {
         path.join(project, ".picklab", "runs", ".active-desk-swap02.json"),
       ),
     ).toBe(true);
+  });
+});
+
+describe("artifact capture path validation", () => {
+  it("rejects a traversing artifact name before the producer writes", async () => {
+    const run = await createRun(project, "artifact-name");
+    const escapedName = `${path.basename(root)}-escaped-artifact`;
+    let producedPath: string | undefined;
+    try {
+      await expect(
+        run.captureArtifact("screenshots", `../${escapedName}`, async (outPath) => {
+          producedPath = outPath;
+          await fs.promises.writeFile(outPath, SECRET_PIXELS);
+        }),
+      ).rejects.toThrow(/Invalid .* name/);
+      expect(producedPath).toBeUndefined();
+      expect(fs.existsSync(path.join(os.tmpdir(), escapedName))).toBe(false);
+      expect(await outsideFiles()).toEqual([]);
+    } finally {
+      await fs.promises.rm(path.join(os.tmpdir(), escapedName), { force: true });
+    }
   });
 });

@@ -4,12 +4,23 @@
 // about. It leaves an uncommitted claim whose owner (this pid) is then dead, so
 // a later append must reclaim it and write the marker. Not a `*.test.ts` file,
 // so vitest never runs it directly.
-import { appendAction, type EvidenceAction } from "../../src/evidence.js";
+import {
+  appendAction,
+  beginEvidenceRun,
+  type EvidenceAction,
+} from "../../src/evidence.js";
 
-const runDir = process.argv[2];
-const maxBytes = Number(process.argv[3]);
-if (runDir === undefined || !Number.isInteger(maxBytes)) {
-  console.error("usage: evidence-marker-crash-worker <runDir> <maxBytes>");
+const projectDir = process.argv[2];
+const sessionId = process.argv[3];
+const maxBytes = Number(process.argv[4]);
+if (
+  projectDir === undefined ||
+  sessionId === undefined ||
+  !Number.isInteger(maxBytes)
+) {
+  console.error(
+    "usage: evidence-marker-crash-worker <projectDir> <sessionId> <maxBytes>",
+  );
   process.exit(2);
 }
 
@@ -21,10 +32,12 @@ const action: EvidenceAction = {
   status: "ok",
 };
 
+const { run } = await beginEvidenceRun(projectDir, sessionId);
+
 // `_afterMarkerClaim` runs after the claim identity is stamped but before the
 // marker append. Exiting here leaves the sentinel holding this pid's uncommitted
 // claim with no marker in the journal — exactly the crash-mid-claim state.
-await appendAction(runDir, action, {
+await appendAction(run, action, {
   maxBytes,
   maxLineBytes: 4096,
   _afterMarkerClaim: () => {

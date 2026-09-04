@@ -30,8 +30,8 @@ redirect `project-local` artifact writes. An unsafe entry is reported, never
 replaced or removed.
 
 Sensitive run writes — manifests, the action journal and its lock and
-truncation sentinel, the session's active-run pointer, and screenshots and
-other run artifacts — are additionally bound to the *directory* that passed
+truncation sentinel, the session's active-run pointer, HTML reports, and
+screenshots and other run artifacts — are additionally bound to the *directory* that passed
 verification, not to its pathname. Each directory is opened once with
 `O_DIRECTORY|O_NOFOLLOW`, verified through that descriptor (its real path is
 read back from `/proc/self/fd/<fd>`), and every write of the operation is

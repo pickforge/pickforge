@@ -323,7 +323,7 @@ describe("session registry", () => {
       env,
     );
     const { run } = await beginEvidenceRun(projectDir, stale.id, {}, env);
-    await appendAction(run.dir, {
+    await appendAction(run, {
       actionId: "before-reap",
       source: "mcp",
       tool: "desktop_click",

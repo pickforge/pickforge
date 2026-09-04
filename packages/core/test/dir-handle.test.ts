@@ -192,6 +192,44 @@ describe("run storage descriptor cleanup", () => {
     );
   });
 
+  it("validates artifact path components before creating staging", async () => {
+    const run = await createRun(project, "artifact-components");
+    const mkdtemp = vi.spyOn(fs.promises, "mkdtemp");
+    let produced = false;
+    try {
+      for (const [subdir, name] of [
+        ["screenshots", "../escaped.png"],
+        ["../screenshots", "shot.png"],
+      ] as const) {
+        await expect(
+          run.captureArtifact(subdir, name, async () => {
+            produced = true;
+          }),
+        ).rejects.toThrow(/Invalid/);
+      }
+    } finally {
+      mkdtemp.mockRestore();
+    }
+    expect(produced).toBe(false);
+    expect(mkdtemp).not.toHaveBeenCalled();
+    expect(descriptorsUnder(root)).toEqual([]);
+  });
+
+  it("closes the artifact directory when staging creation fails", async () => {
+    const run = await createRun(project, "staging-failure");
+    const mkdtemp = vi
+      .spyOn(fs.promises, "mkdtemp")
+      .mockRejectedValue(new Error("staging unavailable"));
+    try {
+      await expect(
+        run.captureArtifact("screenshots", "shot.png", async () => {}),
+      ).rejects.toThrow("staging unavailable");
+    } finally {
+      mkdtemp.mockRestore();
+    }
+    expect(descriptorsUnder(root)).toEqual([]);
+  });
+
   it("holds no descriptor after bound work throws or the run vanishes", async () => {
     const run = await createRun(project, "bound");
     await expect(
@@ -210,7 +248,7 @@ describe("run storage descriptor cleanup", () => {
 
   it("holds no descriptor after evidence begin and append", async () => {
     const { run } = await beginEvidenceRun(project, "desk-fd0000");
-    await appendAction(run.dir, {
+    await appendAction(run, {
       actionId: "a1",
       source: "test",
       tool: "t",
