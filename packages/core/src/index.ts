@@ -6,6 +6,7 @@ export {
   buildContainedCommand,
   CONTAINMENT_TOKEN_ENV,
   containmentEnv,
+  containmentScopeProblem,
   createContainmentScope,
   destroyContainmentScope,
   ensureContainmentScope,

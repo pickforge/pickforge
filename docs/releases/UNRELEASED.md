@@ -45,6 +45,23 @@ GitHub release description, then reset it after the release is published.
   out of the session cgroup first, or refuses with an actionable reason.
   `NODE_OPTIONS` and related code-injection variables are stripped from the
   desktop environment. Neither mechanism requires `sudo`.
+- A containment scope is bound to the session that owns it. A scope cgroup must
+  be named `pickforge-<session id>`, so a tampered record can never point one
+  session's launch or cleanup at another session's valid-looking scope, and a
+  `cgroup` scope with no path is refused instead of silently starting an app
+  uncontained. Immediately before the kill, every process in the scope must be
+  shown to carry that session's token (or to descend from one that does), and
+  the caller's own process chain is moved out by pinned identity, so an
+  ancestor whose PID was recycled is refused rather than migrated. Cleanup also
+  never forgets a process it has already identified: one whose environment
+  stays unreadable is reported as an unconfirmed survivor instead of vanishing
+  from an empty scan.
+- A failed x11vnc startup now stops the whole process group it spawned and
+  reports what it owned, so a failed `session create` keeps the session runtime
+  directory and the VNC identity for a reaper retry unless that cleanup is
+  confirmed. `stopXvfb` refuses a live PID when no recorded start identity is
+  passed, rather than verifying a snapshot that proves nothing about the Xvfb
+  the caller meant.
 - Desktop sessions now get their own `XDG_RUNTIME_DIR` (mode `0700`, inside the
   session directory) and their own D-Bus addresses, which point at sockets
   Pickforge never creates, so toolkits and portals fail closed instead of

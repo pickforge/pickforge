@@ -79,6 +79,29 @@ function spawnInScope(
   return pid;
 }
 
+/**
+ * Join `scope`'s cgroup while carrying `token`'s scope token: a cgroup member
+ * that belongs to a different containment scope.
+ */
+function spawnWithToken(
+  scope: ContainmentScope,
+  tokenScope: ContainmentScope,
+  command: string,
+  args: string[] = [],
+): number {
+  const target = buildContainedCommand(process.execPath, scope, command, args);
+  const child = spawn(target.command, target.args, {
+    env: { ...process.env, ...containmentEnv(tokenScope) },
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+  const pid = child.pid;
+  if (pid === undefined) throw new Error("spawn produced no pid");
+  strays.add(pid);
+  return pid;
+}
+
 /** Start a command under the containment supervisor whatever the mechanism. */
 function spawnSupervised(
   scope: ContainmentScope,
@@ -197,7 +220,7 @@ describe("containment scope creation", () => {
     if (scope.mechanism === "cgroup") {
       expect(scope.cgroupDir).toMatch(/^\/sys\/fs\/cgroup\//);
       expect(fs.existsSync(scope.cgroupDir as string)).toBe(true);
-      expect(scopeCgroupProblem(scope.cgroupDir as string)).toBeUndefined();
+      expect(scopeCgroupProblem(scope.cgroupDir as string, scope.id)).toBeUndefined();
     }
     await destroyContainmentScope(scope);
   });
@@ -407,6 +430,49 @@ describe("containment refuses to signal anything it does not own", () => {
     30_000,
   );
 
+  itWithCgroup(
+    "refuses cleanup rather than migrating an ancestor whose pid may have been recycled",
+    async () => {
+      const scope = createContainmentScope({ id: "desk-inside02" });
+      expect(scope.mechanism).toBe("cgroup");
+      const victim = spawnInScope(scope, "/bin/sleep", ["300"]);
+      expect(await waitFor(() => cgroupMembers(scope).includes(victim))).toBe(true);
+
+      // The worker's parent (its containment supervisor) is a cgroup member and
+      // an ancestor, so cleanup must move it out before `cgroup.kill`. The
+      // worker makes every `/proc/<ppid>/stat` read after the first report a
+      // changed start time, which is what a reaped-and-reused ancestor pid
+      // looks like: `cgroup.procs` takes a bare number, so an unpinned write
+      // would move an unrelated process out of its own cgroup.
+      const report = path.join(root, "ancestor-reuse.json");
+      const worker = path.join(here, "workers", "containment-ancestor-reuse-worker.ts");
+      const built = buildContainedCommand(process.execPath, scope, BUN, [
+        worker,
+        JSON.stringify(scope),
+        report,
+      ]);
+      const child = spawn(built.command, built.args, {
+        env: { ...process.env, ...containmentEnv(scope) },
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      strays.add(child.pid as number);
+      const { code, stderr } = await finish(child);
+
+      expect(code, stderr).toBe(0);
+      const written = JSON.parse(fs.readFileSync(report, "utf8"));
+      expect(written.survived).toBe(true);
+      expect(written.result.confirmed).toBe(false);
+      expect(written.result.reason).toMatch(/containment cgroup/);
+      expect(written.result.signaled).not.toContain(written.pid);
+      expect(written.result.signaled).not.toContain(written.ppid);
+      // Refused, not written through: the scope cgroup is still there.
+      expect(fs.existsSync(scope.cgroupDir as string)).toBe(true);
+
+      await destroyContainmentScope(scope);
+    },
+    30_000,
+  );
+
   it("never writes cgroup.kill to the cgroup the lab itself runs in", async () => {
     const own = readOwnCgroupPath();
     const ownDir =
@@ -415,19 +481,85 @@ describe("containment refuses to signal anything it does not own", () => {
       // No readable cgroup, or the tests themselves run inside a scope: the
       // static check below is what protects that case, and it is covered by
       // the tampered-path tests.
-      expect(scopeCgroupProblem("/sys/fs/cgroup/user.slice")).toBeDefined();
+      expect(scopeCgroupProblem("/sys/fs/cgroup/user.slice", "desk-1")).toBeDefined();
       return;
     }
     // A tampered record naming the delegated parent (where this process, its
     // shell and unrelated user processes live) must be refused outright.
     const result = await destroyContainmentScope(
-      { token: "6".repeat(64), mechanism: "cgroup", cgroupDir: ownDir },
+      { id: "desk-own", token: "6".repeat(64), mechanism: "cgroup", cgroupDir: ownDir },
       { termTimeoutMs: 200, killTimeoutMs: 200 },
     );
     expect(result.confirmed).toBe(false);
     expect(result.reason).toMatch(/refusing cgroup cleanup/);
     expect(result.signaled).toEqual([]);
   });
+
+  itWithCgroup(
+    "never kills through another live session's scope cgroup",
+    async () => {
+      const mine = createContainmentScope({ id: "desk-sib01" });
+      const other = createContainmentScope({ id: "desk-sib02" });
+      expect(other.mechanism).toBe("cgroup");
+      const bystander = spawnInScope(other, "/bin/sleep", ["300"]);
+      expect(await waitFor(() => cgroupMembers(other).includes(bystander))).toBe(
+        true,
+      );
+
+      // A record for *my* session, tampered to name a sibling session's real,
+      // valid-looking `pickforge-*` scope. Both paths are genuine scope
+      // cgroups on this host, so nothing but the binding to a session id can
+      // tell them apart.
+      const result = await destroyContainmentScope(
+        { ...mine, cgroupDir: other.cgroupDir as string },
+        { termTimeoutMs: 300, killTimeoutMs: 300 },
+      );
+      expect(result.confirmed).toBe(false);
+      expect(result.reason).toMatch(/expected a directory named pickforge-desk-sib01/);
+      expect(result.signaled).toEqual([]);
+      expect(isPidAlive(bystander)).toBe(true);
+      expect(fs.existsSync(other.cgroupDir as string)).toBe(true);
+      expect(cgroupMembers(other)).toContain(bystander);
+
+      // The sibling's own cleanup is unaffected by the attempt.
+      expect((await destroyContainmentScope(other)).confirmed).toBe(true);
+      expect(isPidAlive(bystander)).toBe(false);
+      await destroyContainmentScope(mine);
+    },
+    30_000,
+  );
+
+  itWithCgroup(
+    "refuses to kill a scope holding a process that carries a different session's token",
+    async () => {
+      const scope = createContainmentScope({ id: "desk-sib03" });
+      const other = createContainmentScope({ id: "desk-sib04", useCgroup: false });
+      expect(scope.mechanism).toBe("cgroup");
+      // Joins this scope's cgroup but carries another session's token: what a
+      // record whose id *and* path were both rewritten would produce. The name
+      // check passes; the members' tokens are the second, live proof.
+      const supervisor = spawnWithToken(scope, other, "/bin/sleep", ["300"]);
+      expect(await waitFor(() => cgroupMembers(scope).includes(supervisor))).toBe(
+        true,
+      );
+
+      const result = await destroyContainmentScope(scope, {
+        termTimeoutMs: 300,
+        killTimeoutMs: 300,
+      });
+      expect(result.confirmed).toBe(false);
+      expect(result.reason).toMatch(/do not carry this session's containment token/);
+      expect(isPidAlive(supervisor)).toBe(true);
+      expect(fs.existsSync(scope.cgroupDir as string)).toBe(true);
+      await destroyContainmentScope(other, {
+        termTimeoutMs: 500,
+        killTimeoutMs: 500,
+      });
+      expect(await waitFor(() => !isPidAlive(supervisor))).toBe(true);
+      await destroyContainmentScope(scope);
+    },
+    30_000,
+  );
 });
 
 describe("containment identity safety", () => {
@@ -552,6 +684,69 @@ describe("containment identity safety", () => {
     expect(isPidAlive(pid)).toBe(false);
   }, 20_000);
 
+  it("never confirms cleanup while a process it identified stays unreadable", async () => {
+    const scope = createContainmentScope({ id: "desk-id06", useCgroup: false });
+    const pid = spawnInScope(scope, "/bin/sleep", ["300"]);
+    expect(await waitFor(() => processCarriesToken(pid, scope.token))).toBe(true);
+
+    // The sweep establishes ownership on its first read, and every read after
+    // it fails with EACCES: a process that is *not* dying, just permanently
+    // unreadable. Rebuilding the list from readable matches alone would lose
+    // the identity and let two empty scans report success over a live process.
+    const environ = `/proc/${pid}/environ`;
+    const realRead = fs.readFileSync;
+    let environReads = 0;
+    vi.spyOn(fs, "readFileSync").mockImplementation(((file, ...rest) => {
+      if (file === environ) {
+        environReads += 1;
+        if (environReads >= 2) {
+          throw Object.assign(new Error("EACCES: permission denied"), {
+            code: "EACCES",
+          });
+        }
+      }
+      return realRead.call(fs, file, ...rest);
+    }) as typeof fs.readFileSync);
+
+    const result = await destroyContainmentScope(scope, {
+      termTimeoutMs: 300,
+      killTimeoutMs: 300,
+    });
+    expect(result.confirmed).toBe(false);
+    expect(result.survivors).toContain(pid);
+    expect(result.reason).toMatch(/unreadable containment token/);
+    expect(isPidAlive(pid)).toBe(true);
+  }, 20_000);
+
+  it("keeps an identified process that becomes tokenless at the same start time", async () => {
+    const scope = createContainmentScope({ id: "desk-id07", useCgroup: false });
+    const pid = spawnInScope(scope, "/bin/sleep", ["300"]);
+    expect(await waitFor(() => processCarriesToken(pid, scope.token))).toBe(true);
+
+    // Readable, without the token, at the *same* start time: the same process
+    // that was scanned, so it is neither a reused pid to refuse nor an
+    // identity to forget. It stays an unconfirmed survivor.
+    const environ = `/proc/${pid}/environ`;
+    const realRead = fs.readFileSync;
+    let environReads = 0;
+    vi.spyOn(fs, "readFileSync").mockImplementation(((file, ...rest) => {
+      if (file === environ) {
+        environReads += 1;
+        if (environReads >= 2) return "PATH=/usr/bin\0HOME=/nowhere\0";
+      }
+      return realRead.call(fs, file, ...rest);
+    }) as typeof fs.readFileSync);
+
+    const result = await destroyContainmentScope(scope, {
+      termTimeoutMs: 300,
+      killTimeoutMs: 300,
+    });
+    expect(result.confirmed).toBe(false);
+    expect(result.survivors).toContain(pid);
+    expect(result.refused).toEqual([]);
+    expect(isPidAlive(pid)).toBe(true);
+  }, 20_000);
+
   it("does not match a process whose token is only a prefix", async () => {
     const scope = createContainmentScope({ id: "desk-id02", useCgroup: false });
     const child = spawn("/bin/sleep", ["300"], {
@@ -580,6 +775,7 @@ describe("containment cleanup failure reporting", () => {
     fs.writeFileSync(path.join(fakeCgroup, "cgroup.procs"), "");
     fs.writeFileSync(path.join(fakeCgroup, "cgroup.kill"), "");
     const scope: ContainmentScope = {
+      id: path.basename(fakeCgroup).slice("pickforge-".length),
       token: "0".repeat(64),
       mechanism: "cgroup",
       cgroupDir: fakeCgroup,
@@ -595,16 +791,25 @@ describe("containment cleanup failure reporting", () => {
   });
 
   it("refuses a scope path that escapes the cgroup filesystem or lacks the prefix", () => {
-    expect(scopeCgroupProblem("/sys/fs/cgroup/user.slice/pickforge-desk-1")).toBeUndefined();
-    expect(scopeCgroupProblem("/sys/fs/cgroup/user.slice")).toMatch(/pickforge-\*/);
-    expect(scopeCgroupProblem("/sys/fs/cgroup")).toBeDefined();
-    expect(scopeCgroupProblem("/sys/fs/cgroup/x/../pickforge-desk-1")).toBeDefined();
-    expect(scopeCgroupProblem("/tmp/pickforge-desk-1")).toBeDefined();
-    expect(scopeCgroupProblem("relative/pickforge-desk-1")).toBeDefined();
+    const id = "desk-1";
+    expect(scopeCgroupProblem("/sys/fs/cgroup/user.slice/pickforge-desk-1", id)).toBeUndefined();
+    expect(scopeCgroupProblem("/sys/fs/cgroup/user.slice", id)).toMatch(/expected a directory named/);
+    expect(scopeCgroupProblem("/sys/fs/cgroup", id)).toBeDefined();
+    expect(scopeCgroupProblem("/sys/fs/cgroup/x/../pickforge-desk-1", id)).toBeDefined();
+    expect(scopeCgroupProblem("/tmp/pickforge-desk-1", id)).toBeDefined();
+    expect(scopeCgroupProblem("relative/pickforge-desk-1", id)).toBeDefined();
+    // Another session's valid scope, and a scope nested in one, are refused.
+    expect(scopeCgroupProblem("/sys/fs/cgroup/user.slice/pickforge-desk-2", id)).toBeDefined();
+    expect(
+      scopeCgroupProblem("/sys/fs/cgroup/user.slice/pickforge-desk-2/pickforge-desk-1", id),
+    ).toBeDefined();
+    // An id that could name another directory can never become a scope path.
+    expect(scopeCgroupProblem("/sys/fs/cgroup/user.slice/pickforge-desk-1", "../x")).toBeDefined();
   });
 
   it("treats an already-removed cgroup as clean when no member survives", async () => {
     const scope: ContainmentScope = {
+      id: "gone-cgroup",
       token: "1".repeat(64),
       mechanism: "cgroup",
       cgroupDir: "/sys/fs/cgroup/pickforge-gone-cgroup",
@@ -618,17 +823,18 @@ describe("containment cleanup failure reporting", () => {
 
   it("reports a cgroup scope with no recorded path as unconfirmed", async () => {
     const result = await destroyContainmentScope(
-      { token: "2".repeat(64), mechanism: "cgroup" },
+      { id: "desk-nopath", token: "2".repeat(64), mechanism: "cgroup" },
       { termTimeoutMs: 200, killTimeoutMs: 200 },
     );
     expect(result.confirmed).toBe(false);
-    expect(result.reason).toContain("missing");
+    expect(result.reason).toContain("without a cgroup path");
   });
 });
 
 describe("buildContainedCommand", () => {
   it("passes an argv array with the cgroup, binary and args, never a shell string", () => {
     const scope: ContainmentScope = {
+      id: "desk-1",
       token: "3".repeat(64),
       mechanism: "cgroup",
       cgroupDir: "/sys/fs/cgroup/user.slice/pickforge-desk-1",
@@ -650,7 +856,7 @@ describe("buildContainedCommand", () => {
   it("passes '-' instead of a path for the marker mechanism", () => {
     const built = buildContainedCommand(
       process.execPath,
-      { token: "4".repeat(64), mechanism: "marker" },
+      { id: "desk-marker", token: "4".repeat(64), mechanism: "marker" },
       "/usr/bin/app",
       [],
     );
@@ -658,7 +864,11 @@ describe("buildContainedCommand", () => {
   });
 
   it("rejects an empty node path or command", () => {
-    const scope: ContainmentScope = { token: "5".repeat(64), mechanism: "marker" };
+    const scope: ContainmentScope = {
+      id: "desk-empty",
+      token: "5".repeat(64),
+      mechanism: "marker",
+    };
     expect(() => buildContainedCommand("", scope, "app", [])).toThrow(
       /Node.js executable/,
     );
@@ -669,14 +879,34 @@ describe("buildContainedCommand", () => {
 
   it("rejects a tampered cgroup path before anything is spawned", () => {
     const tampered: ContainmentScope = {
+      id: "desk-1",
       token: "7".repeat(64),
       mechanism: "cgroup",
       cgroupDir: "/sys/fs/cgroup/user.slice/user-1000.slice",
     };
     expect(() => buildContainedCommand(process.execPath, tampered, "app", [])).toThrow(
-      /not a Pickforge cgroup/,
+      /not this session's Pickforge cgroup/,
     );
-    expect(() => ensureContainmentScope(tampered)).toThrow(/not a Pickforge cgroup/);
+    expect(() => ensureContainmentScope(tampered)).toThrow(
+      /not this session's Pickforge cgroup/,
+    );
+    // A sibling session's real scope is refused just as hard as a bad path.
+    const sibling: ContainmentScope = {
+      ...tampered,
+      cgroupDir: "/sys/fs/cgroup/user.slice/pickforge-desk-2",
+    };
+    expect(() => buildContainedCommand(process.execPath, sibling, "app", [])).toThrow(
+      /expected a directory named pickforge-desk-1/,
+    );
+    expect(() => ensureContainmentScope(sibling)).toThrow(
+      /expected a directory named pickforge-desk-1/,
+    );
+    // A cgroup mechanism with no path may not silently launch uncontained.
+    const pathless: ContainmentScope = { id: "desk-1", token: "7".repeat(64), mechanism: "cgroup" };
+    expect(() => buildContainedCommand(process.execPath, pathless, "app", [])).toThrow(
+      /without a cgroup path/,
+    );
+    expect(() => ensureContainmentScope(pathless)).toThrow(/without a cgroup path/);
   });
 });
 
@@ -724,7 +954,7 @@ describe("containment supervisor", () => {
     const started = path.join(root, "false-join-started.txt");
     const built = buildContainedCommand(
       process.execPath,
-      { token: "8".repeat(64), mechanism: "cgroup", cgroupDir: placeholder },
+      { id: "placeholder", token: "8".repeat(64), mechanism: "cgroup", cgroupDir: placeholder },
       "/bin/sh",
       ["-c", `echo started > "${started}"`],
     );
@@ -747,7 +977,12 @@ describe("containment supervisor", () => {
     const started = path.join(root, "unavailable-started.txt");
     const built = buildContainedCommand(
       process.execPath,
-      { token: "9".repeat(64), mechanism: "cgroup", cgroupDir: missing },
+      {
+        id: `unavailable-${process.pid}`,
+        token: "9".repeat(64),
+        mechanism: "cgroup",
+        cgroupDir: missing,
+      },
       "/bin/sh",
       ["-c", `echo started > "${started}"`],
     );
@@ -766,7 +1001,7 @@ describe("containment supervisor", () => {
     const placeholder = "/sys/fs/cgroup/pickforge-placeholder";
     const built = buildContainedCommand(
       process.execPath,
-      { token: "a".repeat(64), mechanism: "cgroup", cgroupDir: placeholder },
+      { id: "placeholder", token: "a".repeat(64), mechanism: "cgroup", cgroupDir: placeholder },
       "/bin/true",
       [],
     );

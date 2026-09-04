@@ -18,8 +18,11 @@ import { readProcessStartTicks, type ProcessIdentity } from "./proc.js";
  *   `cgroup.kill` terminates every member atomically. Membership is the proof
  *   of ownership, and it is always read back from the kernel rather than
  *   inferred from a successful write: the supervisor confirms its join through
- *   `/proc/self/cgroup`, and cleanup refuses any path that is not a
- *   `pickforge-*` directory on a cgroup v2 filesystem.
+ *   `/proc/self/cgroup`. A scope directory is bound to exactly one session —
+ *   it must be named `pickforge-<session id>` on a cgroup v2 filesystem, so a
+ *   record naming a *sibling* session's valid-looking scope is refused — and
+ *   immediately before `cgroup.kill` every remaining member must be shown to
+ *   carry this session's token (or descend from a process that does).
  * - `marker`: a 256-bit random token exported as `PICKFORGE_CONTAINMENT_TOKEN`.
  *   Descendants inherit the environment across `fork`, `setsid` and `exec`, so
  *   `/proc/<pid>/environ` identifies them. The token is unguessable, so a
@@ -28,8 +31,10 @@ import { readProcessStartTicks, type ProcessIdentity } from "./proc.js";
  *   time recorded when the scan found the process: a PID that exited in
  *   between is treated as gone, a PID whose start time changed belongs to an
  *   unrelated process and is refused, never killed, and the same process
- *   whose token is momentarily unreadable (dying, mid-exec) is decided on a
- *   later pass.
+ *   whose token is unreadable (dying, mid-exec) is decided on a later pass.
+ *   Ownership, once a scan has established it, is kept until the process is
+ *   seen to be gone: a scope with an identity that never becomes readable
+ *   again fails cleanup instead of being reported empty.
  *
  * A lab command run from inside a contained shell (for example `session
  * destroy` typed into a `desktop exec xterm`) carries the token and, on a
@@ -38,7 +43,9 @@ import { readProcessStartTicks, type ProcessIdentity } from "./proc.js";
  * PIDs, on the cgroup path by moving the chain into the parent cgroup and
  * confirming from `cgroup.procs` that it is no longer a member before
  * `cgroup.kill` is written. If the chain cannot be moved out, cleanup refuses
- * with an actionable reason rather than terminating the caller.
+ * with an actionable reason rather than terminating the caller. The chain is
+ * pinned by start time on both paths, so an ancestor that exits mid-cleanup
+ * neither exempts nor donates its pid to an unrelated process.
  *
  * The marker sweep always runs, including after a cgroup kill, so cleanup is
  * confirmed by a mechanism that does not depend on the cgroup being intact.
@@ -54,12 +61,24 @@ const DEFAULT_TERM_TIMEOUT_MS = 3_000;
 const DEFAULT_KILL_TIMEOUT_MS = 2_000;
 const CGROUP_RMDIR_ATTEMPTS = 20;
 const SCOPE_PREFIX = "pickforge-";
+/**
+ * Session ids that may become a cgroup directory name: no separators, no
+ * `..`, nothing the kernel or `path.basename` would read as another path.
+ */
+const SCOPE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+/** How long a member whose ownership cannot yet be read may stay undecided. */
+const MEMBER_VERIFY_TIMEOUT_MS = 1_000;
 const INSIDE_SCOPE_ADVICE =
   "Run the command from a shell outside the session, not from one started by `desktop exec`.";
 
 export type ContainmentMechanism = "cgroup" | "marker";
 
 export interface ContainmentScope {
+  /**
+   * The session this scope belongs to. `cgroupDir` is bound to it: a scope may
+   * only ever act on the directory named `pickforge-<id>`.
+   */
+  id: string;
   /** Random per-session token exported to every contained process. */
   token: string;
   /** Strongest mechanism available on this host. */
@@ -95,11 +114,11 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** The current process's cgroup v2 path, e.g. `/user.slice/....scope`. */
-export function readOwnCgroupPath(): string | undefined {
+/** The cgroup v2 path in a `/proc/<pid>/cgroup` file, e.g. `/user.slice/x`. */
+function readCgroupPathOf(procFile: string): string | undefined {
   let content: string;
   try {
-    content = fs.readFileSync("/proc/self/cgroup", "utf8");
+    content = fs.readFileSync(procFile, "utf8");
   } catch {
     return undefined;
   }
@@ -111,11 +130,25 @@ export function readOwnCgroupPath(): string | undefined {
   return undefined;
 }
 
-function ownCgroupDir(): string | undefined {
-  const own = readOwnCgroupPath();
-  return own === undefined
+/** The current process's cgroup v2 path, e.g. `/user.slice/....scope`. */
+export function readOwnCgroupPath(): string | undefined {
+  return readCgroupPathOf("/proc/self/cgroup");
+}
+
+function cgroupDirOf(procFile: string): string | undefined {
+  const relative = readCgroupPathOf(procFile);
+  return relative === undefined
     ? undefined
-    : path.resolve(path.join(CGROUP_ROOT, own));
+    : path.resolve(path.join(CGROUP_ROOT, relative));
+}
+
+function ownCgroupDir(): string | undefined {
+  return cgroupDirOf("/proc/self/cgroup");
+}
+
+/** The cgroup v2 directory another process is currently a member of. */
+function processCgroupDir(pid: number): string | undefined {
+  return cgroupDirOf(`/proc/${pid}/cgroup`);
 }
 
 /**
@@ -160,23 +193,56 @@ function tryCreateCgroup(parent: string, name: string): string | undefined {
 }
 
 /**
- * Why a recorded cgroup path may not be used as a containment scope, or
- * undefined when it has the shape of one: an absolute, normalised path under
- * the cgroup v2 mount whose last component carries the `pickforge-` prefix.
- * This keeps a tampered session record from pointing cleanup at the lab's own
- * delegated cgroup, or at any directory outside the cgroup filesystem.
+ * Why a recorded cgroup path may not be used as session `id`'s containment
+ * scope, or undefined when it is exactly that session's scope: an absolute,
+ * normalised path under the cgroup v2 mount, named `pickforge-<id>`, directly
+ * inside a parent that is not itself a scope.
+ *
+ * The name is what binds a directory to one session. Checking only for a
+ * `pickforge-*` prefix would accept any *other* live session's scope, so a
+ * tampered record could aim one session's cleanup at a sibling's processes;
+ * requiring the exact name means a record can only ever act on its own scope,
+ * the lab's own delegated cgroup and every directory outside the cgroup
+ * filesystem stay unreachable, and a scope nested inside another scope (which
+ * `cgroup.kill` would reach through its parent anyway) is refused.
  */
-export function scopeCgroupProblem(cgroupDir: string): string | undefined {
+export function scopeCgroupProblem(
+  cgroupDir: string,
+  id: string,
+): string | undefined {
+  if (!SCOPE_ID_PATTERN.test(id)) {
+    return `${JSON.stringify(id)} is not a usable containment scope id`;
+  }
   if (
     path.resolve(cgroupDir) !== cgroupDir ||
     !cgroupDir.startsWith(`${CGROUP_ROOT}/`)
   ) {
     return `${cgroupDir} is not a normalised absolute path under ${CGROUP_ROOT}`;
   }
-  if (!path.basename(cgroupDir).startsWith(SCOPE_PREFIX)) {
-    return `${cgroupDir} is not a ${SCOPE_PREFIX}* scope cgroup`;
+  const expected = `${SCOPE_PREFIX}${id}`;
+  if (path.basename(cgroupDir) !== expected) {
+    return `${cgroupDir} is not session ${id}'s scope cgroup (expected a directory named ${expected})`;
+  }
+  if (path.basename(path.dirname(cgroupDir)).startsWith(SCOPE_PREFIX)) {
+    return `${cgroupDir} is nested inside another ${SCOPE_PREFIX}* scope cgroup`;
   }
   return undefined;
+}
+
+/**
+ * Why a scope may not be used at all: a `cgroup` scope must carry a path bound
+ * to its own session. A `cgroup` mechanism with no path is malformed, never a
+ * silent degrade to "no containment": callers would keep reporting `cgroup`
+ * while nothing joined a cgroup at all.
+ */
+export function containmentScopeProblem(
+  scope: ContainmentScope,
+): string | undefined {
+  if (scope.mechanism !== "cgroup") return undefined;
+  if (scope.cgroupDir === undefined) {
+    return `containment scope for ${scope.id} claims the cgroup mechanism without a cgroup path`;
+  }
+  return scopeCgroupProblem(scope.cgroupDir, scope.id);
 }
 
 /** Whether a directory really lives on a cgroup v2 filesystem. */
@@ -237,15 +303,19 @@ export function createContainmentScope(
   opts: CreateContainmentScopeOptions,
 ): ContainmentScope {
   const token = randomBytes(TOKEN_BYTES).toString("hex");
-  if (opts.useCgroup === false || markerForcedByEnvironment()) {
-    return { token, mechanism: "marker" };
-  }
+  const marker: ContainmentScope = { id: opts.id, token, mechanism: "marker" };
+  if (opts.useCgroup === false || markerForcedByEnvironment()) return marker;
+  if (!SCOPE_ID_PATTERN.test(opts.id)) return marker;
   const parent = findDelegatedCgroupDir();
-  if (parent === undefined) return { token, mechanism: "marker" };
+  if (parent === undefined) return marker;
   pruneEmptyScopeCgroups(parent);
   const dir = tryCreateCgroup(parent, `${SCOPE_PREFIX}${opts.id}`);
-  if (dir === undefined) return { token, mechanism: "marker" };
-  return { token, mechanism: "cgroup", cgroupDir: dir };
+  if (dir === undefined) return marker;
+  const scope: ContainmentScope = { ...marker, mechanism: "cgroup", cgroupDir: dir };
+  // A cgroup we cannot later prove is this session's own is worse than none:
+  // degrade to the marker mechanism instead of recording a scope that every
+  // launch and cleanup would refuse.
+  return containmentScopeProblem(scope) === undefined ? scope : marker;
 }
 
 /**
@@ -256,22 +326,23 @@ export function createContainmentScope(
  * harmless. The token is unchanged, so the marker sweep still covers anything
  * started before or after.
  *
- * Throws when the recorded path does not have the shape of a scope cgroup: a
- * launch must never join whatever directory a tampered record names.
+ * Throws when the recorded scope is not this session's own scope cgroup: a
+ * launch must never join whatever directory a tampered record names, nor
+ * silently start uncontained while still reporting the cgroup mechanism.
  */
 export function ensureContainmentScope(
   scope: ContainmentScope,
 ): ContainmentScope {
-  if (scope.mechanism !== "cgroup" || scope.cgroupDir === undefined) {
-    return scope;
-  }
-  const problem = scopeCgroupProblem(scope.cgroupDir);
+  if (scope.mechanism !== "cgroup") return scope;
+  const problem = containmentScopeProblem(scope);
   if (problem !== undefined) {
     throw new Error(
-      `Refusing to launch into a containment scope that is not a Pickforge cgroup: ${problem}`,
+      `Refusing to launch into a containment scope that is not this session's Pickforge cgroup: ${problem}`,
     );
   }
-  if (fs.existsSync(scope.cgroupDir)) return scope;
+  if (scope.cgroupDir === undefined || fs.existsSync(scope.cgroupDir)) {
+    return scope;
+  }
   const parent = path.dirname(scope.cgroupDir);
   const name = path.basename(scope.cgroupDir);
   const dir = tryCreateCgroup(parent, name);
@@ -360,6 +431,19 @@ function readParentPid(pid: number): number | undefined {
   return Number.isFinite(ppid) ? ppid : undefined;
 }
 
+/** A live process's parent and start time from a single `stat` read. */
+function readParentAndStart(
+  pid: number,
+): { ppid: number; startTicks: number } | undefined {
+  const fields = readProcStatFields(pid);
+  if (fields === undefined || fields[0] === "Z") return undefined;
+  const ppid = Number(fields[4 - 3]);
+  const startTicks = Number(fields[22 - 3]);
+  return Number.isFinite(ppid) && Number.isFinite(startTicks)
+    ? { ppid, startTicks }
+    : undefined;
+}
+
 /**
  * Every live process carrying this scope's token, excluding the caller's own
  * process chain, each with the start time that pins its identity for the
@@ -367,30 +451,37 @@ function readParentPid(pid: number): number | undefined {
  * start-time read is not listed.
  */
 function listContainedIdentities(token: string): ProcessIdentity[] {
-  const excluded = selfAndAncestors();
+  const excluded = selfAndAncestorIdentities();
   const found: ProcessIdentity[] = [];
   for (const pid of listProcPids()) {
-    if (excluded.has(pid)) continue;
     if (!processCarriesToken(pid, token)) continue;
     const startTicks = readProcessStartTicks(pid);
-    if (startTicks !== undefined) found.push({ pid, startTicks });
+    if (startTicks === undefined) continue;
+    if (excluded.get(pid) === startTicks) continue;
+    found.push({ pid, startTicks });
   }
   return found;
 }
 
 /**
- * This process and its ancestors. A lab CLI invoked from inside a contained
- * shell would inherit the token; excluding the caller's own chain keeps a
- * cleanup from killing the process performing it.
+ * This process and its ancestors, each pinned to the start time it has right
+ * now. A lab CLI invoked from inside a contained shell would inherit the
+ * token; excluding the caller's own chain keeps a cleanup from killing the
+ * process performing it. The exclusion is by identity, not by bare pid: an
+ * ancestor that exits during a sweep must not lend its number to a contained
+ * process that the kernel later assigns it to, in either direction — such a
+ * process is signalled like any other, and a chain member is only ever
+ * exempted (or migrated out of a cgroup) while its start time still matches.
  */
-function selfAndAncestors(): Set<number> {
-  const chain = new Set<number>([process.pid]);
+function selfAndAncestorIdentities(): Map<number, number> {
+  const chain = new Map<number, number>();
   let current: number | undefined = process.pid;
   while (current !== undefined && current > 1 && chain.size < 64) {
-    const parent: number | undefined = readParentPid(current);
-    if (parent === undefined || parent <= 1 || chain.has(parent)) break;
-    chain.add(parent);
-    current = parent;
+    const stat = readParentAndStart(current);
+    if (stat === undefined) break;
+    chain.set(current, stat.startTicks);
+    if (stat.ppid <= 1 || chain.has(stat.ppid)) break;
+    current = stat.ppid;
   }
   return chain;
 }
@@ -411,13 +502,7 @@ function listProcPids(): number[] {
  * both mechanisms.
  */
 export function listContainedProcesses(token: string): number[] {
-  const excluded = selfAndAncestors();
-  const found: number[] = [];
-  for (const pid of listProcPids()) {
-    if (excluded.has(pid)) continue;
-    if (processCarriesToken(pid, token)) found.push(pid);
-  }
-  return found;
+  return listContainedIdentities(token).map((identity) => identity.pid);
 }
 
 /** Members of a cgroup, or undefined when the list cannot be read at all. */
@@ -440,12 +525,73 @@ function isInsideCgroup(cgroupDir: string): boolean {
   );
 }
 
-/** PIDs of this process's own chain that are members of the scope cgroup. */
-function ownChainInside(cgroupDir: string, members: number[]): number[] {
-  const chain = selfAndAncestors();
-  const inside = new Set(members.filter((pid) => chain.has(pid)));
-  if (isInsideCgroup(cgroupDir)) inside.add(process.pid);
-  return [...inside];
+/**
+ * This process's own chain members of the scope cgroup, each pinned to the
+ * start time it has now, so a later migration can refuse a recycled number.
+ */
+function ownChainInside(
+  cgroupDir: string,
+  members: number[],
+): ProcessIdentity[] {
+  const chain = selfAndAncestorIdentities();
+  const inside = new Map<number, number>();
+  for (const pid of members) {
+    const startTicks = chain.get(pid);
+    if (startTicks !== undefined) inside.set(pid, startTicks);
+  }
+  const own = chain.get(process.pid);
+  if (isInsideCgroup(cgroupDir) && own !== undefined) {
+    inside.set(process.pid, own);
+  }
+  return [...inside].map(([pid, startTicks]) => ({ pid, startTicks }));
+}
+
+function insideScopeRefusal(detail: string): string {
+  return (
+    `this command is running inside the session's containment cgroup and ` +
+    `${detail}; refusing to write cgroup.kill. ${INSIDE_SCOPE_ADVICE}`
+  );
+}
+
+/**
+ * Move one pinned chain member into the parent cgroup. `cgroup.procs` takes a
+ * bare number, so every guarantee has to come from re-reading `/proc` around
+ * the write: the pid must still be this process's ancestor *with the recorded
+ * start time* and still a member of this scope, or nothing is written at all —
+ * a pid that has been reaped and reused belongs to an unrelated process, and
+ * moving that out of its own cgroup would be exactly the harm this avoids.
+ * After the write the same identity must be readable in the parent cgroup;
+ * anything else is refused rather than assumed.
+ */
+function migrateChainMember(
+  identity: ProcessIdentity,
+  cgroupDir: string,
+  parentDir: string,
+): string | undefined {
+  if (selfAndAncestorIdentities().get(identity.pid) !== identity.startTicks) {
+    return undefined;
+  }
+  if (processCgroupDir(identity.pid) !== cgroupDir) return undefined;
+  try {
+    fs.writeFileSync(path.join(parentDir, "cgroup.procs"), String(identity.pid));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return undefined;
+    return insideScopeRefusal(
+      `pid ${identity.pid} could not be moved out: ${errorMessage(error)}`,
+    );
+  }
+  const now = processCgroupDir(identity.pid);
+  if (selfAndAncestorIdentities().get(identity.pid) !== identity.startTicks) {
+    return insideScopeRefusal(
+      `pid ${identity.pid} changed identity while being moved out of ${cgroupDir}`,
+    );
+  }
+  if (now !== parentDir) {
+    return insideScopeRefusal(
+      `pid ${identity.pid} is in ${now ?? "<unreadable>"} after being moved out, not ${parentDir}`,
+    );
+  }
+  return undefined;
 }
 
 /**
@@ -453,40 +599,119 @@ function ownChainInside(cgroupDir: string, members: number[]): number[] {
  * confirm from the kernel that none of it is still a member. Returns the
  * reason cleanup must refuse when that cannot be established.
  */
-function evacuateOwnChain(cgroupDir: string, pids: number[]): string | undefined {
-  const parentProcs = path.join(path.dirname(cgroupDir), "cgroup.procs");
-  for (const pid of pids) {
-    try {
-      fs.writeFileSync(parentProcs, String(pid));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ESRCH") continue;
-      return (
-        `this command is running inside the session's containment cgroup ` +
-        `(pid ${pid}) and could not be moved out: ${errorMessage(error)}. ` +
-        INSIDE_SCOPE_ADVICE
-      );
-    }
+function evacuateOwnChain(
+  cgroupDir: string,
+  chainInside: ProcessIdentity[],
+): string | undefined {
+  const parentDir = path.dirname(cgroupDir);
+  for (const identity of chainInside) {
+    const problem = migrateChainMember(identity, cgroupDir, parentDir);
+    if (problem !== undefined) return problem;
   }
   const remaining = readCgroupProcs(cgroupDir);
-  const chain = selfAndAncestors();
-  const still =
-    remaining === undefined ? pids : remaining.filter((pid) => chain.has(pid));
+  if (remaining === undefined) {
+    return insideScopeRefusal(`${cgroupDir}/cgroup.procs became unreadable`);
+  }
+  const chain = selfAndAncestorIdentities();
+  const still = remaining.filter((pid) => chain.has(pid));
   if (still.length > 0 || isInsideCgroup(cgroupDir)) {
-    return (
-      `this command is still a member of the session's containment cgroup ` +
-      `(pid(s) ${still.join(", ") || process.pid}) after moving out; ` +
-      `refusing to write cgroup.kill. ${INSIDE_SCOPE_ADVICE}`
+    return insideScopeRefusal(
+      `pid(s) ${still.join(", ") || process.pid} are still members afterwards`,
     );
   }
   return undefined;
 }
 
+type MemberVerdict = "ours" | "gone" | "foreign" | "unknown";
+
+/**
+ * Whether a cgroup member belongs to this scope. It does when it carries the
+ * token, or when an ancestor *inside the same cgroup* does: a member that
+ * exec'd a setuid image has an unreadable `environ` of its own, but it is
+ * still a child of the supervisor that joined the scope carrying the token.
+ * The walk stops at the cgroup boundary, so an unreadable process outside the
+ * scope never decides anything about a member of it.
+ *
+ * The residual case — a process that wiped its own environment *and* whose
+ * whole in-scope parent chain has exited — is reported as `unknown` and
+ * refused rather than killed on an unproven claim of ownership.
+ */
+function classifyCgroupMember(
+  pid: number,
+  token: string,
+  members: Set<number>,
+): MemberVerdict {
+  let current: number | undefined = pid;
+  let unreadable = false;
+  for (let depth = 0; current !== undefined && depth < 64; depth += 1) {
+    const read = readEnviron(current);
+    if (read.kind === "entries") {
+      if (read.entries.includes(`${TOKEN_ENV}=${token}`)) return "ours";
+    } else if (read.kind === "unreadable") {
+      unreadable = true;
+    } else if (current === pid) {
+      return "gone";
+    }
+    const parent = readParentPid(current);
+    current = parent !== undefined && members.has(parent) ? parent : undefined;
+  }
+  return unreadable ? "unknown" : "foreign";
+}
+
+/**
+ * Prove, immediately before `cgroup.kill`, that every process the kill would
+ * reach is this session's own. A directory named `pickforge-<id>` on a cgroup
+ * v2 filesystem is already bound to one session, so this is the second, live
+ * proof: even a record whose id and path were both rewritten cannot make the
+ * kill land on processes that carry another session's token. Members whose
+ * ownership is momentarily unreadable (dying, mid-exec) are re-read until they
+ * settle or leave; one that never settles fails cleanup instead of being
+ * killed unverified.
+ */
+async function verifyCgroupMembership(
+  cgroupDir: string,
+  token: string,
+): Promise<string | undefined> {
+  const deadline = Date.now() + MEMBER_VERIFY_TIMEOUT_MS;
+  for (;;) {
+    const members = readCgroupProcs(cgroupDir);
+    if (members === undefined) return `could not read ${cgroupDir}/cgroup.procs`;
+    const chain = selfAndAncestorIdentities();
+    const inScope = new Set(members);
+    const undecided: number[] = [];
+    const foreign: number[] = [];
+    for (const pid of members) {
+      if (chain.has(pid)) continue;
+      const verdict = classifyCgroupMember(pid, token, inScope);
+      if (verdict === "foreign") foreign.push(pid);
+      else if (verdict === "unknown") undecided.push(pid);
+    }
+    if (foreign.length > 0) {
+      return (
+        `refusing cgroup cleanup: ${cgroupDir} holds process(es) that do not ` +
+        `carry this session's containment token: ${foreign.join(", ")}`
+      );
+    }
+    if (undecided.length === 0) return undefined;
+    if (Date.now() >= deadline) {
+      return (
+        `refusing cgroup cleanup: could not verify that process(es) ` +
+        `${undecided.join(", ")} in ${cgroupDir} belong to this session`
+      );
+    }
+    await sleep(POLL_INTERVAL_MS);
+  }
+}
+
 /**
  * Everything that must hold before `cgroup.kill` may be written: the path is
- * a real cgroup, its member list is readable, and none of this process's own
- * chain is (any longer) a member.
+ * a real cgroup, its member list is readable, none of this process's own chain
+ * is (any longer) a member, and every remaining member is provably ours.
  */
-function guardCgroupKill(cgroupDir: string): string | undefined {
+async function guardCgroupKill(
+  cgroupDir: string,
+  token: string,
+): Promise<string | undefined> {
   if (!isCgroup2Dir(cgroupDir)) {
     return `refusing cgroup cleanup: ${cgroupDir} is not on a cgroup v2 filesystem`;
   }
@@ -495,7 +720,10 @@ function guardCgroupKill(cgroupDir: string): string | undefined {
     return `could not read ${cgroupDir}/cgroup.procs`;
   }
   const inside = ownChainInside(cgroupDir, members);
-  return inside.length === 0 ? undefined : evacuateOwnChain(cgroupDir, inside);
+  const evacuated =
+    inside.length === 0 ? undefined : evacuateOwnChain(cgroupDir, inside);
+  if (evacuated !== undefined) return evacuated;
+  return verifyCgroupMembership(cgroupDir, token);
 }
 
 function killCgroup(cgroupDir: string): boolean {
@@ -538,76 +766,104 @@ async function removeCgroupDir(cgroupDir: string): Promise<boolean> {
 interface SweepState {
   signaled: Set<number>;
   refused: Set<number>;
+  /**
+   * Every identity a scan has found carrying the token and that has not been
+   * shown to be gone (or refused) since. Ownership, once established, is never
+   * forgotten because a later `environ` read failed: an identity that stops
+   * being readable stays here, so it can still be signalled when the token
+   * comes back and is reported as an unconfirmed survivor if it never does.
+   */
+  pending: Map<string, ProcessIdentity>;
+  /** Pending identities whose token could not be re-read on the last pass. */
+  unverified: Set<number>;
 }
 
-type SignalOutcome = "signaled" | "refused" | "skipped";
+function identityKey(identity: ProcessIdentity): string {
+  return `${identity.pid}:${identity.startTicks}`;
+}
 
 /**
- * Signal one contained process, re-verifying immediately before the signal
- * that the PID is still the scanned process and still carries the token. A
- * process that exited since the scan is skipped; a PID now owned by a
- * different process is refused, never killed; the same process without a
- * readable token (dying or mid-exec) is skipped and decided on a later pass.
+ * Decide one pending identity: `gone` and `mismatch` settle it for good,
+ * `match` signals it (once per sweep) and keeps it pending until it exits, and
+ * `same-process` — the same process with an unreadable, empty or tokenless
+ * environment — leaves it pending, marked unverified, for a later pass.
  */
-function signalContained(
+function decidePending(
   identity: ProcessIdentity,
   token: string,
   signal: NodeJS.Signals,
   state: SweepState,
-): SignalOutcome {
+  settled: Set<string>,
+): void {
+  const key = identityKey(identity);
   const probe = probeToken(identity, token);
-  if (probe === "gone" || probe === "same-process") return "skipped";
-  if (probe === "mismatch") {
-    state.refused.add(identity.pid);
-    return "refused";
+  if (probe === "gone") {
+    state.pending.delete(key);
+    state.unverified.delete(identity.pid);
+    return;
   }
+  if (probe === "mismatch") {
+    state.pending.delete(key);
+    state.unverified.delete(identity.pid);
+    state.refused.add(identity.pid);
+    settled.add(key);
+    return;
+  }
+  if (probe === "same-process") {
+    state.unverified.add(identity.pid);
+    return;
+  }
+  state.unverified.delete(identity.pid);
+  if (settled.has(key)) return;
+  settled.add(key);
   try {
     process.kill(identity.pid, signal);
     state.signaled.add(identity.pid);
-    return "signaled";
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ESRCH") return "skipped";
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+      state.pending.delete(key);
+      return;
+    }
+    state.pending.delete(key);
     state.refused.add(identity.pid);
-    return "refused";
   }
 }
 
 /**
  * Signal every contained process once, then wait for the scope to empty. New
  * PIDs that appear while waiting (a descendant forked mid-shutdown) are
- * signalled too, but an already-signalled PID is not signalled again, so a
- * graceful SIGTERM handler is not interrupted by a second SIGTERM. A process
- * that could not be decided on one pass is decided on a later one.
+ * signalled too, but an already-signalled PID is not signalled again in the
+ * same sweep, so a graceful SIGTERM handler is not interrupted by a second
+ * SIGTERM. A process that could not be decided on one pass stays pending and
+ * is decided on a later one — including one the scans can no longer see.
  */
 async function sweepUntilEmpty(
   token: string,
   signal: NodeJS.Signals,
   timeoutMs: number,
   state: SweepState,
-): Promise<number[]> {
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  const settledThisPass = new Set<number>();
-  let emptyScans = 0;
+  const settled = new Set<string>();
+  let emptyPasses = 0;
   for (;;) {
-    const remaining = listContainedIdentities(token);
-    // A process mid-exec is invisible to one scan; only two consecutive empty
-    // scans, a poll apart, mean the scope is empty.
-    if (remaining.length === 0) {
-      emptyScans += 1;
-      if (emptyScans >= 2) return [];
-      await sleep(POLL_INTERVAL_MS);
-      continue;
+    for (const identity of listContainedIdentities(token)) {
+      state.pending.set(identityKey(identity), identity);
     }
-    emptyScans = 0;
-    for (const identity of remaining) {
-      if (settledThisPass.has(identity.pid)) continue;
-      if (signalContained(identity, token, signal, state) !== "skipped") {
-        settledThisPass.add(identity.pid);
-      }
+    for (const identity of [...state.pending.values()]) {
+      decidePending(identity, token, signal, state, settled);
     }
-    if (Date.now() >= deadline) return listContainedProcesses(token);
+    // A process mid-exec is invisible to one scan; only two consecutive passes
+    // with nothing pending, a poll apart, mean the scope is empty.
+    emptyPasses = state.pending.size === 0 ? emptyPasses + 1 : 0;
+    if (emptyPasses >= 2 || Date.now() >= deadline) return;
     await sleep(POLL_INTERVAL_MS);
   }
+}
+
+/** Contained processes still pending when a sweep ran out of time. */
+function pendingSurvivors(state: SweepState): number[] {
+  return [...new Set([...state.pending.values()].map((each) => each.pid))];
 }
 
 export interface DestroyContainmentOptions {
@@ -619,12 +875,11 @@ async function destroyCgroupMembers(
   scope: ContainmentScope,
   timeoutMs: number,
 ): Promise<string | undefined> {
-  const cgroupDir = scope.cgroupDir;
-  if (cgroupDir === undefined) return "containment cgroup path is missing";
-  const problem = scopeCgroupProblem(cgroupDir);
+  const problem = containmentScopeProblem(scope);
   if (problem !== undefined) return `refusing cgroup cleanup: ${problem}`;
+  const cgroupDir = scope.cgroupDir as string;
   if (!fs.existsSync(cgroupDir)) return undefined;
-  const blocked = guardCgroupKill(cgroupDir);
+  const blocked = await guardCgroupKill(cgroupDir, scope.token);
   if (blocked !== undefined) return blocked;
   if (!killCgroup(cgroupDir)) return `could not write ${cgroupDir}/cgroup.kill`;
   if (!(await waitForCgroupEmpty(cgroupDir, timeoutMs))) {
@@ -668,30 +923,30 @@ export async function destroyContainmentScope(
   }
   const termTimeoutMs = opts.termTimeoutMs ?? DEFAULT_TERM_TIMEOUT_MS;
   const killTimeoutMs = opts.killTimeoutMs ?? DEFAULT_KILL_TIMEOUT_MS;
-  const state: SweepState = { signaled: new Set(), refused: new Set() };
+  const state: SweepState = {
+    signaled: new Set(),
+    refused: new Set(),
+    pending: new Map(),
+    unverified: new Set(),
+  };
   const cgroupReason =
     scope.mechanism === "cgroup"
       ? await destroyCgroupMembers(scope, termTimeoutMs)
       : undefined;
 
-  let survivors = await sweepUntilEmpty(
-    scope.token,
-    "SIGTERM",
-    termTimeoutMs,
-    state,
-  );
-  if (survivors.length > 0) {
-    survivors = await sweepUntilEmpty(
-      scope.token,
-      "SIGKILL",
-      killTimeoutMs,
-      state,
-    );
+  await sweepUntilEmpty(scope.token, "SIGTERM", termTimeoutMs, state);
+  if (state.pending.size > 0) {
+    await sweepUntilEmpty(scope.token, "SIGKILL", killTimeoutMs, state);
   }
+  const survivors = pendingSurvivors(state);
+  const unverified = survivors.filter((pid) => state.unverified.has(pid));
 
   const reason =
     survivors.length > 0
-      ? `${survivors.length} contained process(es) survived SIGKILL: ${survivors.join(", ")}`
+      ? `${survivors.length} contained process(es) survived SIGKILL: ${survivors.join(", ")}` +
+        (unverified.length === 0
+          ? ""
+          : ` (${unverified.join(", ")} still had this scope's start identity with an unreadable containment token)`)
       : state.refused.size > 0
         ? `refused to signal ${state.refused.size} live PID(s) that no longer carry the session token: ${[...state.refused].join(", ")}`
         : cgroupReason;
@@ -857,16 +1112,16 @@ export function buildContainedCommand(
   if (command === "") {
     throw new Error("Containment supervisor requires a command to run");
   }
-  let cgroupDir = "-";
-  if (scope.mechanism === "cgroup" && scope.cgroupDir !== undefined) {
-    const problem = scopeCgroupProblem(scope.cgroupDir);
-    if (problem !== undefined) {
-      throw new Error(
-        `Containment supervisor refuses a scope that is not a Pickforge cgroup: ${problem}`,
-      );
-    }
-    cgroupDir = scope.cgroupDir;
+  const problem = containmentScopeProblem(scope);
+  if (problem !== undefined) {
+    throw new Error(
+      `Containment supervisor refuses a scope that is not this session's Pickforge cgroup: ${problem}`,
+    );
   }
+  const cgroupDir =
+    scope.mechanism === "cgroup" && scope.cgroupDir !== undefined
+      ? scope.cgroupDir
+      : "-";
   return {
     command: nodePath,
     args: [

@@ -364,6 +364,7 @@ describeWithXvfb("desktop teardown failure reporting", () => {
           ...record?.desktop,
           display: handle.display,
           containment: {
+            id: handle.id,
             token: "f".repeat(64),
             mechanism: "cgroup",
             cgroupDir: unkillable,
