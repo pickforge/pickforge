@@ -36,13 +36,24 @@ export {
 } from "./viewer.js";
 
 export {
+  DEFAULT_EXEC_WINDOW_TIMEOUT_MS,
+  execApp,
   launchApp,
   listWindows,
+  noClientWindowsWarning,
   waitForWindow,
   type AppHandle,
+  type ExecAppHandle,
+  type ExecAppOptions,
   type LaunchAppOptions,
   type WindowInfo,
 } from "./apps.js";
+
+export {
+  createIsolatedDesktopEnvironment,
+  desktopEnvironmentRecipe,
+  type DesktopEnvironmentRecipe,
+} from "./environment.js";
 
 export {
   buildScreenshotCommand,

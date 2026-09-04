@@ -1,10 +1,11 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { isProcessGroupAlive } from "@pickforge/picklab-core";
 import { ensureCliBuilt } from "./build-once.js";
 
 const cliPath = fileURLToPath(new URL("../dist/picklab.js", import.meta.url));
@@ -95,6 +96,36 @@ function makeProjectDir(name = "project"): string {
   const dir = path.join(tmpDir, name);
   fs.mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+function writeDesktopSessionRecord(
+  env: Record<string, string>,
+  projectDir: string,
+  display = ":987",
+): string {
+  const id = "desk-12345678";
+  const dir = path.join(env.PICKLAB_HOME, "sessions");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, `${id}.json`),
+    `${JSON.stringify({
+      id,
+      type: "desktop",
+      createdAt: "2026-06-09T12:00:00.000Z",
+      status: "running",
+      projectDir,
+      desktop: { display, xvfbPid: 999_999_999 },
+    })}\n`,
+  );
+  return id;
+}
+
+function stopTestProcessGroup(pid: number): void {
+  try {
+    process.kill(-pid, "SIGTERM");
+  } catch {
+    // The test command has already exited.
+  }
 }
 
 async function waitFor(
@@ -617,10 +648,206 @@ describe("picklab session (desktop)", () => {
 });
 
 describe("picklab desktop", () => {
+  it("prints an eval-ready isolated environment in text and JSON", async () => {
+    const projectDir = makeProjectDir();
+    const env = makeEnv({
+      extra: {
+        WAYLAND_DISPLAY: "wayland-0",
+        WAYLAND_SOCKET: "42",
+        WAYLAND_DEBUG: "client",
+        ELECTRON_OZONE_PLATFORM_HINT: "wayland",
+        GLFW_PLATFORM: "wayland",
+        SECRET_TOKEN: "do-not-print",
+      },
+    });
+    const id = writeDesktopSessionRecord(env, projectDir, ":98");
+
+    const json = await runCli(
+      ["desktop", "env", "--session", id, "--json"],
+      env,
+      projectDir,
+    );
+    expect(json.code).toBe(0);
+    const report = parseJson(json);
+    expect(report.unset).toEqual(["WAYLAND_DEBUG", "WAYLAND_SOCKET"]);
+    expect(report.exports).toEqual({
+      DISPLAY: ":98",
+      WAYLAND_DISPLAY: "picklab-no-wayland",
+      ELECTRON_OZONE_PLATFORM_HINT: "x11",
+      GDK_BACKEND: "x11",
+      GLFW_PLATFORM: "x11",
+      QT_QPA_PLATFORM: "xcb",
+      SDL_VIDEODRIVER: "x11",
+      WINIT_UNIX_BACKEND: "x11",
+      XDG_SESSION_TYPE: "x11",
+    });
+    expect(report.script).not.toContain("do-not-print");
+
+    const text = await runCli(
+      ["desktop", "env", "--session", id],
+      env,
+      projectDir,
+    );
+    expect(text.code).toBe(0);
+    expect(text.stderr).toBe("");
+    expect(text.stdout.trim()).toBe(report.script);
+
+    const evaluated = spawnSync(
+      "/bin/sh",
+      [
+        "-c",
+        'eval "$1"; printf "%s\\n" "$DISPLAY" "${WAYLAND_DISPLAY-unset}" "$ELECTRON_OZONE_PLATFORM_HINT" "$GDK_BACKEND" "$GLFW_PLATFORM" "$QT_QPA_PLATFORM"',
+        "sh",
+        text.stdout,
+      ],
+      { env, encoding: "utf8" },
+    );
+    expect(evaluated.status).toBe(0);
+    expect(evaluated.stdout).toBe(
+      ":98\npicklab-no-wayland\nx11\nx11\nx11\nxcb\n",
+    );
+  });
+
+  it("executes argv in the isolated environment and reports its process group", async () => {
+    const projectDir = makeProjectDir();
+    const capture = path.join(tmpDir, "exec-environment.txt");
+    const command = path.join(tmpDir, "capture-exec");
+    const searchMarker = path.join(tmpDir, "xdotool-searched");
+    const env = makeEnv({
+      bins: {
+        xdotool:
+          'case "$1" in\n  search)\n' +
+          `    if [ -f "${searchMarker}" ]; then echo 4242; else : > "${searchMarker}"; exit 1; fi ;;\n` +
+          "  getwindowname) echo picklab-fake-window ;;\nesac",
+      },
+      extra: {
+        WAYLAND_DISPLAY: "wayland-0",
+        WAYLAND_SOCKET: "42",
+      },
+    });
+    const id = writeDesktopSessionRecord(env, projectDir, ":97");
+    writeScript(
+      command,
+      "printf 'DISPLAY=%s\\nWAYLAND_DISPLAY=%s\\nWAYLAND_SOCKET=%s\\nELECTRON_OZONE_PLATFORM_HINT=%s\\nGDK_BACKEND=%s\\nGLFW_PLATFORM=%s\\nQT_QPA_PLATFORM=%s\\nSDL_VIDEODRIVER=%s\\nWINIT_UNIX_BACKEND=%s\\nXDG_SESSION_TYPE=%s\\n' " +
+        '"$DISPLAY" "${WAYLAND_DISPLAY-unset}" "${WAYLAND_SOCKET-unset}" "$ELECTRON_OZONE_PLATFORM_HINT" "$GDK_BACKEND" "$GLFW_PLATFORM" "$QT_QPA_PLATFORM" "$SDL_VIDEODRIVER" "$WINIT_UNIX_BACKEND" "$XDG_SESSION_TYPE" ' +
+        `> "${capture}"\n` +
+        `printf 'ARG=%s\\n' "$@" >> "${capture}"\n` +
+        "exec /bin/sleep 30",
+    );
+
+    const result = await runCli(
+      [
+        "desktop",
+        "exec",
+        "--session",
+        id,
+        "--window-timeout",
+        "1000",
+        "--json",
+        "--",
+        command,
+        "hello world",
+        "$(not-expanded)",
+      ],
+      env,
+      projectDir,
+    );
+    const report = parseJson(result);
+    try {
+      expect(result.code).toBe(0);
+      expect(report.processGroupId).toBe(report.pid);
+      expect(report.windowCount).toBe(1);
+      expect(report.windows).toEqual([
+        { id: "4242", name: "picklab-fake-window" },
+      ]);
+      expect(fs.readFileSync(capture, "utf8")).toBe(
+        "DISPLAY=:97\n" +
+          "WAYLAND_DISPLAY=picklab-no-wayland\nWAYLAND_SOCKET=unset\n" +
+          "ELECTRON_OZONE_PLATFORM_HINT=x11\nGDK_BACKEND=x11\n" +
+          "GLFW_PLATFORM=x11\nQT_QPA_PLATFORM=xcb\n" +
+          "SDL_VIDEODRIVER=x11\nWINIT_UNIX_BACKEND=x11\n" +
+          "XDG_SESSION_TYPE=x11\n" +
+          "ARG=hello world\nARG=$(not-expanded)\n",
+      );
+    } finally {
+      if (typeof report.pid === "number") stopTestProcessGroup(report.pid);
+    }
+  });
+
+  it("reports a possible real-desktop escape when exec finds no window", async () => {
+    const projectDir = makeProjectDir();
+    const pidFile = path.join(tmpDir, "windowless.pid");
+    const command = path.join(tmpDir, "windowless-command");
+    const env = makeEnv({ bins: { xdotool: "exit 1" } });
+    const id = writeDesktopSessionRecord(env, projectDir, ":96");
+    writeScript(command, `echo $$ > "${pidFile}"\nexec /bin/sleep 30`);
+
+    const result = await runCli(
+      [
+        "desktop",
+        "exec",
+        "--session",
+        id,
+        "--window-timeout",
+        "100",
+        "--json",
+        "--",
+        command,
+      ],
+      env,
+      projectDir,
+    );
+    expect(result.code).toBe(1);
+    const errors = parseJson(result).errors.join("\n");
+    expect(errors).toContain("may have escaped the lab");
+    expect(errors).toContain("opened on your real desktop");
+    expect(errors).toContain("PickLab stopped process group");
+    expect(errors).toContain("--window-timeout");
+    const processGroupId = Number(fs.readFileSync(pidFile, "utf8").trim());
+    await waitFor(() => !isProcessGroupAlive(processGroupId));
+    expect(isProcessGroupAlive(processGroupId)).toBe(false);
+  });
+
+  it("screenshots without xdotool and reports that window counting is unavailable", async () => {
+    const projectDir = makeProjectDir();
+    const env = makeEnv({
+      bins: {
+        import:
+          'for arg in "$@"; do out="$arg"; done\nprintf "\\211PNG\\r\\n\\032\\n" > "$out"',
+      },
+    });
+    const id = writeDesktopSessionRecord(env, projectDir, ":95");
+    const out = path.join(tmpDir, "without-xdotool.png");
+
+    const json = await runCli(
+      ["desktop", "screenshot", "--session", id, "--out", out, "--json"],
+      env,
+      projectDir,
+    );
+    expect(json.code).toBe(0);
+    const report = parseJson(json);
+    expect(report.windowCount).toBeUndefined();
+    expect(report.warnings).toEqual([expect.stringContaining("xdotool")]);
+    expect(report.warnings[0]).toContain("missing");
+    expect(report.warnings[0]).not.toContain("escaped the lab");
+
+    const text = await runCli(
+      ["desktop", "screenshot", "--session", id, "--out", out],
+      env,
+      projectDir,
+    );
+    expect(text.code).toBe(0);
+    expect(text.stdout).toContain("warning: xdotool is missing");
+    expect(text.stdout).not.toContain("escaped the lab");
+  });
+
   it(
     "screenshots into a run directory with a manifest entry",
     async () => {
-      const env = makeEnv({ realPath: true });
+      const env = makeEnv({
+        realPath: true,
+        bins: { xdotool: "exit 1" },
+      });
       cleanupEnvs.push(env);
       const projectDir = makeProjectDir();
       await runCli(
@@ -636,6 +863,10 @@ describe("picklab desktop", () => {
       expect(result.code).toBe(0);
       const report = parseJson(result);
       expect(report.ok).toBe(true);
+      expect(report.windowCount).toBe(0);
+      expect(report.warnings).toEqual([
+        expect.stringContaining("may have escaped the lab"),
+      ]);
       expect(report.runId).toMatch(/-desktop/);
       expect(report.path).toContain(
         path.join(projectDir, ".picklab", "runs", report.runId, "screenshots"),
