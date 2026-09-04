@@ -1,6 +1,6 @@
 # Pickforge agent install guide
 
-You are an AI coding agent, and your user asked you to install and configure Pickforge: a CLI + MCP server that gives you a reproducible lab for native desktop apps (Xvfb) and Android emulators — screenshots, input, logs, and run artifacts. Linux only for now.
+You are an AI coding agent, and your user asked you to install and configure Pickforge: a Rust CLI plus a TypeScript lab CLI and MCP server. The lab gives you reproducible native desktop sessions (Xvfb) and Android emulators with screenshots, input, logs, and run artifacts. The lab is Linux-only; the Rust CLI also supports Apple silicon macOS.
 
 Follow the steps in order. Verify each one before moving on. Rules:
 
@@ -14,15 +14,38 @@ Follow the steps in order. Verify each one before moving on. Rules:
 curl -fsSL https://pickforge.dev/install.sh | sh
 ```
 
-Or directly: `npm install -g pickforge` (needs Node >= 20) or `bun add -g pickforge`. Never with sudo.
+The alpha installer resolves `pickforge@next`, then downloads the matching
+Rust binary from the same `v<version>` GitHub release and verifies its SHA-256
+file. It supports Linux x86_64 and Apple silicon macOS. On another target it
+leaves the TypeScript commands installed, clearly reports that they still
+work, and refuses to install an unsupported Rust binary.
 
-Verify:
+The npm-only alternatives, `npm install -g pickforge@next` and
+`bun add -g pickforge@next`, do not install the Rust binary. Never install with
+sudo.
+
+Verify all three commands:
 
 ```sh
+command -v pickforge && pickforge --version
 command -v pickforge-lab && pickforge-lab --version
+command -v pickforge-mcp
 ```
 
-If `pickforge-lab` is not on PATH, the global bin dir (`npm prefix -g`/bin or `~/.bun/bin`) is missing from PATH — fix the user's shell profile or tell them, don't fall back to a local install.
+If they are not on PATH, the global bin dir (`npm prefix -g`/bin or
+`~/.bun/bin`) is missing from PATH. Fix the user's shell profile or tell them.
+Do not fall back to a local install.
+
+For a local installer smoke test, point the npm install at a packed tarball and
+the Rust download at a directory containing `pickforge-linux-x86_64` or
+`pickforge-macos-arm64` plus its same-named `.sha256` file:
+
+```sh
+PICKFORGE_INSTALL_FROM_TARBALL=/absolute/path/pickforge-0.4.0-alpha.1.tgz \
+PICKFORGE_INSTALL_RELEASE_BASE_URL=file:///absolute/path/release-assets \
+PICKFORGE_INSTALL_RUNTIME=npm \
+sh scripts/install.sh
+```
 
 On fatal errors the CLI and MCP server report the error message and stack trace — the message can reference the failing command and its output, with secrets redacted — plus OS, Node.js, and app versions to Sentry; nothing else is collected. Tell the user they can disable this with `PICKFORGE_TELEMETRY=0`.
 
@@ -31,7 +54,22 @@ deprecation warning to stderr. New TypeScript state goes under
 `~/.pickforge/lab/`; existing `~/.pickforge/picklab/` and `~/.picklab/` state
 is read in place without silent migration or deletion.
 
-## 2. Register the MCP server with the agent the user uses
+## 2. Initialize the Flutter integration
+
+Inside the user's Flutter project, run the read-only diagnostics before the
+transactional integration setup:
+
+```sh
+pickforge doctor
+pickforge init
+```
+
+For `0.4.0-alpha.1`, the visible `--mobile-integration-alpha` flag is enabled
+by default because this is a prerelease build. `init --dry-run` previews every
+change. Normal `init` configures the official Dart/Flutter MCP server and the
+portable Flutter workflow for Claude Code, Codex, and Pi.
+
+## 3. Register the lab MCP server with the agent the user uses
 
 That is probably you. Built-in support:
 
@@ -55,7 +93,7 @@ Verify with `pickforge-lab agents list` — the agent must show `registered`.
 
 Important: a running agent session only picks up new MCP servers after a restart. Tell the user the `pickforge-lab` tools appear in the *next* session; don't report failure when they are absent from the current one.
 
-## 3. Install system packages (desktop profiles)
+## 4. Install system packages (desktop profiles)
 
 Check what is missing:
 
@@ -73,7 +111,7 @@ For desktop sessions Pickforge needs `Xvfb`, `xdotool`, and one screenshot path:
 
 For Android profiles the user needs an Android SDK with `cmdline-tools`, `platform-tools`, `emulator`, and a system image. `pickforge-lab doctor` prints exact `sdkmanager` commands for missing SDK pieces, and exact `export` commands when the SDK root is unset.
 
-## 4. Initialize the project
+## 5. Initialize the lab project
 
 Ask the user which profile fits the app, then run inside the project:
 
@@ -83,7 +121,7 @@ pickforge-lab init --profile <flutter-desktop|android|desktop+android|generic> -
 
 Without `--profile`, init defaults to `generic`; it prompts only before privileged provisioning steps. In agent or other non-interactive contexts, use `--yes`. This writes the project config and plans the provisioning for that profile. Privileged lab-user creation happens only with explicit `--yes --create-lab-user`; it is optional for every profile.
 
-## 5. Provision lab resources
+## 6. Provision lab resources
 
 Pickforge can provision two lab resources:
 
@@ -92,7 +130,7 @@ Pickforge can provision two lab resources:
 
 `pickforge-lab init` plans the AVD automatically for Android profiles and the lab user only with `--create-lab-user`; `pickforge-lab doctor --fix` offers both.
 
-## 6. Verify everything
+## 7. Verify everything
 
 ```sh
 pickforge-lab doctor

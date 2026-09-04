@@ -8,6 +8,18 @@ describe("pickforge", () => {
     expect(program.version()).toBe("0.4.0-alpha.1");
   });
 
+  it("exposes desktop exec as a separate window-wait command", () => {
+    const program = buildProgram();
+    const desktop = program.commands.find((command) => command.name() === "desktop");
+    const launch = desktop?.commands.find((command) => command.name() === "launch");
+    const exec = desktop?.commands.find((command) => command.name() === "exec");
+    expect(launch?.aliases()).not.toContain("exec");
+    expect(exec).toBeDefined();
+    expect(exec?.options.map((option) => option.long)).toContain(
+      "--window-timeout",
+    );
+  });
+
   it("exposes only project scope on the static browser relay command", () => {
     const program = buildProgram();
     const browser = program.commands.find((command) => command.name() === "browser");

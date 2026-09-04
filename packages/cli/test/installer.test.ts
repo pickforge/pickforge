@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ensureCliBuilt } from "./build-once.js";
 
@@ -54,6 +55,7 @@ function describeFailure(result: ExecResult): string {
 let suiteDir: string;
 let tarball: string;
 let npmCache: string;
+let releaseBaseUrl: string;
 
 function makeCase(name: string): { home: string; dir: string } {
   const dir = path.join(suiteDir, name);
@@ -76,8 +78,10 @@ function baseEnv(home: string, extra: Record<string, string> = {}): Record<strin
   return {
     HOME: home,
     PICKFORGE_HOME: path.join(home, ".pickforge", "lab"),
+    PICKFORGE_INSTALL_RELEASE_BASE_URL: releaseBaseUrl,
     PATH: process.env.PATH ?? "",
     npm_config_cache: npmCache,
+    npm_config_prefer_offline: "true",
     ...extra,
   };
 }
@@ -100,6 +104,26 @@ beforeAll(async () => {
   suiteDir = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-installer-"));
   npmCache = path.join(suiteDir, "npm-cache");
   fs.mkdirSync(npmCache, { recursive: true });
+
+  const releaseDir = path.join(suiteDir, "release");
+  const rustAsset = path.join(releaseDir, "pickforge-linux-x86_64");
+  writeExecutable(
+    rustAsset,
+    [
+      "#!/bin/sh",
+      "if [ \"${1:-}\" = \"--version\" ]; then",
+      `  printf '%s\\n' 'pickforge ${cliVersion}'`,
+      "  exit 0",
+      "fi",
+      "exit 1",
+    ].join("\n"),
+  );
+  const rustHash = createHash("sha256")
+    .update(fs.readFileSync(rustAsset))
+    .digest("hex");
+  fs.writeFileSync(`${rustAsset}.sha256`, `${rustHash}  pickforge-linux-x86_64\n`);
+  releaseBaseUrl = pathToFileURL(releaseDir).href;
+
   const packDir = path.join(suiteDir, "pack");
   fs.mkdirSync(packDir, { recursive: true });
   const packed = await run(
@@ -141,14 +165,91 @@ describe("install.sh", () => {
       });
       const result = await run("sh", [installScript], { cwd: dir, env });
       expect(result.code, describeFailure(result)).toBe(0);
-      expect(result.stdout).toContain(`pickforge-lab ${cliVersion} installed.`);
+      expect(result.stdout).toContain(
+        `pickforge-lab ${cliVersion} and pickforge-mcp installed.`,
+      );
+      expect(result.stdout).toContain(`pickforge ${cliVersion} installed at`);
       expect(result.stdout).toContain("pickforge-lab agents install");
-      expect(result.stdout).toContain("pickforge-lab init --profile");
+      expect(result.stdout).toContain("pickforge doctor");
 
       const binary = path.join(prefix, "bin", "pickforge-lab");
       const version = await run(binary, ["--version"], { env: baseEnv(home) });
       expect(version.code, describeFailure(version)).toBe(0);
       expect(version.stdout.trim()).toBe(cliVersion);
+      const rustVersion = await run(
+        path.join(prefix, "bin", "pickforge"),
+        ["--version"],
+        { env: baseEnv(home) },
+      );
+      expect(rustVersion.code, describeFailure(rustVersion)).toBe(0);
+      expect(rustVersion.stdout.trim()).toBe(`pickforge ${cliVersion}`);
+    },
+    NETWORK_TIMEOUT,
+  );
+
+  it(
+    "rejects a Rust binary whose checksum does not match",
+    async () => {
+      const { home, dir } = makeCase("sh-bad-checksum");
+      const prefix = path.join(dir, "prefix");
+      const badReleaseDir = path.join(dir, "release");
+      const rustAsset = path.join(badReleaseDir, "pickforge-linux-x86_64");
+      fs.mkdirSync(badReleaseDir, { recursive: true });
+      fs.copyFileSync(
+        path.join(fileURLToPath(releaseBaseUrl), "pickforge-linux-x86_64"),
+        rustAsset,
+      );
+      fs.writeFileSync(`${rustAsset}.sha256`, `${"0".repeat(64)}  pickforge-linux-x86_64\n`);
+
+      const result = await run("sh", [installScript], {
+        cwd: dir,
+        env: baseEnv(home, {
+          PICKFORGE_INSTALL_FROM_TARBALL: tarball,
+          PICKFORGE_INSTALL_RUNTIME: "npm",
+          PICKFORGE_INSTALL_RELEASE_BASE_URL: pathToFileURL(badReleaseDir).href,
+          npm_config_prefix: prefix,
+        }),
+      });
+
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain("checksum verification failed");
+      expect(fs.existsSync(path.join(prefix, "bin", "pickforge-lab"))).toBe(true);
+      expect(fs.existsSync(path.join(prefix, "bin", "pickforge"))).toBe(false);
+    },
+    NETWORK_TIMEOUT,
+  );
+
+  it(
+    "refuses unsupported Rust targets after installing the TypeScript commands",
+    async () => {
+      const { home, dir } = makeCase("sh-unsupported-target");
+      const prefix = path.join(dir, "prefix");
+      const fakeBin = path.join(dir, "bin");
+      writeExecutable(
+        path.join(fakeBin, "uname"),
+        [
+          "#!/bin/sh",
+          "if [ \"${1:-}\" = \"-s\" ]; then printf '%s\\n' Plan9; else printf '%s\\n' wasm64; fi",
+        ].join("\n"),
+      );
+
+      const result = await run("/bin/sh", [installScript], {
+        cwd: dir,
+        env: baseEnv(home, {
+          PATH: [fakeBin, process.env.PATH ?? ""].join(path.delimiter),
+          PICKFORGE_INSTALL_FROM_TARBALL: tarball,
+          PICKFORGE_INSTALL_RUNTIME: "npm",
+          npm_config_prefix: prefix,
+        }),
+      });
+
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain("not available for Plan9 wasm64");
+      expect(result.stderr).toContain(
+        "pickforge-lab and pickforge-mcp were installed and still work",
+      );
+      expect(fs.existsSync(path.join(prefix, "bin", "pickforge-lab"))).toBe(true);
+      expect(fs.existsSync(path.join(prefix, "bin", "pickforge"))).toBe(false);
     },
     NETWORK_TIMEOUT,
   );
@@ -308,6 +409,7 @@ describe("install.sh", () => {
         "exit 1",
         "PICKFORGE_FAKE_BIN",
         "  chmod +x \"${FAKE_BUN_GLOBAL_BIN}/pickforge-lab\"",
+        "  cp \"${FAKE_BUN_GLOBAL_BIN}/pickforge-lab\" \"${FAKE_BUN_GLOBAL_BIN}/pickforge-mcp\"",
         "  exit 0",
         "fi",
         "exit 64",
@@ -328,7 +430,9 @@ describe("install.sh", () => {
     });
 
     expect(result.code, describeFailure(result)).toBe(0);
-    expect(result.stdout).toContain(`pickforge-lab ${cliVersion} installed.`);
+    expect(result.stdout).toContain(
+      `pickforge-lab ${cliVersion} and pickforge-mcp installed.`,
+    );
     expect(result.stdout).toContain(`note: ${customBin} is not on your PATH`);
     expect(fs.existsSync(path.join(customBin, "pickforge-lab"))).toBe(true);
     expect(fs.existsSync(path.join(bunInstall, "bin", "pickforge-lab"))).toBe(false);
@@ -349,7 +453,9 @@ describe("install.sh", () => {
       });
       const result = await run("sh", [installScript], { cwd: dir, env });
       expect(result.code, describeFailure(result)).toBe(0);
-      expect(result.stdout).toContain(`pickforge-lab ${cliVersion} installed.`);
+      expect(result.stdout).toContain(
+        `pickforge-lab ${cliVersion} and pickforge-mcp installed.`,
+      );
 
       const version = await run(
         path.join(bunInstall, "bin", "pickforge-lab"),
@@ -426,7 +532,15 @@ describe("packed tarball execution", () => {
       const { home, dir } = makeCase("npx");
       const result = await run(
         "npm",
-        ["exec", "--yes", `--package=${tarball}`, "--", "pickforge-lab", "--version"],
+        [
+          "exec",
+          "--yes",
+          "--offline",
+          `--package=${tarball}`,
+          "--",
+          "pickforge-lab",
+          "--version",
+        ],
         { cwd: dir, env: baseEnv(home) },
       );
       expect(result.code, describeFailure(result)).toBe(0);
@@ -446,6 +560,7 @@ describe("packed tarball execution", () => {
         [
           "exec",
           "--yes",
+          "--offline",
           `--package=${tarball}`,
           "--",
           "pickforge-lab",

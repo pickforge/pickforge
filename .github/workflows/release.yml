@@ -4,6 +4,11 @@ on:
   push:
     tags: ["v*.*.*"]
   workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type release to publish
+        required: true
+        type: string
 
 concurrency:
   group: release-${{ github.ref }}
@@ -14,7 +19,54 @@ permissions:
   id-token: write
 
 jobs:
+  rust-binaries:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rust-target: x86_64-unknown-linux-gnu
+            asset-target: linux-x86_64
+          - os: macos-14
+            rust-target: aarch64-apple-darwin
+            asset-target: macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.rust-target }}
+
+      - name: Build Rust binary
+        run: cargo build --release --locked --target "${{ matrix.rust-target }}" -p pickforge-cli
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          asset="pickforge-${{ matrix.asset-target }}"
+          cp "target/${{ matrix.rust-target }}/release/pickforge" "release-assets/$asset"
+          strip "release-assets/$asset"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd release-assets && sha256sum "$asset" > "$asset.sha256")
+          else
+            (cd release-assets && shasum -a 256 "$asset" > "$asset.sha256")
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pickforge-${{ matrix.asset-target }}
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 7
+
   release:
+    needs: rust-binaries
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,15 +81,24 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
-      - name: Validate release tag
-        if: startsWith(github.ref, 'refs/tags/v')
+      # Manual dispatches are safe dry runs unless the owner types the explicit confirmation.
+      - name: Report dispatch dry run
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.confirm != 'release'
+        run: |
+          echo '## Release dry run' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Build and test jobs ran, but publishing was skipped because `confirm` was not `release`.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Validate release version
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || github.event.inputs.confirm == 'release'
         run: |
           VERSION=$(node -p "require('./packages/cli/package.json').version")
-          if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+          RELEASE_TAG="v$VERSION"
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF_NAME" != "$RELEASE_TAG" ]; then
             echo "release tag $GITHUB_REF_NAME does not match package version $VERSION" >&2
             exit 1
           fi
           echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
 
       - run: bun run typecheck
 
@@ -74,11 +135,11 @@ jobs:
       - run: bun run build
 
       - name: Install npm with trusted publishing support
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || github.event.inputs.confirm == 'release'
         run: npm install --global npm@11.5.1
 
       - name: Upload sourcemaps to Sentry
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || github.event.inputs.confirm == 'release'
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: pickforge
@@ -96,23 +157,35 @@ jobs:
           fi
 
       - name: Publish pickforge
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || github.event.inputs.confirm == 'release'
         working-directory: packages/cli
         run: |
           if npm view "pickforge@$RELEASE_VERSION" version >/dev/null 2>&1; then
             echo "pickforge@$RELEASE_VERSION is already published; skipping"
-          else
+          elif [[ "$RELEASE_VERSION" == *-* ]]; then
             npm publish --access public --provenance --tag next
+          else
+            npm publish --access public --provenance
           fi
 
+      - name: Download Rust release assets
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || github.event.inputs.confirm == 'release'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pickforge-*
+          path: release-assets
+          merge-multiple: true
+
       - name: Create GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || github.event.inputs.confirm == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "GitHub release $RELEASE_TAG already exists; skipping"
-          else
+            echo "GitHub release $RELEASE_TAG already exists; reusing"
+          elif [[ "$RELEASE_TAG" == *-* ]]; then
             gh release create "$RELEASE_TAG" --draft --prerelease --generate-notes
+          else
+            gh release create "$RELEASE_TAG" --draft --generate-notes
           fi
+          gh release upload "$RELEASE_TAG" release-assets/* --clobber
