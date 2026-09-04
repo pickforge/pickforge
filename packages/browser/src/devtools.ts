@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { formatChromeStartupDiagnostics } from "./startup-diagnostics.js";
 import { sleep } from "./util.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 100;
@@ -39,6 +40,17 @@ export function readDevToolsActivePort(profileDir: string): number | undefined {
 export type DevToolsPortResult =
   | { ok: true; port: number }
   | { ok: false; reason: "aborted" | "exited" | "timeout" };
+
+function reportStartupFailure(
+  reason: "exited" | "timeout",
+  profileDir: string,
+  port?: number,
+): DevToolsPortResult {
+  console.error(
+    `Chrome startup ${reason}.\n${formatChromeStartupDiagnostics(profileDir, port)}`,
+  );
+  return { ok: false, reason };
+}
 
 /** Verify that the loopback DevTools HTTP endpoint is accepting requests. */
 export async function probeDevToolsHttp(
@@ -114,7 +126,7 @@ export async function waitForDevToolsPort(
     const port = readDevToolsActivePort(opts.profileDir);
     if (port !== undefined) {
       if (!opts.isAlive()) {
-        return { ok: false, reason: "exited" };
+        return reportStartupFailure("exited", opts.profileDir, port);
       }
       const ready = await isReady(port);
       if (creationAborted()) {
@@ -124,10 +136,10 @@ export async function waitForDevToolsPort(
         return { ok: true, port };
       }
     } else if (!opts.isAlive()) {
-      return { ok: false, reason: "exited" };
+      return reportStartupFailure("exited", opts.profileDir);
     }
     if (Date.now() >= deadline) {
-      return { ok: false, reason: "timeout" };
+      return reportStartupFailure("timeout", opts.profileDir, port);
     }
     try {
       await sleep(poll, opts.signal);

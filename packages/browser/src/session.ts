@@ -44,7 +44,9 @@ import { waitForDevToolsPort } from "./devtools.js";
 import { buildSupervisedBrowserCommand } from "./supervisor.js";
 import { asError, sleep } from "./util.js";
 
-const DEFAULT_CDP_TIMEOUT_MS = 20_000;
+// A cold Chrome can need more than 20 seconds under shared CI load. Keep the
+// budget bounded; failures print the redacted log tail and readiness state.
+const DEFAULT_CDP_TIMEOUT_MS = 45_000;
 // A browser session also launches a heavy real Chrome, so its private Xvfb can
 // be scheduled slowly on a busy host. Give the display generous headroom rather
 // than the display supervisor's default so a loaded machine does not fail the

@@ -48,7 +48,8 @@ describe("real DevTools relay prerequisites", () => {
 describe.skipIf(!ready)("real Chrome through the exact upstream relay", () => {
   it(
     "navigates and exposes accessibility, console, and network metadata",
-    { timeout: 60_000, retry: 1 },
+    // Covers bounded Xvfb + Chrome startup without retry-masking a failure.
+    { timeout: 120_000 },
     async () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), "pf-relay-real-"));
       temporaryDirectories.push(root);

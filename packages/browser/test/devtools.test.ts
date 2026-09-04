@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   parseDevToolsActivePort,
   readDevToolsActivePort,
@@ -141,14 +141,25 @@ describe("waitForDevToolsPort", () => {
     expect(result).toEqual({ ok: false, reason: "exited" });
   });
 
-  it("fails with 'timeout' when the port never appears", async () => {
-    const result = await waitForDevToolsPort({
-      profileDir: tmp,
-      timeoutMs: 60,
-      isAlive: () => true,
-      pollIntervalMs: 10,
-    });
-    expect(result).toEqual({ ok: false, reason: "timeout" });
+  it("fails with 'timeout' and prints durable startup diagnostics", async () => {
+    const profileDir = path.join(tmp, "profile");
+    fs.mkdirSync(profileDir);
+    fs.writeFileSync(path.join(tmp, "chrome.log"), "cold Chrome marker\n");
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await waitForDevToolsPort({
+        profileDir,
+        timeoutMs: 60,
+        isAlive: () => true,
+        pollIntervalMs: 10,
+      });
+      expect(result).toEqual({ ok: false, reason: "timeout" });
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining("cold Chrome marker"),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
   });
 });
 

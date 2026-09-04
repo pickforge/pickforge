@@ -8,6 +8,7 @@ import {
   getSession,
   isPidAlive,
   processIdentityMatches,
+  readProcessStartTicks,
   runCommand,
   stopPid,
   updateSession,
@@ -583,7 +584,9 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
       } finally {
         await destroyDesktopSession(session.id, env);
       }
-      expect(isPidAlive(session.xvfbPid)).toBe(false);
+      // Verified teardown may briefly leave the owned child as a zombie until
+      // Node reaps it. Match the lifecycle contract: no live process remains.
+      expect(readProcessStartTicks(session.xvfbPid)).toBeUndefined();
       expect(isDisplayAlive(session.display)).toBe(false);
       expect(await getSession(session.id, env)).toBeUndefined();
     },
