@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   parseDevToolsActivePort,
   readDevToolsActivePort,
@@ -28,8 +28,9 @@ describe("parseDevToolsActivePort", () => {
     ).toBe(45123);
   });
 
-  it("rejects empty, non-numeric, or out-of-range content", () => {
+  it("rejects empty, partial, non-numeric, or out-of-range content", () => {
     expect(parseDevToolsActivePort("")).toBeUndefined();
+    expect(parseDevToolsActivePort("45123")).toBeUndefined();
     expect(parseDevToolsActivePort("not-a-port\n")).toBeUndefined();
     expect(parseDevToolsActivePort("0\n")).toBeUndefined();
     expect(parseDevToolsActivePort("70000\n")).toBeUndefined();
@@ -127,10 +128,16 @@ describe("waitForDevToolsPort", () => {
       isAlive: () => false,
       pollIntervalMs: 10,
     });
-    expect(result).toEqual({ ok: false, reason: "exited" });
+    expect(result).toMatchObject({ ok: false, reason: "exited" });
+    if (result.ok || result.reason === "aborted") {
+      throw new Error("Expected exited diagnostics");
+    }
+    expect(result.diagnostics).toContain(
+      "file was not created before the Chrome process exited",
+    );
   });
 
-  it("rejects a published port when the process has already exited", async () => {
+  it("rejects a published port without claiming an unrun readiness probe", async () => {
     fs.writeFileSync(path.join(tmp, "DevToolsActivePort"), "6006\n/x\n");
     const result = await waitForDevToolsPort({
       profileDir: tmp,
@@ -138,28 +145,65 @@ describe("waitForDevToolsPort", () => {
       isAlive: () => false,
       pollIntervalMs: 10,
     });
-    expect(result).toEqual({ ok: false, reason: "exited" });
+    expect(result).toMatchObject({ ok: false, reason: "exited" });
+    if (result.ok || result.reason === "aborted") {
+      throw new Error("Expected exited diagnostics");
+    }
+    expect(result.diagnostics).toContain(
+      "published port 6006, then the Chrome process exited",
+    );
+    expect(result.diagnostics).not.toContain("HTTP endpoint");
+    expect(result.diagnostics).not.toContain("did not become ready");
   });
 
-  it("fails with 'timeout' and prints durable startup diagnostics", async () => {
+  it("returns durable timeout diagnostics for an invalid port file", async () => {
     const profileDir = path.join(tmp, "profile");
+    const logPath = path.join(tmp, "daemon.log");
     fs.mkdirSync(profileDir);
-    fs.writeFileSync(path.join(tmp, "chrome.log"), "cold Chrome marker\n");
-    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
-    try {
-      const result = await waitForDevToolsPort({
-        profileDir,
-        timeoutMs: 60,
-        isAlive: () => true,
-        pollIntervalMs: 10,
-      });
-      expect(result).toEqual({ ok: false, reason: "timeout" });
-      expect(stderr).toHaveBeenCalledWith(
-        expect.stringContaining("cold Chrome marker"),
-      );
-    } finally {
-      stderr.mockRestore();
+    fs.writeFileSync(path.join(profileDir, "DevToolsActivePort"), "45123");
+    fs.writeFileSync(logPath, "cold Chrome marker\n");
+
+    const result = await waitForDevToolsPort({
+      profileDir,
+      logPath,
+      timeoutMs: 60,
+      isAlive: () => true,
+      pollIntervalMs: 10,
+    });
+
+    expect(result).toMatchObject({ ok: false, reason: "timeout" });
+    if (result.ok || result.reason === "aborted") {
+      throw new Error("Expected timeout diagnostics");
     }
+    expect(result.diagnostics).toContain(
+      "file exists but does not contain a valid port before timeout",
+    );
+    expect(result.diagnostics).toContain("cold Chrome marker");
+  });
+
+  it("reports endpoint readiness only after timeout probes ran", async () => {
+    fs.writeFileSync(path.join(tmp, "DevToolsActivePort"), "6007\n/x\n");
+    let probes = 0;
+
+    const result = await waitForDevToolsPort({
+      profileDir: tmp,
+      timeoutMs: 20,
+      isAlive: () => true,
+      isReady: () => {
+        probes += 1;
+        return false;
+      },
+      pollIntervalMs: 10,
+    });
+
+    expect(probes).toBeGreaterThan(0);
+    expect(result).toMatchObject({ ok: false, reason: "timeout" });
+    if (result.ok || result.reason === "aborted") {
+      throw new Error("Expected timeout diagnostics");
+    }
+    expect(result.diagnostics).toContain(
+      "published port 6007, but its HTTP endpoint did not become ready before timeout",
+    );
   });
 });
 

@@ -130,4 +130,27 @@ describe.skipIf(!hasXvfb)("MCP browser lifecycle", () => {
     },
     TEST_TIMEOUT_MS,
   );
+
+  it(
+    "returns captured Chrome diagnostics when browser creation fails",
+    async () => {
+      writeFakeChrome(dirs.binDir, "crash");
+
+      const result = await lab.client.callTool({
+        name: "session_create",
+        arguments: { type: "browser" },
+      });
+      const report = parseToolJson(result);
+
+      expect(result.isError).toBe(true);
+      expect(report.errors).toHaveLength(1);
+      expect(report.errors[0]).toContain(
+        "file was not created before the Chrome process exited",
+      );
+      expect(report.errors[0]).toContain(
+        "fake Chrome crashed before publishing a port",
+      );
+    },
+    TEST_TIMEOUT_MS,
+  );
 });
