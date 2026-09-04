@@ -1,35 +1,34 @@
 # Pickforge release checklist
 
-These are the owner-only steps for `0.4.0-alpha.1`. Stop on the first failure.
-Do not reuse or move a release tag. Do not publish the GitHub draft until the
-live, device, artifact, and clean-machine checks pass.
+Owner-only steps for any Pickforge release. Nothing here is pinned to one
+version: set `VERSION` once and run the commands as written. Stop on the first
+failure. Do not reuse or move a release tag. Do not publish the GitHub draft
+until every gate below is green.
+
+```sh
+export VERSION=0.4.0-alpha.2      # the version being released
+export TAG="v${VERSION}"
+export REPO=pickforge/pickforge
+cd ~/Projects/Pickforge/picklab
+```
+
+Prereleases (`X.Y.Z-*`) publish to the npm `next` dist-tag and create a GitHub
+*prerelease* draft. Stable versions publish to `latest` and create a normal
+draft. Everything else in this checklist is identical.
 
 ## 1. Prepare a clean release checkout
 
-Run this only after the repository rename, PR #83, and the alpha-gate PR have
-merged to `main` with green checks.
-
 ```sh
-export VERSION=0.4.0-alpha.1
-export TAG="v${VERSION}"
-cd ~/Projects/Pickforge/picklab
 git fetch origin --prune
 git switch main
 git pull --ff-only
 test -z "$(git status --porcelain)"
-test "$(node -p "require('./packages/cli/package.json').version")" = "$VERSION"
-test "$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml)" = "$VERSION"
-node <<'NODE'
-const fs = require("fs");
-const expected = process.env.VERSION;
-for (const name of fs.readdirSync("packages")) {
-  const path = `packages/${name}/package.json`;
-  if (!fs.existsSync(path)) continue;
-  const actual = JSON.parse(fs.readFileSync(path, "utf8")).version;
-  if (actual !== expected) throw new Error(`${path}: ${actual} != ${expected}`);
-}
-NODE
+test "$(node scripts/check-release-versions.mjs "$TAG")" = "$VERSION"
 ```
+
+`scripts/check-release-versions.mjs` is the single source of truth for version
+consistency: it checks every workspace package, the root manifest, the Cargo
+workspace, and the tag. The release workflow runs the same script.
 
 Confirm the tag does not exist locally or remotely:
 
@@ -48,14 +47,8 @@ bun run test
 bun run build
 cargo fmt --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test -p pickforge-cli
+cargo test --workspace --locked
 cargo build --release --locked
-```
-
-Verify the host Rust binary directly:
-
-```sh
-./target/release/pickforge --version
 test "$(./target/release/pickforge --version)" = "pickforge $VERSION"
 ```
 
@@ -87,168 +80,183 @@ paths in the release log. Continue only with an explicit `PASS` vision verdict.
 `INCONCLUSIVE`, a missing screenshot, a skipped visual review, or a dirty
 project tree is a release failure.
 
-## 5. Create the npm package for the first time
+## 5. Optional: run the candidate smoke locally
 
-A trusted publisher cannot create a new npm package. The owner performs this
-one manual publish from the already verified tree:
+The release workflow runs this automatically (steps 7 and 8). Run it locally
+only when you are debugging the gate itself. It installs *only* candidate
+artifacts into an isolated home, and touches neither your real home nor the
+generated project tree.
 
 ```sh
-cd ~/Projects/Pickforge/picklab
-bun install --frozen-lockfile
 bun run build
-cd packages/cli
-npm whoami
-npm publish --access public --tag next
-npm view pickforge@next version
-npm view pickforge@next bin --json
-cd ../..
-test "$(npm view pickforge@next version)" = "$VERSION"
+cargo build --release --locked
+rm -rf /tmp/candidate && mkdir -p /tmp/candidate/npm /tmp/candidate/assets
+(cd packages/cli && npm pack --pack-destination /tmp/candidate/npm)
+cp target/release/pickforge /tmp/candidate/assets/pickforge-linux-x86_64
+strip /tmp/candidate/assets/pickforge-linux-x86_64
+(cd /tmp/candidate/assets && sha256sum pickforge-linux-x86_64 > pickforge-linux-x86_64.sha256)
+rm -rf /tmp/smoke-evidence && mkdir -m 777 /tmp/smoke-evidence
+docker run --rm --platform linux/amd64 \
+  -v "$PWD/scripts:/opt/pickforge/scripts:ro" \
+  -v /tmp/candidate:/opt/pickforge/candidate:ro \
+  -v /tmp/smoke-evidence:/opt/pickforge/evidence \
+  -e "PICKFORGE_SMOKE_VERSION=$VERSION" \
+  -e PICKFORGE_SMOKE_ASSET_DIR=/opt/pickforge/candidate/assets \
+  -e "PICKFORGE_SMOKE_TARBALL=/opt/pickforge/candidate/npm/pickforge-${VERSION}.tgz" \
+  -e PICKFORGE_SMOKE_EVIDENCE=/opt/pickforge/evidence \
+  ghcr.io/cirruslabs/flutter:stable bash -lc '
+    set -eu
+    apt-get update -qq
+    apt-get install -y --no-install-recommends ca-certificates curl >/dev/null 2>&1
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1
+    apt-get install -y --no-install-recommends nodejs >/dev/null 2>&1
+    exec /opt/pickforge/scripts/candidate-smoke.sh
+  '
+cat /tmp/smoke-evidence/summary.md
 ```
 
-The bin map must contain `pickforge-lab` and `pickforge-mcp`. Do not add or move
-the `latest` dist-tag.
-
-## 6. Configure npm trusted publishing
-
-Open the `pickforge` package settings on npm and add a GitHub Actions trusted
-publisher with exactly these values:
-
-- Organization or user: `pickforge`
-- Repository: `pickforge`
-- Workflow filename: `release.yml`
-- Environment: leave empty
-
-Re-open the package settings and confirm the publisher was saved before
-creating the tag.
-
-## 7. Create the tag and wait for the release workflow
-
-The owner creates and pushes the tag. This is the first point at which the
-workflow may publish through npm OIDC.
+On an Apple silicon Mac, run the same script against a downloaded asset:
 
 ```sh
-cd ~/Projects/Pickforge/picklab
+PICKFORGE_SMOKE_VERSION="$VERSION" \
+PICKFORGE_SMOKE_ASSET_DIR=/absolute/path/release-assets \
+PICKFORGE_SMOKE_ASSET=pickforge-macos-arm64 \
+PICKFORGE_SMOKE_EXPECT_ARCH=arm64 \
+  bash scripts/candidate-smoke.sh
+```
+
+## 6. Write the release notes
+
+`docs/releases/UNRELEASED.md` is the release description. It must read as
+public notes: no drafting instructions, no "to be updated" placeholders, and no
+claim about validation that has not actually happened. The publish job passes
+this file to `gh release create --notes-file`.
+
+```sh
+$EDITOR docs/releases/UNRELEASED.md
+grep -n -i -E 'draft|to be updated|not executed|TODO' docs/releases/UNRELEASED.md   # must print nothing
+git commit -am "docs(release): notes for $VERSION"
+git push origin main
+```
+
+## 7. Optional: dry-run the release workflow
+
+A manual dispatch with an empty (or non-matching) `confirm` input builds the
+candidate artifacts, runs both smokes and every gate, and publishes nothing.
+The publish job is the only job with `contents: write` and `id-token: write`,
+and it does not run unless `confirm` is exactly `$TAG` on `main`.
+
+```sh
+gh workflow run release.yml --repo "$REPO" --ref main -f confirm=
+sleep 10
+RUN_ID="$(gh run list --repo "$REPO" --workflow release.yml --limit 1 \
+  --json databaseId --jq '.[0].databaseId')"
+gh run watch "$RUN_ID" --repo "$REPO" --exit-status
+```
+
+Download the evidence the smokes uploaded:
+
+```sh
+gh run download "$RUN_ID" --repo "$REPO" \
+  -n candidate-smoke-linux -n candidate-smoke-macos -D /tmp/candidate-evidence
+cat /tmp/candidate-evidence/summary.md
+```
+
+## 8. Create the tag and wait for the release workflow
+
+The owner creates and pushes the tag. This is the point at which the workflow
+may publish through npm OIDC — and only after the clean Linux container smoke,
+the Apple silicon smoke, and the lab and Rust gates have all passed.
+
+```sh
 test -z "$(git status --porcelain)"
 test "$(git branch --show-current)" = main
 git pull --ff-only
 git tag -a "$TAG" -m "Pickforge $VERSION"
 git push origin "$TAG"
 sleep 10
-RUN_ID="$(gh run list --repo pickforge/pickforge --workflow release.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
+RUN_ID="$(gh run list --repo "$REPO" --workflow release.yml --limit 1 \
+  --json databaseId --jq '.[0].databaseId')"
 test -n "$RUN_ID"
-gh run watch "$RUN_ID" --repo pickforge/pickforge --exit-status
+gh run watch "$RUN_ID" --repo "$REPO" --exit-status
 ```
 
-The workflow must remain green. It should skip the already completed manual npm
-publish, create a draft GitHub prerelease, and attach four Rust files.
-
-## 8. Inspect the draft and its assets
+## 9. Inspect the draft and its assets
 
 ```sh
-RELEASE_JSON="$(gh release view "$TAG" --repo pickforge/pickforge --json isDraft,isPrerelease,assets,url)"
+RELEASE_JSON="$(gh release view "$TAG" --repo "$REPO" --json isDraft,isPrerelease,assets,url)"
 printf '%s\n' "$RELEASE_JSON" | jq .
 test "$(printf '%s' "$RELEASE_JSON" | jq -r .isDraft)" = true
-test "$(printf '%s' "$RELEASE_JSON" | jq -r .isPrerelease)" = true
 ASSET_DIR="$(mktemp -d)"
-gh release download "$TAG" --repo pickforge/pickforge --dir "$ASSET_DIR"
+gh release download "$TAG" --repo "$REPO" --dir "$ASSET_DIR"
 (
   cd "$ASSET_DIR"
   sha256sum -c pickforge-linux-x86_64.sha256
   sha256sum -c pickforge-macos-arm64.sha256
 )
-test -x "$ASSET_DIR/pickforge-linux-x86_64" || chmod +x "$ASSET_DIR/pickforge-linux-x86_64"
+chmod +x "$ASSET_DIR/pickforge-linux-x86_64"
 test "$($ASSET_DIR/pickforge-linux-x86_64 --version)" = "pickforge $VERSION"
-gh release edit "$TAG" --repo pickforge/pickforge \
-  --notes-file docs/releases/UNRELEASED.md --draft --prerelease
 ```
 
-Confirm the asset list is exactly:
+The asset list must be exactly:
 
 - `pickforge-linux-x86_64`
 - `pickforge-linux-x86_64.sha256`
 - `pickforge-macos-arm64`
 - `pickforge-macos-arm64.sha256`
 
-Run the macOS binary on an Apple silicon machine and require the same version
-output before publishing the draft:
+The workflow already executed both binaries on their own platforms. Confirm the
+published assets are the smoked ones by comparing the checksums above with the
+`candidate-smoke-linux` and `candidate-smoke-macos` evidence from the same run.
 
-```sh
-MAC_ASSET_DIR="$(mktemp -d)"
-gh release download "$TAG" --repo pickforge/pickforge --dir "$MAC_ASSET_DIR" \
-  --pattern 'pickforge-macos-arm64*'
-(
-  cd "$MAC_ASSET_DIR"
-  shasum -a 256 -c pickforge-macos-arm64.sha256
-  chmod +x pickforge-macos-arm64
-  test "$(./pickforge-macos-arm64 --version)" = "pickforge $VERSION"
-)
-```
-
-## 9. Run the clean-machine smoke
-
-This uses a fresh Flutter container, the published `pickforge@next` package,
-and the authenticated draft assets downloaded above. A clean image has no
-coding-agent harness, so `doctor` must run safely and report that single
-readiness gap rather than being treated as ready.
-
-```sh
-ASSET_DIR="$(cd "$ASSET_DIR" && pwd)"
-REPO_DIR="$(pwd)"
-docker run --rm --platform linux/amd64 \
-  -v "$REPO_DIR/scripts/install.sh:/tmp/install.sh:ro" \
-  -v "$ASSET_DIR:/tmp/pickforge-assets:ro" \
-  ghcr.io/cirruslabs/flutter:stable bash -lc '
-    set -eu
-    apt-get update
-    apt-get install -y --no-install-recommends ca-certificates curl
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-    apt-get install -y --no-install-recommends nodejs
-    flutter create --platforms=linux /tmp/pickforge-smoke
-    export npm_config_prefix=/tmp/pickforge-prefix
-    export PATH=/tmp/pickforge-prefix/bin:$PATH
-    PICKFORGE_INSTALL_RUNTIME=npm \
-    PICKFORGE_INSTALL_RELEASE_BASE_URL=file:///tmp/pickforge-assets \
-      sh /tmp/install.sh
-    test "$(pickforge --version)" = "pickforge 0.4.0-alpha.1"
-    test "$(pickforge-lab --version)" = "0.4.0-alpha.1"
-    set +e
-    pickforge doctor --project-dir /tmp/pickforge-smoke \
-      >/tmp/pickforge-doctor.txt 2>&1
-    doctor_status=$?
-    set -e
-    cat /tmp/pickforge-doctor.txt
-    test "$doctor_status" -eq 1
-    grep -F "framework: flutter" /tmp/pickforge-doctor.txt
-    grep -F "no supported agent harness found on PATH" /tmp/pickforge-doctor.txt
-  '
-```
-
-## 10. Publish the GitHub prerelease and verify public paths
+## 10. Publish and verify the public paths
 
 Only after every earlier step is green:
 
 ```sh
-gh release edit "$TAG" --repo pickforge/pickforge --draft=false --prerelease
+gh release edit "$TAG" --repo "$REPO" --draft=false
 PUBLIC_ASSET_DIR="$(mktemp -d)"
-curl -fsSL \
-  "https://github.com/pickforge/pickforge/releases/download/$TAG/pickforge-linux-x86_64" \
-  -o "$PUBLIC_ASSET_DIR/pickforge-linux-x86_64"
-curl -fsSL \
-  "https://github.com/pickforge/pickforge/releases/download/$TAG/pickforge-linux-x86_64.sha256" \
-  -o "$PUBLIC_ASSET_DIR/pickforge-linux-x86_64.sha256"
+for file in pickforge-linux-x86_64 pickforge-linux-x86_64.sha256; do
+  curl -fsSL "https://github.com/$REPO/releases/download/$TAG/$file" \
+    -o "$PUBLIC_ASSET_DIR/$file"
+done
 (cd "$PUBLIC_ASSET_DIR" && sha256sum -c pickforge-linux-x86_64.sha256)
-npm view pickforge@next version
+npm view "pickforge@$VERSION" version
 npm view pickforge dist-tags --json
-curl -fsSL https://pickforge.dev/install.sh | grep -F 'package_spec="pickforge@next"'
+curl -fsSL https://pickforge.dev/install.sh | head -n 5
 ```
 
 Require all of these final facts:
 
-- The GitHub release is public and marked prerelease, not draft.
-- `pickforge@next` resolves to `0.4.0-alpha.1`; `latest` was not moved.
+- The GitHub release is public, and marked prerelease exactly when `$VERSION`
+  is a prerelease.
+- `npm view pickforge@$VERSION version` matches `$VERSION`, and `latest` moved
+  only for a stable release.
 - Both Rust targets and both checksum files are public.
-- `https://pickforge.dev/install.sh` serves the canonical alpha installer.
+- `https://pickforge.dev/install.sh` serves the canonical installer.
 
-If anything fails after the npm publish or tag push, leave the GitHub release as
-a draft and fix forward with a new version and tag. Never move or overwrite a
-published tag.
+## 11. Reset the notes for the next release
+
+The published GitHub release text is now the source of truth for `$VERSION`.
+
+```sh
+cp docs/releases/TEMPLATE.md docs/releases/UNRELEASED.md
+git commit -am "docs(release): reset unreleased notes after $VERSION"
+git push origin main
+```
+
+If anything fails after the npm publish or the tag push, leave the GitHub
+release as a draft and fix forward with a new version and tag. Never move or
+overwrite a published tag.
+
+## One-time setup (done; kept for recovery)
+
+Not part of a normal release:
+
+- The first `pickforge` publish was done by hand from a verified tree, because
+  a trusted publisher cannot create a new npm package.
+- npm trusted publishing is configured on the `pickforge` package with
+  organization `pickforge`, repository `pickforge`, workflow `release.yml`, and
+  no environment. Re-check these values if a publish fails OIDC.
+- The macOS signing and notarization policy lives in
+  [SIGNING.md](SIGNING.md) and is enforced by the macOS candidate smoke.

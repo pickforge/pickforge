@@ -41,17 +41,18 @@ checks to pass, and merge it only after final human review.
 ## 5. Cut and verify the alpha
 
 Follow [docs/releases/CHECKLIST.md](docs/releases/CHECKLIST.md) from the start.
-It is the one authoritative sequence for local gates, the opt-in live Flutter
-test, the real-device vision pass, the first manual npm publish, trusted
-publisher setup, tag creation, workflow monitoring, draft asset checks, the
-clean-machine installer smoke, and final prerelease publication.
+It is the one authoritative, version-parametric sequence for local gates, the
+opt-in live Flutter test, the real-device vision pass, release notes, the
+optional dry run, tag creation, workflow monitoring, draft asset checks, and
+publication.
 
-Do not repeat the first npm publish outside the checklist. Do not publish the
-GitHub draft until every checklist gate is green. The owner creates and pushes
-the tag; no implementation or review agent does so.
+Do not publish the GitHub draft until every checklist gate is green. The owner
+creates and pushes the tag; no implementation or review agent does so.
 
-A manual workflow dispatch is a build-and-test dry run unless its required
-`confirm` input is exactly `release`. That confirmation can publish and is an
+A manual workflow dispatch is a dry run — it builds the candidate artifacts and
+runs both candidate smokes — unless its `confirm` input is exactly the release
+tag (`v<version>`) on `main`. Only the publish job holds write and OIDC
+permissions, so a dry run has nothing to publish with. That confirmation is an
 owner-only recovery path, not part of the normal tagged release sequence.
 
 ## 6. Deprecate the old package later

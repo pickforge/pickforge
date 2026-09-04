@@ -1,0 +1,30 @@
+name: Candidate smokes
+
+# Runs the release candidate smokes on pull requests that touch the release
+# path, so the gate is exercised before it has to hold a real release. The
+# pull_request token is read-only and this workflow has no publish step.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/candidate-artifacts.yml"
+      - ".github/workflows/candidate-smokes-pr.yml"
+      - ".github/workflows/release.yml"
+      - "crates/**"
+      - "packages/cli/**"
+      - "scripts/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+
+concurrency:
+  group: candidate-smokes-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  candidates:
+    uses: ./.github/workflows/candidate-artifacts.yml
+    permissions:
+      contents: read

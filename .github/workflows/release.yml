@@ -1,72 +1,89 @@
 name: Release
 
+# Publishing is gated on artifacts that were actually executed. The candidate
+# npm tarball and Rust assets are built once, proven by the Linux container and
+# Apple silicon smokes, and only then published — the same files, not a rebuild.
+
 on:
   push:
     tags: ["v*.*.*"]
   workflow_dispatch:
     inputs:
       confirm:
-        description: Type release to publish
-        required: true
+        description: >-
+          Leave empty for a dry run. To publish, type the exact release tag,
+          for example v0.4.0-alpha.2.
+        required: false
+        default: ""
         type: string
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# Read-only by default. Only the publish job is granted write and OIDC, and it
+# only runs for a confirmed publish, so a dispatch without the exact tag cannot
+# publish even if a later step were wrong: it has no token to publish with.
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
-  rust-binaries:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            rust-target: x86_64-unknown-linux-gnu
-            asset-target: linux-x86_64
-          - os: macos-14
-            rust-target: aarch64-apple-darwin
-            asset-target: macos-arm64
-    runs-on: ${{ matrix.os }}
+  resolve:
+    name: Resolve the release candidate
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      publish: ${{ steps.resolve.outputs.publish }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
         with:
-          targets: ${{ matrix.rust-target }}
+          node-version: "24"
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-${{ matrix.rust-target }}
-
-      - name: Build Rust binary
-        run: cargo build --release --locked --target "${{ matrix.rust-target }}" -p pickforge-cli
-
-      - name: Prepare release assets
-        shell: bash
+      - name: Resolve version and publish intent
+        id: resolve
+        env:
+          CONFIRM: ${{ inputs.confirm }}
         run: |
-          mkdir -p release-assets
-          asset="pickforge-${{ matrix.asset-target }}"
-          cp "target/${{ matrix.rust-target }}/release/pickforge" "release-assets/$asset"
-          strip "release-assets/$asset"
-          if command -v sha256sum >/dev/null 2>&1; then
-            (cd release-assets && sha256sum "$asset" > "$asset.sha256")
-          else
-            (cd release-assets && shasum -a 256 "$asset" > "$asset.sha256")
+          set -eu
+          VERSION="$(node scripts/check-release-versions.mjs)"
+          TAG="v$VERSION"
+          PUBLISH=false
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            node scripts/check-release-versions.mjs "$GITHUB_REF_NAME" >/dev/null
+            PUBLISH=true
+          elif [ "$CONFIRM" = "$TAG" ] && [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            PUBLISH=true
+          elif [ -n "$CONFIRM" ]; then
+            echo "::notice::confirm \"$CONFIRM\" is not \"$TAG\" on main; this run is a dry run"
           fi
+          {
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+            echo "publish=$PUBLISH"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## Release $TAG"
+            echo
+            if [ "$PUBLISH" = "true" ]; then
+              echo "This run publishes after every gate and both candidate smokes pass."
+            else
+              echo "Dry run: every gate and both candidate smokes run, and nothing is published."
+              echo "To publish from a dispatch, type \`$TAG\` in the confirm input on \`main\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: pickforge-${{ matrix.asset-target }}
-          path: release-assets/
-          if-no-files-found: error
-          retention-days: 7
+  candidates:
+    name: Candidate artifacts
+    needs: resolve
+    uses: ./.github/workflows/candidate-artifacts.yml
+    permissions:
+      contents: read
 
-  release:
-    needs: rust-binaries
+  lab-gates:
+    name: Lab gates
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -81,26 +98,9 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
-      # Manual dispatches are safe dry runs unless the owner types the explicit confirmation.
-      - name: Report dispatch dry run
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.confirm != 'release'
-        run: |
-          echo '## Release dry run' >> "$GITHUB_STEP_SUMMARY"
-          echo 'Build and test jobs ran, but publishing was skipped because `confirm` was not `release`.' >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Validate release version
-        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || github.event.inputs.confirm == 'release'
-        run: |
-          VERSION=$(node -p "require('./packages/cli/package.json').version")
-          RELEASE_TAG="v$VERSION"
-          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF_NAME" != "$RELEASE_TAG" ]; then
-            echo "release tag $GITHUB_REF_NAME does not match package version $VERSION" >&2
-            exit 1
-          fi
-          echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
-
       - run: bun run typecheck
+
+      - run: bun run lint
 
       - name: Install desktop test dependencies
         run: |
@@ -132,14 +132,77 @@ jobs:
           PICKFORGE_REQUIRE_BROWSER: "1"
           PICKFORGE_CHROME_NO_SANDBOX: "1"
 
-      - run: bun run build
+  rust-gates:
+    name: Rust gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --check
+
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - run: cargo test --workspace --locked
+
+  publish:
+    name: Publish
+    needs: [resolve, candidates, lab-gates, rust-gates]
+    if: needs.resolve.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+      RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Refuse to publish an unconfirmed run
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -eu
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            test "$GITHUB_REF_NAME" = "$RELEASE_TAG"
+          else
+            test "$CONFIRM" = "$RELEASE_TAG"
+            test "$GITHUB_REF" = "refs/heads/main"
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-npm
+          path: candidate
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pickforge-*
+          path: release-assets
+          merge-multiple: true
+
+      # The tarball the smokes installed is the tarball that gets published.
+      - name: Verify the candidate tarball
+        run: |
+          set -eu
+          cd candidate/npm
+          sha256sum -c "pickforge-${RELEASE_VERSION}.tgz.sha256"
+          echo "TARBALL=$PWD/pickforge-${RELEASE_VERSION}.tgz" >> "$GITHUB_ENV"
 
       - name: Install npm with trusted publishing support
-        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || github.event.inputs.confirm == 'release'
         run: npm install --global npm@11.5.1
 
       - name: Upload sourcemaps to Sentry
-        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || github.event.inputs.confirm == 'release'
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: pickforge
@@ -150,42 +213,48 @@ jobs:
             exit 0
           fi
           if ! {
-            npx --yes @sentry/cli sourcemaps inject packages/cli/dist &&
-            npx --yes @sentry/cli sourcemaps upload --release "pickforge@$RELEASE_VERSION" packages/cli/dist
+            npx --yes @sentry/cli sourcemaps inject candidate/dist &&
+            npx --yes @sentry/cli sourcemaps upload --release "pickforge@$RELEASE_VERSION" candidate/dist
           }; then
             echo "::warning::Sentry sourcemap upload failed; continuing release"
           fi
 
+      # Publishing the packed tarball, not a rebuild, is what makes the smokes
+      # meaningful. If npm ever rejects provenance for a tarball publish, fix
+      # the workflow: do not fall back to publishing a rebuilt, unsmoked tree.
       - name: Publish pickforge
-        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || github.event.inputs.confirm == 'release'
-        working-directory: packages/cli
         run: |
+          set -eu
           if npm view "pickforge@$RELEASE_VERSION" version >/dev/null 2>&1; then
             echo "pickforge@$RELEASE_VERSION is already published; skipping"
           elif [[ "$RELEASE_VERSION" == *-* ]]; then
-            npm publish --access public --provenance --tag next
+            npm publish "$TARBALL" --access public --provenance --tag next
           else
-            npm publish --access public --provenance
+            npm publish "$TARBALL" --access public --provenance
           fi
 
-      - name: Download Rust release assets
-        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || github.event.inputs.confirm == 'release'
-        uses: actions/download-artifact@v4
-        with:
-          pattern: pickforge-*
-          path: release-assets
-          merge-multiple: true
-
-      - name: Create GitHub release
-        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || github.event.inputs.confirm == 'release'
+      - name: Create the draft GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -eu
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             echo "GitHub release $RELEASE_TAG already exists; reusing"
           elif [[ "$RELEASE_TAG" == *-* ]]; then
-            gh release create "$RELEASE_TAG" --draft --prerelease --generate-notes
+            gh release create "$RELEASE_TAG" --draft --prerelease \
+              --title "Pickforge $RELEASE_VERSION" --notes-file docs/releases/UNRELEASED.md
           else
-            gh release create "$RELEASE_TAG" --draft --generate-notes
+            gh release create "$RELEASE_TAG" --draft \
+              --title "Pickforge $RELEASE_VERSION" --notes-file docs/releases/UNRELEASED.md
           fi
           gh release upload "$RELEASE_TAG" release-assets/* --clobber
+
+      - name: Summarize
+        run: |
+          {
+            echo "## Published $RELEASE_TAG"
+            echo
+            echo "- npm: the packed candidate tarball, published with provenance"
+            echo "- GitHub: draft release with the smoked Rust assets and checksums"
+            echo "- A human still has to review and publish the draft."
+          } >> "$GITHUB_STEP_SUMMARY"
