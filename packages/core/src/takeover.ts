@@ -490,7 +490,7 @@ export async function recordTakeoverEvidence(
       { slug: "computer-use" },
       opts.env,
     );
-    await appendAction(run.dir, {
+    await appendAction(run, {
       actionId: crypto.randomUUID(),
       source: "takeover",
       tool,

@@ -13,6 +13,7 @@ import {
 } from "@pickforge/lab-core";
 
 export {
+  captureRunArtifact,
   captureToTarget,
   requireDisplay,
   type RunnableSessionType,

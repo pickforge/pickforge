@@ -93,6 +93,9 @@ pub struct IntegrationPack {
 }
 
 impl IntegrationPack {
+    /// The empty pack: only the project receipt, no servers, tools, or
+    /// workflows. Not a user-facing mode; `pickforge init` always uses
+    /// [`IntegrationPack::flutter`].
     pub fn base() -> Self {
         Self {
             name: "pickforge-base".into(),

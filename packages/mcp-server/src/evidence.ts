@@ -13,7 +13,6 @@ import {
   writeEvidenceReport,
   type EvidenceAction,
   type RunHandle,
-  type RunManifest,
   type SanitizedTypedValue,
 } from "@pickforge/lab-core";
 import type { ServerContext, ToolReport } from "./context.js";
@@ -64,22 +63,15 @@ async function evidenceRun(
 }
 
 async function refreshFinalizedReport(run: RunHandle): Promise<void> {
-  const parsed: unknown = JSON.parse(
-    await fs.promises.readFile(path.join(run.dir, "manifest.json"), "utf8"),
-  );
-  if (typeof parsed !== "object" || parsed === null) {
-    throw new Error(`Invalid evidence manifest for run ${run.runId}`);
-  }
-  const manifest = parsed as RunManifest;
+  const manifest = await run.readManifest();
   if (
     !isEvidenceRun(manifest) ||
-    manifest.runId !== run.runId ||
     manifest.sessionId !== run.manifest.sessionId ||
     manifest.status === "running"
   ) {
     return;
   }
-  await writeEvidenceReport(run.dir, manifest);
+  await writeEvidenceReport(run, manifest);
 }
 
 async function confinedArtifacts(
@@ -124,14 +116,19 @@ function sanitizedTarget(
   return Object.keys(sanitized).length === 0 ? undefined : sanitized;
 }
 
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
-export async function withMcpEvidence<T extends ToolReport>(
+interface EvidenceAttempt {
+  actionId: string;
+  startedAt: Date;
+  run?: RunHandle;
+  sessionId?: string;
+  tool: string;
+  target?: Record<string, unknown>;
+}
+
+async function startEvidenceAttempt<T>(
   ctx: ServerContext,
   options: McpEvidenceOptions<T>,
-  operation: (evidence: EvidenceOperationContext) => Promise<T>,
-): Promise<T> {
-  const actionId = crypto.randomUUID();
-  const startedAt = new Date();
+): Promise<EvidenceAttempt> {
   let run: RunHandle | undefined;
   if (options.sessionId !== undefined) {
     try {
@@ -140,7 +137,6 @@ export async function withMcpEvidence<T extends ToolReport>(
       reportEvidenceFailure(options.tool, error);
     }
   }
-
   const typedValue =
     options.typedValue === undefined
       ? undefined
@@ -148,64 +144,108 @@ export async function withMcpEvidence<T extends ToolReport>(
           options.typedValue.value,
           options.typedValue.inputType,
         );
-  const target = sanitizedTarget(options.target, typedValue);
+  return {
+    actionId: crypto.randomUUID(),
+    startedAt: new Date(),
+    run,
+    sessionId: options.sessionId,
+    tool: options.tool,
+    target: sanitizedTarget(options.target, typedValue),
+  };
+}
 
+function baseAction(
+  attempt: EvidenceAttempt,
+  status: EvidenceAction["status"],
+): EvidenceAction {
+  const action: EvidenceAction = {
+    actionId: attempt.actionId,
+    source: "mcp",
+    tool: attempt.tool,
+    startedAt: attempt.startedAt.toISOString(),
+    durationMs: Date.now() - attempt.startedAt.getTime(),
+    status,
+  };
+  if (attempt.sessionId !== undefined) action.sessionId = attempt.sessionId;
+  if (attempt.target !== undefined) action.target = attempt.target;
+  return action;
+}
+
+async function successAction<T extends ToolReport>(
+  attempt: EvidenceAttempt,
+  options: McpEvidenceOptions<T>,
+  result: T,
+  run: RunHandle,
+): Promise<EvidenceAction> {
+  const errors = result.errors ?? [];
+  const action = baseAction(attempt, errors.length === 0 ? "ok" : "error");
+  const artifacts =
+    options.artifacts === undefined
+      ? []
+      : await confinedArtifacts(run, options.artifacts(result, run));
+  if (artifacts.length > 0) action.artifacts = artifacts;
+  if (errors.length > 0) {
+    action.error = sanitizeErrorText(errors.join("; "));
+  }
+  return action;
+}
+
+async function recordBestEffort(
+  tool: string,
+  operation: () => Promise<void>,
+): Promise<void> {
   try {
-    const result = await operation({ actionId, run });
-    if (run !== undefined) {
-      try {
-        const artifacts =
-          options.artifacts === undefined
-            ? []
-            : await confinedArtifacts(run, options.artifacts(result, run));
-        const action: EvidenceAction = {
-          actionId,
-          source: "mcp",
-          tool: options.tool,
-          startedAt: startedAt.toISOString(),
-          durationMs: Date.now() - startedAt.getTime(),
-          status: (result.errors?.length ?? 0) === 0 ? "ok" : "error",
-        };
-        if (options.sessionId !== undefined) {
-          action.sessionId = options.sessionId;
-        }
-        if (target !== undefined) action.target = target;
-        if (artifacts.length > 0) action.artifacts = artifacts;
-        if ((result.errors?.length ?? 0) > 0) {
-          action.error = sanitizeErrorText(result.errors!.join("; "));
-        }
-        await appendAction(run.dir, action);
-        if (options.refreshReportAfterRecord === true) {
-          await refreshFinalizedReport(run);
-        }
-      } catch (error) {
-        reportEvidenceFailure(options.tool, error);
-      }
+    await operation();
+  } catch (error) {
+    reportEvidenceFailure(tool, error);
+  }
+}
+
+async function recordSuccess<T extends ToolReport>(
+  attempt: EvidenceAttempt,
+  options: McpEvidenceOptions<T>,
+  result: T,
+): Promise<void> {
+  const run = attempt.run;
+  if (run === undefined) return;
+  await recordBestEffort(options.tool, async () => {
+    await appendAction(run, await successAction(attempt, options, result, run));
+    if (options.refreshReportAfterRecord === true) {
+      await refreshFinalizedReport(run);
     }
+  });
+}
+
+async function recordFailure(
+  attempt: EvidenceAttempt,
+  error: unknown,
+): Promise<void> {
+  const run = attempt.run;
+  if (run === undefined) return;
+  await recordBestEffort(attempt.tool, async () => {
+    const action = baseAction(attempt, evidenceStatus(error));
+    action.error = sanitizeErrorText(
+      error instanceof Error ? error.message : String(error),
+    );
+    await appendAction(run, action);
+  });
+}
+
+export async function withMcpEvidence<T extends ToolReport>(
+  ctx: ServerContext,
+  options: McpEvidenceOptions<T>,
+  operation: (evidence: EvidenceOperationContext) => Promise<T>,
+): Promise<T> {
+  const attempt = await startEvidenceAttempt(ctx, options);
+  try {
+    const result = await operation({
+      actionId: attempt.actionId,
+      run: attempt.run,
+    });
+    await recordSuccess(attempt, options, result);
     return result;
   } catch (error) {
-    if (run !== undefined) {
-      try {
-        const action: EvidenceAction = {
-          actionId,
-          source: "mcp",
-          tool: options.tool,
-          startedAt: startedAt.toISOString(),
-          durationMs: Date.now() - startedAt.getTime(),
-          status: evidenceStatus(error),
-          error: sanitizeErrorText(
-            error instanceof Error ? error.message : String(error),
-          ),
-        };
-        if (options.sessionId !== undefined) {
-          action.sessionId = options.sessionId;
-        }
-        if (target !== undefined) action.target = target;
-        await appendAction(run.dir, action);
-      } catch (appendError) {
-        reportEvidenceFailure(options.tool, appendError);
-      }
-    }
+    await recordFailure(attempt, error);
     throw error;
   }
 }

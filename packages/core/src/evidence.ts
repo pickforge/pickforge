@@ -1,8 +1,20 @@
 import fs from "node:fs";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { ensureDir, writeFileAtomic, type EnvLike } from "./paths.js";
+import { type EnvLike } from "./paths.js";
+import {
+  DirHandle,
+  RunStorageAccessError,
+  withDirHandle,
+} from "./dir-handle.js";
 import { openRunCatalog } from "./run-catalog.js";
+import {
+  openRunDirIn,
+  withBoundRunDir,
+  withExistingRunsRootDir,
+  withRunsRootDir,
+  type RunDirBinding,
+} from "./run-root.js";
 import { resolveRunStorage } from "./storage.js";
 import {
   isPidAlive,
@@ -13,6 +25,7 @@ import {
   EVIDENCE_ACTION_LOG,
   EVIDENCE_VERSION,
   RunHandle,
+  adoptRunIn,
   createRun,
   type RunManifest,
   type RunStatus,
@@ -233,7 +246,16 @@ function manifestMatchesPointer(
   );
 }
 
-/** Absolute path of the active-run pointer for a session. */
+/** File name of a session's active-run pointer inside the runs root. */
+function pointerName(sessionId: string): string {
+  return `.active-${sessionId}.json`;
+}
+
+/**
+ * Absolute path of the active-run pointer for a session. This is a location
+ * for reporting and inspection; every pointer read and write goes through the
+ * verified runs-root descriptor instead of this pathname.
+ */
 export async function activePointerPath(
   projectDir: string,
   sessionId: string,
@@ -241,7 +263,7 @@ export async function activePointerPath(
 ): Promise<string> {
   assertSafeSessionId(sessionId);
   const parent = (await resolveRunStorage(projectDir, env)).runsDir;
-  return path.join(parent, `.active-${sessionId}.json`);
+  return path.join(parent, pointerName(sessionId));
 }
 
 function parsePointer(raw: string): ActiveEvidencePointer | undefined {
@@ -321,16 +343,31 @@ function identityIsAlive(pid: number, startTicks?: number): boolean {
   return isPidAlive(pid);
 }
 
-async function readManifest(
-  runDir: string,
+/**
+ * Read a run's manifest through the verified runs-root descriptor, so the
+ * lookup cannot be redirected by a swapped ancestor and an unsafe or
+ * traversing run id is refused rather than followed.
+ */
+async function readManifestIn(
+  root: DirHandle,
+  runId: string,
 ): Promise<RunManifest | undefined> {
-  let raw: string;
+  let runDir: DirHandle;
   try {
-    raw = await fs.promises.readFile(path.join(runDir, "manifest.json"), "utf8");
+    runDir = await openRunDirIn(root, runId);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    // Missing, unsafe, or traversing: no manifest to read. Other failures
+    // (permissions, I/O) still propagate from the read below.
+    if (error instanceof RunStorageAccessError) return undefined;
     throw error;
   }
+  let raw: string | undefined;
+  try {
+    raw = await runDir.readFileIfPresent("manifest.json");
+  } finally {
+    await runDir.close();
+  }
+  if (raw === undefined) return undefined;
   try {
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== "object" || parsed === null) return undefined;
@@ -357,22 +394,26 @@ export async function resolveActivePointer(
   env: EnvLike = process.env,
 ): Promise<PointerResolution> {
   assertSafeSessionId(sessionId);
-  const parent = (await resolveRunStorage(projectDir, env)).runsDir;
-  const pointerPath = path.join(parent, `.active-${sessionId}.json`);
-  let raw: string;
-  try {
-    raw = await fs.promises.readFile(pointerPath, "utf8");
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "ENOTDIR") return { status: "absent" };
-    throw error;
-  }
+  return withExistingRunsRootDir(projectDir, env, async (root) =>
+    root === undefined
+      ? { status: "absent" }
+      : resolveActivePointerIn(root, sessionId),
+  );
+}
+
+/** {@link resolveActivePointer} against an already open, verified root. */
+async function resolveActivePointerIn(
+  root: DirHandle,
+  sessionId: string,
+): Promise<PointerResolution> {
+  const raw = await root.readFileIfPresent(pointerName(sessionId));
+  if (raw === undefined) return { status: "absent" };
   if (raw.trim() === "") return { status: "claiming", raw };
   const claim = parseClaim(raw);
   if (claim !== undefined) return { status: "claiming", raw, claim };
   const pointer = parsePointer(raw);
   if (pointer === undefined) return { status: "corrupt", raw };
-  const manifest = await readManifest(path.join(parent, pointer.runId));
+  const manifest = await readManifestIn(root, pointer.runId);
   if (
     manifest === undefined ||
     manifest.status !== "running" ||
@@ -403,57 +444,48 @@ export async function clearActivePointer(
   env: EnvLike = process.env,
 ): Promise<boolean> {
   assertSafeSessionId(sessionId);
-  const parent = (await resolveRunStorage(projectDir, env)).runsDir;
-  const pointerPath = path.join(parent, `.active-${sessionId}.json`);
-  if (opts.force === true) {
-    return unlinkIfPresent(pointerPath);
-  }
-  let current: string;
-  try {
-    current = await fs.promises.readFile(pointerPath, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw error;
-  }
-  if (opts.expectRaw !== undefined) {
-    if (current !== opts.expectRaw) return false;
-    return unlinkIfMatches(pointerPath, current);
-  }
-  // Default: only clear a pointer that is genuinely stale/corrupt.
-  const resolution = await resolveActivePointer(projectDir, sessionId, env);
-  if (resolution.status === "stale" || resolution.status === "corrupt") {
-    return unlinkIfMatches(pointerPath, current);
-  }
-  return false;
+  return withExistingRunsRootDir(projectDir, env, async (root) =>
+    root === undefined ? false : clearActivePointerIn(root, sessionId, opts),
+  );
 }
 
-async function unlinkIfPresent(target: string): Promise<boolean> {
-  try {
-    await fs.promises.unlink(target);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw error;
+/** {@link clearActivePointer} against an already open, verified root. */
+async function clearActivePointerIn(
+  root: DirHandle,
+  sessionId: string,
+  opts: { expectRaw?: string; force?: boolean } = {},
+): Promise<boolean> {
+  const name = pointerName(sessionId);
+  if (opts.force === true) return root.unlinkChild(name);
+  const current = await root.readFileIfPresent(name);
+  if (current === undefined) return false;
+  if (opts.expectRaw !== undefined) {
+    if (current !== opts.expectRaw) return false;
+    return unlinkIfMatchesIn(root, name, current);
   }
+  // Default: only clear a pointer that is genuinely stale/corrupt.
+  const resolution = await resolveActivePointerIn(root, sessionId);
+  if (resolution.status === "stale" || resolution.status === "corrupt") {
+    return unlinkIfMatchesIn(root, name, current);
+  }
+  return false;
 }
 
 /**
  * Unlink only if the file content still matches what we last read, closing the
  * window where a peer republishes a fresh pointer between our read and unlink.
+ * Both the compare and the unlink resolve through the same directory
+ * descriptor, so they always act on the same directory.
  */
-async function unlinkIfMatches(
-  target: string,
+async function unlinkIfMatchesIn(
+  dir: DirHandle,
+  name: string,
   expected: string,
 ): Promise<boolean> {
-  let current: string;
-  try {
-    current = await fs.promises.readFile(target, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw error;
-  }
+  const current = await dir.readFileIfPresent(name);
+  if (current === undefined) return false;
   if (current !== expected) return false;
-  return unlinkIfPresent(target);
+  return dir.unlinkChild(name);
 }
 
 /** Raised internally when a winner discovers it no longer owns its claim. */
@@ -466,16 +498,6 @@ class ClaimLostError extends Error {
 
 function claimBackoff(attempt: number): number {
   return Math.min(CLAIM_BACKOFF_MS * (attempt + 1), CLAIM_BACKOFF_MAX_MS);
-}
-
-/** Read a file's full contents, or `undefined` if it does not exist. */
-async function readTextIfPresent(target: string): Promise<string | undefined> {
-  try {
-    return await fs.promises.readFile(target, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
-  }
 }
 
 interface JournalLockClaim {
@@ -513,12 +535,10 @@ function parseJournalLockClaim(raw: string): JournalLockClaim | undefined {
 }
 
 interface JournalLockHandle {
-  lockPath: string;
   claimContent: string;
 }
 
-async function acquireJournalLock(runDir: string): Promise<JournalLockHandle> {
-  const lockPath = path.join(runDir, JOURNAL_LOCK);
+async function acquireJournalLock(dir: DirHandle): Promise<JournalLockHandle> {
   const ownerPid = process.pid;
   const ownerStartTicks = readProcessStartTicks(ownerPid);
   const deadline = Date.now() + CLAIM_TOTAL_DEADLINE_MS;
@@ -526,10 +546,10 @@ async function acquireJournalLock(runDir: string): Promise<JournalLockHandle> {
   for (let attempt = 0; attempt < MAX_CLAIM_ATTEMPTS; attempt += 1) {
     let handle: fs.promises.FileHandle;
     try {
-      handle = await fs.promises.open(lockPath, "wx");
+      handle = await dir.openFile(JOURNAL_LOCK, "wx");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const raw = await readTextIfPresent(lockPath);
+      const raw = await dir.readFileIfPresent(JOURNAL_LOCK);
       if (raw === undefined) continue;
       const claim = parseJournalLockClaim(raw);
       if (
@@ -541,7 +561,7 @@ async function acquireJournalLock(runDir: string): Promise<JournalLockHandle> {
         continue;
       }
       if (claim !== undefined || attempt >= EMPTY_CLAIM_GRACE_ATTEMPTS) {
-        await unlinkIfMatches(lockPath, raw).catch(() => {});
+        await unlinkIfMatchesIn(dir, JOURNAL_LOCK, raw).catch(() => {});
       }
       if (Date.now() >= deadline) break;
       await delay(claimBackoff(attempt));
@@ -565,21 +585,21 @@ async function acquireJournalLock(runDir: string): Promise<JournalLockHandle> {
       }
     } catch (error) {
       await handle.close().catch(() => {});
-      await unlinkIfPresent(lockPath).catch(() => {});
+      await dir.unlinkChild(JOURNAL_LOCK).catch(() => {});
       throw error;
     }
     await handle.close();
-    return { lockPath, claimContent };
+    return { claimContent };
   }
 
-  throw new Error(`Timed out waiting for evidence journal lock in ${runDir}`);
+  throw new Error(`Timed out waiting for evidence journal lock in ${dir.dir}`);
 }
 
 async function withJournalLock<T>(
-  runDir: string,
+  dir: DirHandle,
   operation: () => Promise<T>,
 ): Promise<T> {
-  const lock = await acquireJournalLock(runDir);
+  const lock = await acquireJournalLock(dir);
   let result: T;
   let operationError: unknown;
   try {
@@ -590,7 +610,7 @@ async function withJournalLock<T>(
 
   // Never turn a successful append into a retryable error after its bytes landed.
   // A release failure leaves a recoverable owner-stamped lock for a later process.
-  await unlinkIfMatches(lock.lockPath, lock.claimContent).catch(() => {});
+  await unlinkIfMatchesIn(dir, JOURNAL_LOCK, lock.claimContent).catch(() => {});
   if (operationError !== undefined) throw operationError;
   return result!;
 }
@@ -615,7 +635,6 @@ async function withJournalLock<T>(
  * just-created run is finalized (`failed`) and the claim released, so no
  * permanent running orphan is ever left behind.
  */
-// eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function beginEvidenceRun(
   projectDir: string,
   sessionId: string,
@@ -623,192 +642,284 @@ export async function beginEvidenceRun(
   env: EnvLike = process.env,
 ): Promise<BeginEvidenceRunResult> {
   assertSafeSessionId(sessionId);
-  const parent = (await resolveRunStorage(projectDir, env)).runsDir;
-  await ensureDir(parent);
-  const pointerPath = path.join(parent, `.active-${sessionId}.json`);
-  const ownerPid = process.pid;
-  const ownerStartTicks = readProcessStartTicks(ownerPid);
-  const deadline = Date.now() + CLAIM_TOTAL_DEADLINE_MS;
+  // The runs root is materialized descriptor by descriptor through the same
+  // trust boundary the catalog reads with (#54), and the descriptor stays open
+  // for the whole claim: every pointer create, publish, read, and unlink below
+  // resolves through it, so a `.picklab` swapped at any point cannot redirect
+  // the pointer file or the run directory.
+  return withRunsRootDir(projectDir, env, async (root) => {
+    const ownerPid = process.pid;
+    const ctx: ClaimContext = {
+      projectDir,
+      sessionId,
+      env,
+      root,
+      pointerName: pointerName(sessionId),
+      ownerPid,
+      ownerStartTicks: readProcessStartTicks(ownerPid),
+      deadline: Date.now() + CLAIM_TOTAL_DEADLINE_MS,
+    };
 
-  const adopt = (
-    pointer: ActiveEvidencePointer,
-    manifest: RunManifest,
-  ): BeginEvidenceRunResult => ({
-    run: new RunHandle(path.join(parent, pointer.runId), manifest),
-    adopted: true,
-  });
-
-  for (let attempt = 0; attempt < MAX_CLAIM_ATTEMPTS; attempt += 1) {
-    let handle: fs.promises.FileHandle | undefined;
-    try {
-      handle = await fs.promises.open(pointerPath, "wx");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const resolution = await resolveActivePointer(projectDir, sessionId, env);
-      if (resolution.status === "active") {
-        return adopt(resolution.pointer, resolution.manifest);
+    for (let attempt = 0; attempt < MAX_CLAIM_ATTEMPTS; attempt += 1) {
+      const step = await tryClaimPointer(ctx, attempt);
+      if (step.kind === "adopt") {
+        return adoptEvidenceRun(ctx, step.pointer, step.manifest);
       }
-      if (resolution.status === "claiming") {
-        // A peer holds the claim. If its owner identity is present and the owner
-        // is alive, it is merely slow — wait, never steal. Only reclaim a claim
-        // whose owner is provably dead, or an owner-unknown (empty) claim that
-        // outlives a short grace (a claimer that died in the microscopic window
-        // between the wx create and its identity stamp).
-        const owner = resolution.claim;
-        if (owner !== undefined) {
-          // eslint-disable-next-line max-depth -- Legacy gate debt: pickforge/pickforge#60
-          if (identityIsAlive(owner.ownerPid, owner.ownerStartTicks)) {
-            // eslint-disable-next-line max-depth -- Legacy gate debt: pickforge/pickforge#60
-            if (Date.now() >= deadline) break;
-            await delay(claimBackoff(attempt));
-            continue;
-          }
-          await clearActivePointer(
-            projectDir,
-            sessionId,
-            { expectRaw: resolution.raw },
-            env,
-          );
-          continue;
-        }
-        if (attempt >= EMPTY_CLAIM_GRACE_ATTEMPTS) {
-          await clearActivePointer(
-            projectDir,
-            sessionId,
-            { expectRaw: resolution.raw },
-            env,
-          );
-        }
-        if (Date.now() >= deadline) break;
+      if (step.kind === "retry") continue;
+      if (step.kind === "wait") {
+        if (Date.now() >= ctx.deadline) break;
         await delay(claimBackoff(attempt));
         continue;
       }
-      if (resolution.status === "absent") {
-        // The pointer vanished between our failed claim and the read; retry.
-        continue;
-      }
-      // stale or corrupt: clear exactly this content, then retry the claim.
-      await clearActivePointer(
-        projectDir,
-        sessionId,
-        { expectRaw: resolution.raw },
-        env,
-      );
-      continue;
+      const result = await completeOwnedClaim(ctx, step.handle, opts);
+      if (result !== undefined) return result;
+      if (Date.now() >= ctx.deadline) break;
     }
+    throw new Error(
+      `Failed to acquire an active evidence run for session ${sessionId} ` +
+        `within ${CLAIM_TOTAL_DEADLINE_MS}ms`,
+    );
+  });
+}
 
-    // We own the claim. Stamp our verifiable identity synchronously so peers can
-    // tell we are alive, closing the owner-unknown window as fast as possible.
-    const claimRecord: ActiveEvidenceClaim = {
-      evidenceVersion: EVIDENCE_VERSION,
-      sessionId,
-      ownerPid,
-      claim: true,
-      claimedAt: new Date().toISOString(),
-    };
-    if (ownerStartTicks !== undefined) {
-      claimRecord.ownerStartTicks = ownerStartTicks;
+interface ClaimContext {
+  projectDir: string;
+  sessionId: string;
+  env: EnvLike;
+  /** Open, verified runs root every pointer operation resolves through. */
+  root: DirHandle;
+  pointerName: string;
+  ownerPid: number;
+  ownerStartTicks: number | undefined;
+  deadline: number;
+}
+
+type ClaimStep =
+  | { kind: "claimed"; handle: fs.promises.FileHandle }
+  | { kind: "adopt"; pointer: ActiveEvidencePointer; manifest: RunManifest }
+  /** Retry the claim immediately. */
+  | { kind: "retry" }
+  /** Back off, or give up at the deadline, then retry the claim. */
+  | { kind: "wait" };
+
+async function adoptEvidenceRun(
+  ctx: ClaimContext,
+  pointer: ActiveEvidencePointer,
+  manifest: RunManifest,
+): Promise<BeginEvidenceRunResult> {
+  return {
+    run: await adoptRunIn(ctx.root, pointer.runId, manifest),
+    adopted: true,
+  };
+}
+
+function clearClaim(ctx: ClaimContext, expectRaw: string): Promise<boolean> {
+  return clearActivePointerIn(ctx.root, ctx.sessionId, { expectRaw });
+}
+
+/**
+ * A peer holds the claim. If its owner identity is present and the owner is
+ * alive, it is merely slow: wait, never steal. Only reclaim a claim whose
+ * owner is provably dead, or an owner-unknown (empty) claim that outlives a
+ * short grace (a claimer that died in the microscopic window between the wx
+ * create and its identity stamp).
+ */
+async function stepPastForeignClaim(
+  ctx: ClaimContext,
+  attempt: number,
+  raw: string,
+  owner: ActiveEvidenceClaim | undefined,
+): Promise<ClaimStep> {
+  if (owner !== undefined) {
+    if (identityIsAlive(owner.ownerPid, owner.ownerStartTicks)) {
+      return { kind: "wait" };
     }
-    const claimContent = `${JSON.stringify(claimRecord)}\n`;
-    try {
-      const buf = Buffer.from(claimContent, "utf8");
-      const { bytesWritten } = await handle.write(buf, 0, buf.length, 0);
-      if (bytesWritten !== buf.length) {
-        throw new Error(
-          `short claim write: ${bytesWritten}/${buf.length} bytes`,
-        );
-      }
-    } catch (error) {
-      await handle.close().catch(() => {});
-      await clearActivePointer(
-        projectDir,
-        sessionId,
-        { expectRaw: claimContent },
-        env,
-      ).catch(() => {});
-      // Fall back to unconditional cleanup if the claim was never readable.
-      await unlinkIfMatches(pointerPath, "").catch(() => {});
-      throw error;
-    }
-    await handle.close().catch(() => {});
-
-    // Create the run, then publish the pointer over our claim.
-    let run: RunHandle | undefined;
-    try {
-      if (opts._afterClaim !== undefined) await opts._afterClaim();
-      run = await createRun(
-        projectDir,
-        opts.slug ?? "evidence",
-        { now: opts.now, sessionId, meta: opts.meta, evidence: true },
-        env,
-      );
-
-      const pointer: ActiveEvidencePointer = {
-        evidenceVersion: EVIDENCE_VERSION,
-        sessionId,
-        runId: run.runId,
-        ownerPid,
-        createdAt: new Date().toISOString(),
-      };
-      if (ownerStartTicks !== undefined) {
-        pointer.ownerStartTicks = ownerStartTicks;
-      }
-      const pointerContent = `${JSON.stringify(pointer)}\n`;
-
-      // Confirm we still own the claim before publishing. A live owner is never
-      // reclaimed, so this passes in practice; it is defense in depth against a
-      // reclaim we did not expect.
-      const current = await readTextIfPresent(pointerPath);
-      if (current !== claimContent) throw new ClaimLostError();
-
-      // Publish atomically (temp + rename) so a concurrent reader never sees a
-      // torn pointer — only the intact claim or the intact full pointer.
-      await writeFileAtomic(pointerPath, pointerContent);
-
-      // Final confirmation that the published pointer is ours.
-      const publishedRaw = await readTextIfPresent(pointerPath);
-      const published =
-        publishedRaw === undefined ? undefined : parsePointer(publishedRaw);
-      if (
-        published === undefined ||
-        published.runId !== run.runId ||
-        published.ownerPid !== ownerPid ||
-        published.ownerStartTicks !== ownerStartTicks
-      ) {
-        throw new ClaimLostError();
-      }
-      return { run, adopted: false };
-    } catch (error) {
-      // Publication/verification failed. Finalize the just-created run so it is
-      // never a permanent running orphan, then release our claim (a no-op if a
-      // peer already replaced it) so the session can recover.
-      if (run !== undefined) {
-        await run.finish("failed").catch(() => {});
-      }
-      await clearActivePointer(
-        projectDir,
-        sessionId,
-        { expectRaw: claimContent },
-        env,
-      ).catch(() => {});
-
-      if (error instanceof ClaimLostError) {
-        // Another owner took the session. Adopt it if it is active; otherwise
-        // fall through to retry within the remaining budget.
-        const resolution = await resolveActivePointer(projectDir, sessionId, env);
-        if (resolution.status === "active") {
-          return adopt(resolution.pointer, resolution.manifest);
-        }
-        if (Date.now() >= deadline) break;
-        continue;
-      }
-      throw error;
-    }
+    await clearClaim(ctx, raw);
+    return { kind: "retry" };
   }
-  throw new Error(
-    `Failed to acquire an active evidence run for session ${sessionId} ` +
-      `within ${CLAIM_TOTAL_DEADLINE_MS}ms`,
-  );
+  if (attempt >= EMPTY_CLAIM_GRACE_ATTEMPTS) await clearClaim(ctx, raw);
+  return { kind: "wait" };
+}
+
+/** Decide the next step when the `wx` claim failed because a pointer exists. */
+async function stepPastExistingPointer(
+  ctx: ClaimContext,
+  attempt: number,
+): Promise<ClaimStep> {
+  const resolution = await resolveActivePointerIn(ctx.root, ctx.sessionId);
+  switch (resolution.status) {
+    case "active":
+      return {
+        kind: "adopt",
+        pointer: resolution.pointer,
+        manifest: resolution.manifest,
+      };
+    case "claiming":
+      return stepPastForeignClaim(ctx, attempt, resolution.raw, resolution.claim);
+    case "absent":
+      // The pointer vanished between our failed claim and the read; retry.
+      return { kind: "retry" };
+    default:
+      // stale or corrupt: clear exactly this content, then retry the claim.
+      await clearClaim(ctx, resolution.raw);
+      return { kind: "retry" };
+  }
+}
+
+async function tryClaimPointer(
+  ctx: ClaimContext,
+  attempt: number,
+): Promise<ClaimStep> {
+  try {
+    const handle = await ctx.root.openFile(ctx.pointerName, "wx");
+    return { kind: "claimed", handle };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    return stepPastExistingPointer(ctx, attempt);
+  }
+}
+
+function claimRecordFor(ctx: ClaimContext): string {
+  const claimRecord: ActiveEvidenceClaim = {
+    evidenceVersion: EVIDENCE_VERSION,
+    sessionId: ctx.sessionId,
+    ownerPid: ctx.ownerPid,
+    claim: true,
+    claimedAt: new Date().toISOString(),
+  };
+  if (ctx.ownerStartTicks !== undefined) {
+    claimRecord.ownerStartTicks = ctx.ownerStartTicks;
+  }
+  return `${JSON.stringify(claimRecord)}\n`;
+}
+
+/**
+ * We own the claim. Stamp our verifiable identity synchronously so peers can
+ * tell we are alive, closing the owner-unknown window as fast as possible.
+ */
+async function stampClaim(
+  ctx: ClaimContext,
+  handle: fs.promises.FileHandle,
+  claimContent: string,
+): Promise<void> {
+  try {
+    const buf = Buffer.from(claimContent, "utf8");
+    const { bytesWritten } = await handle.write(buf, 0, buf.length, 0);
+    if (bytesWritten !== buf.length) {
+      throw new Error(`short claim write: ${bytesWritten}/${buf.length} bytes`);
+    }
+  } catch (error) {
+    await handle.close().catch(() => {});
+    await clearClaim(ctx, claimContent).catch(() => {});
+    // Fall back to unconditional cleanup if the claim was never readable.
+    await unlinkIfMatchesIn(ctx.root, ctx.pointerName, "").catch(() => {});
+    throw error;
+  }
+  await handle.close().catch(() => {});
+}
+
+function pointerRecordFor(ctx: ClaimContext, runId: string): string {
+  const pointer: ActiveEvidencePointer = {
+    evidenceVersion: EVIDENCE_VERSION,
+    sessionId: ctx.sessionId,
+    runId,
+    ownerPid: ctx.ownerPid,
+    createdAt: new Date().toISOString(),
+  };
+  if (ctx.ownerStartTicks !== undefined) {
+    pointer.ownerStartTicks = ctx.ownerStartTicks;
+  }
+  return `${JSON.stringify(pointer)}\n`;
+}
+
+/** Publish the full pointer over our claim and confirm we are the owner. */
+async function publishPointer(
+  ctx: ClaimContext,
+  runId: string,
+  claimContent: string,
+): Promise<void> {
+  // Confirm we still own the claim before publishing. A live owner is never
+  // reclaimed, so this passes in practice; it is defense in depth against a
+  // reclaim we did not expect.
+  const current = await ctx.root.readFileIfPresent(ctx.pointerName);
+  if (current !== claimContent) throw new ClaimLostError();
+
+  // Publish atomically (temp + rename) so a concurrent reader never sees a
+  // torn pointer: only the intact claim or the intact full pointer. Both the
+  // temp create and the rename resolve through the verified root descriptor.
+  await ctx.root.writeFileAtomic(ctx.pointerName, pointerRecordFor(ctx, runId));
+
+  // Final confirmation that the published pointer is ours.
+  const publishedRaw = await ctx.root.readFileIfPresent(ctx.pointerName);
+  const published =
+    publishedRaw === undefined ? undefined : parsePointer(publishedRaw);
+  if (
+    published === undefined ||
+    published.runId !== runId ||
+    published.ownerPid !== ctx.ownerPid ||
+    published.ownerStartTicks !== ctx.ownerStartTicks
+  ) {
+    throw new ClaimLostError();
+  }
+}
+
+/**
+ * Create the run, then publish the pointer over our claim. If publication or
+ * verification fails, the just-created run is finalized (`failed`) so it is
+ * never a permanent running orphan, and the claim is released (a no-op if a
+ * peer already replaced it) so the session can recover.
+ */
+async function createAndPublishRun(
+  ctx: ClaimContext,
+  opts: BeginEvidenceRunOptions,
+  claimContent: string,
+): Promise<RunHandle> {
+  let run: RunHandle | undefined;
+  try {
+    if (opts._afterClaim !== undefined) await opts._afterClaim();
+    run = await createRun(
+      ctx.projectDir,
+      opts.slug ?? "evidence",
+      {
+        now: opts.now,
+        sessionId: ctx.sessionId,
+        meta: opts.meta,
+        evidence: true,
+      },
+      ctx.env,
+    );
+    await publishPointer(ctx, run.runId, claimContent);
+    return run;
+  } catch (error) {
+    if (run !== undefined) await run.finish("failed").catch(() => {});
+    await clearClaim(ctx, claimContent).catch(() => {});
+    throw error;
+  }
+}
+
+/**
+ * Own the claim end to end. Returns the new run, the adopted run of an owner
+ * that took the session meanwhile, or `undefined` when the claim was lost and
+ * nothing is active yet (the caller retries within the remaining budget).
+ */
+async function completeOwnedClaim(
+  ctx: ClaimContext,
+  handle: fs.promises.FileHandle,
+  opts: BeginEvidenceRunOptions,
+): Promise<BeginEvidenceRunResult | undefined> {
+  const claimContent = claimRecordFor(ctx);
+  await stampClaim(ctx, handle, claimContent);
+  try {
+    const run = await createAndPublishRun(ctx, opts, claimContent);
+    return { run, adopted: false };
+  } catch (error) {
+    if (!(error instanceof ClaimLostError)) throw error;
+    const resolution = await resolveActivePointerIn(ctx.root, ctx.sessionId);
+    if (resolution.status === "active") {
+      return adoptEvidenceRun(ctx, resolution.pointer, resolution.manifest);
+    }
+    return undefined;
+  }
 }
 
 /**
@@ -816,102 +927,140 @@ export async function beginEvidenceRun(
  * The pointer is compare-cleared only after the manifest is durable, so a
  * concurrently replaced pointer is never removed.
  */
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function finalizeActiveEvidenceRun(
   projectDir: string,
   sessionId: string,
   status: RunStatus = "completed",
   env: EnvLike = process.env,
 ): Promise<RunManifest | undefined> {
-  const parent = (await resolveRunStorage(projectDir, env)).runsDir;
+  return (
+    await finalizeActiveEvidenceRunHandle(projectDir, sessionId, status, env)
+  )?.manifest;
+}
+
+/** @internal Finalize and retain the verified run handle for bound follow-up writes. */
+export async function finalizeActiveEvidenceRunHandle(
+  projectDir: string,
+  sessionId: string,
+  status: RunStatus = "completed",
+  env: EnvLike = process.env,
+): Promise<RunHandle | undefined> {
+  const finalized = await withExistingRunsRootDir(
+    projectDir,
+    env,
+    async (root) => {
+      if (root === undefined) return { done: true as const };
+      return finalizeUnderRoot({ projectDir, sessionId, env, root }, status);
+    },
+  );
+  if (finalized.done) return undefined;
+  await pruneFinalizedEvidenceRuns(projectDir, {}, env);
+  return finalized.run;
+}
+
+/**
+ * Finalize under an open, verified runs root: the run is adopted through the
+ * same descriptor the pointer was read from, so the manifest update lands in
+ * the verified run directory or fails.
+ */
+async function finalizeUnderRoot(
+  ctx: FinalizeContext,
+  status: RunStatus,
+): Promise<{ done: true } | { done: false; run: RunHandle }> {
   for (let attempt = 0; attempt < MAX_CLAIM_ATTEMPTS; attempt += 1) {
-    const resolution = await resolveActivePointer(projectDir, sessionId, env);
-    if (resolution.status === "absent") return undefined;
+    const step = await resolveFinalizableRun(ctx, attempt);
+    if (step.kind === "done") return { done: true };
+    if (step.kind === "retry") continue;
 
-    if (resolution.status === "claiming") {
-      const owner = resolution.claim;
-      if (
-        owner !== undefined &&
-        identityIsAlive(owner.ownerPid, owner.ownerStartTicks)
-      ) {
-        await delay(claimBackoff(attempt));
-        continue;
-      }
-      if (owner === undefined && attempt < EMPTY_CLAIM_GRACE_ATTEMPTS) {
-        await delay(claimBackoff(attempt));
-        continue;
-      }
-      if (
-        await clearActivePointer(
-          projectDir,
-          sessionId,
-          { expectRaw: resolution.raw },
-          env,
-        )
-      ) {
-        return undefined;
-      }
-      continue;
-    }
-    if (resolution.status === "corrupt") {
-      if (
-        await clearActivePointer(
-          projectDir,
-          sessionId,
-          { expectRaw: resolution.raw },
-          env,
-        )
-      ) {
-        return undefined;
-      }
-      continue;
-    }
-
-    const pointer = resolution.pointer;
-    if (pointer === undefined) continue;
-    const runDir = path.join(parent, pointer.runId);
-    const manifest =
-      resolution.status === "active"
-        ? resolution.manifest
-        : await readManifest(runDir);
-    if (
-      manifest === undefined ||
-      !isEvidenceRun(manifest) ||
-      !manifestMatchesPointer(manifest, pointer, sessionId)
-    ) {
-      if (
-        await clearActivePointer(
-          projectDir,
-          sessionId,
-          { expectRaw: resolution.raw },
-          env,
-        )
-      ) {
-        return undefined;
-      }
-      continue;
-    }
-
+    const { pointer, manifest } = step;
+    const run = await adoptRunIn(ctx.root, pointer.runId, manifest);
     if (manifest.status === "running") {
-      manifest.evidenceTruncated = await isEvidenceTruncated(runDir);
-      await new RunHandle(runDir, manifest).finish(status);
+      manifest.evidenceTruncated = await isEvidenceTruncatedIn(run.binding);
+      await run.finish(status);
     }
-    if (
-      !(await clearActivePointer(
-        projectDir,
-        sessionId,
-        { expectRaw: resolution.raw },
-        env,
-      ))
-    ) {
-      continue;
-    }
-    await pruneFinalizedEvidenceRuns(projectDir, {}, env);
-    return manifest;
+    const cleared = await clearActivePointerIn(ctx.root, ctx.sessionId, {
+      expectRaw: step.raw,
+    });
+    if (!cleared) continue;
+    return { done: false, run };
   }
   throw new Error(
-    `Failed to finalize the active evidence run for session ${sessionId}`,
+    `Failed to finalize the active evidence run for session ${ctx.sessionId}`,
   );
+}
+
+interface FinalizeContext {
+  projectDir: string;
+  sessionId: string;
+  env: EnvLike;
+  /** Open, verified runs root every pointer and run access resolves through. */
+  root: DirHandle;
+}
+
+type FinalizeStep =
+  | { kind: "done" }
+  | { kind: "retry" }
+  | {
+      kind: "ready";
+      raw: string;
+      pointer: ActiveEvidencePointer;
+      manifest: RunManifest;
+    };
+
+/** Compare-clear the pointer: done if it was ours to clear, else retry. */
+async function clearOrRetry(
+  ctx: FinalizeContext,
+  raw: string,
+): Promise<FinalizeStep> {
+  const cleared = await clearActivePointerIn(ctx.root, ctx.sessionId, {
+    expectRaw: raw,
+  });
+  return { kind: cleared ? "done" : "retry" };
+}
+
+/** Wait out a live or freshly made claim; reclaim only a provably dead one. */
+async function waitOutForeignClaim(
+  ctx: FinalizeContext,
+  attempt: number,
+  raw: string,
+  owner: ActiveEvidenceClaim | undefined,
+): Promise<FinalizeStep> {
+  const live =
+    owner !== undefined &&
+    identityIsAlive(owner.ownerPid, owner.ownerStartTicks);
+  const inGrace = owner === undefined && attempt < EMPTY_CLAIM_GRACE_ATTEMPTS;
+  if (live || inGrace) {
+    await delay(claimBackoff(attempt));
+    return { kind: "retry" };
+  }
+  return clearOrRetry(ctx, raw);
+}
+
+async function resolveFinalizableRun(
+  ctx: FinalizeContext,
+  attempt: number,
+): Promise<FinalizeStep> {
+  const resolution = await resolveActivePointerIn(ctx.root, ctx.sessionId);
+  if (resolution.status === "absent") return { kind: "done" };
+  if (resolution.status === "claiming") {
+    return waitOutForeignClaim(ctx, attempt, resolution.raw, resolution.claim);
+  }
+  if (resolution.status === "corrupt") return clearOrRetry(ctx, resolution.raw);
+
+  const pointer = resolution.pointer;
+  if (pointer === undefined) return { kind: "retry" };
+  const manifest =
+    resolution.status === "active"
+      ? resolution.manifest
+      : await readManifestIn(ctx.root, pointer.runId);
+  if (
+    manifest === undefined ||
+    !isEvidenceRun(manifest) ||
+    !manifestMatchesPointer(manifest, pointer, ctx.sessionId)
+  ) {
+    return clearOrRetry(ctx, resolution.raw);
+  }
+  return { kind: "ready", raw: resolution.raw, pointer, manifest };
 }
 
 function encodeRecord(record: EvidenceRecord): string {
@@ -986,6 +1135,8 @@ function forgetRunByteCache(runDir: string): void {
 async function snapshotRunDirEntries(
   runDir: string,
 ): Promise<Map<string, string> | undefined> {
+  // `runDir` is the pinned directory's capability path: the whole walk stays
+  // inside the descriptor's directory, whatever happens to its ancestors.
   const result = new Map<string, string>();
   const walk = async (dir: string, rel: string): Promise<boolean> => {
     let entries: fs.Dirent[];
@@ -1095,9 +1246,13 @@ async function walkRunArtifactBytes(runDir: string): Promise<number> {
  * new artifact — into a handful of `readdir` calls instead of a full recursive
  * `readdir`+`lstat` of every file on every append.
  */
-async function measureRunArtifactBytes(runDir: string): Promise<number> {
-  const cached = runByteCache.get(runDir);
-  const currentEntries = await snapshotRunDirEntries(runDir);
+async function measureRunArtifactBytes(dir: DirHandle): Promise<number> {
+  // The cache is keyed by the run's stable logical path; the scan itself walks
+  // the descriptor's capability path, which changes with the descriptor number.
+  const cacheKey = dir.dir;
+  const walkRoot = dir.resolve();
+  const cached = runByteCache.get(cacheKey);
+  const currentEntries = await snapshotRunDirEntries(walkRoot);
   if (
     cached !== undefined &&
     currentEntries !== undefined &&
@@ -1105,11 +1260,11 @@ async function measureRunArtifactBytes(runDir: string): Promise<number> {
   ) {
     return cached.artifactBytes;
   }
-  const artifactBytes = await walkRunArtifactBytes(runDir);
+  const artifactBytes = await walkRunArtifactBytes(walkRoot);
   if (currentEntries === undefined) {
-    forgetRunByteCache(runDir);
+    forgetRunByteCache(cacheKey);
   } else {
-    runByteCache.set(runDir, { artifactBytes, entries: currentEntries });
+    runByteCache.set(cacheKey, { artifactBytes, entries: currentEntries });
   }
   return artifactBytes;
 }
@@ -1129,10 +1284,10 @@ async function measureRunArtifactBytes(runDir: string): Promise<number> {
  * writes over many calls or many processes.
  */
 async function measureRunEvidenceBytes(
-  runDir: string,
+  dir: DirHandle,
   journalBytes: number,
 ): Promise<number> {
-  return (await measureRunArtifactBytes(runDir)) + journalBytes;
+  return (await measureRunArtifactBytes(dir)) + journalBytes;
 }
 
 async function repairTornJournalTail(
@@ -1182,14 +1337,38 @@ async function appendLine(
  * that gates the one-time truncation marker, so this is O(1) and consistent
  * across processes.
  */
-export async function isEvidenceTruncated(runDir: string): Promise<boolean> {
+export async function isEvidenceTruncated(
+  run: EvidenceReadTarget,
+): Promise<boolean> {
+  return withEvidenceReadDir(run, sentinelExists);
+}
+
+/** {@link isEvidenceTruncated} for a run that is already bound. */
+async function isEvidenceTruncatedIn(
+  binding: RunDirBinding,
+): Promise<boolean> {
+  return withBoundRunDir(binding, sentinelExists);
+}
+
+async function sentinelExists(dir: DirHandle): Promise<boolean> {
   try {
-    await fs.promises.stat(path.join(runDir, TRUNCATION_SENTINEL));
+    await fs.promises.stat(dir.resolve(TRUNCATION_SENTINEL));
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw error;
   }
+}
+
+/** A run target used only to inspect truncation state. */
+type EvidenceReadTarget = string | RunHandle;
+
+function withEvidenceReadDir<T>(
+  run: EvidenceReadTarget,
+  fn: (dir: DirHandle) => Promise<T>,
+): Promise<T> {
+  if (typeof run !== "string") return withBoundRunDir(run.binding, fn);
+  return withDirHandle(DirHandle.open(run), fn);
 }
 
 /**
@@ -1207,10 +1386,15 @@ export async function isEvidenceTruncated(runDir: string): Promise<boolean> {
  * Over-long records are rejected with a `RangeError` before any write.
  */
 export async function appendAction(
-  runDir: string,
+  run: RunHandle,
   record: EvidenceRecord,
   opts: AppendActionOptions = {},
 ): Promise<AppendResult> {
+  if (!(run instanceof RunHandle)) {
+    throw new RunStorageAccessError(
+      "appendAction requires a verified RunHandle; run directory paths are refused",
+    );
+  }
   const maxLineBytes = opts.maxLineBytes ?? EVIDENCE_MAX_LINE_BYTES;
   const maxBytes = opts.maxBytes ?? EVIDENCE_MAX_BYTES;
   const externalBytes = opts.externalBytes ?? 0;
@@ -1228,81 +1412,88 @@ export async function appendAction(
     );
   }
 
-  const journalPath = path.join(runDir, EVIDENCE_ACTION_LOG);
-  return withJournalLock(runDir, async () => {
-    const handle = await fs.promises.open(
-      journalPath,
-      fs.constants.O_RDWR |
-        fs.constants.O_CREAT |
-        fs.constants.O_APPEND |
-        fs.constants.O_NOFOLLOW,
-      0o600,
-    );
-    try {
-      await repairTornJournalTail(handle);
-      // Derive current usage from the run directory's real on-disk bytes (journal
-      // + artifacts), so the cap is cumulative across every prior append and every
-      // process. `externalBytes` only adds bytes not yet under the run dir. The
-      // journal's own live size comes straight off the open handle (already
-      // repaired above), since it is appended to in place rather than replaced.
-      const journalBytes = (await handle.stat()).size;
-      const used =
-        (await measureRunEvidenceBytes(runDir, journalBytes)) + externalBytes;
+  return withBoundRunDir(run.binding, (dir) =>
+    withJournalLock(dir, async () => {
+      const handle = await dir.openFile(
+        EVIDENCE_ACTION_LOG,
+        fs.constants.O_RDWR |
+          fs.constants.O_CREAT |
+          fs.constants.O_APPEND |
+          fs.constants.O_NOFOLLOW,
+        0o600,
+      );
+      try {
+        await repairTornJournalTail(handle);
+        // Derive current usage from the run directory's real on-disk bytes
+        // (journal + artifacts), so the cap is cumulative across every prior
+        // append and every process. `externalBytes` only adds bytes not yet
+        // under the run dir. The journal's own live size comes straight off the
+        // open handle (already repaired above), since it is appended to in
+        // place rather than replaced.
+        const journalBytes = (await handle.stat()).size;
+        const used =
+          (await measureRunEvidenceBytes(dir, journalBytes)) + externalBytes;
 
-      if (used >= maxBytes) {
-        // Already at or beyond the cap. Ensure the one-time marker exists, then
-        // record only bounded metadata-only actions.
-        const wroteMarker = await writeTruncationMarkerOnce(
-          runDir,
-          handle,
-          used,
-          maxBytes,
-          markerHooks,
-        );
-        if (!isMetadataOnly(record)) {
-          return { outcome: "capped", bytesWritten: 0, usedBytes: used };
-        }
-        const written = await appendLine(handle, line);
-        return {
-          outcome: wroteMarker ? "truncated" : "appended",
-          bytesWritten: written,
-          usedBytes: used + written,
-        };
-      }
-
-      const written = await appendLine(handle, line);
-      const usedAfter = used + written;
-      if (usedAfter >= maxBytes) {
-        try {
-          await writeTruncationMarkerOnce(
-            runDir,
+        if (used >= maxBytes) {
+          // Already at or beyond the cap. Ensure the one-time marker exists,
+          // then record only bounded metadata-only actions.
+          const wroteMarker = await writeTruncationMarkerOnce(
+            dir,
             handle,
-            usedAfter,
+            used,
             maxBytes,
             markerHooks,
           );
+          if (!isMetadataOnly(record)) {
+            return { outcome: "capped", bytesWritten: 0, usedBytes: used };
+          }
+          const written = await appendLine(handle, line);
           return {
-            outcome: "truncated",
+            outcome: wroteMarker ? "truncated" : "appended",
             bytesWritten: written,
-            usedBytes: usedAfter,
-          };
-        } catch {
-          // The caller's record is already durable and cannot be rolled back
-          // without risking another process's append. Report success and let the
-          // next append recover the marker instead of inviting a duplicate retry.
-          return {
-            outcome: "appended",
-            bytesWritten: written,
-            usedBytes: usedAfter,
-            truncationPending: true,
+            usedBytes: used + written,
           };
         }
+
+        const written = await appendLine(handle, line);
+        const usedAfter = used + written;
+        if (usedAfter >= maxBytes) {
+          try {
+            await writeTruncationMarkerOnce(
+              dir,
+              handle,
+              usedAfter,
+              maxBytes,
+              markerHooks,
+            );
+            return {
+              outcome: "truncated",
+              bytesWritten: written,
+              usedBytes: usedAfter,
+            };
+          } catch {
+            // The caller's record is already durable and cannot be rolled back
+            // without risking another process's append. Report success and let
+            // the next append recover the marker instead of inviting a
+            // duplicate retry.
+            return {
+              outcome: "appended",
+              bytesWritten: written,
+              usedBytes: usedAfter,
+              truncationPending: true,
+            };
+          }
+        }
+        return {
+          outcome: "appended",
+          bytesWritten: written,
+          usedBytes: usedAfter,
+        };
+      } finally {
+        await handle.close();
       }
-      return { outcome: "appended", bytesWritten: written, usedBytes: usedAfter };
-    } finally {
-      await handle.close();
-    }
-  });
+    }),
+  );
 }
 
 /** Interim record a claimant stamps into the truncation sentinel at `wx` time. */
@@ -1378,8 +1569,8 @@ function parseTruncationSentinel(
  * sentinel. Tolerant of a torn final line and of unparseable lines (skipped),
  * since it only needs to answer "is a marker already present?".
  */
-async function journalHasTruncationMarker(runDir: string): Promise<boolean> {
-  const raw = await readTextIfPresent(path.join(runDir, EVIDENCE_ACTION_LOG));
+async function journalHasTruncationMarker(dir: DirHandle): Promise<boolean> {
+  const raw = await dir.readFileIfPresent(EVIDENCE_ACTION_LOG);
   if (raw === undefined || raw === "") return false;
   const segments = raw.split("\n");
   // Drop the clean terminator's trailing "" or a torn (unterminated) final line.
@@ -1410,7 +1601,7 @@ async function journalHasTruncationMarker(runDir: string): Promise<boolean> {
  * claim or the intact commit — never a torn sentinel and never an absent one.
  */
 async function commitTruncationSentinel(
-  sentinelPath: string,
+  dir: DirHandle,
   ownerPid: number,
   ownerStartTicks: number | undefined,
 ): Promise<void> {
@@ -1421,7 +1612,7 @@ async function commitTruncationSentinel(
     committedAt: new Date().toISOString(),
   };
   if (ownerStartTicks !== undefined) commit.ownerStartTicks = ownerStartTicks;
-  await writeFileAtomic(sentinelPath, `${JSON.stringify(commit)}\n`);
+  await dir.writeFileAtomic(TRUNCATION_SENTINEL, `${JSON.stringify(commit)}\n`);
 }
 
 /**
@@ -1449,118 +1640,186 @@ async function commitTruncationSentinel(
  *
  * Returns true only for the process that actually appended the marker.
  */
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
+interface TruncationWriterContext {
+  dir: DirHandle;
+  journal: fs.promises.FileHandle;
+  usedBytes: number;
+  maxBytes: number;
+  hooks: MarkerHooks;
+  ownerPid: number;
+  ownerStartTicks: number | undefined;
+  deadline: number;
+}
+
+type TruncationClaimStep =
+  | { kind: "owned"; handle: fs.promises.FileHandle }
+  | { kind: "retry" }
+  | { kind: "done" };
+
+function claimOwnedByWriter(
+  ctx: TruncationWriterContext,
+  claim: TruncationClaim,
+): boolean {
+  return (
+    claim.ownerPid === ctx.ownerPid &&
+    claim.ownerStartTicks === ctx.ownerStartTicks
+  );
+}
+
+async function stepPastExistingTruncationClaim(
+  ctx: TruncationWriterContext,
+  attempt: number,
+): Promise<TruncationClaimStep> {
+  const raw = await ctx.dir.readFileIfPresent(TRUNCATION_SENTINEL);
+  if (raw === undefined) return { kind: "retry" };
+  const state = parseTruncationSentinel(raw);
+  if (state?.kind === "committed") return { kind: "done" };
+  if (state?.kind === "claim") {
+    if (identityIsAlive(state.claim.ownerPid, state.claim.ownerStartTicks)) {
+      if (
+        claimOwnedByWriter(ctx, state.claim) &&
+        (await journalHasTruncationMarker(ctx.dir))
+      ) {
+        await commitTruncationSentinel(
+          ctx.dir,
+          ctx.ownerPid,
+          ctx.ownerStartTicks,
+        );
+      }
+      return { kind: "done" };
+    }
+    await unlinkIfMatchesIn(ctx.dir, TRUNCATION_SENTINEL, raw).catch(() => {});
+    return { kind: "retry" };
+  }
+  if (attempt >= EMPTY_CLAIM_GRACE_ATTEMPTS) {
+    await unlinkIfMatchesIn(ctx.dir, TRUNCATION_SENTINEL, raw).catch(() => {});
+    return { kind: "retry" };
+  }
+  if (Date.now() >= ctx.deadline) return { kind: "done" };
+  await delay(claimBackoff(attempt));
+  return { kind: "retry" };
+}
+
+async function tryTruncationClaim(
+  ctx: TruncationWriterContext,
+  attempt: number,
+): Promise<TruncationClaimStep> {
+  try {
+    return {
+      kind: "owned",
+      handle: await ctx.dir.openFile(TRUNCATION_SENTINEL, "wx"),
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    return stepPastExistingTruncationClaim(ctx, attempt);
+  }
+}
+
+function truncationClaimContent(ctx: TruncationWriterContext): string {
+  const claim: TruncationClaim = {
+    evidenceVersion: EVIDENCE_VERSION,
+    ownerPid: ctx.ownerPid,
+    claim: true,
+    claimedAt: new Date().toISOString(),
+  };
+  if (ctx.ownerStartTicks !== undefined) {
+    claim.ownerStartTicks = ctx.ownerStartTicks;
+  }
+  return `${JSON.stringify(claim)}\n`;
+}
+
+async function stampTruncationClaim(
+  sentinel: fs.promises.FileHandle,
+  content: string,
+): Promise<void> {
+  try {
+    const buf = Buffer.from(content, "utf8");
+    const { bytesWritten } = await sentinel.write(buf, 0, buf.length, 0);
+    if (bytesWritten !== buf.length) {
+      throw new Error(
+        `short truncation claim write: ${bytesWritten}/${buf.length} bytes`,
+      );
+    }
+  } finally {
+    await sentinel.close().catch(() => {});
+  }
+}
+
+async function appendTruncationMarker(
+  ctx: TruncationWriterContext,
+): Promise<void> {
+  if (ctx.hooks.failAppend !== undefined) {
+    await ctx.hooks.failAppend();
+    return;
+  }
+  await appendLine(
+    ctx.journal,
+    encodeRecord(buildTruncationMarker(ctx.usedBytes, ctx.maxBytes)),
+  );
+}
+
+async function completeTruncationClaim(
+  ctx: TruncationWriterContext,
+  sentinel: fs.promises.FileHandle,
+): Promise<boolean> {
+  const claimContent = truncationClaimContent(ctx);
+  await stampTruncationClaim(sentinel, claimContent);
+  let appended = false;
+  try {
+    if (ctx.hooks.afterClaim !== undefined) await ctx.hooks.afterClaim();
+    if (await journalHasTruncationMarker(ctx.dir)) {
+      await commitTruncationSentinel(
+        ctx.dir,
+        ctx.ownerPid,
+        ctx.ownerStartTicks,
+      );
+      return false;
+    }
+    await appendTruncationMarker(ctx);
+    appended = true;
+    await commitTruncationSentinel(
+      ctx.dir,
+      ctx.ownerPid,
+      ctx.ownerStartTicks,
+    );
+    return true;
+  } catch (error) {
+    // A failed append is safe to retry. A failed commit is not: its marker is
+    // already durable, so leave the recoverable claim for the next writer.
+    if (!appended) {
+      await unlinkIfMatchesIn(
+        ctx.dir,
+        TRUNCATION_SENTINEL,
+        claimContent,
+      ).catch(() => {});
+    }
+    throw error;
+  }
+}
+
 async function writeTruncationMarkerOnce(
-  runDir: string,
-  handle: fs.promises.FileHandle,
+  dir: DirHandle,
+  journal: fs.promises.FileHandle,
   usedBytes: number,
   maxBytes: number,
   hooks: MarkerHooks = {},
 ): Promise<boolean> {
-  const sentinelPath = path.join(runDir, TRUNCATION_SENTINEL);
   const ownerPid = process.pid;
-  const ownerStartTicks = readProcessStartTicks(ownerPid);
-  const deadline = Date.now() + CLAIM_TOTAL_DEADLINE_MS;
-
+  const ctx: TruncationWriterContext = {
+    dir,
+    journal,
+    usedBytes,
+    maxBytes,
+    hooks,
+    ownerPid,
+    ownerStartTicks: readProcessStartTicks(ownerPid),
+    deadline: Date.now() + CLAIM_TOTAL_DEADLINE_MS,
+  };
   for (let attempt = 0; attempt < MAX_CLAIM_ATTEMPTS; attempt += 1) {
-    let sentinel: fs.promises.FileHandle;
-    try {
-      sentinel = await fs.promises.open(sentinelPath, "wx");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const raw = await readTextIfPresent(sentinelPath);
-      if (raw === undefined) continue; // Vanished between wx and read; retry.
-      const state = parseTruncationSentinel(raw);
-      if (state?.kind === "committed") return false; // Marker durably written.
-      if (state?.kind === "claim") {
-        // A live owner is writing (or will write) the marker — never duplicate.
-        // Only a provably dead owner's claim is reclaimed, so a slow-but-live
-        // writer is never stolen from.
-        if (identityIsAlive(state.claim.ownerPid, state.claim.ownerStartTicks)) {
-          const ownedByCaller =
-            state.claim.ownerPid === ownerPid &&
-            state.claim.ownerStartTicks === ownerStartTicks;
-          // eslint-disable-next-line max-depth -- Legacy gate debt: pickforge/pickforge#60
-          if (ownedByCaller && (await journalHasTruncationMarker(runDir))) {
-            await commitTruncationSentinel(sentinelPath, ownerPid, ownerStartTicks);
-          }
-          return false;
-        }
-        await unlinkIfMatches(sentinelPath, raw).catch(() => {});
-        continue;
-      }
-      // Owner-unknown (empty/torn/unparseable) claim: a winner stamps identity
-      // synchronously, so this only persists if the claimer died in the tiny
-      // window between the `wx` create and its stamp. Tolerate a short grace,
-      // then reclaim.
-      if (attempt >= EMPTY_CLAIM_GRACE_ATTEMPTS) {
-        await unlinkIfMatches(sentinelPath, raw).catch(() => {});
-        continue;
-      }
-      if (Date.now() >= deadline) return false;
-      await delay(claimBackoff(attempt));
-      continue;
-    }
-
-    // We own a fresh claim. Stamp verifiable identity synchronously so peers can
-    // tell we are alive, closing the owner-unknown window as fast as possible.
-    const claimRecord: TruncationClaim = {
-      evidenceVersion: EVIDENCE_VERSION,
-      ownerPid,
-      claim: true,
-      claimedAt: new Date().toISOString(),
-    };
-    if (ownerStartTicks !== undefined) {
-      claimRecord.ownerStartTicks = ownerStartTicks;
-    }
-    const claimContent = `${JSON.stringify(claimRecord)}\n`;
-    try {
-      const buf = Buffer.from(claimContent, "utf8");
-      const { bytesWritten } = await sentinel.write(buf, 0, buf.length, 0);
-      if (bytesWritten !== buf.length) {
-        throw new Error(
-          `short truncation claim write: ${bytesWritten}/${buf.length} bytes`,
-        );
-      }
-    } finally {
-      await sentinel.close().catch(() => {});
-    }
-
-    let appended = false;
-    try {
-      if (hooks.afterClaim !== undefined) await hooks.afterClaim();
-
-      // A prior crashed writer may have appended the marker before it could
-      // commit its sentinel (crash between append and commit). Never write a
-      // second one: recover by committing the sentinel over the existing marker.
-      if (await journalHasTruncationMarker(runDir)) {
-        await commitTruncationSentinel(sentinelPath, ownerPid, ownerStartTicks);
-        return false;
-      }
-
-      if (hooks.failAppend !== undefined) {
-        await hooks.failAppend();
-      } else {
-        await appendLine(
-          handle,
-          encodeRecord(buildTruncationMarker(usedBytes, maxBytes)),
-        );
-      }
-      appended = true;
-      await commitTruncationSentinel(sentinelPath, ownerPid, ownerStartTicks);
-      return true;
-    } catch (error) {
-      // The append failed, so no marker was written: clear our claim so the
-      // sentinel never persists as a permanent gate with no truncation action —
-      // the next append retries cleanly. If instead the append succeeded and only
-      // the commit failed, the marker is already durable; leave the (recoverable)
-      // claim so `isEvidenceTruncated` stays true and a later append commits it
-      // or, once we exit, reclaims and commits it.
-      if (!appended) {
-        await unlinkIfMatches(sentinelPath, claimContent).catch(() => {});
-      }
-      throw error;
-    }
+    const step = await tryTruncationClaim(ctx, attempt);
+    if (step.kind === "done") return false;
+    if (step.kind === "retry") continue;
+    return completeTruncationClaim(ctx, step.handle);
   }
   return false;
 }
@@ -1609,6 +1868,37 @@ export function parseActionsJournal(
   return records;
 }
 
+async function readActionsFromHandle(
+  handle: fs.promises.FileHandle,
+  label: string,
+): Promise<EvidenceRecord[]> {
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) {
+      throw new Error(`Unsafe evidence journal in ${label}: not a regular file`);
+    }
+    return parseActionsJournal(await handle.readFile("utf8"), label);
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Read the action journal through an already verified run descriptor. */
+export async function readActionsIn(
+  runDir: DirHandle,
+): Promise<EvidenceRecord[]> {
+  try {
+    const handle = await runDir.openFile(
+      EVIDENCE_ACTION_LOG,
+      fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+    );
+    return readActionsFromHandle(handle, runDir.dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+}
+
 /**
  * Read the run's action journal deterministically. Records are returned in file
  * (append) order. A missing/empty journal yields `[]`. Only a torn final line
@@ -1616,28 +1906,17 @@ export function parseActionsJournal(
  * dropped; any malformed or blank line before the end is rejected.
  */
 export async function readActions(runDir: string): Promise<EvidenceRecord[]> {
-  const journalPath = path.join(runDir, EVIDENCE_ACTION_LOG);
   let handle: fs.promises.FileHandle;
   try {
     handle = await fs.promises.open(
-      journalPath,
+      path.join(runDir, EVIDENCE_ACTION_LOG),
       fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
     );
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw error;
   }
-  let raw: string;
-  try {
-    const stat = await handle.stat();
-    if (!stat.isFile()) {
-      throw new Error(`Unsafe evidence journal in ${runDir}: not a regular file`);
-    }
-    raw = await handle.readFile("utf8");
-  } finally {
-    await handle.close();
-  }
-  return parseActionsJournal(raw, runDir);
+  return readActionsFromHandle(handle, runDir);
 }
 
 export function isEvidenceRun(manifest: RunManifest): boolean {

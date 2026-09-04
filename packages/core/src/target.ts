@@ -221,33 +221,66 @@ export async function resolveScreenshotTarget(
   };
 }
 
+/**
+ * Capture an artifact into a run, bound to the run's verified directory for
+ * the whole capture. See {@link RunHandle.captureArtifact}: the destination
+ * descriptor is held across the producer's run, so no ancestor swap can
+ * redirect the published artifact.
+ *
+ * Returns the artifact's path inside the run.
+ */
+export async function captureRunArtifact(
+  run: RunHandle,
+  subdir: string | undefined,
+  name: string,
+  capture: (outPath: string) => Promise<void>,
+): Promise<string> {
+  return run.captureArtifact(subdir, name, capture);
+}
+
+/**
+ * Run a screenshot capture against a resolved target and record it.
+ *
+ * `capture` receives the path it must write to. For a run-backed target that
+ * is a private staging path whose bytes are published into the run through the
+ * verified run directory's descriptor; for an explicit `--out` target it is
+ * the confined output path itself.
+ */
 export async function captureToTarget(
   target: ScreenshotTarget,
-  capture: () => Promise<void>,
+  capture: (outPath: string) => Promise<void>,
 ): Promise<Record<string, unknown>> {
+  const run = target.run;
   try {
-    await capture();
-  } catch (error) {
-    if (target.run !== undefined) {
-      await target.run.finish("failed").catch(() => {});
+    if (run === undefined) {
+      await capture(target.outPath);
+    } else {
+      await captureRunArtifact(
+        run,
+        "screenshots",
+        path.basename(target.outPath),
+        capture,
+      );
     }
+  } catch (error) {
+    if (run !== undefined) await run.finish("failed").catch(() => {});
     throw error;
   }
   const data: Record<string, unknown> = { path: target.outPath };
-  if (target.run !== undefined) {
+  if (run !== undefined) {
     try {
-      await target.run.addArtifact(
+      await run.addArtifact(
         "screenshot",
         path.basename(target.outPath),
         target.outPath,
       );
-      await target.run.finish("completed");
+      await run.finish("completed");
     } catch (error) {
-      await target.run.finish("failed").catch(() => {});
+      await run.finish("failed").catch(() => {});
       throw error;
     }
-    data.runId = target.run.runId;
-    data.runDir = target.run.dir;
+    data.runId = run.runId;
+    data.runDir = run.dir;
   }
   return data;
 }

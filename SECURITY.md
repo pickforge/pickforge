@@ -23,6 +23,29 @@ fuller model.
 Computer-use evidence is stored as local run data, by default under
 `~/.pickforge/lab/projects/<projectId>/runs/<runId>/` (outside the
 project; see the README's "Run storage" section for storage modes).
+Run directories are created and read through the same trust boundary: every
+entry below the project directory, the Pickforge home, or the custom path must
+be a real directory, so a symlinked `.picklab` committed in a repository cannot
+redirect `project-local` artifact writes. An unsafe entry is reported, never
+replaced or removed.
+
+Sensitive run writes — manifests, the action journal and its lock and
+truncation sentinel, the session's active-run pointer, HTML reports, and
+screenshots and other run artifacts — are additionally bound to the *directory* that passed
+verification, not to its pathname. Each directory is opened once with
+`O_DIRECTORY|O_NOFOLLOW`, verified through that descriptor (its real path is
+read back from `/proc/self/fd/<fd>`), and every write of the operation is
+issued through the same descriptor. Replacing an ancestor after verification
+therefore cannot redirect the write: it lands in the verified directory or
+fails. Screenshots are produced into a process-private staging directory and
+published through the held descriptor, since an external capture tool cannot be
+handed a descriptor. This mechanism is Linux-only (as is the lab); where
+`/proc/self/fd` is unavailable, run-storage writes fail closed rather than
+falling back to pathname writes.
+
+Reads (listing runs, reading manifests and journals) and retention pruning
+apply the lstat/realpath trust boundary, but are not descriptor-bound in the
+same way.
 `actions.jsonl` is the authoritative sanitized timeline; finalization
 produces an escaped, no-script `report.html` with a restrictive content
 security policy and no external requests.

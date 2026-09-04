@@ -57,6 +57,14 @@ export {
 } from "./run.js";
 
 export {
+  ensureVerifiedRunsRoot,
+  RunStorageAccessError,
+  type RunDirBinding,
+  type RunStorageRoot,
+  type VerifiedRunRoot,
+} from "./run-root.js";
+
+export {
   listRuns,
   openRunCatalog,
   RunCatalog,
@@ -144,6 +152,7 @@ export {
 } from "./proc.js";
 
 export {
+  captureRunArtifact,
   captureToTarget,
   requireDisplay,
   resolveConfinedPath,

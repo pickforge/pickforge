@@ -3,15 +3,29 @@
 // journal's O_APPEND atomicity is proven under genuine concurrency, not just
 // in-process Promise.all. It is not a `*.test.ts` file, so vitest never runs
 // it directly.
-import { appendAction, type EvidenceAction } from "../../src/evidence.js";
+import {
+  appendAction,
+  beginEvidenceRun,
+  type EvidenceAction,
+} from "../../src/evidence.js";
 
-const runDir = process.argv[2];
-const worker = process.argv[3];
-const count = Number(process.argv[4]);
-if (runDir === undefined || worker === undefined || !Number.isInteger(count)) {
-  console.error("usage: evidence-append-worker <runDir> <workerId> <count>");
+const projectDir = process.argv[2];
+const sessionId = process.argv[3];
+const worker = process.argv[4];
+const count = Number(process.argv[5]);
+if (
+  projectDir === undefined ||
+  sessionId === undefined ||
+  worker === undefined ||
+  !Number.isInteger(count)
+) {
+  console.error(
+    "usage: evidence-append-worker <projectDir> <sessionId> <workerId> <count>",
+  );
   process.exit(2);
 }
+
+const { run } = await beginEvidenceRun(projectDir, sessionId);
 
 for (let index = 0; index < count; index += 1) {
   const action: EvidenceAction = {
@@ -22,7 +36,7 @@ for (let index = 0; index < count; index += 1) {
     status: "ok",
     target: { worker, index },
   };
-  const result = await appendAction(runDir, action, {
+  const result = await appendAction(run, action, {
     // Large cap so this workload never truncates; we are testing atomicity.
     maxBytes: 1024 * 1024 * 1024,
   });

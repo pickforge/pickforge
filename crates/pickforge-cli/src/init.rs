@@ -21,11 +21,14 @@ pub struct InitRequest {
 }
 
 impl InitRequest {
+    /// The normal `pickforge init` request: every supported harness with the
+    /// Flutter integration pack. Callers that only need the project receipt
+    /// (tests, diagnostics) can swap in [`IntegrationPack::base`].
     pub fn new(project_dir: impl Into<PathBuf>) -> Self {
         Self {
             project_dir: project_dir.into(),
             harnesses: Harness::ALL.to_vec(),
-            pack: IntegrationPack::base(),
+            pack: IntegrationPack::flutter(),
         }
     }
 }

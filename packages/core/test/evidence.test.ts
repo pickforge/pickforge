@@ -446,7 +446,7 @@ describe("pointer resolution and clearing", () => {
 describe("appendAction and readActions", () => {
   it("appends a full record and reads it back", async () => {
     const { run } = await beginEvidenceRun(project, "desk-app000");
-    const result = await appendAction(run.dir, action({ actionId: "x1" }));
+    const result = await appendAction(run, action({ actionId: "x1" }));
     expect(result.outcome).toBe("appended");
     expect(result.bytesWritten).toBeGreaterThan(0);
     const records = await readActions(run.dir);
@@ -461,8 +461,8 @@ describe("appendAction and readActions", () => {
     const { run } = await beginEvidenceRun(project, "desk-nomut0");
     const manifestPath = path.join(run.dir, "manifest.json");
     const before = await fs.promises.readFile(manifestPath, "utf8");
-    await appendAction(run.dir, action());
-    await appendAction(run.dir, action({ actionId: "a2" }));
+    await appendAction(run, action());
+    await appendAction(run, action({ actionId: "a2" }));
     const after = await fs.promises.readFile(manifestPath, "utf8");
     expect(after).toBe(before);
   });
@@ -471,7 +471,7 @@ describe("appendAction and readActions", () => {
     const { run } = await beginEvidenceRun(project, "desk-big000");
     const huge = action({ error: "x".repeat(2000) });
     await expect(
-      appendAction(run.dir, huge, { maxLineBytes: 256 }),
+      appendAction(run, huge, { maxLineBytes: 256 }),
     ).rejects.toThrow(RangeError);
     // Nothing was written.
     expect(await readActions(run.dir)).toEqual([]);
@@ -480,7 +480,7 @@ describe("appendAction and readActions", () => {
   it("returns records in append order", async () => {
     const { run } = await beginEvidenceRun(project, "desk-order0");
     for (let i = 0; i < 5; i += 1) {
-      await appendAction(run.dir, action({ actionId: `a${i}` }));
+      await appendAction(run, action({ actionId: `a${i}` }));
     }
     const ids = (await readActions(run.dir)).map((r) => r.actionId);
     expect(ids).toEqual(["a0", "a1", "a2", "a3", "a4"]);
@@ -499,7 +499,7 @@ describe("appendAction and readActions", () => {
       })}\n`,
     );
 
-    await appendAction(run.dir, action({ actionId: "recovered" }));
+    await appendAction(run, action({ actionId: "recovered" }));
 
     expect((await readActions(run.dir)).map((r) => r.actionId)).toEqual([
       "recovered",
@@ -525,16 +525,20 @@ describe("appendAction and readActions", () => {
 
     await expect(readActions(run.dir)).rejects.toThrow();
     await expect(
-      appendAction(run.dir, action({ actionId: "blocked" })),
+      appendAction(run, action({ actionId: "blocked" })),
     ).rejects.toThrow();
     expect(await fs.promises.readFile(outside, "utf8")).toBe(outsideBody);
   });
 });
 
 describe("readActions corruption handling", () => {
-  async function journalOf(session: string): Promise<{ runDir: string; journal: string }> {
+  async function journalOf(session: string): Promise<{
+    run: RunHandle;
+    runDir: string;
+    journal: string;
+  }> {
     const { run } = await beginEvidenceRun(project, session);
-    return { runDir: run.dir, journal: path.join(run.dir, "actions.jsonl") };
+    return { run, runDir: run.dir, journal: path.join(run.dir, "actions.jsonl") };
   }
 
   it("tolerates a torn (unterminated) final line", async () => {
@@ -547,12 +551,12 @@ describe("readActions corruption handling", () => {
   });
 
   it("repairs a torn final line before the next append", async () => {
-    const { runDir, journal } = await journalOf("desk-torn01");
+    const { run, runDir, journal } = await journalOf("desk-torn01");
     const good = `${JSON.stringify(action({ actionId: "ok1" }))}\n`;
     const torn = '{"partial":"TORN';
     await fs.promises.writeFile(journal, good + torn);
 
-    await appendAction(runDir, action({ actionId: "ok2" }));
+    await appendAction(run, action({ actionId: "ok2" }));
 
     const records = await readActions(runDir);
     expect(records.map((r) => r.actionId)).toEqual(["ok1", "ok2"]);
@@ -588,7 +592,7 @@ describe("evidence cap and truncation", () => {
     const outcomes: string[] = [];
     for (let i = 0; i < 30; i += 1) {
       const result = await appendAction(
-        run.dir,
+        run,
         action({ actionId: `m${i}`, target: { i } }),
         { maxBytes, maxLineBytes: 1024 },
       );
@@ -614,21 +618,21 @@ describe("evidence cap and truncation", () => {
     const { run } = await beginEvidenceRun(project, "desk-cap001");
     const maxBytes = 200;
     // Cross the cap first.
-    await appendAction(run.dir, action({ actionId: "seed", target: { p: "x".repeat(180) } }), {
+    await appendAction(run, action({ actionId: "seed", target: { p: "x".repeat(180) } }), {
       maxBytes,
       maxLineBytes: 4096,
     });
     expect(await isEvidenceTruncated(run.dir)).toBe(true);
 
     const heavy = await appendAction(
-      run.dir,
+      run,
       action({ actionId: "heavy", artifacts: ["screenshots/a.png"] }),
       { maxBytes, maxLineBytes: 4096 },
     );
     expect(heavy.outcome).toBe("capped");
     expect(heavy.bytesWritten).toBe(0);
 
-    const meta = await appendAction(run.dir, action({ actionId: "meta" }), {
+    const meta = await appendAction(run, action({ actionId: "meta" }), {
       maxBytes,
       maxLineBytes: 4096,
     });
@@ -643,7 +647,7 @@ describe("evidence cap and truncation", () => {
 
   it("counts externalBytes toward the cap without a giant journal", async () => {
     const { run } = await beginEvidenceRun(project, "desk-cap002");
-    const result = await appendAction(run.dir, action({ actionId: "s1" }), {
+    const result = await appendAction(run, action({ actionId: "s1" }), {
       maxBytes: 1024,
       externalBytes: 4096,
     });
@@ -667,7 +671,7 @@ describe("evidence cap and truncation", () => {
       Buffer.alloc(5000),
     );
     const first = await appendAction(
-      run.dir,
+      run,
       action({ actionId: "a1", artifacts: ["screenshots/a.bin"] }),
       { maxBytes, maxLineBytes: 4096 },
     );
@@ -679,7 +683,7 @@ describe("evidence cap and truncation", () => {
       path.join(screenshots, "b.bin"),
       Buffer.alloc(5000),
     );
-    const second = await appendAction(run.dir, action({ actionId: "a2" }), {
+    const second = await appendAction(run, action({ actionId: "a2" }), {
       maxBytes,
       maxLineBytes: 4096,
     });
@@ -697,7 +701,7 @@ describe("evidence cap and truncation", () => {
       Buffer.alloc(maxBytes + 1000),
     );
     // A metadata-only append observes the over-cap artifact bytes and truncates.
-    const meta = await appendAction(run.dir, action({ actionId: "m1" }), {
+    const meta = await appendAction(run, action({ actionId: "m1" }), {
       maxBytes,
       maxLineBytes: 4096,
     });
@@ -705,13 +709,13 @@ describe("evidence cap and truncation", () => {
 
     // A subsequent artifact-carrying action is dropped; metadata still records.
     const heavy = await appendAction(
-      run.dir,
+      run,
       action({ actionId: "heavy", artifacts: ["screenshots/big.bin"] }),
       { maxBytes, maxLineBytes: 4096 },
     );
     expect(heavy.outcome).toBe("capped");
     expect(heavy.bytesWritten).toBe(0);
-    const meta2 = await appendAction(run.dir, action({ actionId: "m2" }), {
+    const meta2 = await appendAction(run, action({ actionId: "m2" }), {
       maxBytes,
       maxLineBytes: 4096,
     });
@@ -731,7 +735,7 @@ describe("evidence cap and truncation", () => {
       "/etc/hostname",
       path.join(run.dir, "screenshots", "link"),
     );
-    const result = await appendAction(run.dir, action({ actionId: "a1" }), {
+    const result = await appendAction(run, action({ actionId: "a1" }), {
       maxBytes: 100_000,
       maxLineBytes: 4096,
     });
@@ -753,7 +757,7 @@ describe("evidence cap and truncation", () => {
     );
     // First append after the artifacts land always does a full scan, seeding
     // the cache with the correct total.
-    const seeded = await appendAction(run.dir, action({ actionId: "seed" }), {
+    const seeded = await appendAction(run, action({ actionId: "seed" }), {
       maxBytes: 1_000_000,
     });
     expect(seeded.usedBytes).toBeGreaterThanOrEqual(40 * 1024);
@@ -761,7 +765,7 @@ describe("evidence cap and truncation", () => {
     const lstatSpy = vi.spyOn(fs.promises, "lstat");
     lstatSpy.mockClear();
     for (let i = 0; i < 10; i += 1) {
-      await appendAction(run.dir, action({ actionId: `meta-${i}` }), {
+      await appendAction(run, action({ actionId: `meta-${i}` }), {
         maxBytes: 1_000_000,
       });
     }
@@ -780,7 +784,7 @@ describe("evidence cap and truncation", () => {
       path.join(screenshots, "late.bin"),
       Buffer.alloc(2048),
     );
-    const after = await appendAction(run.dir, action({ actionId: "after" }), {
+    const after = await appendAction(run, action({ actionId: "after" }), {
       maxBytes: 1_000_000,
     });
     expect(after.usedBytes).toBeGreaterThanOrEqual(seeded.usedBytes + 2048);
@@ -801,7 +805,7 @@ describe("truncation marker durability", () => {
     const { run } = await beginEvidenceRun(project, "desk-mkfail");
     const maxBytes = 200;
     const result = await appendAction(
-      run.dir,
+      run,
       action({ actionId: "seed", target: { p: "x".repeat(180) } }),
       {
         maxBytes,
@@ -825,7 +829,7 @@ describe("truncation marker durability", () => {
 
     // A subsequent normal append recovers and writes exactly one marker without
     // duplicating the already-committed seed action.
-    const recovered = await appendAction(run.dir, action({ actionId: "after" }), {
+    const recovered = await appendAction(run, action({ actionId: "after" }), {
       maxBytes,
       maxLineBytes: 4096,
     });
@@ -847,7 +851,7 @@ describe("truncation marker durability", () => {
     );
     await fs.promises.writeFile(path.join(run.dir, SENTINEL), "");
 
-    const result = await appendAction(run.dir, action({ actionId: "recover" }), {
+    const result = await appendAction(run, action({ actionId: "recover" }), {
       maxBytes,
       maxLineBytes: 4096,
     });
@@ -878,7 +882,7 @@ describe("truncation marker durability", () => {
     let result: Awaited<ReturnType<typeof appendAction>> | undefined;
     try {
       result = await appendAction(
-        run.dir,
+        run,
         action({ actionId: "seed", target: { p: "x".repeat(180) } }),
         {
           maxBytes,
@@ -897,7 +901,7 @@ describe("truncation marker durability", () => {
 
     // The same live owner retries and commits its recoverable sentinel on the
     // next append instead of leaving the claim pending until process exit.
-    await appendAction(run.dir, action({ actionId: "after" }), {
+    await appendAction(run, action({ actionId: "after" }), {
       maxBytes,
       maxLineBytes: 4096,
     });
@@ -926,7 +930,7 @@ describe("truncation marker durability", () => {
     })}\n`;
     await fs.promises.writeFile(path.join(run.dir, SENTINEL), deadClaim);
 
-    const result = await appendAction(run.dir, action({ actionId: "recover" }), {
+    const result = await appendAction(run, action({ actionId: "recover" }), {
       maxBytes,
       maxLineBytes: 4096,
     });
@@ -943,7 +947,7 @@ describe("truncation marker durability", () => {
     const maxBytes = 200;
     // Cross the cap normally so a real marker sits in the journal.
     await appendAction(
-      run.dir,
+      run,
       action({ actionId: "seed", target: { p: "x".repeat(180) } }),
       { maxBytes, maxLineBytes: 4096 },
     );
@@ -959,7 +963,7 @@ describe("truncation marker durability", () => {
     })}\n`;
     await fs.promises.writeFile(path.join(run.dir, SENTINEL), deadClaim);
 
-    const result = await appendAction(run.dir, action({ actionId: "after" }), {
+    const result = await appendAction(run, action({ actionId: "after" }), {
       maxBytes,
       maxLineBytes: 4096,
     });
@@ -977,7 +981,7 @@ describe("truncation marker durability", () => {
     const { run } = await beginEvidenceRun(project, "desk-mkidem");
     const maxBytes = 200;
     await appendAction(
-      run.dir,
+      run,
       action({ actionId: "seed", target: { p: "x".repeat(180) } }),
       { maxBytes, maxLineBytes: 4096 },
     );
@@ -988,7 +992,7 @@ describe("truncation marker durability", () => {
     expect(sentinel.committed).toBe(true);
 
     for (let i = 0; i < 5; i += 1) {
-      const r = await appendAction(run.dir, action({ actionId: `m${i}` }), {
+      const r = await appendAction(run, action({ actionId: `m${i}` }), {
         maxBytes,
         maxLineBytes: 4096,
       });
@@ -1017,7 +1021,7 @@ describe("truncation marker durability", () => {
       signalClaimed = resolve;
     });
 
-    const winner = appendAction(run.dir, action({ actionId: "winner" }), {
+    const winner = appendAction(run, action({ actionId: "winner" }), {
       maxBytes,
       maxLineBytes: 4096,
       _afterMarkerClaim: async () => {
@@ -1026,7 +1030,7 @@ describe("truncation marker durability", () => {
       },
     });
     await claimed;
-    const peer = appendAction(run.dir, action({ actionId: "peer" }), {
+    const peer = appendAction(run, action({ actionId: "peer" }), {
       maxBytes,
       maxLineBytes: 4096,
     });
@@ -1513,8 +1517,8 @@ describe("adopted run handles are usable", () => {
     const first = await beginEvidenceRun(project, "desk-share0");
     const second = await beginEvidenceRun(project, "desk-share0");
     expect(second.run).toBeInstanceOf(RunHandle);
-    await appendAction(first.run.dir, action({ actionId: "from-first" }));
-    await appendAction(second.run.dir, action({ actionId: "from-second" }));
+    await appendAction(first.run, action({ actionId: "from-first" }));
+    await appendAction(second.run, action({ actionId: "from-second" }));
     const ids = (await readActions(first.run.dir)).map((r) => r.actionId);
     expect(ids).toEqual(["from-first", "from-second"]);
   });

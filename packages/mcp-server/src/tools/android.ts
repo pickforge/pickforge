@@ -16,6 +16,7 @@ import {
 } from "@pickforge/lab-android";
 import { redactSecrets } from "@pickforge/lab-core";
 import {
+  captureRunArtifact,
   captureToTarget,
   imageContent,
   resolveScreenshotTarget,
@@ -210,36 +211,42 @@ function registerAndroidTool4(server: McpServer, ctx: ServerContext): void {
               typeof result.data?.path === "string" ? [result.data.path] : [],
           },
           async ({ actionId, run }) => {
-            const destination =
-              run !== undefined &&
-              args.out === undefined &&
-              args.runSlug === undefined
-                ? {
-                    outPath: path.join(
-                      run.dir,
-                      "screenshots",
-                      `${actionId}.png`,
-                    ),
-                  }
-                : await resolveScreenshotTarget(
-                    ctx,
-                    args,
-                    "android",
-                    target.sessionId,
-                  );
-            const data = await captureToTarget(destination, async () => {
+            const capture = async (outPath: string): Promise<void> => {
               await screenshot({
                 serial: target.serial,
-                outPath: destination.outPath,
+                outPath,
                 env: ctx.env,
               });
-            });
-            Object.assign(data, targetData(target));
-            if (run !== undefined && destination.run === undefined) {
-              data.runId = run.runId;
-              data.runDir = run.dir;
+            };
+            const intoEvidenceRun =
+              run !== undefined &&
+              args.out === undefined &&
+              args.runSlug === undefined;
+            let data: Record<string, unknown>;
+            let outPath: string;
+            if (intoEvidenceRun && run !== undefined) {
+              // Bound to the evidence run's verified directory. `captureToTarget`
+              // is not used here because it finalizes its run, and the evidence
+              // run stays open for later actions.
+              outPath = await captureRunArtifact(
+                run,
+                "screenshots",
+                `${actionId}.png`,
+                capture,
+              );
+              data = { path: outPath, runId: run.runId, runDir: run.dir };
+            } else {
+              const destination = await resolveScreenshotTarget(
+                ctx,
+                args,
+                "android",
+                target.sessionId,
+              );
+              data = await captureToTarget(destination, capture);
+              outPath = destination.outPath;
             }
-            const image = await imageContent(destination.outPath);
+            Object.assign(data, targetData(target));
+            const image = await imageContent(outPath);
             Object.assign(data, image.meta);
             return { data, extraContent: image.content };
           },

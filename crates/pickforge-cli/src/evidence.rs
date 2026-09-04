@@ -369,56 +369,74 @@ pub fn record_at(
     )))
 }
 
+const RECEIPT_REMEDIATION: &str = "run `pickforge init` for this project and selected harnesses";
+
+fn receipt_error(path: &Path, reason: &str) -> EvidenceError {
+    EvidenceError::Receipt(format!(
+        "{}: {reason}; {RECEIPT_REMEDIATION}",
+        path.to_string_lossy()
+    ))
+}
+
+/// Read the receipt bytes while pinning the path to one regular, unlinked
+/// file identity before, during, and after the read.
+fn read_receipt_bytes(path: &Path) -> Result<Vec<u8>, EvidenceError> {
+    let io_error = |e: io::Error| receipt_error(path, &e.to_string());
+    let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(receipt_error(path, "receipt is not a regular file"));
+    }
+    let mut file = File::open(path).map_err(io_error)?;
+    let opened = file.metadata().map_err(io_error)?;
+    if !same_file(&metadata, &opened) {
+        return Err(receipt_error(path, "receipt changed while opening"));
+    }
+    let opened_identity = file_identity(&file).map_err(io_error)?;
+    if opened_identity.link_count > 1 {
+        return Err(receipt_error(path, "receipt is hardlinked"));
+    }
+    let bytes = read_bounded(&mut file).map_err(|e| receipt_error(path, &e.to_string()))?;
+    let path_after = fs::symlink_metadata(path).map_err(io_error)?;
+    if path_after.file_type().is_symlink()
+        || !path_after.is_file()
+        || !same_file(&opened, &path_after)
+    {
+        return Err(receipt_error(path, "receipt path changed while reading"));
+    }
+    let reopened = File::open(path).map_err(io_error)?;
+    let reopened_identity = file_identity(&reopened).map_err(io_error)?;
+    if opened_identity != reopened_identity || reopened_identity.link_count > 1 {
+        return Err(receipt_error(path, "receipt path changed while reading"));
+    }
+    Ok(bytes)
+}
+
+fn receipt_identifies_project(receipt: &Receipt, project_path: &str, project_id: &str) -> bool {
+    receipt.schema_version == INIT_SCHEMA_VERSION
+        && receipt.project_path == project_path
+        && receipt.project_id == project_id
+}
+
+fn receipt_has_flutter_pack(receipt: &Receipt) -> bool {
+    receipt.pack.name == "pickforge-flutter"
+        && receipt.pack.version >= 1
+        && !receipt.harnesses.is_empty()
+}
+
 fn validate_receipt(
     path: &Path,
     project_path: &str,
     project_id: &str,
 ) -> Result<(), EvidenceError> {
-    let remediation =
-        "run `pickforge init --mobile-integration-alpha` for this project and selected harnesses";
-    let receipt_error = |reason: String| {
-        EvidenceError::Receipt(format!(
-            "{}: {reason}; {remediation}",
-            path.to_string_lossy()
-        ))
-    };
-    let metadata = fs::symlink_metadata(path).map_err(|e| receipt_error(e.to_string()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(receipt_error("receipt is not a regular file".into()));
-    }
-    let mut file = File::open(path).map_err(|e| receipt_error(e.to_string()))?;
-    let opened = file.metadata().map_err(|e| receipt_error(e.to_string()))?;
-    if !same_file(&metadata, &opened) {
-        return Err(receipt_error("receipt changed while opening".into()));
-    }
-    let opened_identity = file_identity(&file).map_err(|e| receipt_error(e.to_string()))?;
-    if opened_identity.link_count > 1 {
-        return Err(receipt_error("receipt is hardlinked".into()));
-    }
-    let bytes = read_bounded(&mut file).map_err(|e| receipt_error(e.to_string()))?;
-    let path_after = fs::symlink_metadata(path).map_err(|e| receipt_error(e.to_string()))?;
-    if path_after.file_type().is_symlink()
-        || !path_after.is_file()
-        || !same_file(&opened, &path_after)
-    {
-        return Err(receipt_error("receipt path changed while reading".into()));
-    }
-    let reopened = File::open(path).map_err(|e| receipt_error(e.to_string()))?;
-    let reopened_identity = file_identity(&reopened).map_err(|e| receipt_error(e.to_string()))?;
-    if opened_identity != reopened_identity || reopened_identity.link_count > 1 {
-        return Err(receipt_error("receipt path changed while reading".into()));
-    }
+    let bytes = read_receipt_bytes(path)?;
     let receipt: Receipt =
-        serde_json::from_slice(&bytes).map_err(|e| receipt_error(e.to_string()))?;
-    if receipt.schema_version != INIT_SCHEMA_VERSION
-        || receipt.project_path != project_path
-        || receipt.project_id != project_id
-        || receipt.pack.name != "pickforge-flutter"
-        || receipt.pack.version < 1
-        || receipt.harnesses.is_empty()
+        serde_json::from_slice(&bytes).map_err(|e| receipt_error(path, &e.to_string()))?;
+    if !receipt_identifies_project(&receipt, project_path, project_id)
+        || !receipt_has_flutter_pack(&receipt)
     {
         return Err(receipt_error(
-            "receipt does not identify this initialized Flutter project".into(),
+            path,
+            "receipt does not identify this initialized Flutter project",
         ));
     }
     Ok(())
