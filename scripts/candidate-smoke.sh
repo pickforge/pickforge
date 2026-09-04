@@ -317,6 +317,11 @@ main() {
   resolve_asset_name
   REAL_HOME="${HOME:?HOME must be set}"
   WORK="${PICKFORGE_SMOKE_WORK:-$(mktemp -d)}"
+  mkdir -p "${WORK}"
+  # Canonical: on macOS `mktemp -d` hands back /var/... for /private/var/...,
+  # and the CLI reports canonical paths, so uncanonicalized bases would make
+  # every "inside the isolated home" check compare two different spellings.
+  WORK="$(cd -- "${WORK}" && pwd -P)"
   EVIDENCE="${PICKFORGE_SMOKE_EVIDENCE:-${WORK}/evidence}"
   INSTALL_SH="${PICKFORGE_SMOKE_INSTALL_SH:-${SCRIPT_DIR}/install.sh}"
   SMOKE_HOME="${WORK}/home"
