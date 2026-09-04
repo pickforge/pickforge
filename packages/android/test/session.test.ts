@@ -8,7 +8,7 @@ import {
   isPidAlive,
   updateSession,
   type EnvLike,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
   androidSessionLogDir,
   consolePortLockPath,
@@ -18,12 +18,12 @@ import {
   startEmulator,
 } from "../src/index.js";
 
-const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-android-sess-"));
+const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-android-sess-"));
 const home = path.join(tmpRoot, "home");
 const projectDir = path.join(tmpRoot, "project");
 fs.mkdirSync(home, { recursive: true });
 fs.mkdirSync(projectDir, { recursive: true });
-const registryEnv: EnvLike = { ...process.env, PICKLAB_HOME: home };
+const registryEnv: EnvLike = { ...process.env, PICKFORGE_HOME: home };
 
 afterAll(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
@@ -73,7 +73,7 @@ describe("createAndroidSession", () => {
         bootTimeoutMs: 5_000,
       });
       try {
-        expect(session.avdName).toBe("picklab-avd");
+        expect(session.avdName).toBe("pickforge-avd");
         expect(session.serial).toBe("emulator-5554");
         expect(session.consolePort).toBe(5554);
         expect(isPidAlive(session.emulatorPid)).toBe(true);
@@ -83,7 +83,7 @@ describe("createAndroidSession", () => {
         const record = await getSession(session.id, registryEnv);
         expect(record?.status).toBe("running");
         expect(record?.android).toEqual({
-          avdName: "picklab-avd",
+          avdName: "pickforge-avd",
           serial: "emulator-5554",
           emulatorPid: session.emulatorPid,
           consolePort: 5554,
@@ -111,7 +111,7 @@ describe("createAndroidSession", () => {
   it("marks the session as error and stops the emulator when boot times out", async () => {
     const sdk = makeFakeSdk({ bootCompleted: "0" });
     const isolatedHome = path.join(tmpRoot, "home-boot-timeout");
-    const isolatedEnv: EnvLike = { ...process.env, PICKLAB_HOME: isolatedHome };
+    const isolatedEnv: EnvLike = { ...process.env, PICKFORGE_HOME: isolatedHome };
     await expect(
       createAndroidSession({
         projectDir,
@@ -131,7 +131,7 @@ describe("createAndroidSession", () => {
     const id = (entries[0] as string).slice(0, -".json".length);
     const record = await getSession(id, isolatedEnv);
     expect(record?.status).toBe("error");
-    expect(record?.android?.avdName).toBe("picklab-avd");
+    expect(record?.android?.avdName).toBe("pickforge-avd");
   });
 
   it("fails actionably when the emulator binary is missing", async () => {
@@ -152,7 +152,7 @@ describe("createAndroidSession", () => {
     const isolatedHome = path.join(tmpRoot, "home-reap-android");
     const isolatedEnv: EnvLike = {
       ...process.env,
-      PICKLAB_HOME: isolatedHome,
+      PICKFORGE_HOME: isolatedHome,
     };
     const stale = await createSession(
       { type: "android", projectDir, android: { avdName: "old-avd" } },
@@ -198,11 +198,11 @@ describe("startEmulator failure detail", () => {
   it("includes the daemon log path when boot never completes", async () => {
     const sdk = makeFakeSdk({ bootCompleted: "0" });
     const failureEnv: EnvLike = {
-      PICKLAB_HOME: path.join(tmpRoot, "home-emu-failure"),
+      PICKFORGE_HOME: path.join(tmpRoot, "home-emu-failure"),
     };
     await expect(
       startEmulator({
-        avdName: "picklab-avd",
+        avdName: "pickforge-avd",
         sdk,
         port: 5558,
         logDir: path.join(tmpRoot, "emu-logs"),

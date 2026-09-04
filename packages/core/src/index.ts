@@ -1,22 +1,23 @@
-export const packageName = "@pickforge/picklab-core";
+export const packageName = "@pickforge/lab-core";
+
+export { readPickforgeEnv, type EnvLike } from "./env-compat.js";
 
 export {
   agentsDir,
   ensureDir,
   globalConfigPath,
   isProfileConfined,
-  legacyAgentsDir,
-  legacyGlobalConfigPath,
-  legacyPicklabHome,
-  legacySessionsDir,
+  legacyAgentsDirs,
+  legacyGlobalConfigPaths,
+  legacyPickforgeHomes,
+  legacySessionsDirs,
   listDirSafe,
-  picklabHome,
+  pickforgeHome,
   projectConfigPath,
   resolveReadablePath,
   runsDir,
   sessionsDir,
   writeFileAtomic,
-  type EnvLike,
 } from "./paths.js";
 
 export {
@@ -27,8 +28,8 @@ export {
   resolvedDefaults,
   saveGlobalConfig,
   saveProjectConfig,
-  type PicklabConfig,
-  type PicklabProfile,
+  type PickforgeConfig,
+  type PickforgeProfile,
   type StorageConfig,
   type StorageMode,
   type ViewerMode,
@@ -224,6 +225,7 @@ export {
   isDisplaySocketAlive,
   isSessionProcessAlive,
   listSessions,
+  sessionDataDir,
   updateSession,
   type AndroidSessionInfo,
   type BrowserSessionInfo,

@@ -1,4 +1,4 @@
-import type { EnvLike } from "@pickforge/picklab-core";
+import type { EnvLike } from "@pickforge/lab-core";
 import type { AgentKind, ChangeResult, RegistrationState } from "../types.js";
 import {
   claudeCodeConfigPath,
@@ -18,6 +18,7 @@ import {
   linkCursor,
   unlinkCursor,
 } from "./cursor.js";
+import { linkPi, piConfigPath, piIsRegistered, unlinkPi } from "./pi.js";
 
 export interface BuiltinAgent {
   name: AgentKind;
@@ -48,6 +49,13 @@ export const BUILTIN_AGENTS: Record<AgentKind, BuiltinAgent> = {
     isRegistered: cursorIsRegistered,
     link: linkCursor,
     unlink: unlinkCursor,
+  },
+  pi: {
+    name: "pi",
+    defaultConfigPath: piConfigPath,
+    isRegistered: piIsRegistered,
+    link: linkPi,
+    unlink: unlinkPi,
   },
 };
 

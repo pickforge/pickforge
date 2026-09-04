@@ -16,7 +16,7 @@ import {
   type EnvLike,
   type HumanLease,
   type SessionRecord,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import { screenshot } from "./screenshot.js";
 import {
   desktopSessionLogDir,
@@ -28,10 +28,10 @@ import { startVnc, type VncHandle } from "./vnc.js";
 
 /**
  * Desktop-linux orchestration for supervised pause / human takeover
- * (pickforge/picklab#21): switches x11vnc between read-only and writable
+ * (pickforge/pickforge#21): switches x11vnc between read-only and writable
  * scoped to the human lease's lifetime, and recovers a session left with a
  * writable VNC server after a crashed takeover. Lease/permit bookkeeping
- * itself lives in `@pickforge/picklab-core` (`takeover.ts`), which this
+ * itself lives in `@pickforge/lab-core` (`takeover.ts`), which this
  * module wraps with VNC-mode and evidence side effects.
  */
 
@@ -89,7 +89,7 @@ async function evidenceEnabledForProject(
 
 /**
  * Public entry point for stale-lease recovery outside an already-locked VNC
- * operation (e.g. `picklab takeover status`, or a standalone health check).
+ * operation (e.g. `pickforge-lab takeover status`, or a standalone health check).
  */
 export async function recoverStaleHumanLease(
   id: string,
@@ -214,7 +214,7 @@ export async function startHumanTakeover(
  * its fresh `expiresAt` and reschedule their own hard-deadline backstop), or
  * `undefined` if the lease was no longer renewable — already stale (TTL
  * elapsed without a timely renewal: `renewHumanLease` itself refuses to
- * resurrect a stale lease, see pickforge/picklab#21 P0-B) or held by someone
+ * resurrect a stale lease, see pickforge/pickforge#21 P0-B) or held by someone
  * else. The caller must treat `undefined` as "the lease is gone" and end the
  * takeover immediately, not merely stop trying to renew.
  */

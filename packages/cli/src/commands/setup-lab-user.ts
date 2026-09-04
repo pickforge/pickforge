@@ -1,4 +1,4 @@
-import type { EnvLike } from "@pickforge/picklab-core";
+import type { EnvLike } from "@pickforge/lab-core";
 import { resolveAskpassCapability } from "../provision/askpass.js";
 import { collectSnapshot } from "../provision/detect.js";
 import {

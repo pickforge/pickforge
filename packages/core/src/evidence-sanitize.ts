@@ -2,7 +2,7 @@ import { redactSecrets } from "./redact.js";
 
 /**
  * Fail-closed sanitizers for structured computer-use evidence
- * (pickforge/picklab#20). Every function in this module drops or normalizes
+ * (pickforge/pickforge#20). Every function in this module drops or normalizes
  * anything it does not positively recognize; unknown fields, unparseable
  * values, and free-form text never reach persisted evidence unchanged.
  */
@@ -205,7 +205,7 @@ export interface SanitizedNetworkFailure {
  * timing, and a sanitized error summary. Headers, bodies, and query strings
  * have no field here and can never be persisted through this shape.
  */
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 export function sanitizeNetworkFailure(input: {
   method?: string;
   url?: string;

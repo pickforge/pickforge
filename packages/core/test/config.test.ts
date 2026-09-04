@@ -12,12 +12,12 @@ import {
 
 let home: string;
 let project: string;
-let env: { PICKLAB_HOME: string };
+let env: { PICKFORGE_HOME: string };
 
 beforeEach(async () => {
-  home = await fs.promises.mkdtemp(path.join(os.tmpdir(), "picklab-home-"));
-  project = await fs.promises.mkdtemp(path.join(os.tmpdir(), "picklab-proj-"));
-  env = { PICKLAB_HOME: home };
+  home = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-home-"));
+  project = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-proj-"));
+  env = { PICKFORGE_HOME: home };
 });
 
 afterEach(async () => {
@@ -28,9 +28,9 @@ afterEach(async () => {
 describe("loadConfig", () => {
   it("returns defaults when no config files exist", async () => {
     const config = await loadConfig(project, env);
-    expect(config.android?.avdName).toBe("picklab-avd");
-    expect(config.labUser?.name).toBe("picklab-lab");
-    expect(config.labUser?.home).toBe("/var/lib/picklab/lab-home");
+    expect(config.android?.avdName).toBe("pickforge-avd");
+    expect(config.labUser?.name).toBe("pickforge-lab");
+    expect(config.labUser?.home).toBe("/var/lib/pickforge/lab-home");
     expect(config.viewer?.mode).toBe("manual");
     expect(config.evidence?.enabled).toBe(true);
   });
@@ -46,7 +46,7 @@ describe("loadConfig", () => {
     const config = await loadConfig(project, env);
     expect(config.profile).toBe("android");
     expect(config.android?.avdName).toBe("global-avd");
-    expect(config.labUser?.name).toBe("picklab-lab");
+    expect(config.labUser?.name).toBe("pickforge-lab");
   });
 
   it("applies project config over global config", async () => {
@@ -107,7 +107,7 @@ describe("save/load round-trip", () => {
     expect(JSON.parse(raw).profile).toBe("flutter-desktop");
   });
 
-  it("persists global config under picklab home", async () => {
+  it("persists global config under pickforge-lab home", async () => {
     await saveGlobalConfig({ profile: "generic" }, env);
     const raw = await fs.promises.readFile(
       path.join(home, "config.json"),
@@ -119,9 +119,9 @@ describe("save/load round-trip", () => {
 
 describe("resolvedDefaults", () => {
   it("exposes the documented defaults", () => {
-    expect(resolvedDefaults.android.avdName).toBe("picklab-avd");
-    expect(resolvedDefaults.labUser.name).toBe("picklab-lab");
-    expect(resolvedDefaults.labUser.home).toBe("/var/lib/picklab/lab-home");
+    expect(resolvedDefaults.android.avdName).toBe("pickforge-avd");
+    expect(resolvedDefaults.labUser.name).toBe("pickforge-lab");
+    expect(resolvedDefaults.labUser.home).toBe("/var/lib/pickforge/lab-home");
     expect(resolvedDefaults.viewer.mode).toBe("manual");
     expect(resolvedDefaults.evidence.enabled).toBe(true);
     expect(resolvedDefaults.storage.mode).toBe("home");
@@ -129,9 +129,9 @@ describe("resolvedDefaults", () => {
 });
 
 describe("loadConfig legacy home fallback", () => {
-  it("reads an existing ~/.picklab global config when PICKLAB_HOME is unset and the new default has nothing yet", async () => {
+  it("reads an existing ~/.picklab global config when PICKFORGE_HOME is unset and the new default has nothing yet", async () => {
     const fakeHome = await fs.promises.mkdtemp(
-      path.join(os.tmpdir(), "picklab-fakehome-"),
+      path.join(os.tmpdir(), "pickforge-lab-fakehome-"),
     );
     const homedirSpy = vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
     try {
@@ -146,7 +146,7 @@ describe("loadConfig legacy home fallback", () => {
       expect(config.profile).toBe("android");
       // Non-destructive: nothing was written to the new default location.
       expect(
-        fs.existsSync(path.join(fakeHome, ".pickforge", "picklab")),
+        fs.existsSync(path.join(fakeHome, ".pickforge", "lab")),
       ).toBe(false);
     } finally {
       homedirSpy.mockRestore();
@@ -154,9 +154,9 @@ describe("loadConfig legacy home fallback", () => {
     }
   });
 
-  it("prefers the new default over the legacy home once the new one has a config", async () => {
+  it("prefers ~/.pickforge/picklab over the older ~/.picklab fallback", async () => {
     const fakeHome = await fs.promises.mkdtemp(
-      path.join(os.tmpdir(), "picklab-fakehome-"),
+      path.join(os.tmpdir(), "pickforge-lab-fakehome-"),
     );
     const homedirSpy = vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
     try {
@@ -184,9 +184,35 @@ describe("loadConfig legacy home fallback", () => {
     }
   });
 
-  it("does not fall back to ~/.picklab once PICKLAB_HOME is set explicitly", async () => {
+  it("prefers the new ~/.pickforge/lab default over both fallbacks", async () => {
     const fakeHome = await fs.promises.mkdtemp(
-      path.join(os.tmpdir(), "picklab-fakehome-"),
+      path.join(os.tmpdir(), "pickforge-lab-fakehome-"),
+    );
+    const homedirSpy = vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
+    try {
+      for (const [dir, profile] of [
+        [path.join(fakeHome, ".picklab"), "android"],
+        [path.join(fakeHome, ".pickforge", "picklab"), "generic"],
+        [path.join(fakeHome, ".pickforge", "lab"), "flutter-desktop"],
+      ] as const) {
+        await fs.promises.mkdir(dir, { recursive: true });
+        await fs.promises.writeFile(
+          path.join(dir, "config.json"),
+          JSON.stringify({ profile }),
+        );
+      }
+
+      const config = await loadConfig(project, {});
+      expect(config.profile).toBe("flutter-desktop");
+    } finally {
+      homedirSpy.mockRestore();
+      await fs.promises.rm(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  it("does not fall back to old defaults once PICKFORGE_HOME is set explicitly", async () => {
+    const fakeHome = await fs.promises.mkdtemp(
+      path.join(os.tmpdir(), "pickforge-lab-fakehome-"),
     );
     const homedirSpy = vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
     try {

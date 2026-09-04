@@ -15,7 +15,7 @@ import {
   readHumanLease,
   readHumanLeaseRaw,
   recordTakeoverEvidence,
-  sessionsDir,
+  sessionDataDir,
   stopPid,
   stopProcessGroupVerified,
   updateSession,
@@ -23,7 +23,7 @@ import {
   type EnvLike,
   type LocalSessionTeardownFinalizer,
   type SessionRecord,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
   XvfbStartError,
   isDisplayAlive,
@@ -76,10 +76,10 @@ export function desktopSessionLogDir(
   id: string,
   registryEnv: EnvLike = process.env,
 ): string {
-  return path.join(sessionsDir(registryEnv), id);
+  return sessionDataDir(id, registryEnv);
 }
 
-// eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function createDesktopSession(
   opts: CreateDesktopSessionOptions,
 ): Promise<DesktopSessionHandle> {
@@ -326,7 +326,7 @@ async function acquireSessionVncLock(
   id: string,
   registryEnv: EnvLike,
 ): Promise<() => Promise<void>> {
-  const registryDir = sessionsDir(registryEnv);
+  const registryDir = path.dirname(sessionDataDir(id, registryEnv));
   await fs.promises.mkdir(registryDir, { recursive: true });
   const lockPath = path.join(registryDir, `${id}.ensure-vnc.lock`);
   const owner = { pid: process.pid, token: randomUUID() };
@@ -351,7 +351,7 @@ async function acquireSessionVncLock(
       } catch (error) {
         const code = errorCode(error);
         if (code === "ENOENT") {
-          // eslint-disable-next-line max-depth -- Legacy gate debt: pickforge/picklab#60
+          // eslint-disable-next-line max-depth -- Legacy gate debt: pickforge/pickforge#60
           if ((await getSession(id, registryEnv)) === undefined) {
             throw new Error(`Session not found: ${id}`);
           }
@@ -428,7 +428,7 @@ export async function stopOwnedSessionVnc(
  * the recorded writable VNC, clear its record, record a `takeover_recovered`
  * evidence entry, and release the stale lease. A *live* lease is left
  * untouched — this only reclaims genuinely stale state. Exported for
- * `@pickforge/picklab-desktop-linux`'s `takeover.ts` (a sibling module,
+ * `@pickforge/lab-desktop-linux`'s `takeover.ts` (a sibling module,
  * imported one-directionally from here to avoid a cycle since `takeover.ts`
  * already depends on this file's VNC primitives). Assumes the caller already
  * holds the session's VNC lock (`withSessionVncLock`).
@@ -442,7 +442,7 @@ export async function recoverStaleTakeoverLocked(
   if (initial === undefined) return { recovered: false };
   if (!isHumanLeaseStale(initial)) return { recovered: false };
 
-  // TOCTOU guard (pickforge/picklab#21 P1-C): the cheap check above can be
+  // TOCTOU guard (pickforge/pickforge#21 P1-C): the cheap check above can be
   // arbitrarily stale by the time we act — a live owner's heartbeat may have
   // renewed the lease in the gap. Re-read immediately before the destructive
   // VNC stop and re-check staleness on THAT read; a lease that is no longer
@@ -496,7 +496,7 @@ export async function ensureSessionVnc(
   if ((await getSession(id, registryEnv)) === undefined) {
     throw new Error(`Session not found: ${id}`);
   }
-  // eslint-disable-next-line complexity -- Legacy gate debt: pickforge/picklab#60
+  // eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
   return withSessionVncLock(id, registryEnv, async () => {
     let record = await getSession(id, registryEnv);
     if (record === undefined) {

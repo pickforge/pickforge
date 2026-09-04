@@ -7,20 +7,20 @@ import {
   createSession,
   releaseHumanLease,
   type EnvLike,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import { takeoverStatus } from "../src/commands/takeover.js";
 
 let root: string;
 let env: EnvLike;
 
 beforeEach(async () => {
-  root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "picklab-takeover-status-"));
-  env = { PICKLAB_HOME: path.join(root, "home") };
-  process.env.PICKLAB_HOME = env.PICKLAB_HOME;
+  root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-takeover-status-"));
+  env = { PICKFORGE_HOME: path.join(root, "home") };
+  process.env.PICKFORGE_HOME = env.PICKFORGE_HOME;
 });
 
 afterEach(async () => {
-  delete process.env.PICKLAB_HOME;
+  delete process.env.PICKFORGE_HOME;
   await fs.promises.rm(root, { recursive: true, force: true });
 });
 
@@ -56,7 +56,7 @@ describe("takeoverStatus", () => {
   it("reports a stale lease as recoverable, not active", async () => {
     const id = await createDesktop();
     const lease = await acquireHumanLease(id, env);
-    const stalePath = path.join(env.PICKLAB_HOME as string, "sessions", id, "human.lease.json");
+    const stalePath = path.join(env.PICKFORGE_HOME as string, "sessions", id, "human.lease.json");
     const stale = { ...lease, ownerPid: 999_999 };
     await fs.promises.writeFile(stalePath, `${JSON.stringify(stale)}\n`);
 

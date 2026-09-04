@@ -7,20 +7,20 @@ import {
   readActions,
   saveProjectConfig,
   type EvidenceAction,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import { createDevtoolsEvidenceRecorder } from "../src/devtools-evidence.js";
 import type { JsonRpcMessage } from "../src/ndjson.js";
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-const SECRET = "picklab-devtools-secret";
+const SECRET = "pickforge-lab-devtools-secret";
 let projectDir: string;
 
 beforeEach(async () => {
   projectDir = await fs.promises.mkdtemp(
-    path.join(os.tmpdir(), "picklab-devtools-evidence-"),
+    path.join(os.tmpdir(), "pickforge-lab-devtools-evidence-"),
   );
   // These tests assert against the literal `.picklab/runs` layout.
-  vi.stubEnv("PICKLAB_STORAGE_MODE", "project-local");
+  vi.stubEnv("PICKFORGE_STORAGE_MODE", "project-local");
 });
 
 afterEach(async () => {

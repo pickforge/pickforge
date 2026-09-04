@@ -65,7 +65,7 @@ export function renderRunReport(
   records: readonly EvidenceRecord[] = [],
 ): string[] {
   const lines = [
-    `# PickLab run ${safeText(manifest.runId)}`,
+    `# Pickforge run ${safeText(manifest.runId)}`,
     "",
     `- Slug: ${safeText(manifest.slug)}`,
     `- Status: ${safeText(manifest.status)}`,
@@ -217,7 +217,7 @@ export function renderEvidenceHtml(
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PickLab run ${escapeHtml(manifest.runId)}</title>
+<title>Pickforge run ${escapeHtml(manifest.runId)}</title>
 <style>
 :root{color-scheme:light dark;font-family:system-ui,sans-serif}body{max-width:960px;margin:0 auto;padding:2rem;line-height:1.5}header{display:flex;align-items:baseline;gap:.75rem}.summary,.step{border:1px solid #8886;border-radius:.75rem;padding:1rem;margin:1rem 0}.step-number{font-weight:700;white-space:nowrap}h1,h2{margin:.25rem 0}dl{display:grid;grid-template-columns:max-content 1fr;gap:.25rem 1rem}dt{font-weight:700}dd{margin:0;overflow-wrap:anywhere}.filmstrip{display:grid;gap:1rem;margin-top:1rem}figure{margin:0}img{display:block;max-width:100%;height:auto;border:1px solid #8886;border-radius:.5rem}figcaption{font-size:.875rem;overflow-wrap:anywhere}.status-error,.status-timeout,.status-truncated{border-color:#b33}.empty{opacity:.7}
 </style>
@@ -225,7 +225,7 @@ export function renderEvidenceHtml(
 <body>
 <main>
 <section class="summary">
-<h1>PickLab run ${escapeHtml(manifest.runId)}</h1>
+<h1>Pickforge run ${escapeHtml(manifest.runId)}</h1>
 <dl>${renderMetadata("Slug", manifest.slug)}${renderMetadata("Status", manifest.status)}${renderMetadata("Created", manifest.createdAt)}${manifest.sessionId === undefined ? "" : renderMetadata("Session", manifest.sessionId)}</dl>
 </section>
 <section aria-label="Action timeline">

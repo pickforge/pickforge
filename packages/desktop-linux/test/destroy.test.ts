@@ -7,9 +7,9 @@ const FAILING_PID = 424_242;
 const STUCK_PID = 535_353;
 let allowFailingPidStop = false;
 
-vi.mock("@pickforge/picklab-core", async (importOriginal) => {
+vi.mock("@pickforge/lab-core", async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import("@pickforge/picklab-core")>();
+    await importOriginal<typeof import("@pickforge/lab-core")>();
   return {
     ...actual,
     processIdentityMatches: vi.fn(() => true),
@@ -45,16 +45,16 @@ import {
   stopProcessGroupVerified,
   updateSession,
   type EnvLike,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
   destroyDesktopSession,
   teardownDesktopSession,
 } from "../src/session.js";
 
-const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-destroy-test-"));
+const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-destroy-test-"));
 const registryEnv: EnvLike = {
   ...process.env,
-  PICKLAB_HOME: path.join(tmpRoot, "home"),
+  PICKFORGE_HOME: path.join(tmpRoot, "home"),
 };
 const projectDir = path.join(tmpRoot, "project");
 fs.mkdirSync(projectDir, { recursive: true });

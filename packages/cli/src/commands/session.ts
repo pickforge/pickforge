@@ -3,13 +3,13 @@ import {
   destroyAndroidSession,
   getAndroidSessionStatus,
   teardownAndroidSession,
-} from "@pickforge/picklab-android";
+} from "@pickforge/lab-android";
 import {
   createBrowserSession,
   destroyBrowserSession,
   getBrowserSessionStatus,
   teardownBrowserSession,
-} from "@pickforge/picklab-browser";
+} from "@pickforge/lab-browser";
 import {
   createLocalSessions,
   destroyLocalSessions,
@@ -26,13 +26,13 @@ import {
   type LocalSessionSummary,
   type LocalSessionTeardownRuntime,
   type SessionRecord,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
   createDesktopSession,
   destroyDesktopSession,
   getDesktopSessionStatus,
   teardownDesktopSession,
-} from "@pickforge/picklab-desktop-linux";
+} from "@pickforge/lab-desktop-linux";
 import {
   parseIntArg,
   resolveProjectDir,
@@ -139,7 +139,7 @@ function describeCreated(summary: LocalSessionSummary): string {
 export async function runSessionCreate(
   opts: SessionCreateOptions,
 ): Promise<number> {
-  // eslint-disable-next-line complexity -- Legacy gate debt: pickforge/picklab#60
+  // eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
   return runReported(opts, async () => {
     const projectDir = resolveProjectDir(opts);
     const config = await loadConfig(projectDir);

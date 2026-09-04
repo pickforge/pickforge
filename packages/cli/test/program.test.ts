@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { buildProgram } from "../src/program.js";
 
-describe("@pickforge/picklab", () => {
-  it("builds the picklab program", () => {
+describe("pickforge", () => {
+  it("builds the pickforge-lab program", () => {
     const program = buildProgram();
-    expect(program.name()).toBe("picklab");
-    expect(program.version()).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(program.name()).toBe("pickforge-lab");
+    expect(program.version()).toBe("0.4.0-alpha.1");
   });
 
   it("exposes only project scope on the static browser relay command", () => {

@@ -1,9 +1,10 @@
-export type AgentKind = "codex" | "claude-code" | "cursor";
+export type AgentKind = "codex" | "claude-code" | "cursor" | "pi";
 
 export const AGENT_KINDS: readonly AgentKind[] = [
   "codex",
   "claude-code",
   "cursor",
+  "pi",
 ];
 
 export interface McpServerEntry {
@@ -15,6 +16,7 @@ export interface ChangeResult {
   configPath: string;
   changed: boolean;
   backupPath?: string;
+  migratedLegacyEntries?: string[];
   instructions?: string;
   warning?: string;
 }

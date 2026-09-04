@@ -8,7 +8,7 @@ import {
   type EnvLike,
   type ProcessIdentity,
   type RunCommandResult,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import { parseDisplayNumber } from "./display.js";
 import { createIsolatedDesktopEnvironment } from "./environment.js";
 import { sleep } from "./util.js";
@@ -148,14 +148,14 @@ export async function execApp(opts: ExecAppOptions): Promise<ExecAppHandle> {
             "but a daemonising child may have escaped the lab and opened on your real desktop. " +
             "Check your real desktop, find any stray process with `pgrep -af <app-name>`, " +
             "and stop it with `kill <pid>`. " +
-            "Containment is tracked at https://github.com/pickforge/picklab/issues/85. " +
+            "Containment is tracked at https://github.com/pickforge/pickforge/issues/85. " +
             `Log: ${app.logPath}`,
         );
       }
       if (Date.now() >= deadline) {
         throw new Error(
           `No new client window appeared on ${opts.display} within ${timeoutMs}ms ` +
-            `while ${opts.command} was still running. PickLab stopped process ` +
+            `while ${opts.command} was still running. Pickforge stopped process ` +
             `group ${app.pid} because the app may have escaped the lab and ` +
             "opened on your real desktop. If this was a slow first build, " +
             "retry with `--window-timeout <ms>`. " +
@@ -176,8 +176,8 @@ export function noClientWindowsWarning(
   return (
     `No client windows are visible on ${display}. If the screenshot is black, ` +
     "the app may have escaped the lab and opened on your real desktop. " +
-    `Start it with \`picklab desktop exec --session ${sessionId} -- <command>\` ` +
-    `or run \`eval "$(picklab desktop env --session ${sessionId})"\` before launching it.`
+    `Start it with \`pickforge-lab desktop exec --session ${sessionId} -- <command>\` ` +
+    `or run \`eval "$(pickforge-lab desktop env --session ${sessionId})"\` before launching it.`
   );
 }
 

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runCommand, type EnvLike } from "@pickforge/picklab-core";
+import { runCommand, type EnvLike } from "@pickforge/lab-core";
 import {
   assertSystemImageId,
   findSdkTool,
@@ -9,7 +9,7 @@ import {
   systemImageInstalled,
 } from "./sdk.js";
 
-export const DEFAULT_AVD_NAME = "picklab-avd";
+export const DEFAULT_AVD_NAME = "pickforge-avd";
 
 const AVD_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const CREATE_AVD_TIMEOUT_MS = 120_000;

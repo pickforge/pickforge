@@ -9,7 +9,7 @@ const SECRET_QUESTION_PATTERN =
 const SECRET_GUIDANCE =
   "This looks like a request for a secret (password, API key, token, 2FA " +
   "code, or other credential). Never collect secrets through this tool. " +
-  "Ask the user to run `picklab watch --control` to take temporary " +
+  "Ask the user to run `pickforge-lab watch --control` to take temporary " +
   "supervised control of the desktop over a writable VNC session, enter " +
   "the secret themselves, and return control (or into the environment), " +
   'then confirm out-of-band with kind "confirm" (e.g. "I\'ve entered the ' +

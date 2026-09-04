@@ -12,7 +12,7 @@ import {
   resolveRunStorage,
   type EnvLike,
   type SessionRecord,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
   runDevtoolsMcpRelay,
   type DevtoolsMcpExecutable,
@@ -33,7 +33,7 @@ let projectDir: string;
 
 beforeEach(async () => {
   root = await fs.promises.mkdtemp(
-    path.join(os.tmpdir(), "picklab-evidence-integration-"),
+    path.join(os.tmpdir(), "pickforge-lab-evidence-integration-"),
   );
   projectDir = path.join(root, "project");
   await fs.promises.mkdir(projectDir);
@@ -150,7 +150,7 @@ describe("browser evidence integration", () => {
       "utf8",
     );
     const registryEnv: EnvLike = {
-      PICKLAB_HOME: path.join(root, "picklab-home"),
+      PICKFORGE_HOME: path.join(root, "pickforge-home"),
     };
     const sessionId = (
       await createSession({ type: "browser", projectDir }, registryEnv)

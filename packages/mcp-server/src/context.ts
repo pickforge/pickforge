@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
+  readPickforgeEnv,
   resolveConfinedPath,
   resolveRunnableSession,
   resolveScreenshotTarget as resolveTarget,
@@ -9,14 +10,14 @@ import {
   type RunnableSessionType,
   type ScreenshotTarget,
   type SessionRecord,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 
 export {
   captureToTarget,
   requireDisplay,
   type RunnableSessionType,
   type ScreenshotTarget,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 
 const MAX_INLINE_IMAGE_BYTES = 2 * 1024 * 1024;
 
@@ -35,7 +36,7 @@ export function resolveContext(
 ): ServerContext {
   const env = opts.env ?? process.env;
   const projectDir = path.resolve(
-    opts.projectDir ?? env.PICKLAB_PROJECT_DIR ?? process.cwd(),
+    opts.projectDir ?? readPickforgeEnv(env, "PROJECT_DIR") ?? process.cwd(),
   );
   return { projectDir, env };
 }

@@ -2,12 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   isPidAlive,
-  picklabHome,
+  pickforgeHome,
   runCommand,
   startDaemon,
   stopPid,
   type EnvLike,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
   assertSerial,
   listDevices,
@@ -126,7 +126,7 @@ export function pickConsolePort(usedSerials: readonly string[]): number {
   );
 }
 
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function waitForBoot(opts: WaitForBootOptions): Promise<void> {
   assertSerial(opts.serial);
   const timeoutMs = opts.timeoutMs ?? DEFAULT_BOOT_TIMEOUT_MS;
@@ -182,7 +182,7 @@ export function consolePortLockPath(
   port: number,
   registryEnv: EnvLike = process.env,
 ): string {
-  return path.join(picklabHome(registryEnv), "ports", `emulator-${port}.lock`);
+  return path.join(pickforgeHome(registryEnv), "ports", `emulator-${port}.lock`);
 }
 
 function readLockOwnerPid(lockPath: string): number | null {
@@ -301,7 +301,7 @@ export async function startEmulator(
     if (!tryReserveConsolePort(opts.port, registryEnv)) {
       throw new Error(
         `Console port ${opts.port} is already reserved by another ` +
-          `PickLab emulator (${consolePortLockPath(opts.port, registryEnv)})`,
+          `Pickforge emulator (${consolePortLockPath(opts.port, registryEnv)})`,
       );
     }
     port = opts.port;
@@ -374,7 +374,7 @@ export async function stopEmulator(
   return stopped;
 }
 
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 async function stopEmulatorProcess(
   opts: StopEmulatorOptions,
 ): Promise<boolean> {

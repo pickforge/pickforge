@@ -16,11 +16,11 @@ import {
   updateSession,
   type CreateSessionInput,
   type EnvLike,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
   findOnPath,
   startXvfb,
-} from "@pickforge/picklab-desktop-linux";
+} from "@pickforge/lab-desktop-linux";
 import {
   browserSessionLogDir,
   browserRuntimeLayout,
@@ -47,12 +47,12 @@ let projectDir: string;
 let registryEnv: EnvLike;
 
 beforeEach(() => {
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-browser-sess-"));
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-browser-sess-"));
   home = path.join(tmp, "home");
   projectDir = path.join(tmp, "project");
   fs.mkdirSync(home, { recursive: true });
   fs.mkdirSync(projectDir, { recursive: true });
-  registryEnv = { PICKLAB_HOME: home };
+  registryEnv = { PICKFORGE_HOME: home };
 });
 
 afterEach(() => {
@@ -303,7 +303,7 @@ describe.skipIf(!hasXvfb)("createBrowserSession (fake binaries)", () => {
       expect(dump.AWS_SECRET_ACCESS_KEY).toBeUndefined();
       expect(dump.DISPLAY).toBe(session.display);
       expect(dump.HOME).toBe(path.join(session.logDir, "home"));
-      expect(dump.WAYLAND_DISPLAY).toBe("picklab-no-wayland");
+      expect(dump.WAYLAND_DISPLAY).toBe("pickforge-no-wayland");
     } finally {
       await destroyBrowserSession(session.id, registryEnv).catch(() => {});
     }
@@ -809,7 +809,7 @@ describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
     expect(await getSession(id, registryEnv)).toBeUndefined();
   }, TEST_TIMEOUT_MS);
 
-  // eslint-disable-next-line complexity -- Legacy gate debt: pickforge/picklab#60
+  // eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
   it("preserves retry state or completes cleanup across the supervisor reap race", async () => {
     const sessionsPath = path.join(home, "sessions");
     fs.mkdirSync(sessionsPath, { recursive: true });
@@ -1006,7 +1006,7 @@ describe("browser record inspection (no live processes)", () => {
         browserStartTimeTicks: 1,
         binaryPath: "/usr/bin/chromium",
         profileMode: "ephemeral",
-        profileDir: "/tmp/picklab-stale",
+        profileDir: "/tmp/pickforge-lab-stale",
         cdpPort: 9222,
       },
     });

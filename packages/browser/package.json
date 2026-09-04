@@ -1,8 +1,8 @@
 {
-  "name": "@pickforge/picklab-browser",
-  "version": "0.3.0",
+  "name": "@pickforge/lab-browser",
+  "version": "0.4.0-alpha.1",
   "private": true,
-  "description": "Isolated headed Chrome/Chromium browser sessions for PickLab",
+  "description": "Isolated headed Chrome/Chromium browser sessions for Pickforge",
   "type": "module",
   "engines": {
     "node": "^20.19.0 || ^22.12.0 || >=23.0.0"
@@ -17,8 +17,8 @@
     "build": "tsup src/index.ts --format esm --dts --clean"
   },
   "dependencies": {
-    "@pickforge/picklab-core": "*",
-    "@pickforge/picklab-desktop-linux": "*",
+    "@pickforge/lab-core": "*",
+    "@pickforge/lab-desktop-linux": "*",
     "chrome-devtools-mcp": "1.5.0"
   }
 }

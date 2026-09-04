@@ -10,7 +10,7 @@ import {
 } from "../src/target.js";
 
 let home: string;
-let env: { PICKLAB_HOME: string };
+let env: { PICKFORGE_HOME: string };
 
 const HINTS = {
   consumerLabel: "test",
@@ -40,7 +40,7 @@ async function createRunningBrowser(projectDir: string): Promise<string> {
         browserStartTimeTicks: 5,
         binaryPath: "/usr/bin/chromium",
         profileMode: "ephemeral",
-        profileDir: "/tmp/picklab-profile",
+        profileDir: "/tmp/pickforge-lab-profile",
         cdpPort: 1,
       },
     },
@@ -50,8 +50,8 @@ async function createRunningBrowser(projectDir: string): Promise<string> {
 }
 
 beforeEach(async () => {
-  home = await fs.promises.mkdtemp(path.join(os.tmpdir(), "picklab-target-"));
-  env = { PICKLAB_HOME: home };
+  home = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-target-"));
+  env = { PICKFORGE_HOME: home };
 });
 
 afterEach(async () => {
@@ -212,7 +212,7 @@ describe("resolveDesktopCapableSession", () => {
         projectDir: "/proj-a",
       }),
     ).rejects.toThrow(
-      /No running desktop session for this project; create one with: picklab session create --type desktop/,
+      /No running desktop session for this project; create one with: pickforge-lab session create --type desktop/,
     );
   });
 
@@ -306,10 +306,10 @@ describe("resolveScreenshotTarget out confinement", () => {
 
   it("rejects an out whose path symlinks outside the base dir", async () => {
     const project = await fs.promises.mkdtemp(
-      path.join(os.tmpdir(), "picklab-proj-"),
+      path.join(os.tmpdir(), "pickforge-lab-proj-"),
     );
     const outside = await fs.promises.mkdtemp(
-      path.join(os.tmpdir(), "picklab-outside-"),
+      path.join(os.tmpdir(), "pickforge-lab-outside-"),
     );
     await fs.promises.symlink(outside, path.join(project, "link"));
     try {
@@ -328,7 +328,7 @@ describe("resolveScreenshotTarget out confinement", () => {
 
   it("rejects an out that is a dangling symlink pointing outside the base dir", async () => {
     const project = await fs.promises.mkdtemp(
-      path.join(os.tmpdir(), "picklab-proj-"),
+      path.join(os.tmpdir(), "pickforge-lab-proj-"),
     );
     // Dangling symlink: target does not exist, so realpath cannot resolve it,
     // but a subsequent write would follow it and create the outside file.

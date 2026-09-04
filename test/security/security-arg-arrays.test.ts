@@ -135,7 +135,7 @@ describe("behavioral: core runCommand", () => {
 });
 
 describe("behavioral: desktop input builders (pure argv)", () => {
-  const hostile = "$(touch /tmp/picklab-canary) `evil` ; rm -rf /tmp/x | cat";
+  const hostile = "$(touch /tmp/pickforge-lab-canary) `evil` ; rm -rf /tmp/x | cat";
 
   it("keeps hostile text as a single argv element after --", () => {
     expect(buildTypeArgs(hostile)).toEqual([
@@ -322,7 +322,7 @@ describe("behavioral: MCP android_run_adb (InMemoryTransport + recorder adb)", (
       projectDir: dirs.projectDir,
       env: {
         HOME: dirs.home,
-        PICKLAB_HOME: dirs.home,
+        PICKFORGE_HOME: dirs.home,
         PATH: dirs.binDir,
         ANDROID_HOME: sdk,
       },
@@ -356,7 +356,7 @@ describe("behavioral: MCP android_run_adb (InMemoryTransport + recorder adb)", (
   });
 });
 
-describe("behavioral: built CLI (spawned picklab binary)", () => {
+describe("behavioral: built CLI (spawned pickforge-lab binary)", () => {
   let dirs: LabDirs;
   let record: string;
   let canary: string;
@@ -370,7 +370,7 @@ describe("behavioral: built CLI (spawned picklab binary)", () => {
     const sdk = makeRecorderAdbSdk(dirs.root, { record });
     env = {
       HOME: dirs.home,
-      PICKLAB_HOME: dirs.home,
+      PICKFORGE_HOME: dirs.home,
       PATH: dirs.binDir,
       ANDROID_HOME: sdk,
     };
@@ -384,7 +384,7 @@ describe("behavioral: built CLI (spawned picklab binary)", () => {
     removeLabDirs(dirs);
   });
 
-  it("escapes hostile text typed through picklab android type", async () => {
+  it("escapes hostile text typed through pickforge-lab android type", async () => {
     const result = await runBuiltCli(
       [
         "android",
@@ -412,7 +412,7 @@ describe("behavioral: built CLI (spawned picklab binary)", () => {
     expect(fs.existsSync(canary)).toBe(false);
   });
 
-  it("passes hostile raw adb args through picklab android adb verbatim", async () => {
+  it("passes hostile raw adb args through pickforge-lab android adb verbatim", async () => {
     const result = await runBuiltCli(
       [
         "android",

@@ -14,7 +14,7 @@ import {
   readProcessIdentity,
   stopPid,
   updateSession,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
   desktopSessionLogDir,
   destroyDesktopSession,
@@ -52,7 +52,7 @@ async function executable(name: string, source: string): Promise<string> {
 }
 
 beforeEach(async () => {
-  root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "picklab-viewer-"));
+  root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-viewer-"));
   binDir = path.join(root, "bin");
   home = path.join(root, "home");
   await fs.promises.mkdir(binDir, { recursive: true });
@@ -177,7 +177,7 @@ describe("ensureSessionVnc", () => {
       `const fs = require("node:fs");\nconst net = require("node:net");\nconst args = process.argv.slice(2);\nconst port = Number(args[args.indexOf("-rfbport") + 1]);\nfs.appendFileSync(process.env.STARTS_PATH, JSON.stringify(args) + "\\n");\nconst server = net.createServer((socket) => socket.end());\nserver.listen(port, "127.0.0.1");\nprocess.on("SIGTERM", () => server.close(() => process.exit(0)));\n`,
     );
     await executable("remote-viewer", "process.exit(0);\n");
-    const registryEnv = { PICKLAB_HOME: home };
+    const registryEnv = { PICKFORGE_HOME: home };
     const record = await createSession(
       {
         type: "desktop",
@@ -255,7 +255,7 @@ describe("ensureSessionVnc", () => {
     if (childIdentity === undefined) {
       throw new Error("helper process identity missing");
     }
-    const registryEnv = { PICKLAB_HOME: home };
+    const registryEnv = { PICKFORGE_HOME: home };
     const record = await createSession(
       { type: "desktop", projectDir: root },
       registryEnv,
@@ -294,7 +294,7 @@ describe("ensureSessionVnc", () => {
     spawnedPids.push(pid);
     const identity = readProcessIdentity(pid);
     if (identity === undefined) throw new Error("helper identity missing");
-    const registryEnv = { PICKLAB_HOME: home };
+    const registryEnv = { PICKFORGE_HOME: home };
     const record = await createSession(
       {
         type: "desktop",
@@ -358,7 +358,7 @@ describe("ensureSessionVnc", () => {
     server.listen(syntheticVncPort(), "127.0.0.1");
     await listening;
     await executable("x11vnc", "process.exit(99);\n");
-    const registryEnv = { PICKLAB_HOME: home };
+    const registryEnv = { PICKFORGE_HOME: home };
     const record = await createSession(
       {
         type: "desktop",
@@ -388,7 +388,7 @@ describe("ensureSessionVnc", () => {
       "x11vnc",
       `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "started");\nprocess.exit(1);\n`,
     );
-    const registryEnv = { PICKLAB_HOME: home };
+    const registryEnv = { PICKFORGE_HOME: home };
     const record = await createSession(
       {
         type: "desktop",
@@ -425,7 +425,7 @@ describe("ensureSessionVnc", () => {
       "x11vnc",
       `const net = require("node:net");\nconst args = process.argv.slice(2);\nconst port = Number(args[args.indexOf("-rfbport") + 1]);\nconst server = net.createServer((socket) => socket.end());\nserver.listen(port, "127.0.0.1");\nprocess.on("SIGTERM", () => server.close(() => process.exit(0)));\n`,
     );
-    const registryEnv = { PICKLAB_HOME: home };
+    const registryEnv = { PICKFORGE_HOME: home };
     const record = await createSession(
       {
         type: "desktop",

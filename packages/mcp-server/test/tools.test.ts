@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { isProcessGroupAlive } from "@pickforge/picklab-core";
+import { isProcessGroupAlive } from "@pickforge/lab-core";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { imageContent } from "../src/context.js";
@@ -58,7 +58,7 @@ beforeEach(async () => {
   dirs = makeLabDirs();
   lab = await connectLab({
     projectDir: dirs.projectDir,
-    env: { PICKLAB_HOME: dirs.home, PATH: dirs.binDir },
+    env: { PICKFORGE_HOME: dirs.home, PATH: dirs.binDir },
   });
 });
 
@@ -68,7 +68,7 @@ afterEach(async () => {
 });
 
 describe("tool inventory", () => {
-  it("lists every PickLab tool with an input schema and description", async () => {
+  it("lists every Pickforge tool with an input schema and description", async () => {
     const { tools } = await lab.client.listTools();
     const names = tools.map((tool) => tool.name);
     for (const expected of EXPECTED_TOOLS) {
@@ -313,7 +313,7 @@ describe("desktop isolation tools", () => {
       path.join(dirs.binDir, "xdotool"),
       'case "$1" in\n  search)\n' +
         `    if [ -f "${searchMarker}" ]; then echo 4242; else : > "${searchMarker}"; exit 1; fi ;;\n` +
-        "  getwindowname) echo picklab-mcp-window ;;\nesac",
+        "  getwindowname) echo pickforge-mcp-window ;;\nesac",
     );
     const command = path.join(dirs.root, "mcp-exec");
     const capture = path.join(dirs.root, "mcp-exec.txt");
@@ -337,7 +337,7 @@ describe("desktop isolation tools", () => {
       expect(report.processGroupId).toBe(report.pid);
       expect(report.windowCount).toBe(1);
       expect(report.windows).toEqual([
-        { id: "4242", name: "picklab-mcp-window" },
+        { id: "4242", name: "pickforge-mcp-window" },
       ]);
       expect(fs.readFileSync(capture, "utf8")).toBe(
         "DISPLAY=:987\nGDK_BACKEND=x11\nARG=hello world\n",
@@ -367,7 +367,7 @@ describe("desktop isolation tools", () => {
 
     expect(result.isError).toBe(true);
     const report = parseToolJson(result);
-    expect(report.errors.join("\n")).toContain("PickLab stopped process group");
+    expect(report.errors.join("\n")).toContain("Pickforge stopped process group");
     expect(report.errors.join("\n")).toContain("--window-timeout");
     const processGroupId = Number(fs.readFileSync(pidFile, "utf8").trim());
     const deadline = Date.now() + 2_000;
@@ -498,16 +498,16 @@ describe("inline image content", () => {
 });
 
 describe("server context", () => {
-  it("falls back to PICKLAB_PROJECT_DIR from the environment", async () => {
+  it("falls back to PICKFORGE_PROJECT_DIR from the environment", async () => {
     const projectDir = path.join(dirs.root, "env-project");
     const server = createMcpServer({
       env: {
-        PICKLAB_HOME: dirs.home,
+        PICKFORGE_HOME: dirs.home,
         PATH: dirs.binDir,
-        PICKLAB_PROJECT_DIR: projectDir,
+        PICKFORGE_PROJECT_DIR: projectDir,
       },
     });
-    const client = new Client({ name: "picklab-test", version: "0.0.0" });
+    const client = new Client({ name: "pickforge-lab-test", version: "0.0.0" });
     const [clientTransport, serverTransport] =
       InMemoryTransport.createLinkedPair();
     await Promise.all([

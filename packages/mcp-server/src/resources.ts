@@ -17,7 +17,7 @@ import {
   sortEvidenceRecords,
   type RunCatalog,
   type RunCatalogEntry,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import type { ServerContext } from "./context.js";
 import { sessionStatusEntry } from "./tools/session.js";
 
@@ -208,14 +208,13 @@ async function listRunFiles(
   return entries;
 }
 
-// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/picklab#60
-export function registerResources(server: McpServer, ctx: ServerContext): void {
+function registerResource1(server: McpServer, ctx: ServerContext): void {
   server.registerResource(
     "runs",
-    "picklab://runs",
+    "pickforge://runs",
     {
-      title: "PickLab runs",
-      description: "Index of recorded runs (see picklab doctor for the resolved storage path)",
+      title: "Pickforge runs",
+      description: "Index of recorded runs (see pickforge-lab doctor for the resolved storage path)",
       mimeType: "application/json",
     },
     async (uri) => {
@@ -238,15 +237,17 @@ export function registerResources(server: McpServer, ctx: ServerContext): void {
       };
     },
   );
+}
 
+function registerResource2(server: McpServer, ctx: ServerContext): void {
   server.registerResource(
     "run-manifest",
-    new ResourceTemplate("picklab://runs/{runId}/manifest", {
+    new ResourceTemplate("pickforge://runs/{runId}/manifest", {
       list: async () => ({
         resources: (
           await (await openRunCatalog(ctx.projectDir, ctx.env)).list()
         ).map(({ manifest }) => ({
-          uri: `picklab://runs/${manifest.runId}/manifest`,
+          uri: `pickforge://runs/${manifest.runId}/manifest`,
           name: `Run ${manifest.runId} manifest`,
           mimeType: "application/json",
         })),
@@ -275,14 +276,16 @@ export function registerResources(server: McpServer, ctx: ServerContext): void {
       };
     },
   );
+}
 
+function registerResource3(server: McpServer, ctx: ServerContext): void {
   server.registerResource(
     "run-actions",
-    new ResourceTemplate("picklab://runs/{runId}/actions", {
+    new ResourceTemplate("pickforge://runs/{runId}/actions", {
       list: async () => ({
         resources: (await listEvidenceRunFiles(ctx, EVIDENCE_ACTION_LOG)).map(
           (runId) => ({
-            uri: `picklab://runs/${runId}/actions`,
+            uri: `pickforge://runs/${runId}/actions`,
             name: `Run ${runId} actions`,
             mimeType: "application/json",
           }),
@@ -328,14 +331,16 @@ export function registerResources(server: McpServer, ctx: ServerContext): void {
       };
     },
   );
+}
 
+function registerResource4(server: McpServer, ctx: ServerContext): void {
   server.registerResource(
     "run-report",
-    new ResourceTemplate("picklab://runs/{runId}/report", {
+    new ResourceTemplate("pickforge://runs/{runId}/report", {
       list: async () => ({
         resources: (await listEvidenceRunFiles(ctx, EVIDENCE_REPORT)).map(
           (runId) => ({
-            uri: `picklab://runs/${runId}/report`,
+            uri: `pickforge://runs/${runId}/report`,
             name: `Run ${runId} HTML report`,
             mimeType: "text/html",
           }),
@@ -371,13 +376,15 @@ export function registerResources(server: McpServer, ctx: ServerContext): void {
       };
     },
   );
+}
 
+function registerResource5(server: McpServer, ctx: ServerContext): void {
   server.registerResource(
     "run-screenshot",
-    new ResourceTemplate("picklab://runs/{runId}/screenshots/{name}", {
+    new ResourceTemplate("pickforge://runs/{runId}/screenshots/{name}", {
       list: async () => ({
         resources: (await listRunFiles(ctx, "screenshots")).map((entry) => ({
-          uri: `picklab://runs/${entry.runId}/screenshots/${entry.name}`,
+          uri: `pickforge://runs/${entry.runId}/screenshots/${entry.name}`,
           name: `Run ${entry.runId} screenshot ${entry.name}`,
           mimeType: "image/png",
         })),
@@ -444,13 +451,15 @@ export function registerResources(server: McpServer, ctx: ServerContext): void {
       };
     },
   );
+}
 
+function registerResource6(server: McpServer, ctx: ServerContext): void {
   server.registerResource(
     "run-log",
-    new ResourceTemplate("picklab://runs/{runId}/logs/{name}", {
+    new ResourceTemplate("pickforge://runs/{runId}/logs/{name}", {
       list: async () => ({
         resources: (await listRunFiles(ctx, "logs")).map((entry) => ({
-          uri: `picklab://runs/${entry.runId}/logs/${entry.name}`,
+          uri: `pickforge://runs/${entry.runId}/logs/${entry.name}`,
           name: `Run ${entry.runId} log ${entry.name}`,
           mimeType: "text/plain",
         })),
@@ -509,13 +518,15 @@ export function registerResources(server: McpServer, ctx: ServerContext): void {
       };
     },
   );
+}
 
+function registerResource7(server: McpServer, ctx: ServerContext): void {
   server.registerResource(
     "session-status",
-    new ResourceTemplate("picklab://sessions/{sessionId}/status", {
+    new ResourceTemplate("pickforge://sessions/{sessionId}/status", {
       list: async () => ({
         resources: (await listSessions(ctx.env)).map((record) => ({
-          uri: `picklab://sessions/${record.id}/status`,
+          uri: `pickforge://sessions/${record.id}/status`,
           name: `Session ${record.id} status`,
           mimeType: "application/json",
         })),
@@ -544,4 +555,14 @@ export function registerResources(server: McpServer, ctx: ServerContext): void {
       };
     },
   );
+}
+
+export function registerResources(server: McpServer, ctx: ServerContext): void {
+  registerResource1(server, ctx);
+  registerResource2(server, ctx);
+  registerResource3(server, ctx);
+  registerResource4(server, ctx);
+  registerResource5(server, ctx);
+  registerResource6(server, ctx);
+  registerResource7(server, ctx);
 }

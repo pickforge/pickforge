@@ -69,11 +69,11 @@ export function makeRecorderAdbSdk(
     `} >> ${shellQuote(opts.record)}`,
     'case "$*" in',
     "  *\"screencap -p\"*) printf '\\211PNG\\r\\n\\032\\n' ;;",
-    '  *"uiautomator dump"*) echo "UI hierchary dumped to: /sdcard/picklab-ui.xml" ;;',
+    '  *"uiautomator dump"*) echo "UI hierchary dumped to: /sdcard/pickforge-lab-ui.xml" ;;',
   ];
   if (opts.uiTreeXml !== undefined) {
     lines.push(
-      `  *"cat /sdcard/picklab-ui.xml"*) printf '%s' ${shellQuote(opts.uiTreeXml)} ;;`,
+      `  *"cat /sdcard/pickforge-lab-ui.xml"*) printf '%s' ${shellQuote(opts.uiTreeXml)} ;;`,
     );
   }
   if (opts.logcatLines !== undefined) {
@@ -123,7 +123,7 @@ export const cliDistPath = path.join(
   packagesDir,
   "cli",
   "dist",
-  "picklab.js",
+  "pickforge-lab.js",
 );
 
 export function runBuiltCli(

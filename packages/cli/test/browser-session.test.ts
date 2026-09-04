@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
-import { findOnPath } from "@pickforge/picklab-desktop-linux";
+import { findOnPath } from "@pickforge/lab-desktop-linux";
 import {
   fakePath,
   writeExecutable,
@@ -15,12 +15,12 @@ import {
 } from "../../browser/test/fakes.js";
 import { ensureCliBuilt } from "./build-once.js";
 
-const cliPath = fileURLToPath(new URL("../dist/picklab.js", import.meta.url));
+const cliPath = fileURLToPath(new URL("../dist/pickforge-lab.js", import.meta.url));
 const mcpPath = fileURLToPath(
-  new URL("../dist/picklab-mcp.js", import.meta.url),
+  new URL("../dist/pickforge-mcp.js", import.meta.url),
 );
 const hasXvfb = findOnPath("Xvfb") !== null;
-const PLANTED_SECRET = "picklab-cli-browser-secret";
+const PLANTED_SECRET = "pickforge-lab-cli-browser-secret";
 
 interface CliResult {
   code: number | null;
@@ -37,7 +37,7 @@ beforeAll(async () => {
 }, 300_000);
 
 beforeEach(() => {
-  root = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-cli-browser-"));
+  root = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-cli-browser-"));
   projectDir = path.join(root, "project");
   const home = path.join(root, "home");
   const binDir = path.join(root, "bin");
@@ -46,7 +46,7 @@ beforeEach(() => {
   writeFakeChrome(binDir, "ready");
   env = {
     HOME: home,
-    PICKLAB_HOME: home,
+    PICKFORGE_HOME: home,
     PATH: fakePath(binDir),
     SECRET_TOKEN: PLANTED_SECRET,
   };
@@ -249,7 +249,7 @@ describe.skipIf(!hasXvfb)("built CLI browser lifecycle", () => {
         stderr: "pipe",
       });
       const client = new Client({
-        name: "picklab-devtools-relay-smoke",
+        name: "pickforge-lab-devtools-relay-smoke",
         version: "0.0.0",
       });
       await client.connect(transport);
@@ -284,7 +284,7 @@ describe.skipIf(!hasXvfb)("built MCP browser lifecycle", () => {
         stderr: "pipe",
       });
       const client = new Client({
-        name: "picklab-built-browser-test",
+        name: "pickforge-lab-built-browser-test",
         version: "0.0.0",
       });
       await client.connect(transport);

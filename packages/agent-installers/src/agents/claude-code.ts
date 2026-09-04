@@ -1,10 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
-import { runCommand, type EnvLike } from "@pickforge/picklab-core";
+import { runCommand, type EnvLike } from "@pickforge/lab-core";
 import {
   jsonFileMcpServerState,
   mergeMcpServerIntoJsonFile,
+  ownedLegacyMcpServerNamesInJsonFile,
   removeMcpServerFromJsonFile,
+  replaceOwnedLegacyMcpServersInJsonFile,
 } from "../jsonConfig.js";
 import {
   BROWSER_MCP_SERVER_NAME,
@@ -16,8 +18,8 @@ import type { ChangeResult, RegistrationState } from "../types.js";
 import { homeDir } from "./home.js";
 
 export const CLAUDE_CODE_MANUAL_COMMAND =
-  "claude mcp add --scope user picklab -- picklab mcp serve && " +
-  "claude mcp add --scope user picklab-browser -- picklab browser devtools-mcp";
+  "claude mcp add --scope user pickforge-lab -- pickforge-lab mcp serve && " +
+  "claude mcp add --scope user pickforge-lab-browser -- pickforge-lab browser devtools-mcp";
 
 const DIRECT_EDIT_WARNING =
   "the claude binary was not found on PATH, so the config file was edited " +
@@ -163,26 +165,46 @@ export async function claudeCodeIsRegistered(
   return jsonFileMcpServerState(configPath);
 }
 
+async function linkClaudeCodeWithBinary(
+  claudeBin: string,
+  configPath: string,
+  env: EnvLike,
+): Promise<ChangeResult> {
+  const migratedLegacyEntries =
+    await ownedLegacyMcpServerNamesInJsonFile(configPath);
+  if (
+    migratedLegacyEntries.length === 0 &&
+    (await claudeCodeIsRegistered(configPath)) === true
+  ) {
+    return { configPath, changed: false };
+  }
+  let changed = false;
+  for (const name of migratedLegacyEntries) {
+    changed = (await removeClaudeMcpServer(claudeBin, env, name)) || changed;
+  }
+  for (const server of CLAUDE_SERVERS) {
+    changed =
+      (await addClaudeMcpServerOrRepair(claudeBin, configPath, env, server)) ||
+      changed;
+  }
+  return {
+    configPath,
+    changed,
+    ...(migratedLegacyEntries.length === 0 ? {} : { migratedLegacyEntries }),
+  };
+}
+
 export async function linkClaudeCode(
   configPath: string,
   env: EnvLike = process.env,
 ): Promise<ChangeResult> {
   const claudeBin = findClaudeBinary(env);
   if (claudeBin !== undefined) {
-    if ((await claudeCodeIsRegistered(configPath)) === true) {
-      return { configPath, changed: false };
-    }
-    let changed = false;
-    for (const server of CLAUDE_SERVERS) {
-      changed =
-        (await addClaudeMcpServerOrRepair(
-          claudeBin,
-          configPath,
-          env,
-          server,
-        )) || changed;
-    }
-    return { configPath, changed };
+    return linkClaudeCodeWithBinary(claudeBin, configPath, env);
+  }
+  const migration = await replaceOwnedLegacyMcpServersInJsonFile(configPath);
+  if (migration.changed) {
+    return { ...migration, warning: DIRECT_EDIT_WARNING };
   }
   let exists = false;
   try {

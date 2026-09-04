@@ -7,7 +7,7 @@ import {
   destroySessionRecord,
   listSessions,
   type EnvLike,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 
 const PARTIAL_PID = 4_194_301;
 
@@ -44,10 +44,10 @@ afterEach(() => {
 
 describe("desktop partial startup ownership", () => {
   it("persists a retryable error record when Xvfb cleanup is unconfirmed", async () => {
-    root = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-desktop-startup-"));
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-desktop-startup-"));
     const env: EnvLike = {
       ...process.env,
-      PICKLAB_HOME: path.join(root, "home"),
+      PICKFORGE_HOME: path.join(root, "home"),
     };
     await expect(
       createDesktopSession({

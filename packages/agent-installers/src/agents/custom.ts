@@ -3,10 +3,15 @@ import path from "node:path";
 import {
   agentsDir,
   ensureDir,
+  legacyAgentsDirs,
+  listDirSafe,
+  resolveReadablePath,
   writeFileAtomic,
   type EnvLike,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
+  LEGACY_MCP_SERVER_NAME,
+  LEGACY_SHARED_SNIPPET_BASENAMES,
   MCP_SERVER_NAME,
   renderJsonSnippet,
   SHARED_SNIPPET_BASENAMES,
@@ -18,8 +23,8 @@ const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const RESERVED_NAMES = new Set<string>([
   ...AGENT_KINDS,
   "state",
-  ...SHARED_SNIPPET_BASENAMES.map((basename) =>
-    basename.replace(/\.[^.]+$/, ""),
+  ...[...SHARED_SNIPPET_BASENAMES, ...LEGACY_SHARED_SNIPPET_BASENAMES].map(
+    (basename) => basename.replace(/\.[^.]+$/, ""),
   ),
 ]);
 
@@ -99,7 +104,9 @@ function entryFromSnippet(raw: string): McpServerEntry | undefined {
   if (!isPlainObject(parsed) || !isPlainObject(parsed.mcpServers)) {
     return undefined;
   }
-  const entry = parsed.mcpServers[MCP_SERVER_NAME];
+  const entry =
+    parsed.mcpServers[MCP_SERVER_NAME] ??
+    parsed.mcpServers[LEGACY_MCP_SERVER_NAME];
   if (!isPlainObject(entry) || typeof entry.command !== "string") {
     return undefined;
   }
@@ -112,23 +119,25 @@ function entryFromSnippet(raw: string): McpServerEntry | undefined {
 export async function listCustomAgents(
   env: EnvLike = process.env,
 ): Promise<CustomAgent[]> {
-  let entries: string[];
-  try {
-    entries = await fs.promises.readdir(agentsDir(env));
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "ENOTDIR") {
-      return [];
-    }
-    throw error;
-  }
-  const sharedBasenames = new Set<string>(SHARED_SNIPPET_BASENAMES);
+  const primaryDir = agentsDir(env);
+  const legacyDirs = legacyAgentsDirs(env);
+  const directoryEntries = await Promise.all(
+    [primaryDir, ...legacyDirs].map((dir) => listDirSafe(dir)),
+  );
+  const entries = [...new Set(directoryEntries.flat())].sort();
+  const sharedBasenames = new Set<string>([
+    ...SHARED_SNIPPET_BASENAMES,
+    ...LEGACY_SHARED_SNIPPET_BASENAMES,
+  ]);
   const agents: CustomAgent[] = [];
-  for (const basename of entries.sort()) {
+  for (const basename of entries) {
     if (!basename.endsWith(".json") || sharedBasenames.has(basename)) {
       continue;
     }
-    const configPath = path.join(agentsDir(env), basename);
+    const configPath = await resolveReadablePath(
+      path.join(primaryDir, basename),
+      legacyDirs.map((dir) => path.join(dir, basename)),
+    );
     let raw: string;
     try {
       raw = await fs.promises.readFile(configPath, "utf8");
@@ -148,7 +157,11 @@ export async function removeCustomAgent(
   name: string,
   env: EnvLike = process.env,
 ): Promise<ChangeResult> {
-  const configPath = customAgentConfigPath(validateCustomAgentName(name), env);
+  const validName = validateCustomAgentName(name);
+  const listed = (await listCustomAgents(env)).find(
+    (agent) => agent.name === validName,
+  );
+  const configPath = listed?.configPath ?? customAgentConfigPath(validName, env);
   try {
     await fs.promises.unlink(configPath);
   } catch (error) {

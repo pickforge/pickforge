@@ -3,16 +3,16 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
 
-vi.mock("@pickforge/picklab-core", async (importOriginal) => {
+vi.mock("@pickforge/lab-core", async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import("@pickforge/picklab-core")>();
+    await importOriginal<typeof import("@pickforge/lab-core")>();
   return { ...actual, readProcessIdentity: vi.fn(() => undefined) };
 });
 
-import { isPidAlive, type EnvLike } from "@pickforge/picklab-core";
+import { isPidAlive, type EnvLike } from "@pickforge/lab-core";
 import { startXvfb, XvfbStartError } from "../src/display.js";
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-xvfb-identity-"));
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-xvfb-identity-"));
 const binDir = path.join(root, "bin");
 const pidFile = path.join(root, "xvfb.pid");
 fs.mkdirSync(binDir, { recursive: true });

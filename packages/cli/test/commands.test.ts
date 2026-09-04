@@ -5,10 +5,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { isProcessGroupAlive } from "@pickforge/picklab-core";
+import { isProcessGroupAlive } from "@pickforge/lab-core";
 import { ensureCliBuilt } from "./build-once.js";
 
-const cliPath = fileURLToPath(new URL("../dist/picklab.js", import.meta.url));
+const cliPath = fileURLToPath(new URL("../dist/pickforge-lab.js", import.meta.url));
 
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const FAKE_SERIAL = "emulator-5554";
@@ -82,11 +82,11 @@ function makeEnv(opts: EnvOptions = {}): Record<string, string> {
   }
   return {
     HOME: home,
-    PICKLAB_HOME: path.join(home, ".picklab"),
+    PICKFORGE_HOME: path.join(home, "state"),
     // Default new runs to the pre-#34 project-local layout so existing
     // fixtures/assertions in this file keep working; tests that exercise the
     // new "home" default explicitly override this via opts.extra.
-    PICKLAB_STORAGE_MODE: "project-local",
+    PICKFORGE_STORAGE_MODE: "project-local",
     PATH: pathParts.join(":"),
     ...(opts.extra ?? {}),
   };
@@ -104,7 +104,7 @@ function writeDesktopSessionRecord(
   display = ":987",
 ): string {
   const id = "desk-12345678";
-  const dir = path.join(env.PICKLAB_HOME, "sessions");
+  const dir = path.join(env.PICKFORGE_HOME, "sessions");
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(
     path.join(dir, `${id}.json`),
@@ -146,8 +146,8 @@ function fakeAdbEnv(): { env: Record<string, string>; adbLog: string } {
     `printf '%s\\n' "$*" >> "${adbLog}"`,
     'case "$*" in',
     "  *\"screencap -p\"*) printf '\\211PNG\\r\\n\\032\\n' ;;",
-    '  *"uiautomator dump"*) echo "UI hierchary dumped to: /sdcard/picklab-ui.xml" ;;',
-    `  *"cat /sdcard/picklab-ui.xml"*) printf '<?xml version="1.0"?><hierarchy rotation="0"><node text="token=${PLANTED_TOKEN}" /></hierarchy>' ;;`,
+    '  *"uiautomator dump"*) echo "UI hierchary dumped to: /sdcard/pickforge-lab-ui.xml" ;;',
+    `  *"cat /sdcard/pickforge-lab-ui.xml"*) printf '<?xml version="1.0"?><hierarchy rotation="0"><node text="token=${PLANTED_TOKEN}" /></hierarchy>' ;;`,
     `  *"logcat -d"*) printf 'I/Auth( 123): authToken=${PLANTED_TOKEN}\\nI/App( 123): started\\n' ;;`,
     '  *"install -r"*) echo Success ;;',
     '  *monkey*) echo "Events injected: 1" ;;',
@@ -234,7 +234,7 @@ beforeAll(async () => {
 }, 300_000);
 
 beforeEach(() => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-cmd-"));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-cmd-"));
 });
 
 afterEach(async () => {
@@ -245,7 +245,7 @@ afterEach(async () => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 }, 60_000);
 
-describe("picklab session (desktop)", () => {
+describe("pickforge-lab session (desktop)", () => {
   it(
     "creates, reports, and destroys a desktop session",
     async () => {
@@ -312,7 +312,7 @@ describe("picklab session (desktop)", () => {
     const result = await runCli(["watch", "--json"], env, tmpDir);
     expect(result.code).toBe(1);
     expect(parseJson(result).errors.join("\n")).toContain(
-      "picklab session create --type desktop",
+      "pickforge-lab session create --type desktop",
     );
   });
 
@@ -647,7 +647,7 @@ describe("picklab session (desktop)", () => {
   );
 });
 
-describe("picklab desktop", () => {
+describe("pickforge-lab desktop", () => {
   it("prints an eval-ready isolated environment in text and JSON", async () => {
     const projectDir = makeProjectDir();
     const env = makeEnv({
@@ -672,7 +672,7 @@ describe("picklab desktop", () => {
     expect(report.unset).toEqual(["WAYLAND_DEBUG", "WAYLAND_SOCKET"]);
     expect(report.exports).toEqual({
       DISPLAY: ":98",
-      WAYLAND_DISPLAY: "picklab-no-wayland",
+      WAYLAND_DISPLAY: "pickforge-no-wayland",
       ELECTRON_OZONE_PLATFORM_HINT: "x11",
       GDK_BACKEND: "x11",
       GLFW_PLATFORM: "x11",
@@ -704,7 +704,7 @@ describe("picklab desktop", () => {
     );
     expect(evaluated.status).toBe(0);
     expect(evaluated.stdout).toBe(
-      ":98\npicklab-no-wayland\nx11\nx11\nx11\nxcb\n",
+      ":98\npickforge-no-wayland\nx11\nx11\nx11\nxcb\n",
     );
   });
 
@@ -718,7 +718,7 @@ describe("picklab desktop", () => {
         xdotool:
           'case "$1" in\n  search)\n' +
           `    if [ -f "${searchMarker}" ]; then echo 4242; else : > "${searchMarker}"; exit 1; fi ;;\n` +
-          "  getwindowname) echo picklab-fake-window ;;\nesac",
+          "  getwindowname) echo pickforge-fake-window ;;\nesac",
       },
       extra: {
         WAYLAND_DISPLAY: "wayland-0",
@@ -758,11 +758,11 @@ describe("picklab desktop", () => {
       expect(report.processGroupId).toBe(report.pid);
       expect(report.windowCount).toBe(1);
       expect(report.windows).toEqual([
-        { id: "4242", name: "picklab-fake-window" },
+        { id: "4242", name: "pickforge-fake-window" },
       ]);
       expect(fs.readFileSync(capture, "utf8")).toBe(
         "DISPLAY=:97\n" +
-          "WAYLAND_DISPLAY=picklab-no-wayland\nWAYLAND_SOCKET=unset\n" +
+          "WAYLAND_DISPLAY=pickforge-no-wayland\nWAYLAND_SOCKET=unset\n" +
           "ELECTRON_OZONE_PLATFORM_HINT=x11\nGDK_BACKEND=x11\n" +
           "GLFW_PLATFORM=x11\nQT_QPA_PLATFORM=xcb\n" +
           "SDL_VIDEODRIVER=x11\nWINIT_UNIX_BACKEND=x11\n" +
@@ -801,7 +801,7 @@ describe("picklab desktop", () => {
     const errors = parseJson(result).errors.join("\n");
     expect(errors).toContain("may have escaped the lab");
     expect(errors).toContain("opened on your real desktop");
-    expect(errors).toContain("PickLab stopped process group");
+    expect(errors).toContain("Pickforge stopped process group");
     expect(errors).toContain("--window-timeout");
     const processGroupId = Number(fs.readFileSync(pidFile, "utf8").trim());
     await waitFor(() => !isProcessGroupAlive(processGroupId));
@@ -911,17 +911,34 @@ describe("picklab desktop", () => {
         tmpDir,
       );
 
+      const useXterm = fs.existsSync("/usr/bin/xterm");
+      const app = useXterm
+        ? {
+            command: "xterm",
+            args: ["-xrm", "XTerm.vt100.allowTitleOps: false"],
+            window: "xterm",
+          }
+        : {
+            command: "zenity",
+            args: [
+              "--info",
+              "--text",
+              "pickforge",
+              "--title",
+              "pickforge-cli-test",
+            ],
+            window: "pickforge-cli-test",
+          };
       const launched = await runCli(
         [
           "desktop",
           "launch",
           "--json",
           "--wait-window",
-          "xterm",
+          app.window,
           "--",
-          "xterm",
-          "-xrm",
-          "XTerm.vt100.allowTitleOps: false",
+          app.command,
+          ...app.args,
         ],
         env,
         tmpDir,
@@ -930,7 +947,7 @@ describe("picklab desktop", () => {
       const launchReport = parseJson(launched);
       expect(launchReport.pid).toBeGreaterThan(0);
       expect(fs.existsSync(launchReport.logPath)).toBe(true);
-      expect(launchReport.window.name).toContain("xterm");
+      expect(launchReport.window.name).toContain(app.window);
 
       const click = await runCli(
         ["desktop", "click", "20", "20", "--json"],
@@ -1150,7 +1167,7 @@ describe("picklab desktop", () => {
   });
 });
 
-describe("picklab android (fake adb)", () => {
+describe("pickforge-lab android (fake adb)", () => {
   it("threads the serial through install-apk", async () => {
     const { env, adbLog } = fakeAdbEnv();
     const apk = path.join(tmpDir, "app.apk");
@@ -1288,15 +1305,15 @@ describe("picklab android (fake adb)", () => {
     expect(fileContents).not.toContain(PLANTED_TOKEN);
 
     expect(adbLogLines(adbLog)).toEqual([
-      `-s ${FAKE_SERIAL} shell uiautomator dump /sdcard/picklab-ui.xml`,
-      `-s ${FAKE_SERIAL} exec-out cat /sdcard/picklab-ui.xml`,
-      `-s ${FAKE_SERIAL} shell rm -f /sdcard/picklab-ui.xml`,
-      `-s ${FAKE_SERIAL} shell uiautomator dump /sdcard/picklab-ui.xml`,
-      `-s ${FAKE_SERIAL} exec-out cat /sdcard/picklab-ui.xml`,
-      `-s ${FAKE_SERIAL} shell rm -f /sdcard/picklab-ui.xml`,
-      `-s ${FAKE_SERIAL} shell uiautomator dump /sdcard/picklab-ui.xml`,
-      `-s ${FAKE_SERIAL} exec-out cat /sdcard/picklab-ui.xml`,
-      `-s ${FAKE_SERIAL} shell rm -f /sdcard/picklab-ui.xml`,
+      `-s ${FAKE_SERIAL} shell uiautomator dump /sdcard/pickforge-lab-ui.xml`,
+      `-s ${FAKE_SERIAL} exec-out cat /sdcard/pickforge-lab-ui.xml`,
+      `-s ${FAKE_SERIAL} shell rm -f /sdcard/pickforge-lab-ui.xml`,
+      `-s ${FAKE_SERIAL} shell uiautomator dump /sdcard/pickforge-lab-ui.xml`,
+      `-s ${FAKE_SERIAL} exec-out cat /sdcard/pickforge-lab-ui.xml`,
+      `-s ${FAKE_SERIAL} shell rm -f /sdcard/pickforge-lab-ui.xml`,
+      `-s ${FAKE_SERIAL} shell uiautomator dump /sdcard/pickforge-lab-ui.xml`,
+      `-s ${FAKE_SERIAL} exec-out cat /sdcard/pickforge-lab-ui.xml`,
+      `-s ${FAKE_SERIAL} shell rm -f /sdcard/pickforge-lab-ui.xml`,
     ]);
   });
 
@@ -1354,7 +1371,7 @@ describe("picklab android (fake adb)", () => {
   it("fails closed on ambiguous default android sessions instead of running raw adb", async () => {
     const { env, adbLog } = fakeAdbEnv();
     const projectDir = makeProjectDir();
-    const sessionsDir = path.join(env.PICKLAB_HOME, "sessions");
+    const sessionsDir = path.join(env.PICKFORGE_HOME, "sessions");
     fs.mkdirSync(sessionsDir, { recursive: true });
     for (const [id, serial] of [
       ["andr-11111111", "emulator-5554"],
@@ -1368,7 +1385,7 @@ describe("picklab android (fake adb)", () => {
           createdAt: "2026-06-09T12:00:00.000Z",
           status: "running",
           projectDir,
-          android: { avdName: "picklab-avd", serial, consolePort: 5554 },
+          android: { avdName: "pickforge-avd", serial, consolePort: 5554 },
         })}\n`,
       );
     }
@@ -1397,7 +1414,7 @@ describe("picklab android (fake adb)", () => {
     const { env, adbLog } = fakeAdbEnv();
     const ownerProject = makeProjectDir("owner");
     const otherProject = makeProjectDir("other");
-    const sessionsDir = path.join(env.PICKLAB_HOME, "sessions");
+    const sessionsDir = path.join(env.PICKFORGE_HOME, "sessions");
     fs.mkdirSync(sessionsDir, { recursive: true });
     fs.writeFileSync(
       path.join(sessionsDir, "andr-33333333.json"),
@@ -1407,7 +1424,7 @@ describe("picklab android (fake adb)", () => {
         createdAt: "2026-06-09T12:00:00.000Z",
         status: "running",
         projectDir: ownerProject,
-        android: { avdName: "picklab-avd", serial: FAKE_SERIAL, consolePort: 5554 },
+        android: { avdName: "pickforge-avd", serial: FAKE_SERIAL, consolePort: 5554 },
       })}\n`,
     );
     const result = await runCli(
@@ -1445,7 +1462,7 @@ describe("picklab android (fake adb)", () => {
 
   it("rejects a desktop session id passed to an android command", async () => {
     const { env } = fakeAdbEnv();
-    const sessionsDir = path.join(env.PICKLAB_HOME, "sessions");
+    const sessionsDir = path.join(env.PICKFORGE_HOME, "sessions");
     fs.mkdirSync(sessionsDir, { recursive: true });
     fs.writeFileSync(
       path.join(sessionsDir, "desk-12345678.json"),
@@ -1500,7 +1517,7 @@ describe("picklab android (fake adb)", () => {
   });
 });
 
-describe("picklab android session lifecycle (fake sdk)", () => {
+describe("pickforge-lab android session lifecycle (fake sdk)", () => {
   it(
     "starts an emulator session, resolves it implicitly, and destroys it",
     async () => {
@@ -1518,7 +1535,7 @@ describe("picklab android session lifecycle (fake sdk)", () => {
       const session = startReport.sessions[0];
       expect(session.id).toMatch(/^andr-[0-9a-f]+$/);
       expect(session.type).toBe("android");
-      expect(session.avdName).toBe("picklab-avd");
+      expect(session.avdName).toBe("pickforge-avd");
       expect(session.serial).toBe(AUTO_ALLOCATED_SERIAL);
 
       const tap = await runCli(
@@ -1587,7 +1604,7 @@ describe("picklab android session lifecycle (fake sdk)", () => {
   );
 });
 
-describe("picklab artifacts", () => {
+describe("pickforge-lab artifacts", () => {
   it("lists runs with artifact counts", async () => {
     const env = makeEnv();
     const projectDir = makeProjectDir();
@@ -1677,7 +1694,7 @@ describe("picklab artifacts", () => {
       env,
     );
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain("# PickLab run 20260609-120000-synthetic");
+    expect(result.stdout).toContain("# Pickforge run 20260609-120000-synthetic");
     expect(result.stdout).toContain("- Status: completed");
     expect(result.stdout).toContain("- Session: desk-12345678");
     expect(result.stdout).toContain(
@@ -1934,7 +1951,7 @@ function speakMcp(
       params: {
         protocolVersion: "2025-06-18",
         capabilities: {},
-        clientInfo: { name: "picklab-test", version: "0.0.0" },
+        clientInfo: { name: "pickforge-lab-test", version: "0.0.0" },
       },
     });
     send({ jsonrpc: "2.0", method: "notifications/initialized" });
@@ -1942,9 +1959,9 @@ function speakMcp(
   });
 }
 
-describe("picklab mcp serve", () => {
+describe("pickforge-lab mcp serve", () => {
   const mcpEntry = fileURLToPath(
-    new URL("../dist/picklab-mcp.js", import.meta.url),
+    new URL("../dist/pickforge-mcp.js", import.meta.url),
   );
 
   it("serves MCP over stdio and exits 0 when the client closes stdin", async () => {
@@ -1956,7 +1973,10 @@ describe("picklab mcp serve", () => {
 
     expect(exitCode).toBe(0);
     const init = responses.get(1);
-    expect(init?.result?.serverInfo?.name).toBe("picklab");
+    expect(init?.result?.serverInfo).toMatchObject({
+      name: "pickforge-lab",
+      version: "0.4.0-alpha.1",
+    });
     const tools = responses.get(2)?.result?.tools as Array<{ name: string }>;
     const names = tools.map((tool) => tool.name);
     expect(names).toContain("session_create");
@@ -1965,11 +1985,11 @@ describe("picklab mcp serve", () => {
     expect(names).toContain("artifact_report");
   }, 60_000);
 
-  it("serves MCP over stdio via the picklab-mcp bin and exits 0", async () => {
+  it("serves MCP over stdio via the pickforge-mcp bin and exits 0", async () => {
     const env = makeEnv();
     const { responses, exitCode } = await speakMcp([mcpEntry], env);
     expect(exitCode).toBe(0);
-    expect(responses.get(1)?.result?.serverInfo?.name).toBe("picklab");
+    expect(responses.get(1)?.result?.serverInfo?.name).toBe("pickforge-lab");
     const tools = responses.get(2)?.result?.tools as Array<{ name: string }>;
     expect(tools.length).toBeGreaterThanOrEqual(21);
   }, 60_000);

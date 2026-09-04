@@ -2,7 +2,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { browserRuntimeLayout, buildBrowserEnv } from "../src/env.js";
 
-const SESSION_DIR = "/home/lab/.picklab/sessions/brow-abcdef01";
+const SESSION_DIR = "/home/lab/.pickforge/lab/sessions/brow-abcdef01";
 
 describe("browserRuntimeLayout", () => {
   it("confines every runtime path under the session directory", () => {
@@ -69,7 +69,7 @@ describe("buildBrowserEnv", () => {
       sourceEnv: { PATH: "/usr/bin" },
     });
     expect(env.DISPLAY).toBe(":137");
-    expect(env.WAYLAND_DISPLAY).toBe("picklab-no-wayland");
+    expect(env.WAYLAND_DISPLAY).toBe("pickforge-no-wayland");
   });
 
   it("falls back to a safe default PATH when the source has none", () => {

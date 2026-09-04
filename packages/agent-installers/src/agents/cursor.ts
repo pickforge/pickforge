@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { EnvLike } from "@pickforge/picklab-core";
+import type { EnvLike } from "@pickforge/lab-core";
 import {
   jsonFileMcpServerState,
   mergeMcpServerIntoJsonFile,

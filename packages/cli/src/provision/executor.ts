@@ -9,8 +9,8 @@ import {
   saveGlobalConfig,
   saveProjectConfig,
   type EnvLike,
-  type PicklabConfig,
-} from "@pickforge/picklab-core";
+  type PickforgeConfig,
+} from "@pickforge/lab-core";
 import {
   askpassUnavailableMessage,
   type AskpassCapability,
@@ -183,21 +183,21 @@ export function classifyPlan(plan: ProvisioningPlan): PlanClassification {
 }
 
 async function patchGlobalConfig(
-  patch: PicklabConfig,
+  patch: PickforgeConfig,
   env: EnvLike = process.env,
 ): Promise<void> {
   const existing = await readConfigFile(globalConfigPath(env));
-  await saveGlobalConfig(deepMerge(existing, patch) as PicklabConfig, env);
+  await saveGlobalConfig(deepMerge(existing, patch) as PickforgeConfig, env);
 }
 
 async function patchProjectConfig(
   projectDir: string,
-  patch: PicklabConfig,
+  patch: PickforgeConfig,
 ): Promise<void> {
   const existing = await readConfigFile(projectConfigPath(projectDir));
   await saveProjectConfig(
     projectDir,
-    deepMerge(existing, patch) as PicklabConfig,
+    deepMerge(existing, patch) as PickforgeConfig,
   );
 }
 
@@ -388,7 +388,7 @@ function prepareSections(
   });
 }
 
-// eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function executeProvisioning(
   sections: readonly ProvisioningSection[],
   opts: ExecuteProvisioningOptions = {},
@@ -458,7 +458,7 @@ export async function executeProvisioning(
           skipped.push(decision.reason);
         } else {
           addError(decision.reason, decision.kind);
-          // eslint-disable-next-line max-depth -- Legacy gate debt: pickforge/picklab#60
+          // eslint-disable-next-line max-depth -- Legacy gate debt: pickforge/pickforge#60
           if (section.consent.retainPlanOnDenied === true) {
             selected.push(...entry.steps);
           }

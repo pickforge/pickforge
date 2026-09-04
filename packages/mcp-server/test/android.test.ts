@@ -6,7 +6,7 @@ import {
   listRuns,
   readActions,
   saveProjectConfig,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
   adbLogLines,
   connectLab,
@@ -36,7 +36,7 @@ beforeEach(async () => {
   sessionId = writeAndroidSessionRecord(dirs.home, dirs.projectDir);
   lab = await connectLab({
     projectDir: dirs.projectDir,
-    env: { PICKLAB_HOME: dirs.home, PATH: dirs.binDir, ANDROID_HOME: sdk },
+    env: { PICKFORGE_HOME: dirs.home, PATH: dirs.binDir, ANDROID_HOME: sdk },
   });
 });
 
@@ -174,7 +174,7 @@ describe("android tools (fake adb)", () => {
     expect(report.xml).toContain("[REDACTED]");
     expect(report.xml).not.toContain(PLANTED_TOKEN);
     expect(adbLogLines(adbLog)).toContain(
-      `-s ${FAKE_SERIAL} shell uiautomator dump /sdcard/picklab-ui.xml`,
+      `-s ${FAKE_SERIAL} shell uiautomator dump /sdcard/pickforge-lab-ui.xml`,
     );
   });
 
@@ -316,7 +316,7 @@ describe("android_start (fake sdk)", () => {
     const startLab = await connectLab({
       projectDir: startDirs.projectDir,
       env: {
-        PICKLAB_HOME: startDirs.home,
+        PICKFORGE_HOME: startDirs.home,
         PATH: startDirs.binDir,
         ANDROID_HOME: sdk,
       },
@@ -331,7 +331,7 @@ describe("android_start (fake sdk)", () => {
       expect(started.ok).toBe(true);
       const session = started.sessions[0];
       expect(session.id).toMatch(/^andr-[0-9a-f]+$/);
-      expect(session.avdName).toBe("picklab-avd");
+      expect(session.avdName).toBe("pickforge-avd");
       expect(session.serial).toMatch(/^emulator-\d+$/);
 
       const [activeManifest] = await listRuns(startDirs.projectDir);
@@ -416,7 +416,7 @@ describe("android_start (fake sdk)", () => {
     const startLab = await connectLab({
       projectDir: startDirs.projectDir,
       env: {
-        PICKLAB_HOME: startDirs.home,
+        PICKFORGE_HOME: startDirs.home,
         PATH: startDirs.binDir,
         ANDROID_HOME: sdk,
       },

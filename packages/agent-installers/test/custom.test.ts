@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   addCustomAgent,
   listCustomAgents,
@@ -15,18 +15,19 @@ let tmpDir: string;
 let env: Record<string, string>;
 
 beforeEach(() => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-custom-"));
-  env = { PICKLAB_HOME: path.join(tmpDir, ".picklab") };
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-custom-"));
+  env = { PICKFORGE_HOME: path.join(tmpDir, "state") };
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
 describe("parseMcpCommand", () => {
   it("splits on whitespace", () => {
-    expect(parseMcpCommand("picklab mcp serve")).toEqual({
-      command: "picklab",
+    expect(parseMcpCommand("pickforge-lab mcp serve")).toEqual({
+      command: "pickforge-lab",
       args: ["mcp", "serve"],
     });
     expect(parseMcpCommand("  node   server.js  ")).toEqual({
@@ -44,14 +45,14 @@ describe("parseMcpCommand", () => {
 describe("addCustomAgent / listCustomAgents / removeCustomAgent", () => {
   it("stores a snippet file under the agents dir and lists it", async () => {
     const agent = await addCustomAgent(
-      { name: "my-agent", mcpCommand: "picklab mcp serve" },
+      { name: "my-agent", mcpCommand: "pickforge-lab mcp serve" },
       env,
     );
     expect(agent.configPath).toBe(
-      path.join(env.PICKLAB_HOME, "agents", "my-agent.json"),
+      path.join(env.PICKFORGE_HOME, "agents", "my-agent.json"),
     );
     expect(JSON.parse(fs.readFileSync(agent.configPath, "utf8"))).toEqual({
-      mcpServers: { picklab: { command: "picklab", args: ["mcp", "serve"] } },
+      mcpServers: { "pickforge-lab": { command: "pickforge-lab", args: ["mcp", "serve"] } },
     });
 
     const listed = await listCustomAgents(env);
@@ -59,9 +60,39 @@ describe("addCustomAgent / listCustomAgents / removeCustomAgent", () => {
       {
         name: "my-agent",
         configPath: agent.configPath,
+        entry: { command: "pickforge-lab", args: ["mcp", "serve"] },
+      },
+    ]);
+  });
+
+  it("reads and removes custom agents from the former state root", async () => {
+    const home = path.join(tmpDir, "home");
+    vi.spyOn(os, "homedir").mockReturnValue(home);
+    const legacyDir = path.join(home, ".pickforge", "picklab", "agents");
+    const configPath = path.join(legacyDir, "legacy-agent.json");
+    fs.mkdirSync(legacyDir, { recursive: true });
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        mcpServers: {
+          picklab: { command: "picklab", args: ["mcp", "serve"] },
+        },
+      }),
+    );
+
+    expect(await listCustomAgents({})).toEqual([
+      {
+        name: "legacy-agent",
+        configPath,
         entry: { command: "picklab", args: ["mcp", "serve"] },
       },
     ]);
+    expect(fs.existsSync(path.join(home, ".pickforge", "lab"))).toBe(false);
+
+    const removed = await removeCustomAgent("legacy-agent", {});
+    expect(removed).toEqual({ configPath, changed: true });
+    expect(fs.existsSync(configPath)).toBe(false);
+    expect(fs.existsSync(path.join(home, ".pickforge", "lab"))).toBe(false);
   });
 
   it("does not list the shared snippet files as custom agents", async () => {
@@ -89,6 +120,8 @@ describe("addCustomAgent / listCustomAgents / removeCustomAgent", () => {
       "codex",
       "claude-code",
       "cursor",
+      "pi",
+      "pickforge-mcp",
       "picklab-mcp",
       "state",
     ]) {

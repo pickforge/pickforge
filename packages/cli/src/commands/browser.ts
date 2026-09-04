@@ -1,5 +1,5 @@
-import { redactSecrets } from "@pickforge/picklab-core";
-import { runProjectDevtoolsMcp } from "@pickforge/picklab-browser";
+import { redactSecrets } from "@pickforge/lab-core";
+import { runProjectDevtoolsMcp } from "@pickforge/lab-browser";
 import { resolveProjectDir } from "./shared.js";
 
 export interface BrowserDevtoolsMcpOptions {

@@ -6,7 +6,7 @@ import {
   jsonFileHasMcpServer,
   jsonFileMcpServerState,
   mergeMcpServerIntoJsonFile,
-  picklabMcpServerEntries,
+  pickforgeLabMcpServerEntries,
   removeMcpServerFromJsonFile,
 } from "../src/index.js";
 
@@ -14,7 +14,7 @@ let tmpDir: string;
 let file: string;
 
 beforeEach(() => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-json-"));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-json-"));
   file = path.join(tmpDir, "mcp.json");
 });
 
@@ -27,7 +27,7 @@ function readJson(filePath: string): Record<string, any> {
 }
 
 function backupsIn(dir: string): string[] {
-  return fs.readdirSync(dir).filter((entry) => entry.includes("picklab-backup"));
+  return fs.readdirSync(dir).filter((entry) => entry.includes("pickforge-backup"));
 }
 
 function tmpLeftoversIn(dir: string): string[] {
@@ -43,7 +43,7 @@ describe("mergeMcpServerIntoJsonFile", () => {
     expect(result.changed).toBe(true);
     expect(result.backupPath).toBeUndefined();
     expect(readJson(nested)).toEqual({
-      mcpServers: picklabMcpServerEntries(),
+      mcpServers: pickforgeLabMcpServerEntries(),
     });
   });
 
@@ -71,9 +71,38 @@ describe("mergeMcpServerIntoJsonFile", () => {
       theme: "dark",
       mcpServers: {
         other: { command: "other-mcp", args: [] },
-        picklab: { command: "picklab", args: ["mcp", "serve"] },
-        "picklab-browser": {
-          command: "picklab",
+        "pickforge-lab": { command: "pickforge-lab", args: ["mcp", "serve"] },
+        "pickforge-lab-browser": {
+          command: "pickforge-lab",
+          args: ["browser", "devtools-mcp"],
+        },
+      },
+    });
+  });
+
+  it("atomically replaces owned legacy entries and preserves foreign ones", async () => {
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        theme: "dark",
+        mcpServers: {
+          picklab: { command: "picklab", args: ["mcp", "serve"] },
+          "picklab-browser": { command: "foreign", args: [] },
+        },
+      }),
+    );
+    const result = await mergeMcpServerIntoJsonFile(file, {
+      createIfMissing: false,
+    });
+    expect(result.migratedLegacyEntries).toEqual(["picklab"]);
+    expect(result.backupPath).toBeDefined();
+    expect(readJson(file)).toEqual({
+      theme: "dark",
+      mcpServers: {
+        "picklab-browser": { command: "foreign", args: [] },
+        "pickforge-lab": { command: "pickforge-lab", args: ["mcp", "serve"] },
+        "pickforge-lab-browser": {
+          command: "pickforge-lab",
           args: ["browser", "devtools-mcp"],
         },
       },
@@ -110,15 +139,15 @@ describe("mergeMcpServerIntoJsonFile", () => {
 });
 
 describe("removeMcpServerFromJsonFile", () => {
-  it("removes both PickLab entries and backs up first", async () => {
+  it("removes both Pickforge entries and backs up first", async () => {
     fs.writeFileSync(
       file,
       JSON.stringify({
         mcpServers: {
           other: { command: "other-mcp", args: [] },
-          picklab: { command: "picklab", args: ["mcp", "serve"] },
-          "picklab-browser": {
-            command: "picklab",
+          "pickforge-lab": { command: "pickforge-lab", args: ["mcp", "serve"] },
+          "pickforge-lab-browser": {
+            command: "pickforge-lab",
             args: ["browser", "devtools-mcp"],
           },
         },
@@ -145,9 +174,9 @@ describe("removeMcpServerFromJsonFile", () => {
       JSON.stringify({
         theme: "dark",
         mcpServers: {
-          picklab: { command: "picklab", args: ["mcp", "serve"] },
-          "picklab-browser": {
-            command: "picklab",
+          "pickforge-lab": { command: "pickforge-lab", args: ["mcp", "serve"] },
+          "pickforge-lab-browser": {
+            command: "pickforge-lab",
             args: ["browser", "devtools-mcp"],
           },
         },
@@ -180,7 +209,7 @@ describe("atomic writes", () => {
 });
 
 describe("jsonFileHasMcpServer / jsonFileMcpServerState", () => {
-  it("detects the picklab entry", async () => {
+  it("detects the pickforge-lab entry", async () => {
     expect(await jsonFileHasMcpServer(file)).toBe(false);
     expect(await jsonFileMcpServerState(file)).toBe(false);
     await mergeMcpServerIntoJsonFile(file, { createIfMissing: true });
@@ -188,20 +217,20 @@ describe("jsonFileHasMcpServer / jsonFileMcpServerState", () => {
     expect(await jsonFileMcpServerState(file)).toBe(true);
   });
 
-  it("can require the picklab entry to match the expected command", async () => {
+  it("can require the pickforge-lab entry to match the expected command", async () => {
     fs.writeFileSync(
       file,
       JSON.stringify({
         mcpServers: {
-          picklab: { command: "old-picklab", args: ["mcp", "serve"] },
-          "picklab-browser": {
-            command: "picklab",
+          "pickforge-lab": { command: "old-pickforge-lab", args: ["mcp", "serve"] },
+          "pickforge-lab-browser": {
+            command: "pickforge-lab",
             args: ["browser", "devtools-mcp"],
           },
         },
       }),
     );
-    const expected = { command: "picklab", args: ["mcp", "serve"] };
+    const expected = { command: "pickforge-lab", args: ["mcp", "serve"] };
     expect(await jsonFileMcpServerState(file)).toBe(false);
     expect(await jsonFileMcpServerState(file, { expected })).toBe(false);
     expect(await jsonFileHasMcpServer(file, { expected })).toBe(false);

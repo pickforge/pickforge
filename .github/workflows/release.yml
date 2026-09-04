@@ -68,8 +68,8 @@ jobs:
 
       - run: bun run test
         env:
-          PICKLAB_REQUIRE_BROWSER: "1"
-          PICKLAB_CHROME_NO_SANDBOX: "1"
+          PICKFORGE_REQUIRE_BROWSER: "1"
+          PICKFORGE_CHROME_NO_SANDBOX: "1"
 
       - run: bun run build
 
@@ -82,7 +82,7 @@ jobs:
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: pickforge
-          SENTRY_PROJECT: picklab
+          SENTRY_PROJECT: pickforge-lab
         run: |
           if [ -z "$SENTRY_AUTH_TOKEN" ]; then
             echo "SENTRY_AUTH_TOKEN not set; skipping"
@@ -90,19 +90,19 @@ jobs:
           fi
           if ! {
             npx --yes @sentry/cli sourcemaps inject packages/cli/dist &&
-            npx --yes @sentry/cli sourcemaps upload --release "picklab@$RELEASE_VERSION" packages/cli/dist
+            npx --yes @sentry/cli sourcemaps upload --release "pickforge@$RELEASE_VERSION" packages/cli/dist
           }; then
             echo "::warning::Sentry sourcemap upload failed; continuing release"
           fi
 
-      - name: Publish @pickforge/picklab
+      - name: Publish pickforge
         if: startsWith(github.ref, 'refs/tags/v')
         working-directory: packages/cli
         run: |
-          if npm view "@pickforge/picklab@$RELEASE_VERSION" version >/dev/null 2>&1; then
-            echo "@pickforge/picklab@$RELEASE_VERSION is already published; skipping"
+          if npm view "pickforge@$RELEASE_VERSION" version >/dev/null 2>&1; then
+            echo "pickforge@$RELEASE_VERSION is already published; skipping"
           else
-            npm publish --access public --provenance
+            npm publish --access public --provenance --tag next
           fi
 
       - name: Create GitHub release
@@ -114,5 +114,5 @@ jobs:
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             echo "GitHub release $RELEASE_TAG already exists; skipping"
           else
-            gh release create "$RELEASE_TAG" --draft --generate-notes
+            gh release create "$RELEASE_TAG" --draft --prerelease --generate-notes
           fi

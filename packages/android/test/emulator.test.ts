@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { runCommand, type EnvLike } from "@pickforge/picklab-core";
+import { runCommand, type EnvLike } from "@pickforge/lab-core";
 import {
   consolePortLockPath,
   releaseConsolePort,
@@ -12,7 +12,7 @@ import {
   type EmulatorHandle,
 } from "../src/index.js";
 
-const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-android-emu-"));
+const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-android-emu-"));
 
 afterAll(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
@@ -54,7 +54,7 @@ function makeRegistryEnv(): EnvLike {
   homeCounter += 1;
   const home = path.join(tmpRoot, `home-${homeCounter}`);
   fs.mkdirSync(home, { recursive: true });
-  return { PICKLAB_HOME: home };
+  return { PICKFORGE_HOME: home };
 }
 
 async function deadPid(): Promise<number> {
@@ -70,7 +70,7 @@ describe("console port reservation registry", () => {
     const sdk = makeFakeSdk(BOOTING_ADB_SCRIPT);
     const registryEnv = makeRegistryEnv();
     const startOpts = {
-      avdName: "picklab-avd",
+      avdName: "pickforge-avd",
       sdk,
       env: { PATH: "" },
       registryEnv,
@@ -114,7 +114,7 @@ describe("console port reservation registry", () => {
     expect(tryReserveConsolePort(5556, registryEnv)).toBe(true);
     try {
       const handle = await startEmulator({
-        avdName: "picklab-avd",
+        avdName: "pickforge-avd",
         sdk,
         logDir: path.join(tmpRoot, "emu-skip"),
         env: { PATH: "" },
@@ -146,7 +146,7 @@ describe("console port reservation registry", () => {
     try {
       await expect(
         startEmulator({
-          avdName: "picklab-avd",
+          avdName: "pickforge-avd",
           sdk,
           port: 5560,
           logDir: path.join(tmpRoot, "emu-conflict"),
@@ -165,7 +165,7 @@ describe("console port reservation registry", () => {
     const sdk = makeFakeSdk(BOOTING_ADB_SCRIPT);
     const registryEnv = makeRegistryEnv();
     const handle = await startEmulator({
-      avdName: "picklab-avd",
+      avdName: "pickforge-avd",
       sdk,
       port: 5554,
       logDir: path.join(tmpRoot, "emu-explicit-5554"),
@@ -208,7 +208,7 @@ describe("console port reservation registry", () => {
     const registryEnv = makeRegistryEnv();
     await expect(
       startEmulator({
-        avdName: "picklab-avd",
+        avdName: "pickforge-avd",
         sdk,
         logDir: path.join(tmpRoot, "emu-listfail"),
         env: { PATH: "" },
@@ -226,7 +226,7 @@ describe("sdk auto-detection in the execution layer", () => {
     const sdk = makeFakeSdk(BOOTING_ADB_SCRIPT);
     const registryEnv = makeRegistryEnv();
     const handle = await startEmulator({
-      avdName: "picklab-avd",
+      avdName: "pickforge-avd",
       port: 5564,
       logDir: path.join(tmpRoot, "emu-detected"),
       env: { ANDROID_HOME: sdk, PATH: "" },

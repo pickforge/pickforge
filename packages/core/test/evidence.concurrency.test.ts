@@ -56,8 +56,8 @@ let project: string;
 // against and spawn separate `bun` worker processes into via inherited
 // `process.env`) rather than the new `home` default.
 beforeEach(async () => {
-  project = await fs.promises.mkdtemp(path.join(os.tmpdir(), "picklab-evc-"));
-  vi.stubEnv("PICKLAB_STORAGE_MODE", "project-local");
+  project = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-evc-"));
+  vi.stubEnv("PICKFORGE_STORAGE_MODE", "project-local");
 });
 
 afterEach(async () => {

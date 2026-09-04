@@ -28,7 +28,7 @@ describe("createIsolatedDesktopEnvironment", () => {
       PATH: "/custom/bin",
       KEEP_ME: "unchanged",
       DISPLAY: ":90",
-      WAYLAND_DISPLAY: "picklab-no-wayland",
+      WAYLAND_DISPLAY: "pickforge-no-wayland",
       ELECTRON_OZONE_PLATFORM_HINT: "x11",
       GDK_BACKEND: "x11",
       GLFW_PLATFORM: "x11",
@@ -70,7 +70,7 @@ describe("desktopEnvironmentRecipe", () => {
     expect(recipe.unset).toEqual(["WAYLAND_DEBUG", "WAYLAND_SOCKET"]);
     expect(recipe.exports).toEqual({
       DISPLAY: ":92",
-      WAYLAND_DISPLAY: "picklab-no-wayland",
+      WAYLAND_DISPLAY: "pickforge-no-wayland",
       ELECTRON_OZONE_PLATFORM_HINT: "x11",
       GDK_BACKEND: "x11",
       GLFW_PLATFORM: "x11",

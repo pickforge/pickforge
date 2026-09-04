@@ -2,11 +2,11 @@
 //
 // Proven three ways:
 //   1. Statically: the mcp-server source tree contains no "sudo" and never
-//      imports the CLI provisioning code (the only sudo user in PickLab).
+//      imports the CLI provisioning code (the only sudo user in Pickforge).
 //   2. Behaviorally: the MCP server runs a representative tool set with a
 //      poisoned PATH where "sudo" is a recorder script; the recorder file
 //      must stay absent, and the tool list exposes no provisioning tools.
-//   3. In the shipped bundle: the built picklab-mcp entrypoint and every
+//   3. In the shipped bundle: the built pickforge-mcp entrypoint and every
 //      chunk it imports contain zero "sudo" occurrences.
 
 import fs from "node:fs";
@@ -75,7 +75,7 @@ describe("static: mcp-server source", () => {
           file,
           specifier,
           ok:
-            specifier !== "@pickforge/picklab" &&
+            specifier !== "pickforge" &&
             !specifier.includes("/cli/") &&
             !specifier.endsWith("/cli"),
         }).toEqual({ file, specifier, ok: true });
@@ -95,7 +95,7 @@ describe("static: mcp-server source", () => {
       ...Object.keys(manifest.devDependencies ?? {}),
       ...Object.keys(manifest.peerDependencies ?? {}),
     ];
-    expect(declared).not.toContain("@pickforge/picklab");
+    expect(declared).not.toContain("pickforge");
   });
 });
 
@@ -115,7 +115,7 @@ describe("behavioral: MCP server with poisoned PATH", () => {
       projectDir: dirs.projectDir,
       env: {
         HOME: dirs.home,
-        PICKLAB_HOME: dirs.home,
+        PICKFORGE_HOME: dirs.home,
         PATH: dirs.binDir,
         ANDROID_HOME: sdk,
       },
@@ -183,7 +183,7 @@ describe("behavioral: MCP server with poisoned PATH", () => {
         projectDir: startDirs.projectDir,
         env: {
           HOME: startDirs.home,
-          PICKLAB_HOME: startDirs.home,
+          PICKFORGE_HOME: startDirs.home,
           PATH: startDirs.binDir,
           ANDROID_HOME: sdk,
         },
@@ -214,7 +214,7 @@ describe("behavioral: MCP server with poisoned PATH", () => {
   );
 });
 
-describe("bundle: built picklab-mcp entrypoint", () => {
+describe("bundle: built pickforge-mcp entrypoint", () => {
   const distDir = path.join(packagesDir, "cli", "dist");
 
   beforeAll(async () => {
@@ -239,7 +239,7 @@ describe("bundle: built picklab-mcp entrypoint", () => {
   }
 
   it("contains zero sudo occurrences across all imported chunks", () => {
-    const contents = bundleFiles("picklab-mcp.js");
+    const contents = bundleFiles("pickforge-mcp.js");
     // The entrypoint plus at least one shared chunk must have been scanned.
     expect(contents.size).toBeGreaterThanOrEqual(2);
     for (const [name, content] of contents) {
@@ -250,7 +250,7 @@ describe("bundle: built picklab-mcp entrypoint", () => {
   });
 
   it("control: the scanner does find sudo in the CLI bundle that owns provisioning", () => {
-    const contents = bundleFiles("picklab.js");
+    const contents = bundleFiles("pickforge-lab.js");
     const total = [...contents.values()]
       .map((content) => content.match(/sudo/gi)?.length ?? 0)
       .reduce((a, b) => a + b, 0);

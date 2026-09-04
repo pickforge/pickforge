@@ -1,8 +1,8 @@
 {
-  "name": "@pickforge/picklab-android",
-  "version": "0.3.0",
+  "name": "@pickforge/lab-android",
+  "version": "0.4.0-alpha.1",
   "private": true,
-  "description": "AVD, emulator, ADB, UIAutomator, and logcat orchestration for PickLab",
+  "description": "AVD, emulator, ADB, UIAutomator, and logcat orchestration for Pickforge",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -17,6 +17,6 @@
     "build": "tsup src/index.ts --format esm --dts --clean"
   },
   "dependencies": {
-    "@pickforge/picklab-core": "*"
+    "@pickforge/lab-core": "*"
   }
 }

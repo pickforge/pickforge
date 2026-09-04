@@ -10,7 +10,7 @@ import {
   type EnvLike,
   type RunCatalog,
   type RunCatalogEntry,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import { runTool, type ServerContext } from "../context.js";
 
 export async function findRun(
@@ -53,7 +53,7 @@ export function registerArtifactTools(
       description:
         "List recorded runs (screenshots, logs, reports). Runs default to " +
         "the shared Pickforge home outside the project directory; see " +
-        "picklab doctor or the storage config docs for the resolved path.",
+        "pickforge-lab doctor or the storage config docs for the resolved path.",
       inputSchema: {},
     },
     () =>

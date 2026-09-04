@@ -3,14 +3,14 @@ import path from "node:path";
 import {
   ensureDir,
   globalConfigPath,
-  legacyGlobalConfigPath,
+  legacyGlobalConfigPaths,
   projectConfigPath,
   resolveReadablePath,
   writeFileAtomic,
   type EnvLike,
 } from "./paths.js";
 
-export type PicklabProfile =
+export type PickforgeProfile =
   | "flutter-desktop"
   | "android"
   | "desktop+android"
@@ -34,8 +34,8 @@ export interface StorageConfig {
   [key: string]: unknown;
 }
 
-export interface PicklabConfig {
-  profile?: PicklabProfile;
+export interface PickforgeConfig {
+  profile?: PickforgeProfile;
   android?: { avdName?: string; [key: string]: unknown };
   labUser?: { name?: string; home?: string; [key: string]: unknown };
   viewer?: { mode?: ViewerMode; [key: string]: unknown };
@@ -45,12 +45,12 @@ export interface PicklabConfig {
 }
 
 export const resolvedDefaults = {
-  android: { avdName: "picklab-avd" },
-  labUser: { name: "picklab-lab", home: "/var/lib/picklab/lab-home" },
+  android: { avdName: "pickforge-avd" },
+  labUser: { name: "pickforge-lab", home: "/var/lib/pickforge/lab-home" },
   viewer: { mode: "manual" },
   evidence: { enabled: true },
   storage: { mode: "home" },
-} as const satisfies PicklabConfig;
+} as const satisfies PickforgeConfig;
 
 /**
  * Whether computer-use evidence capture is enabled. This is product
@@ -58,7 +58,7 @@ export const resolvedDefaults = {
  * a user can turn off evidence recording (e.g. because screenshot pixels cannot
  * be redacted). Only an explicit `false` disables it.
  */
-export function isEvidenceEnabled(config: PicklabConfig): boolean {
+export function isEvidenceEnabled(config: PickforgeConfig): boolean {
   return config.evidence?.enabled !== false;
 }
 
@@ -87,7 +87,7 @@ export function deepMerge(
   return result;
 }
 
-export async function readConfigFile(filePath: string): Promise<PicklabConfig> {
+export async function readConfigFile(filePath: string): Promise<PickforgeConfig> {
   let raw: string;
   try {
     raw = await fs.promises.readFile(filePath, "utf8");
@@ -103,19 +103,19 @@ export async function readConfigFile(filePath: string): Promise<PicklabConfig> {
     if (!isPlainObject(parsed)) {
       throw new Error("expected a JSON object");
     }
-    return parsed as PicklabConfig;
+    return parsed as PickforgeConfig;
   } catch (error) {
     throw new Error(
-      `Invalid PickLab config at ${filePath}: ${(error as Error).message}`,
+      `Invalid Pickforge config at ${filePath}: ${(error as Error).message}`,
     );
   }
 }
 
 export interface ConfigLayers {
   /** The user-owned global config layer (never travels with `git clone`). */
-  global: PicklabConfig;
+  global: PickforgeConfig;
   /** The project-committed `.picklab/config.json` layer. */
-  project: PicklabConfig;
+  project: PickforgeConfig;
 }
 
 /**
@@ -140,7 +140,7 @@ export async function loadConfigLayers(
   // different primitive.
   const globalPath = await resolveReadablePath(
     globalConfigPath(env),
-    legacyGlobalConfigPath(env),
+    legacyGlobalConfigPaths(env),
   );
   const global = await readConfigFile(globalPath);
   const project = await readConfigFile(projectConfigPath(projectDir));
@@ -150,17 +150,17 @@ export async function loadConfigLayers(
 export async function loadConfig(
   projectDir: string,
   env: EnvLike = process.env,
-): Promise<PicklabConfig> {
+): Promise<PickforgeConfig> {
   const { global, project } = await loadConfigLayers(projectDir, env);
   return deepMerge(
     deepMerge(deepMerge({}, resolvedDefaults), global),
     project,
-  ) as PicklabConfig;
+  ) as PickforgeConfig;
 }
 
 async function writeConfigFile(
   filePath: string,
-  config: PicklabConfig,
+  config: PickforgeConfig,
 ): Promise<void> {
   await ensureDir(path.dirname(filePath));
   await writeFileAtomic(filePath, `${JSON.stringify(config, null, 2)}\n`);
@@ -168,13 +168,13 @@ async function writeConfigFile(
 
 export async function saveProjectConfig(
   projectDir: string,
-  config: PicklabConfig,
+  config: PickforgeConfig,
 ): Promise<void> {
   await writeConfigFile(projectConfigPath(projectDir), config);
 }
 
 export async function saveGlobalConfig(
-  config: PicklabConfig,
+  config: PickforgeConfig,
   env: EnvLike = process.env,
 ): Promise<void> {
   await writeConfigFile(globalConfigPath(env), config);

@@ -6,14 +6,14 @@ import {
   type RunnableSessionType,
   type ScreenshotTarget,
   type SessionRecord,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 
 export {
   captureToTarget,
   requireDisplay,
   type RunnableSessionType,
   type ScreenshotTarget,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 
 export interface BaseCliOptions {
   json?: boolean;
@@ -88,7 +88,7 @@ export async function resolveSessionRecord(
     env,
     projectDir: resolveProjectDir(opts),
     consumerLabel: "command",
-    createHint: `create one with: picklab session create --type ${type}`,
+    createHint: `create one with: pickforge-lab session create --type ${type}`,
     selectHint: "pick one with --session <id>",
   });
 }

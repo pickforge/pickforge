@@ -1,9 +1,11 @@
 import { createRequire } from "node:module";
 import * as Sentry from "@sentry/node";
 import type { ErrorEvent } from "@sentry/node";
-import { redactSecrets } from "@pickforge/picklab-core";
-
-export type EnvLike = Record<string, string | undefined>;
+import {
+  readPickforgeEnv,
+  redactSecrets,
+  type EnvLike,
+} from "@pickforge/lab-core";
 
 const DSN =
   "https://25cc6307aeca0d1d454e0af21bee5498@o4511699702317056.ingest.us.sentry.io/4511699813990400";
@@ -11,7 +13,7 @@ const DSN =
 const DISABLE_VALUES = new Set(["0", "false", "off"]);
 
 export function telemetryEnabled(env: EnvLike = process.env): boolean {
-  const value = env.PICKLAB_TELEMETRY?.trim();
+  const value = readPickforgeEnv(env, "TELEMETRY")?.trim();
   if (value === undefined || value === "") {
     return true;
   }
@@ -26,7 +28,7 @@ export function initTelemetry(env: EnvLike = process.env): void {
   const { version } = require("../package.json") as { version: string };
   Sentry.init({
     dsn: DSN,
-    release: `picklab@${version}`,
+    release: `pickforge@${version}`,
     tracesSampleRate: 0,
     defaultIntegrations: false,
     integrations: [

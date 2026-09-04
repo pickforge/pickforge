@@ -8,7 +8,7 @@ import {
   isPidAlive,
   listSessions,
   type EnvLike,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 
 // A sentinel Xvfb pid/display, standing in for a real X server: this suite
 // only exercises the pre-identity Chrome cleanup path, so Xvfb itself is
@@ -17,9 +17,9 @@ import {
 const FAKE_XVFB_PID = 4_194_301;
 const FAKE_DISPLAY = ":244";
 
-vi.mock("@pickforge/picklab-desktop-linux", async (importOriginal) => {
+vi.mock("@pickforge/lab-desktop-linux", async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import("@pickforge/picklab-desktop-linux")>();
+    await importOriginal<typeof import("@pickforge/lab-desktop-linux")>();
   return {
     ...actual,
     startXvfb: vi.fn(
@@ -52,9 +52,9 @@ vi.mock("@pickforge/picklab-desktop-linux", async (importOriginal) => {
 // Simulate the "pathological /proc identity-read failure" the issue
 // describes: the owned Chrome supervisor is alive, but its own identity can
 // never be captured.
-vi.mock("@pickforge/picklab-core", async (importOriginal) => {
+vi.mock("@pickforge/lab-core", async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import("@pickforge/picklab-core")>();
+    await importOriginal<typeof import("@pickforge/lab-core")>();
   return {
     ...actual,
     readProcessIdentity: vi.fn(() => undefined),
@@ -124,7 +124,7 @@ afterEach(() => {
 
 async function setUpStalledFakeChrome(): Promise<EnvLike> {
   root = fs.mkdtempSync(
-    path.join(os.tmpdir(), "picklab-browser-pre-identity-"),
+    path.join(os.tmpdir(), "pickforge-lab-browser-pre-identity-"),
   );
   const home = path.join(root, "home");
   const binDir = path.join(root, "bin");
@@ -136,7 +136,7 @@ async function setUpStalledFakeChrome(): Promise<EnvLike> {
   return {
     ...process.env,
     HOME: home,
-    PICKLAB_HOME: path.join(root, "picklab-home"),
+    PICKFORGE_HOME: path.join(root, "pickforge-home"),
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
   };
 }

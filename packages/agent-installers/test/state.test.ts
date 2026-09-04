@@ -9,7 +9,7 @@ let homedirSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(async () => {
   fakeHome = await fs.promises.mkdtemp(
-    path.join(os.tmpdir(), "picklab-agentstate-fakehome-"),
+    path.join(os.tmpdir(), "pickforge-lab-agentstate-fakehome-"),
   );
   homedirSpy = vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
 });
@@ -20,7 +20,7 @@ afterEach(async () => {
 });
 
 describe("readAgentsState legacy home fallback", () => {
-  it("reads a legacy ~/.picklab/agents/state.json when PICKLAB_HOME is unset", async () => {
+  it("reads a legacy ~/.picklab/agents/state.json when PICKFORGE_HOME is unset", async () => {
     const legacyDir = path.join(fakeHome, ".picklab", "agents");
     await fs.promises.mkdir(legacyDir, { recursive: true });
     await fs.promises.writeFile(
@@ -39,6 +39,24 @@ describe("readAgentsState legacy home fallback", () => {
     const state = await readAgentsState({});
     expect(state.agents["claude-code"]?.registered).toBe(true);
     expect(state.agents["claude-code"]?.configPath).toBe("/legacy/.claude.json");
+  });
+
+  it("reads the former ~/.pickforge/picklab state before ~/.picklab", async () => {
+    for (const [dir, registered] of [
+      [path.join(fakeHome, ".picklab", "agents"), false],
+      [path.join(fakeHome, ".pickforge", "picklab", "agents"), true],
+    ] as const) {
+      await fs.promises.mkdir(dir, { recursive: true });
+      await fs.promises.writeFile(
+        path.join(dir, "state.json"),
+        JSON.stringify({
+          agents: { codex: { registered, configPath: dir } },
+        }),
+      );
+    }
+
+    const state = await readAgentsState({});
+    expect(state.agents.codex?.registered).toBe(true);
   });
 
   it("prefers the new home once it has its own state", async () => {
@@ -62,7 +80,7 @@ describe("readAgentsState legacy home fallback", () => {
     expect(state.agents.codex?.configPath).toBe("/new/codex");
   });
 
-  it("does not fall back once PICKLAB_HOME is set explicitly", async () => {
+  it("does not fall back once PICKFORGE_HOME is set explicitly", async () => {
     await fs.promises.mkdir(path.join(fakeHome, ".picklab", "agents"), {
       recursive: true,
     });
@@ -73,7 +91,7 @@ describe("readAgentsState legacy home fallback", () => {
       }),
     );
 
-    const state = await readAgentsState({ PICKLAB_HOME: "/other" });
+    const state = await readAgentsState({ PICKFORGE_HOME: "/other" });
     expect(state.agents).toEqual({});
   });
 
@@ -102,7 +120,7 @@ describe("readAgentsState legacy home fallback", () => {
     expect(legacyRaw.agents.cursor).toBeUndefined();
     expect(
       fs.existsSync(
-        path.join(fakeHome, ".pickforge", "picklab", "agents", "state.json"),
+        path.join(fakeHome, ".pickforge", "lab", "agents", "state.json"),
       ),
     ).toBe(true);
   });

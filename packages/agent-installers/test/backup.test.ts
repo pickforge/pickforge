@@ -7,7 +7,7 @@ import { backupFile, isBackupPath } from "../src/index.js";
 let tmpDir: string;
 
 beforeEach(() => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-backup-"));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-backup-"));
 });
 
 afterEach(() => {
@@ -21,7 +21,7 @@ describe("backupFile", () => {
     const file = path.join(tmpDir, "config.json");
     fs.writeFileSync(file, "original");
     const backup = await backupFile(file, FROZEN);
-    expect(backup).toBe(`${file}.picklab-backup-20260609-123456`);
+    expect(backup).toBe(`${file}.pickforge-backup-20260609-123456`);
     expect(fs.readFileSync(backup as string, "utf8")).toBe("original");
     expect(fs.readFileSync(file, "utf8")).toBe("original");
   });
@@ -34,9 +34,9 @@ describe("backupFile", () => {
     const second = await backupFile(file, FROZEN);
     fs.writeFileSync(file, "v3");
     const third = await backupFile(file, FROZEN);
-    expect(first).toBe(`${file}.picklab-backup-20260609-123456`);
-    expect(second).toBe(`${file}.picklab-backup-20260609-123456-2`);
-    expect(third).toBe(`${file}.picklab-backup-20260609-123456-3`);
+    expect(first).toBe(`${file}.pickforge-backup-20260609-123456`);
+    expect(second).toBe(`${file}.pickforge-backup-20260609-123456-2`);
+    expect(third).toBe(`${file}.pickforge-backup-20260609-123456-3`);
     expect(fs.readFileSync(first as string, "utf8")).toBe("v1");
     expect(fs.readFileSync(second as string, "utf8")).toBe("v2");
     expect(fs.readFileSync(third as string, "utf8")).toBe("v3");
@@ -51,12 +51,15 @@ describe("backupFile", () => {
 
 describe("isBackupPath", () => {
   it("matches generated backup paths", () => {
-    expect(isBackupPath("/x/config.json.picklab-backup-20260609-123456")).toBe(
+    expect(isBackupPath("/x/config.json.pickforge-backup-20260609-123456")).toBe(
       true,
     );
     expect(
-      isBackupPath("/x/config.json.picklab-backup-20260609-123456-2"),
+      isBackupPath("/x/config.json.pickforge-backup-20260609-123456-2"),
     ).toBe(true);
+    expect(isBackupPath("/x/config.json.picklab-backup-20260609-123456")).toBe(
+      true,
+    );
     expect(isBackupPath("/x/config.json")).toBe(false);
   });
 });

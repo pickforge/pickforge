@@ -5,9 +5,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const identityState = vi.hoisted(() => ({ miss: false }));
 
-vi.mock("@pickforge/picklab-core", async (importOriginal) => {
+vi.mock("@pickforge/lab-core", async (importOriginal) => {
   const actual = await importOriginal<
-    typeof import("@pickforge/picklab-core")
+    typeof import("@pickforge/lab-core")
   >();
   return {
     ...actual,
@@ -16,11 +16,11 @@ vi.mock("@pickforge/picklab-core", async (importOriginal) => {
   };
 });
 
-import { isProcessGroupAlive } from "@pickforge/picklab-core";
+import { isProcessGroupAlive } from "@pickforge/lab-core";
 import { execApp, launchApp } from "../src/apps.js";
 
 const DISPLAY = ":219";
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-app-wait-"));
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-app-wait-"));
 const liveGroups = new Set<number>();
 
 function writeExecutable(filePath: string, content: string): void {

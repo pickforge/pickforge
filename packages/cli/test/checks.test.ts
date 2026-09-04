@@ -8,8 +8,8 @@ import type { DetectionSnapshot } from "../src/provision/detect.js";
 
 function snapshot(
   overrides: {
-    picklabHome?: Partial<DetectionSnapshot["picklabHome"]>;
-    legacyHome?: DetectionSnapshot["legacyHome"];
+    pickforgeHome?: Partial<DetectionSnapshot["pickforgeHome"]>;
+    legacyHomes?: DetectionSnapshot["legacyHomes"];
     storage?: DetectionSnapshot["storage"];
     config?: Partial<DetectionSnapshot["config"]>;
     desktop?: Partial<DetectionSnapshot["desktop"]>;
@@ -19,13 +19,13 @@ function snapshot(
   } = {},
 ): DetectionSnapshot {
   return {
-    picklabHome: {
-      path: "/home/u/.pickforge/picklab",
+    pickforgeHome: {
+      path: "/home/u/.pickforge/lab",
       exists: true,
       writable: true,
-      ...overrides.picklabHome,
+      ...overrides.pickforgeHome,
     },
-    legacyHome: overrides.legacyHome ?? null,
+    legacyHomes: overrides.legacyHomes ?? [],
     storage: overrides.storage ?? { rejectedProjectCustom: null },
     config: { ok: true, error: null, profile: null, ...overrides.config },
     desktop: {
@@ -53,14 +53,14 @@ function snapshot(
         },
       ],
       kvm: { exists: true, readable: true, writable: true, supported: true },
-      avdName: "picklab-avd",
-      avds: ["picklab-avd"],
+      avdName: "pickforge-avd",
+      avds: ["pickforge-avd"],
       avdExists: true,
       ...overrides.android,
     },
     labUser: {
-      name: "picklab-lab",
-      home: "/var/lib/picklab/lab-home",
+      name: "pickforge-lab",
+      home: "/var/lib/pickforge/lab-home",
       exists: true,
       homeExists: true,
       ...overrides.labUser,
@@ -81,18 +81,18 @@ describe("evaluateChecks", () => {
     expect(checks.every((check) => check.status === "ok")).toBe(true);
   });
 
-  it("flags a missing picklab home", () => {
+  it("flags a missing pickforge-lab home", () => {
     const check = checkById(
-      snapshot({ picklabHome: { exists: false, writable: false } }),
-      "picklab-home",
+      snapshot({ pickforgeHome: { exists: false, writable: false } }),
+      "pickforge-home",
     );
     expect(check.status).toBe("missing");
   });
 
-  it("flags an unwritable picklab home as missing", () => {
+  it("flags an unwritable pickforge-lab home as missing", () => {
     const check = checkById(
-      snapshot({ picklabHome: { writable: false } }),
-      "picklab-home",
+      snapshot({ pickforgeHome: { writable: false } }),
+      "pickforge-home",
     );
     expect(check.status).toBe("missing");
     expect(check.detail).toContain("not writable");
@@ -103,14 +103,24 @@ describe("evaluateChecks", () => {
     expect(checks.some((check) => check.id === "legacy-home")).toBe(false);
   });
 
-  it("surfaces a detected legacy ~/.picklab home as a non-blocking warning", () => {
-    const check = checkById(
-      snapshot({ legacyHome: { path: "/home/u/.picklab" } }),
-      "legacy-home",
-    );
-    expect(check.status).toBe("warn");
-    expect(check.detail).toContain("/home/u/.picklab");
-    expect(check.hint).toContain("non-destructively");
+  it("surfaces every detected legacy home as a non-blocking warning", () => {
+    const checks = evaluateChecks(
+      snapshot({
+        legacyHomes: [
+          { path: "/home/u/.pickforge/picklab" },
+          { path: "/home/u/.picklab" },
+        ],
+      }),
+    ).filter((check) => check.id === "legacy-home");
+
+    expect(checks).toHaveLength(2);
+    expect(checks.map((check) => check.detail)).toEqual([
+      expect.stringContaining("/home/u/.pickforge/picklab"),
+      expect.stringContaining("/home/u/.picklab"),
+    ]);
+    expect(checks.every((check) => check.status === "warn")).toBe(true);
+    expect(checks.every((check) => check.hint?.includes("non-destructively")))
+      .toBe(true);
   });
 
   it("omits the storage-custom-rejected check when nothing was rejected", () => {
@@ -145,11 +155,11 @@ describe("evaluateChecks", () => {
 
   it("flags a broken config with its parse error", () => {
     const check = checkById(
-      snapshot({ config: { ok: false, error: "Invalid PickLab config" } }),
+      snapshot({ config: { ok: false, error: "Invalid Pickforge config" } }),
       "config",
     );
     expect(check.status).toBe("missing");
-    expect(check.detail).toContain("Invalid PickLab config");
+    expect(check.detail).toContain("Invalid Pickforge config");
   });
 
   it("treats x11vnc as optional (warn, not missing)", () => {
@@ -219,21 +229,21 @@ describe("evaluateChecks", () => {
       "avd",
     );
     expect(check.status).toBe("missing");
-    expect(check.hint).toContain("picklab setup android --create-avd");
+    expect(check.hint).toContain("pickforge-lab setup android --create-avd");
   });
 
   it("treats a missing lab user as an optional warning", () => {
     const check = checkById(snapshot({ labUser: { exists: false } }), "lab-user");
     expect(check.status).toBe("warn");
     expect(check.hint).toContain("optional until session isolation ships");
-    expect(check.hint).toContain("picklab setup lab-user");
+    expect(check.hint).toContain("pickforge-lab setup lab-user");
   });
 });
 
 describe("requiredChecksForProfile", () => {
   it("keeps generic projects to home and config", () => {
     expect(requiredChecksForProfile("generic")).toEqual([
-      "picklab-home",
+      "pickforge-home",
       "config",
     ]);
   });

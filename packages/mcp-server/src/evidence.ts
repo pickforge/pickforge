@@ -15,7 +15,7 @@ import {
   type RunHandle,
   type RunManifest,
   type SanitizedTypedValue,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import type { ServerContext, ToolReport } from "./context.js";
 
 export interface EvidenceOperationContext {
@@ -44,7 +44,7 @@ function reportEvidenceFailure(tool: string, error: unknown): void {
   const detail = sanitizeErrorText(
     error instanceof Error ? error.message : String(error),
   );
-  process.stderr.write(`[picklab evidence] ${tool}: ${detail}\n`);
+  process.stderr.write(`[pickforge-lab evidence] ${tool}: ${detail}\n`);
 }
 
 async function evidenceRun(
@@ -124,7 +124,7 @@ function sanitizedTarget(
   return Object.keys(sanitized).length === 0 ? undefined : sanitized;
 }
 
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function withMcpEvidence<T extends ToolReport>(
   ctx: ServerContext,
   options: McpEvidenceOptions<T>,

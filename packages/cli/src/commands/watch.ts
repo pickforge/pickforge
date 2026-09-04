@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { resolveDesktopCapableSession } from "@pickforge/picklab-core";
+import { resolveDesktopCapableSession } from "@pickforge/lab-core";
 import {
   endHumanTakeover,
   ensureSessionVnc,
@@ -8,7 +8,7 @@ import {
   startHumanTakeover,
   type HumanTakeoverHandle,
   type TakeoverEndReason,
-} from "@pickforge/picklab-desktop-linux";
+} from "@pickforge/lab-desktop-linux";
 import {
   resolveProjectDir,
   runReported,
@@ -34,7 +34,7 @@ export interface TakeoverWatchdogHandle {
 export type SpawnWatchdogFn = (handle: HumanTakeoverHandle) => TakeoverWatchdogHandle;
 
 /**
- * Spawn the crash-recovery watchdog (pickforge/picklab#21 P0-A) as a
+ * Spawn the crash-recovery watchdog (pickforge/pickforge#21 P0-A) as a
  * **detached** sibling process — its own process group, `stdio: "ignore"`,
  * `unref()`'d — so a `SIGKILL` of *this* process (a crash of
  * `watch --control` itself) does not kill it too. It re-invokes the same
@@ -86,7 +86,7 @@ function defaultSpawnWatchdog(handle: HumanTakeoverHandle): TakeoverWatchdogHand
 /**
  * Hold a human lease for the duration of the viewer wait, heartbeating it
  * every `heartbeatMs`. Three mechanisms together keep writable VNC from
- * outliving the lease in wall-clock terms (pickforge/picklab#21 P0-A),
+ * outliving the lease in wall-clock terms (pickforge/pickforge#21 P0-A),
  * never only "the next time something happens to touch the session":
  *
  * 1. The first failed renewal ends the takeover *immediately* — it does not

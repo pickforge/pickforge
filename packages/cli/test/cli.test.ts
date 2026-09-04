@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ensureCliBuilt } from "./build-once.js";
 
-const cliPath = fileURLToPath(new URL("../dist/picklab.js", import.meta.url));
+const cliPath = fileURLToPath(new URL("../dist/pickforge-lab.js", import.meta.url));
 
 interface CliResult {
   code: number | null;
@@ -94,7 +94,7 @@ interface FakeEnvOptions {
   sdk?: string;
   /** Stand in for a real graphical session + resolvable askpass helper
    * (locked v1 contract) so privileged steps materialize into `sudo -A`
-   * instead of failing preflight. PickLab never ships its own helper, so
+   * instead of failing preflight. Pickforge never ships its own helper, so
    * tests that need one point SUDO_ASKPASS at a fake executable — none of
    * the fake `sudo` stand-ins below actually invoke it. */
   graphicalSudo?: boolean;
@@ -113,9 +113,9 @@ function makeEnv(
   }
   const env: Record<string, string> = {
     HOME: home,
-    PICKLAB_HOME: path.join(home, ".picklab"),
+    PICKFORGE_HOME: path.join(home, "state"),
     PATH: bin,
-    PICKLAB_KVM_PATH: path.join(tmp, "no-kvm"),
+    PICKFORGE_KVM_PATH: path.join(tmp, "no-kvm"),
   };
   if (opts.sdk !== undefined) {
     env.ANDROID_HOME = opts.sdk;
@@ -138,27 +138,34 @@ beforeAll(async () => {
 }, 300_000);
 
 beforeEach(() => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-cli-"));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-cli-"));
 });
 
 afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-describe("picklab doctor", () => {
+describe("pickforge-lab doctor", () => {
+  it("prints the resolved state directory", async () => {
+    const env = makeEnv(tmpDir);
+    const result = await runCli(["doctor"], env, tmpDir);
+    expect(result.stdout).toContain(`State directory: ${env.PICKFORGE_HOME}`);
+  });
+
   it("exits 0 with findings on a bare machine", async () => {
     const env = makeEnv(tmpDir);
     const result = await runCli(["doctor", "--json"], env, tmpDir);
     expect(result.code).toBe(0);
     const report = parseJson(result);
     expect(report.ok).toBe(false);
+    expect(report.stateDir).toBe(env.PICKFORGE_HOME);
     const byId = Object.fromEntries(
       (report.checks as Array<{ id: string; status: string }>).map((c) => [
         c.id,
         c.status,
       ]),
     );
-    expect(byId["picklab-home"]).toBe("missing");
+    expect(byId["pickforge-home"]).toBe("missing");
     expect(byId["xvfb"]).toBe("missing");
     expect(byId["android-sdk"]).toBe("missing");
     expect(byId["x11vnc"]).toBe("warn");
@@ -166,10 +173,36 @@ describe("picklab doctor", () => {
     expect(byId["lab-user"]).toBe("warn");
   });
 
+  it("warns for every existing legacy state root", async () => {
+    const env = makeEnv(tmpDir);
+    delete env.PICKFORGE_HOME;
+    const legacyHomes = [
+      path.join(env.HOME, ".pickforge", "picklab"),
+      path.join(env.HOME, ".picklab"),
+    ];
+    for (const legacyHome of legacyHomes) {
+      fs.mkdirSync(legacyHome, { recursive: true });
+    }
+
+    const result = await runCli(["doctor", "--json"], env, tmpDir);
+
+    expect(result.code).toBe(0);
+    const report = parseJson(result);
+    const warnings = (
+      report.checks as Array<{ id: string; status: string; detail: string }>
+    ).filter((check) => check.id === "legacy-home");
+    expect(warnings.map((check) => check.detail)).toEqual(
+      legacyHomes.map((legacyHome) =>
+        expect.stringContaining(`${legacyHome} still exists`),
+      ),
+    );
+    expect(warnings.every((check) => check.status === "warn")).toBe(true);
+  });
+
   it("exits 0 when the only non-ok finding is the optional lab user", async () => {
     const sdk = makeFakeSdk(path.join(tmpDir, "sdk"), {
       images: [IMAGE],
-      avdNames: ["picklab-avd"],
+      avdNames: ["pickforge-avd"],
     });
     const env = makeEnv(tmpDir, {
       sdk,
@@ -180,10 +213,10 @@ describe("picklab doctor", () => {
         x11vnc: "exit 0",
       },
     });
-    fs.mkdirSync(env.PICKLAB_HOME!, { recursive: true });
+    fs.mkdirSync(env.PICKFORGE_HOME!, { recursive: true });
     const kvmPath = path.join(tmpDir, "kvm");
     fs.writeFileSync(kvmPath, "", { mode: 0o660 });
-    env.PICKLAB_KVM_PATH = kvmPath;
+    env.PICKFORGE_KVM_PATH = kvmPath;
 
     const result = await runCli(["doctor", "--json"], env, tmpDir);
     expect(result.code).toBe(0);
@@ -197,23 +230,23 @@ describe("picklab doctor", () => {
     expect(nonOk).toEqual([{ id: "lab-user", status: "warn" }]);
   });
 
-  it("creates the picklab home with --fix and skips privileged repairs", async () => {
+  it("creates the pickforge-lab home with --fix and skips privileged repairs", async () => {
     const env = makeEnv(tmpDir);
     const result = await runCli(["doctor", "--json", "--fix"], env, tmpDir);
     expect(result.code).toBe(0);
     const report = parseJson(result);
     expect(report.fix.status).toBe("completed");
-    expect(fs.statSync(env.PICKLAB_HOME!).isDirectory()).toBe(true);
+    expect(fs.statSync(env.PICKFORGE_HOME!).isDirectory()).toBe(true);
     expect(report.fix.results).toEqual([
-      { id: "picklab-home", ok: true, detail: expect.stringContaining("mkdir") },
+      { id: "pickforge-home", ok: true, detail: expect.stringContaining("mkdir") },
     ]);
     const skipped = (report.fix.skipped as string[]).join("\n");
     expect(skipped).toContain("avd:");
     expect(skipped).toContain("lab-user:");
     expect(skipped).toContain(
-      'sudo not found on PATH; cannot provision lab user "picklab-lab". ' +
+      'sudo not found on PATH; cannot provision lab user "pickforge-lab". ' +
         "Install sudo, or create the user manually as root: " +
-        "useradd -r -M -s /usr/sbin/nologin picklab-lab",
+        "useradd -r -M -s /usr/sbin/nologin pickforge-lab",
     );
     expect((report.fix.skipped as string[]).map((entry) => entry.split(":")[0]))
       .toEqual(["avd", "lab-user"]);
@@ -244,7 +277,7 @@ describe("picklab doctor", () => {
     expect(result.code).toBe(0);
     const report = parseJson(result);
     expect(fs.existsSync(path.join(sdk, "avdmanager.log"))).toBe(false);
-    expect(fs.statSync(env.PICKLAB_HOME!).isDirectory()).toBe(true);
+    expect(fs.statSync(env.PICKFORGE_HOME!).isDirectory()).toBe(true);
     const skipped = (report.fix.skipped as string[]).join("\n");
     expect(skipped).toContain("avd: skipped (requires consent");
     expect(skipped).toContain("--yes");
@@ -266,7 +299,7 @@ describe("picklab doctor", () => {
     expect(result.code).toBe(0);
     const report = parseJson(result);
     const log = fs.readFileSync(path.join(sdk, "avdmanager.log"), "utf8");
-    expect(log.trim()).toBe(`create avd -n picklab-avd -k ${IMAGE}`);
+    expect(log.trim()).toBe(`create avd -n pickforge-avd -k ${IMAGE}`);
     expect((report.fix.skipped as string[]).join("\n")).not.toContain("avd:");
   });
 
@@ -282,12 +315,12 @@ describe("picklab doctor", () => {
     expect(report.fix.dryRun).toBe(true);
     expect(
       (report.fix.steps as Array<{ id: string }>).map((step) => step.id),
-    ).toEqual(["picklab-home"]);
-    expect(fs.existsSync(env.PICKLAB_HOME!)).toBe(false);
+    ).toEqual(["pickforge-home"]);
+    expect(fs.existsSync(env.PICKFORGE_HOME!)).toBe(false);
   });
 });
 
-describe("picklab init", () => {
+describe("pickforge-lab init", () => {
   it("writes the project config for the generic profile", async () => {
     const env = makeEnv(tmpDir);
     const projectDir = path.join(tmpDir, "project");
@@ -305,7 +338,7 @@ describe("picklab init", () => {
       fs.readFileSync(path.join(projectDir, ".picklab", "config.json"), "utf8"),
     ) as Record<string, unknown>;
     expect(config).toEqual({ profile: "generic" });
-    expect(fs.statSync(env.PICKLAB_HOME!).isDirectory()).toBe(true);
+    expect(fs.statSync(env.PICKFORGE_HOME!).isDirectory()).toBe(true);
   });
 
   it("does not write anything in --dry-run", async () => {
@@ -319,13 +352,13 @@ describe("picklab init", () => {
     );
     expect(result.code).toBe(0);
     expect(fs.existsSync(path.join(projectDir, ".picklab"))).toBe(false);
-    expect(fs.existsSync(env.PICKLAB_HOME!)).toBe(false);
+    expect(fs.existsSync(env.PICKFORGE_HOME!)).toBe(false);
   });
 
   // Graphical sudo is Linux-only (locked v1 contract) — on any other
   // platform the askpass preflight check always fails first, before the
   // consent gate under test here even runs. Runs on Linux CI; skips
-  // harmlessly elsewhere (see also "picklab setup lab-user" below).
+  // harmlessly elsewhere (see also "pickforge-lab setup lab-user" below).
   it.skipIf(process.platform !== "linux")(
     "fails closed when --create-lab-user lacks --yes in a non-interactive session",
     async () => {
@@ -348,7 +381,7 @@ describe("picklab init", () => {
     expect((report.errors as string[]).join("\n")).toContain("--yes");
     expect(fs.existsSync(sudoLog)).toBe(false);
     expect(fs.existsSync(path.join(projectDir, ".picklab"))).toBe(false);
-    expect(fs.existsSync(env.PICKLAB_HOME!)).toBe(false);
+    expect(fs.existsSync(env.PICKFORGE_HOME!)).toBe(false);
   });
 
   it("fails closed when --create-avd lacks --yes in a non-interactive session", async () => {
@@ -366,7 +399,7 @@ describe("picklab init", () => {
     expect((report.errors as string[]).join("\n")).toContain("--yes");
     expect(fs.existsSync(path.join(sdk, "avdmanager.log"))).toBe(false);
     expect(fs.existsSync(path.join(projectDir, ".picklab"))).toBe(false);
-    expect(fs.existsSync(env.PICKLAB_HOME!)).toBe(false);
+    expect(fs.existsSync(env.PICKFORGE_HOME!)).toBe(false);
   });
 
   it("reports required AVD consent refusal before the required-check error", async () => {
@@ -386,7 +419,7 @@ describe("picklab init", () => {
     expect(report.errors[1]).toContain('Required check "avd" failed');
     expect(report.plan.map((step: { id: string }) => step.id)).toEqual([
       "project-config",
-      "picklab-home",
+      "pickforge-home",
     ]);
   });
 
@@ -415,7 +448,7 @@ describe("picklab init", () => {
     expect((report.checks as Array<{ id: string }>).map((check) => check.id))
       .not.toContain("lab-user");
     expect((report.plan as Array<{ id: string }>).map((step) => step.id)).toEqual(
-      ["project-config", "picklab-home"],
+      ["project-config", "pickforge-home"],
     );
     expect(fs.existsSync(sudoLog)).toBe(false);
   });
@@ -427,7 +460,7 @@ describe("picklab init", () => {
     const sudoLog = path.join(tmpDir, "sudo.log");
     const sdk = makeFakeSdk(path.join(tmpDir, "sdk"), {
       images: [IMAGE],
-      avdNames: ["picklab-avd"],
+      avdNames: ["pickforge-avd"],
     });
     const env = makeEnv(tmpDir, {
       sdk,
@@ -461,7 +494,7 @@ describe("picklab init", () => {
     const plan = report.plan as Array<any>;
     expect(plan.map((step) => step.id)).toEqual([
       "project-config",
-      "picklab-home",
+      "pickforge-home",
       "useradd",
       "mkdir-home",
       "chown-home",
@@ -475,7 +508,7 @@ describe("picklab init", () => {
       "-M",
       "-s",
       "/usr/sbin/nologin",
-      "picklab-lab",
+      "pickforge-lab",
     ]);
     expect(fs.existsSync(sudoLog)).toBe(false);
   });
@@ -490,7 +523,7 @@ describe("picklab init", () => {
       projectDir,
     );
     expect(result.code).toBe(0);
-    const checkIndex = result.stdout.indexOf("picklab-home");
+    const checkIndex = result.stdout.indexOf("pickforge-home");
     const doneIndex = result.stdout.indexOf("[done]");
     expect(checkIndex).toBeGreaterThanOrEqual(0);
     expect(doneIndex).toBeGreaterThan(checkIndex);
@@ -514,7 +547,7 @@ describe("picklab init", () => {
       'sdkmanager "system-images;android-35;google_apis;x86_64"',
     );
     expect(fs.existsSync(path.join(projectDir, ".picklab"))).toBe(false);
-    expect(fs.existsSync(env.PICKLAB_HOME!)).toBe(false);
+    expect(fs.existsSync(env.PICKFORGE_HOME!)).toBe(false);
   });
 
   it("prints a recovery hint when init fails after writing project config", async () => {
@@ -538,8 +571,8 @@ describe("picklab init", () => {
     expect((report.errors as string[]).join("\n")).toContain(
       "Project config was written",
     );
-    expect((report.errors as string[]).join("\n")).toContain("picklab init");
-    expect((report.errors as string[]).join("\n")).toContain("picklab doctor");
+    expect((report.errors as string[]).join("\n")).toContain("pickforge-lab init");
+    expect((report.errors as string[]).join("\n")).toContain("pickforge-lab doctor");
     expect(
       fs.existsSync(path.join(projectDir, ".picklab", "config.json")),
     ).toBe(true);
@@ -568,10 +601,10 @@ describe("picklab init", () => {
     expect(report.status).toBe("failed");
     expect((report.errors as string[]).join("\n")).toContain("sudo not found");
     expect((report.plan as Array<{ id: string }>).map((step) => step.id)).toEqual(
-      ["project-config", "picklab-home"],
+      ["project-config", "pickforge-home"],
     );
     expect(fs.existsSync(path.join(projectDir, ".picklab"))).toBe(false);
-    expect(fs.existsSync(env.PICKLAB_HOME!)).toBe(false);
+    expect(fs.existsSync(env.PICKFORGE_HOME!)).toBe(false);
   });
 
   it("fails closed with an actionable manual fallback when sudo exists but no graphical session is available", async () => {
@@ -606,7 +639,7 @@ describe("picklab init", () => {
         : "only supported on Linux",
     );
     expect(errors).toContain(
-      "Run it yourself in a terminal: sudo useradd -r -M -s /usr/sbin/nologin picklab-lab",
+      "Run it yourself in a terminal: sudo useradd -r -M -s /usr/sbin/nologin pickforge-lab",
     );
     expect(fs.existsSync(sudoLog)).toBe(false);
     expect(fs.existsSync(path.join(projectDir, ".picklab"))).toBe(false);
@@ -634,14 +667,14 @@ describe("picklab init", () => {
     const report = parseJson(result);
     expect(report.plan.map((step: { id: string }) => step.id)).toEqual([
       "project-config",
-      "picklab-home",
+      "pickforge-home",
       "create-avd",
       "persist-avd",
     ]);
     expect(report.errors.join("\n")).toContain("sudo not found");
     expect(fs.existsSync(path.join(sdk, "avdmanager.log"))).toBe(false);
     expect(fs.existsSync(path.join(projectDir, ".picklab"))).toBe(false);
-    expect(fs.existsSync(env.PICKLAB_HOME!)).toBe(false);
+    expect(fs.existsSync(env.PICKFORGE_HOME!)).toBe(false);
   });
 
   it("reports an unrelated planning error and missing privilege support", async () => {
@@ -667,7 +700,7 @@ describe("picklab init", () => {
     expect(report.errors[0]).toContain("sdkmanager");
     expect(report.errors[1]).toContain("sudo not found");
     expect(fs.existsSync(path.join(projectDir, ".picklab"))).toBe(false);
-    expect(fs.existsSync(env.PICKLAB_HOME!)).toBe(false);
+    expect(fs.existsSync(env.PICKFORGE_HOME!)).toBe(false);
   });
 
   // Linux-only (see rationale above).
@@ -729,7 +762,7 @@ describe("picklab init", () => {
     const ids = (report.plan as Array<{ id: string }>).map((step) => step.id);
     expect(ids).toEqual([
       "project-config",
-      "picklab-home",
+      "pickforge-home",
       "create-avd",
       "persist-avd",
     ]);
@@ -740,7 +773,7 @@ describe("picklab init", () => {
       "create",
       "avd",
       "-n",
-      "picklab-avd",
+      "pickforge-avd",
       "-k",
       IMAGE,
     ]);
@@ -760,15 +793,15 @@ describe("picklab init", () => {
     );
     expect(result.code).toBe(0);
     const log = fs.readFileSync(path.join(sdk, "avdmanager.log"), "utf8");
-    expect(log.trim()).toBe(`create avd -n picklab-avd -k ${IMAGE}`);
+    expect(log.trim()).toBe(`create avd -n pickforge-avd -k ${IMAGE}`);
     const projectConfig = JSON.parse(
       fs.readFileSync(path.join(projectDir, ".picklab", "config.json"), "utf8"),
     ) as Record<string, unknown>;
     expect(projectConfig).toEqual({ profile: "android" });
     const globalConfig = JSON.parse(
-      fs.readFileSync(path.join(env.PICKLAB_HOME!, "config.json"), "utf8"),
+      fs.readFileSync(path.join(env.PICKFORGE_HOME!, "config.json"), "utf8"),
     ) as Record<string, any>;
-    expect(globalConfig.android.avdName).toBe("picklab-avd");
+    expect(globalConfig.android.avdName).toBe("pickforge-avd");
   });
 
   // Linux-only (see rationale above).
@@ -812,7 +845,7 @@ describe("picklab init", () => {
   });
 });
 
-describe("picklab setup lab-user", () => {
+describe("pickforge-lab setup lab-user", () => {
   // Graphical sudo is Linux-only (locked v1 contract): resolveAskpassCapability
   // gates on process.platform before even looking at DISPLAY/SUDO_ASKPASS, so
   // any test that needs the "available" happy path to actually route a step
@@ -849,7 +882,7 @@ describe("picklab setup lab-user", () => {
       "-M",
       "-s",
       "/usr/sbin/nologin",
-      "picklab-lab",
+      "pickforge-lab",
     ]);
     expect(fs.existsSync(sudoLog)).toBe(false);
   });
@@ -873,7 +906,7 @@ describe("picklab setup lab-user", () => {
       "-M",
       "-s",
       "/usr/sbin/nologin",
-      "picklab-lab",
+      "pickforge-lab",
     ]);
   });
 
@@ -890,14 +923,14 @@ describe("picklab setup lab-user", () => {
     expect(result.code).toBe(1);
     const report = parseJson(result);
     const errors = (report.errors as string[]).join("\n");
-    // See the equivalent "picklab init" test above for why this branches.
+    // See the equivalent "pickforge-lab init" test above for why this branches.
     expect(errors).toContain(
       process.platform === "linux"
         ? "No graphical session detected"
         : "only supported on Linux",
     );
     expect(errors).toContain(
-      "Run it yourself in a terminal: sudo useradd -r -M -s /usr/sbin/nologin picklab-lab",
+      "Run it yourself in a terminal: sudo useradd -r -M -s /usr/sbin/nologin pickforge-lab",
     );
     expect(fs.existsSync(sudoLog)).toBe(false);
   });
@@ -906,7 +939,7 @@ describe("picklab setup lab-user", () => {
     const home = path.join(tmpDir, "missing-home");
     const env = makeEnv(tmpDir, {
       bins: {
-        getent: "echo 'picklab-lab:x:999:999::/var/empty:/bin/false'",
+        getent: "echo 'pickforge-lab:x:999:999::/var/empty:/bin/false'",
         sudo: "exit 0",
       },
     });
@@ -916,7 +949,7 @@ describe("picklab setup lab-user", () => {
       tmpDir,
     );
     expect(result.code).toBe(1);
-    expect(result.stdout).not.toContain('User "picklab-lab" already exists.');
+    expect(result.stdout).not.toContain('User "pickforge-lab" already exists.');
     expect(fs.existsSync(home)).toBe(false);
   });
 
@@ -928,7 +961,7 @@ describe("picklab setup lab-user", () => {
     const env = makeEnv(tmpDir, {
       graphicalSudo: true,
       bins: {
-        getent: "echo 'picklab-lab:x:999:999::/var/empty:/bin/false'",
+        getent: "echo 'pickforge-lab:x:999:999::/var/empty:/bin/false'",
         sudo: "exit 0",
       },
     });
@@ -939,7 +972,7 @@ describe("picklab setup lab-user", () => {
     );
     expect(result.code).toBe(0);
     const existsIndex = result.stdout.indexOf(
-      'User "picklab-lab" already exists.',
+      'User "pickforge-lab" already exists.',
     );
     expect(existsIndex).toBeGreaterThanOrEqual(0);
     expect(result.stdout.indexOf("[dry-run]")).toBeGreaterThan(existsIndex);
@@ -970,7 +1003,7 @@ describe("picklab setup lab-user", () => {
       bins: { sudo: `printf '%s\\n' "$*" >> ${sudoLog}\nexit 0` },
     });
     const result = await runCli(
-      ["setup", "lab-user", "--yes", "--json", "--name", "picklab-lab"],
+      ["setup", "lab-user", "--yes", "--json", "--name", "pickforge-lab"],
       env,
       tmpDir,
     );
@@ -982,17 +1015,17 @@ describe("picklab setup lab-user", () => {
       .trim()
       .split("\n");
     expect(lines).toEqual([
-      "-A useradd -r -M -s /usr/sbin/nologin picklab-lab",
-      "-A mkdir -p /var/lib/picklab/lab-home",
-      "-A chown picklab-lab:picklab-lab /var/lib/picklab/lab-home",
-      "-A chmod 750 /var/lib/picklab/lab-home",
+      "-A useradd -r -M -s /usr/sbin/nologin pickforge-lab",
+      "-A mkdir -p /var/lib/pickforge/lab-home",
+      "-A chown pickforge-lab:pickforge-lab /var/lib/pickforge/lab-home",
+      "-A chmod 750 /var/lib/pickforge/lab-home",
     ]);
     const globalConfig = JSON.parse(
-      fs.readFileSync(path.join(env.PICKLAB_HOME!, "config.json"), "utf8"),
+      fs.readFileSync(path.join(env.PICKFORGE_HOME!, "config.json"), "utf8"),
     ) as Record<string, any>;
     expect(globalConfig.labUser).toEqual({
-      name: "picklab-lab",
-      home: "/var/lib/picklab/lab-home",
+      name: "pickforge-lab",
+      home: "/var/lib/pickforge/lab-home",
     });
   });
 
@@ -1033,7 +1066,7 @@ describe("picklab setup lab-user", () => {
     ]);
     expect(JSON.stringify(report)).toContain("API_TOKEN=[REDACTED]");
     expect(JSON.stringify(report)).not.toContain("planted-secret");
-    expect(fs.existsSync(path.join(env.PICKLAB_HOME!, "config.json"))).toBe(
+    expect(fs.existsSync(path.join(env.PICKFORGE_HOME!, "config.json"))).toBe(
       false,
     );
   });
@@ -1062,7 +1095,7 @@ describe("picklab setup lab-user", () => {
   });
 });
 
-describe("picklab setup android", () => {
+describe("pickforge-lab setup android", () => {
   it("reports the detected toolchain without --create-avd", async () => {
     const sdk = makeFakeSdk(path.join(tmpDir, "sdk"), { images: [IMAGE] });
     const env = makeEnv(tmpDir, { sdk });
@@ -1133,7 +1166,7 @@ describe("picklab setup android", () => {
   it("is a no-op (config persistence only) when the AVD already exists", async () => {
     const sdk = makeFakeSdk(path.join(tmpDir, "sdk"), {
       images: [IMAGE],
-      avdNames: ["picklab-avd"],
+      avdNames: ["pickforge-avd"],
     });
     const env = makeEnv(tmpDir, { sdk });
     const result = await runCli(

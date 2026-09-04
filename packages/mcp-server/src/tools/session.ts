@@ -10,13 +10,13 @@ import {
   destroyAndroidSession,
   getAndroidSessionStatus,
   teardownAndroidSession,
-} from "@pickforge/picklab-android";
+} from "@pickforge/lab-android";
 import {
   createBrowserSession,
   destroyBrowserSession,
   getBrowserSessionStatus,
   teardownBrowserSession,
-} from "@pickforge/picklab-browser";
+} from "@pickforge/lab-browser";
 import {
   createLocalSessions,
   destroyLocalSessions,
@@ -33,13 +33,13 @@ import {
   type LocalSessionSummary,
   type LocalSessionTeardownRuntime,
   type SessionRecord,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
   createDesktopSession,
   destroyDesktopSession,
   getDesktopSessionStatus,
   teardownDesktopSession,
-} from "@pickforge/picklab-desktop-linux";
+} from "@pickforge/lab-desktop-linux";
 import { runTool, type ServerContext } from "../context.js";
 import { withMcpEvidence } from "../evidence.js";
 
@@ -205,7 +205,7 @@ export async function sessionStatusEntry(
   return entry;
 }
 
-// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/pickforge#60
 export function registerSessionTools(
   server: McpServer,
   ctx: ServerContext,

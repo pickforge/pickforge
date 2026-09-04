@@ -1,8 +1,8 @@
 {
-  "name": "@pickforge/picklab-desktop-linux",
-  "version": "0.3.0",
+  "name": "@pickforge/lab-desktop-linux",
+  "version": "0.4.0-alpha.1",
   "private": true,
-  "description": "Xvfb, VNC, window, input, and screenshot automation for PickLab",
+  "description": "Xvfb, VNC, window, input, and screenshot automation for Pickforge",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -17,6 +17,6 @@
     "build": "tsup src/index.ts --format esm --dts --clean"
   },
   "dependencies": {
-    "@pickforge/picklab-core": "*"
+    "@pickforge/lab-core": "*"
   }
 }

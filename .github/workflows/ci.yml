@@ -102,19 +102,19 @@ jobs:
             || command -v chromium \
             || command -v chromium-browser
 
-      # PICKLAB_REQUIRE_BROWSER makes the browser integration test fail rather
-      # than skip if prerequisites are missing. PICKLAB_CHROME_NO_SANDBOX keeps
+      # PICKFORGE_REQUIRE_BROWSER makes the browser integration test fail rather
+      # than skip if prerequisites are missing. PICKFORGE_CHROME_NO_SANDBOX keeps
       # headed Chrome reliable on the runner without changing the product
       # default (Chrome's sandbox stays on outside CI).
       - run: bun run test
         env:
-          PICKLAB_REQUIRE_BROWSER: "1"
-          PICKLAB_CHROME_NO_SANDBOX: "1"
+          PICKFORGE_REQUIRE_BROWSER: "1"
+          PICKFORGE_CHROME_NO_SANDBOX: "1"
 
       - run: bun run test:coverage
         env:
-          PICKLAB_REQUIRE_BROWSER: "1"
-          PICKLAB_CHROME_NO_SANDBOX: "1"
+          PICKFORGE_REQUIRE_BROWSER: "1"
+          PICKFORGE_CHROME_NO_SANDBOX: "1"
 
       - name: Summarize coverage
         if: ${{ !cancelled() }}

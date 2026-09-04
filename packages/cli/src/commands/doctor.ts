@@ -1,4 +1,4 @@
-import type { EnvLike } from "@pickforge/picklab-core";
+import type { EnvLike } from "@pickforge/lab-core";
 import { resolveAskpassCapability } from "../provision/askpass.js";
 import {
   evaluateChecks,
@@ -17,7 +17,7 @@ import {
   labUserPrivilegeUnavailableMessage,
   planCreateAvd,
   planLabUser,
-  planPicklabHome,
+  planPickforgeHome,
 } from "../provision/planner.js";
 import { confirm, toConsentDecision } from "../provision/prompts.js";
 
@@ -42,6 +42,7 @@ export interface DoctorFixReport {
 
 export interface DoctorReport {
   ok: boolean;
+  stateDir: string;
   checks: DoctorCheck[];
   errors: string[];
   fix?: DoctorFixReport;
@@ -57,9 +58,9 @@ async function buildFixPlan(
 
   sections.push({
     kind: "plan",
-    plan: planPicklabHome({
-      path: snapshot.picklabHome.path,
-      exists: snapshot.picklabHome.exists,
+    plan: planPickforgeHome({
+      path: snapshot.pickforgeHome.path,
+      exists: snapshot.pickforgeHome.exists,
     }),
   });
 
@@ -152,11 +153,13 @@ export async function runDoctor(
   const checks = evaluateChecks(snapshot);
   const report: DoctorReport = {
     ok: !checks.some((check) => check.status === "missing"),
+    stateDir: snapshot.pickforgeHome.path,
     checks,
     errors: [],
   };
 
   if (opts.json !== true) {
+    console.log(`State directory: ${report.stateDir}`);
     for (const check of checks) {
       console.log(formatCheckLine(check));
     }

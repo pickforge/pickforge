@@ -1,7 +1,7 @@
 import path from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { withAgentPermit } from "@pickforge/picklab-core";
+import { withAgentPermit } from "@pickforge/lab-core";
 import {
   click,
   desktopSessionLogDir,
@@ -19,7 +19,7 @@ import {
   scroll,
   typeText,
   waitForWindow,
-} from "@pickforge/picklab-desktop-linux";
+} from "@pickforge/lab-desktop-linux";
 import {
   captureToTarget,
   imageContent,
@@ -103,7 +103,7 @@ function registerLaunchTool(server: McpServer, ctx: ServerContext): void {
           async () => {
             // A newly launched client on the shared display can grab input
             // focus — gated the same as direct input, so it can never land
-            // while a human holds the takeover lease (pickforge/picklab#21 P1-E).
+            // while a human holds the takeover lease (pickforge/pickforge#21 P1-E).
             const cwd =
               args.cwd === undefined
                 ? undefined

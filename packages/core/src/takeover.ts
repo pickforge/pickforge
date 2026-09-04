@@ -4,11 +4,12 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { isEvidenceEnabled, loadConfig } from "./config.js";
 import { appendAction, beginEvidenceRun } from "./evidence.js";
-import { ensureDir, sessionsDir, writeFileAtomic, type EnvLike } from "./paths.js";
+import { ensureDir, writeFileAtomic, type EnvLike } from "./paths.js";
 import { isPidAlive, processIdentityMatches, readProcessStartTicks } from "./proc.js";
+import { sessionDataDir } from "./session.js";
 
 /**
- * Supervised pause / human takeover (pickforge/picklab#21).
+ * Supervised pause / human takeover (pickforge/pickforge#21).
  *
  * State machine: `agent-active -> pause-requested -> human-active(lease,
  * deadline) -> returning -> agent-active`.
@@ -28,7 +29,7 @@ import { isPidAlive, processIdentityMatches, readProcessStartTicks } from "./pro
  *
  * This module owns only the storage-backed lease/permit primitives (pure
  * `fs` + process-identity logic, testable without X11). VNC-mode switching
- * and screenshot/evidence orchestration live in `@pickforge/picklab-desktop-linux`.
+ * and screenshot/evidence orchestration live in `@pickforge/lab-desktop-linux`.
  */
 
 export const HUMAN_LEASE_FILE = "human.lease.json";
@@ -61,16 +62,12 @@ function identityIsAlive(pid: number, startTicks?: number): boolean {
   return isPidAlive(pid);
 }
 
-function sessionStateDir(sessionId: string, env: EnvLike): string {
-  return path.join(sessionsDir(env), sessionId);
-}
-
 function humanLeasePath(sessionId: string, env: EnvLike): string {
-  return path.join(sessionStateDir(sessionId, env), HUMAN_LEASE_FILE);
+  return path.join(sessionDataDir(sessionId, env), HUMAN_LEASE_FILE);
 }
 
 function agentPermitsDir(sessionId: string, env: EnvLike): string {
-  return path.join(sessionStateDir(sessionId, env), AGENT_PERMITS_DIR);
+  return path.join(sessionDataDir(sessionId, env), AGENT_PERMITS_DIR);
 }
 
 /** Atomically-published record of who holds human control of a session. */
@@ -106,7 +103,7 @@ export class HumanControlActiveError extends Error {
   readonly lease: HumanLease;
   constructor(lease: HumanLease) {
     super(
-      "PickLab: human control is active " +
+      "Pickforge: human control is active " +
         `(lease ${lease.leaseId}, held since ${lease.createdAt}); ` +
         "agent input is paused until control returns",
     );
@@ -333,14 +330,14 @@ export interface AcquireHumanLeaseOptions {
  * lease this call just created is released and `HumanLeaseDrainTimeoutError`
  * is thrown — "timeout aborts cleanly."
  */
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function acquireHumanLease(
   sessionId: string,
   env: EnvLike = process.env,
   opts: AcquireHumanLeaseOptions = {},
 ): Promise<HumanLease> {
   assertSafeSessionId(sessionId);
-  const dir = await ensureDir(sessionStateDir(sessionId, env));
+  const dir = await ensureDir(sessionDataDir(sessionId, env));
   const leasePath = path.join(dir, HUMAN_LEASE_FILE);
   const ttlMs = opts.ttlMs ?? HUMAN_LEASE_TTL_MS;
   const heartbeatMs = opts.heartbeatMs ?? HUMAN_LEASE_HEARTBEAT_MS;

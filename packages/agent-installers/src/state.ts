@@ -2,11 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   agentsDir,
-  legacyAgentsDir,
+  legacyAgentsDirs,
   resolveReadablePath,
   writeFileAtomic,
   type EnvLike,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 
 export interface AgentStateEntry {
   registered: boolean;
@@ -26,9 +26,8 @@ export function agentsStatePath(env: EnvLike = process.env): string {
   return path.join(agentsDir(env), "state.json");
 }
 
-function legacyAgentsStatePath(env: EnvLike): string | undefined {
-  const dir = legacyAgentsDir(env);
-  return dir === undefined ? undefined : path.join(dir, "state.json");
+function legacyAgentsStatePaths(env: EnvLike): string[] {
+  return legacyAgentsDirs(env).map((dir) => path.join(dir, "state.json"));
 }
 
 /**
@@ -42,7 +41,7 @@ export async function readAgentsState(
 ): Promise<AgentsState> {
   const statePath = await resolveReadablePath(
     agentsStatePath(env),
-    legacyAgentsStatePath(env),
+    legacyAgentsStatePaths(env),
   );
   let raw: string;
   try {

@@ -17,7 +17,7 @@ import {
   systemImageInstalled,
 } from "../src/index.js";
 
-const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-android-sdk-"));
+const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-android-sdk-"));
 
 afterAll(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });

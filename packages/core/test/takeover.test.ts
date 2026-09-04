@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   HumanControlActiveError,
   HumanLeaseDrainTimeoutError,
@@ -30,8 +30,8 @@ let tmpRoot: string;
 let env: EnvLike;
 
 beforeEach(() => {
-  tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-takeover-test-"));
-  env = { ...process.env, PICKLAB_HOME: path.join(tmpRoot, "home") };
+  tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-takeover-test-"));
+  env = { ...process.env, PICKFORGE_HOME: path.join(tmpRoot, "home") };
 });
 
 afterEach(() => {
@@ -39,7 +39,7 @@ afterEach(() => {
 });
 
 async function writeRawLease(sessionId: string, lease: HumanLease): Promise<string> {
-  const dir = path.join(env.PICKLAB_HOME as string, "sessions", sessionId);
+  const dir = path.join(env.PICKFORGE_HOME as string, "sessions", sessionId);
   fs.mkdirSync(dir, { recursive: true });
   const raw = `${JSON.stringify(lease)}\n`;
   fs.writeFileSync(path.join(dir, "human.lease.json"), raw);
@@ -125,8 +125,31 @@ describe("acquireHumanLease", () => {
     await releaseAgentPermit(permit);
   });
 
+  it("stores leases and permits beside a legacy session record", async () => {
+    const fakeHome = path.join(tmpRoot, "legacy-home");
+    vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
+    const id = "desk-a1b2c3";
+    const legacySessions = path.join(fakeHome, ".picklab", "sessions");
+    fs.mkdirSync(legacySessions, { recursive: true });
+    fs.writeFileSync(path.join(legacySessions, `${id}.json`), "{}\n");
+
+    const lease = await acquireHumanLease(id, {});
+    const permit = await acquireAgentPermit(id, {});
+    const sidecarDir = path.join(legacySessions, id);
+
+    expect(permit.path).toBe(
+      path.join(sidecarDir, "permits", `${permit.permitId}.json`),
+    );
+    expect(fs.existsSync(path.join(sidecarDir, "human.lease.json"))).toBe(true);
+    expect(lease.sessionId).toBe(id);
+    expect(fs.existsSync(path.join(fakeHome, ".pickforge", "lab"))).toBe(false);
+
+    await releaseAgentPermit(permit);
+    await releaseHumanLease(id, lease.leaseId, {});
+  });
+
   it("sweeps a permit owned by a dead process instead of blocking the drain", async () => {
-    const dir = path.join(env.PICKLAB_HOME as string, "sessions", "desk-a7", "permits");
+    const dir = path.join(env.PICKFORGE_HOME as string, "sessions", "desk-a7", "permits");
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
       path.join(dir, "dead-permit.json"),
@@ -147,7 +170,7 @@ describe("withAgentPermit", () => {
   it("runs the action and cleans up its permit when no lease is held", async () => {
     const result = await withAgentPermit("desk-b1", env, async () => "ran");
     expect(result).toBe("ran");
-    const permitsDir = path.join(env.PICKLAB_HOME as string, "sessions", "desk-b1", "permits");
+    const permitsDir = path.join(env.PICKFORGE_HOME as string, "sessions", "desk-b1", "permits");
     expect(fs.existsSync(permitsDir) ? fs.readdirSync(permitsDir) : []).toEqual([]);
   });
 
@@ -160,7 +183,7 @@ describe("withAgentPermit", () => {
       }),
     ).rejects.toThrow(HumanControlActiveError);
     expect(ran).toBe(false);
-    const permitsDir = path.join(env.PICKLAB_HOME as string, "sessions", "desk-b2", "permits");
+    const permitsDir = path.join(env.PICKFORGE_HOME as string, "sessions", "desk-b2", "permits");
     expect(fs.existsSync(permitsDir) ? fs.readdirSync(permitsDir) : []).toEqual([]);
   });
 

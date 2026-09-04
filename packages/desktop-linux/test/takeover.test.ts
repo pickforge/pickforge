@@ -17,8 +17,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // inject an interleaving action between recovery's two staleness checks via
 // `mockImplementationOnce`, while every other call still runs the real
 // implementation.
-vi.mock("@pickforge/picklab-core", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@pickforge/picklab-core")>();
+vi.mock("@pickforge/lab-core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@pickforge/lab-core")>();
   return {
     ...actual,
     readProcessIdentity: vi.fn((pid: number) => ({ pid, startTicks: pid })),
@@ -41,7 +41,7 @@ import {
   resolveRunStorage,
   stopPid,
   type EnvLike,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
   endHumanTakeover,
   recoverStaleHumanLease,
@@ -101,13 +101,13 @@ async function createDesktop(desktop: Record<string, unknown> = {}): Promise<str
 }
 
 beforeEach(async () => {
-  root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "picklab-takeover-dl-"));
+  root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-takeover-dl-"));
   binDir = path.join(root, "bin");
   await fs.promises.mkdir(binDir, { recursive: true });
   argvLogPath = path.join(root, "argv.log");
   env = {
     ...process.env,
-    PICKLAB_HOME: path.join(root, "home"),
+    PICKFORGE_HOME: path.join(root, "home"),
     PATH: binDir,
     ARGV_LOG: argvLogPath,
   };
@@ -118,7 +118,7 @@ afterEach(async () => {
   vi.clearAllMocks();
   // Force-kill any fake x11vnc process a failed assertion left running, so a
   // failure in one test never blocks a later test's port.
-  const sessionsDir = path.join(env.PICKLAB_HOME as string, "sessions");
+  const sessionsDir = path.join(env.PICKFORGE_HOME as string, "sessions");
   const entries = await fs.promises.readdir(sessionsDir).catch(() => [] as string[]);
   for (const entry of entries) {
     if (!entry.endsWith(".json")) continue;
@@ -249,7 +249,7 @@ describe("startHumanTakeover / endHumanTakeover", () => {
     // treated as free once its TTL has passed regardless.
     const current = await readHumanLease(id, env);
     await fs.promises.writeFile(
-      path.join(env.PICKLAB_HOME as string, "sessions", id, "human.lease.json"),
+      path.join(env.PICKFORGE_HOME as string, "sessions", id, "human.lease.json"),
       `${JSON.stringify({ ...current, expiresAt: new Date(Date.now() - 1_000).toISOString() })}\n`,
     );
     expect(await readHumanLease(id, env)).toMatchObject({
@@ -281,7 +281,7 @@ describe("recoverStaleHumanLease (crash recovery)", () => {
       expiresAt: new Date(Date.now() - 1_000).toISOString(),
     };
     await fs.promises.writeFile(
-      path.join(env.PICKLAB_HOME as string, "sessions", id, "human.lease.json"),
+      path.join(env.PICKFORGE_HOME as string, "sessions", id, "human.lease.json"),
       `${JSON.stringify(crashed)}\n`,
     );
 
@@ -317,7 +317,7 @@ describe("recoverStaleHumanLease (crash recovery)", () => {
       expiresAt: new Date(Date.now() - 1_000).toISOString(),
     };
     await fs.promises.writeFile(
-      path.join(env.PICKLAB_HOME as string, "sessions", id, "human.lease.json"),
+      path.join(env.PICKFORGE_HOME as string, "sessions", id, "human.lease.json"),
       `${JSON.stringify(stale)}\n`,
     );
 
@@ -334,7 +334,7 @@ describe("recoverStaleHumanLease (crash recovery)", () => {
     readHumanLeaseRawMock.mockImplementationOnce(
       async (sessionId: string, callEnv: EnvLike) => {
         await fs.promises.writeFile(
-          path.join(callEnv.PICKLAB_HOME as string, "sessions", sessionId, "human.lease.json"),
+          path.join(callEnv.PICKFORGE_HOME as string, "sessions", sessionId, "human.lease.json"),
           `${JSON.stringify(renewed)}\n`,
         );
         return { raw: `${JSON.stringify(renewed)}\n`, lease: renewed };
@@ -376,7 +376,7 @@ describe("startHumanTakeover self-healing", () => {
       expiresAt: new Date(Date.now() - 1_000).toISOString(),
     };
     await fs.promises.writeFile(
-      path.join(env.PICKLAB_HOME as string, "sessions", id, "human.lease.json"),
+      path.join(env.PICKFORGE_HOME as string, "sessions", id, "human.lease.json"),
       `${JSON.stringify(crashed)}\n`,
     );
 
@@ -395,7 +395,7 @@ describe("startHumanTakeover self-healing", () => {
 
 describe("startHumanTakeover against a pre-existing --vnc-control session", () => {
   it("degrades safely: fails cleanly, leaves the persistent writable VNC undisturbed, and rolls back the lease", async () => {
-    // Simulates `picklab session create --vnc-control`'s persistent, lease-
+    // Simulates `pickforge-lab session create --vnc-control`'s persistent, lease-
     // uncoordinated writable VNC — a completely different mechanism (#22)
     // from the leased takeover this module implements (#21). The two must
     // never be silently conflated: a takeover attempt against a session
@@ -443,7 +443,7 @@ describe("ensureSessionVnc recovery integration", () => {
       expiresAt: new Date(Date.now() - 1_000).toISOString(),
     };
     await fs.promises.writeFile(
-      path.join(env.PICKLAB_HOME as string, "sessions", id, "human.lease.json"),
+      path.join(env.PICKFORGE_HOME as string, "sessions", id, "human.lease.json"),
       `${JSON.stringify(crashed)}\n`,
     );
 
@@ -467,7 +467,7 @@ describe("ensureSessionVnc recovery integration", () => {
   });
 });
 
-// Real separate-process proof (pickforge/picklab#21 P0-A): the watchdog must
+// Real separate-process proof (pickforge/pickforge#21 P0-A): the watchdog must
 // actively reclaim a stale lease running as a genuinely independent OS
 // process — not merely "correct in-process against a mock" — since the whole
 // point is surviving a `SIGKILL` of its sibling `watch --control` process.
@@ -482,7 +482,7 @@ const watchdogWorker = fileURLToPath(
   new URL("./workers/takeover-watchdog-worker.ts", import.meta.url),
 );
 // Bun's default package resolution for a plain `bun <script.ts>` invocation
-// follows `@pickforge/picklab-core`'s published `exports.default`
+// follows `@pickforge/lab-core`'s published `exports.default`
 // (`dist/index.js`) rather than vitest's own source alias, so the worker
 // would otherwise run against whatever the core package's dist happened to
 // contain at last build — stale during normal iteration, unlike every other
@@ -516,11 +516,11 @@ describe("runTakeoverWatchdogLoop (real separate-process)", () => {
       ttlMs: 30_000,
       heartbeatMs: 5_000,
     };
-    await fs.promises.mkdir(path.join(env.PICKLAB_HOME as string, "sessions", id), {
+    await fs.promises.mkdir(path.join(env.PICKFORGE_HOME as string, "sessions", id), {
       recursive: true,
     });
     await fs.promises.writeFile(
-      path.join(env.PICKLAB_HOME as string, "sessions", id, "human.lease.json"),
+      path.join(env.PICKFORGE_HOME as string, "sessions", id, "human.lease.json"),
       `${JSON.stringify(stale)}\n`,
     );
     expect(await readHumanLease(id, env)).toBeDefined();
@@ -529,7 +529,7 @@ describe("runTakeoverWatchdogLoop (real separate-process)", () => {
       watchdogWorker,
       id,
       "crashed-lease",
-      env.PICKLAB_HOME as string,
+      env.PICKFORGE_HOME as string,
       "20",
     ]);
 
@@ -547,7 +547,7 @@ describe("runTakeoverWatchdogLoop (real separate-process)", () => {
     // proves the negative (no premature reclaim) by letting it poll for
     // several cycles, then terminating it directly rather than waiting for
     // a natural exit that would never come.
-    const child = spawnWorker([watchdogWorker, id, handle.leaseId, env.PICKLAB_HOME as string, "20"]);
+    const child = spawnWorker([watchdogWorker, id, handle.leaseId, env.PICKFORGE_HOME as string, "20"]);
     await new Promise((resolve) => setTimeout(resolve, 150));
     expect((await readHumanLease(id, env))?.leaseId).toBe(handle.leaseId);
     child.kill("SIGTERM");

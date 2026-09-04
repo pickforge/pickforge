@@ -12,7 +12,7 @@ import {
   stopPid,
   updateSession,
   type EnvLike,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
   XvfbStartError,
   allocateDisplay,
@@ -53,12 +53,12 @@ const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const TEST_TIMEOUT_MS = 30_000;
 const DEAD_DISPLAY = ":219";
 
-const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-desktop-test-"));
+const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-desktop-test-"));
 const home = path.join(tmpRoot, "home");
 const projectDir = path.join(tmpRoot, "project");
 fs.mkdirSync(home, { recursive: true });
 fs.mkdirSync(projectDir, { recursive: true });
-const env: EnvLike = { ...process.env, PICKLAB_HOME: home };
+const env: EnvLike = { ...process.env, PICKFORGE_HOME: home };
 
 afterAll(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
@@ -201,7 +201,7 @@ describe("createDesktopSession registry reaping", () => {
     const isolatedHome = path.join(tmpRoot, "home-reap-desktop");
     const isolatedEnv: EnvLike = {
       ...process.env,
-      PICKLAB_HOME: isolatedHome,
+      PICKFORGE_HOME: isolatedHome,
     };
     const binDir = path.join(tmpRoot, "fake-xvfb");
     writeFakeXvfb(binDir);
@@ -311,7 +311,7 @@ describe("launchApp display isolation", () => {
     try {
       expect(fs.readFileSync(outFile, "utf8")).toBe(
         `DISPLAY=${DEAD_DISPLAY}\n` +
-          "WAYLAND_DISPLAY=picklab-no-wayland\nWAYLAND_SOCKET=unset\n" +
+          "WAYLAND_DISPLAY=pickforge-no-wayland\nWAYLAND_SOCKET=unset\n" +
           "ELECTRON_OZONE_PLATFORM_HINT=x11\nGDK_BACKEND=x11\n" +
           "GLFW_PLATFORM=x11\nQT_QPA_PLATFORM=xcb\n" +
           "SDL_VIDEODRIVER=x11\nWINIT_UNIX_BACKEND=x11\n" +
@@ -601,7 +601,7 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
       writeExecutable(
         guardedZenity,
         "#!/bin/sh\n" +
-          '[ "$WAYLAND_DISPLAY" = picklab-no-wayland ] || exit 20\n' +
+          '[ "$WAYLAND_DISPLAY" = pickforge-no-wayland ] || exit 20\n' +
           '[ "${WAYLAND_SOCKET+set}" != set ] || exit 21\n' +
           '[ "$ELECTRON_OZONE_PLATFORM_HINT" = x11 ] || exit 22\n' +
           '[ "$GDK_BACKEND" = x11 ] || exit 23\n' +
@@ -610,7 +610,7 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
           '[ "$SDL_VIDEODRIVER" = x11 ] || exit 26\n' +
           '[ "$WINIT_UNIX_BACKEND" = x11 ] || exit 27\n' +
           '[ "$XDG_SESSION_TYPE" = x11 ] || exit 28\n' +
-          'exec zenity --info --text picklab --title picklab-exec-itest\n',
+          'exec zenity --info --text pickforge --title pickforge-exec-itest\n',
       );
       try {
         const app = await execApp({
@@ -627,12 +627,12 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
         expect(app.processGroupId).toBe(app.pid);
         expect(app.windows).toEqual(
           expect.arrayContaining([
-            expect.objectContaining({ name: "picklab-exec-itest" }),
+            expect.objectContaining({ name: "pickforge-exec-itest" }),
           ]),
         );
         expect(await listWindows(session.display)).toEqual(
           expect.arrayContaining([
-            expect.objectContaining({ name: "picklab-exec-itest" }),
+            expect.objectContaining({ name: "pickforge-exec-itest" }),
           ]),
         );
       } finally {
@@ -657,20 +657,20 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
             "-xrm",
             "XTerm.vt100.allowTitleOps: false",
             "-T",
-            "picklab-itest",
+            "pickforge-lab-itest",
           ],
           logDir: session.logDir,
         });
         const win = await waitForWindow(
           session.display,
-          "picklab-itest",
+          "pickforge-lab-itest",
           15_000,
         );
         expect(win.id).toMatch(/^\d+$/);
-        expect(win.name).toContain("picklab-itest");
+        expect(win.name).toContain("pickforge-lab-itest");
 
         await click({ display: session.display, sessionId: session.id, env, x: 40, y: 40 });
-        await typeText({ display: session.display, sessionId: session.id, env, text: "echo picklab" });
+        await typeText({ display: session.display, sessionId: session.id, env, text: "echo pickforge-lab" });
         await pressKey({ display: session.display, sessionId: session.id, env, key: "Return" });
         await pressKey({ display: session.display, sessionId: session.id, env, key: "ctrl+shift+t" });
 
@@ -740,7 +740,7 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
             "-xrm",
             "XTerm.vt100.allowTitleOps: false",
             "-T",
-            "picklab c++ [itest]",
+            "pickforge-lab c++ [itest]",
           ],
           logDir: session.logDir,
         });

@@ -11,7 +11,7 @@ import {
   listSessions,
   readProcessIdentity,
   stopPid,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import { runWatch, watchDesktopSession } from "../src/commands/watch.js";
 
 let root: string;
@@ -26,7 +26,7 @@ function syntheticVncPort(): number {
   return 5_900 + syntheticDisplayNumber;
 }
 const originalEnv = {
-  PICKLAB_HOME: process.env.PICKLAB_HOME,
+  PICKFORGE_HOME: process.env.PICKFORGE_HOME,
   PATH: process.env.PATH,
   DISPLAY: process.env.DISPLAY,
   WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY,
@@ -58,7 +58,7 @@ async function createDesktop(
 }
 
 beforeEach(async () => {
-  root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "picklab-watch-unit-"));
+  root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-watch-unit-"));
   binDir = path.join(root, "bin");
   await fs.promises.mkdir(binDir, { recursive: true });
   const reservation = net.createServer();
@@ -73,7 +73,7 @@ beforeEach(async () => {
   const closed = once(reservation, "close");
   reservation.close();
   await closed;
-  process.env.PICKLAB_HOME = path.join(root, "home");
+  process.env.PICKFORGE_HOME = path.join(root, "home");
   process.env.PATH = binDir;
   delete process.env.DISPLAY;
   delete process.env.WAYLAND_DISPLAY;
@@ -88,7 +88,7 @@ afterEach(async () => {
     }
     await destroySessionRecord(record.id).catch(() => {});
   }
-  restoreEnv("PICKLAB_HOME");
+  restoreEnv("PICKFORGE_HOME");
   restoreEnv("PATH");
   restoreEnv("DISPLAY");
   restoreEnv("WAYLAND_DISPLAY");
@@ -111,7 +111,7 @@ describe("watch command in process", () => {
     const report = JSON.parse(String(output.mock.calls[0]?.[0]));
     expect(report.ok).toBe(false);
     expect(report.errors.join("\n")).toContain(
-      "picklab session create --type desktop",
+      "pickforge-lab session create --type desktop",
     );
   });
 

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import type { EnvLike } from "@pickforge/picklab-core";
+import type { EnvLike } from "@pickforge/lab-core";
 import { findOnPath } from "./util.js";
 
 const VIEWER_BINARIES = [

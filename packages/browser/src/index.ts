@@ -1,4 +1,4 @@
-export const packageName = "@pickforge/picklab-browser";
+export const packageName = "@pickforge/lab-browser";
 
 export {
   SUPPORTED_CHROME_BINARIES,

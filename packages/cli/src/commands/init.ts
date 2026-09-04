@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { EnvLike, PicklabProfile } from "@pickforge/picklab-core";
+import type { EnvLike, PickforgeProfile } from "@pickforge/lab-core";
 import { resolveAskpassCapability } from "../provision/askpass.js";
 import {
   evaluateChecks,
@@ -19,12 +19,12 @@ import {
   labUserPrivilegeUnavailableMessage,
   planCreateAvd,
   planLabUser,
-  planPicklabHome,
+  planPickforgeHome,
 } from "../provision/planner.js";
 import { confirm, toConsentDecision } from "../provision/prompts.js";
 
 export interface InitCliOptions {
-  profile?: PicklabProfile;
+  profile?: PickforgeProfile;
   yes?: boolean;
   createLabUser?: boolean;
   createAvd?: boolean;
@@ -40,7 +40,7 @@ export interface InitReport {
    * generic failure without string-matching `errors`. `"failed"` before an
    * execution ever runs. */
   status: ExecuteProvisioningResult["status"];
-  profile: PicklabProfile;
+  profile: PickforgeProfile;
   projectDir: string;
   dryRun: boolean;
   checks: DoctorCheck[];
@@ -88,7 +88,7 @@ function planAvdProvisioning(
         consentTo(
           `dedicated AVD "${snapshot.android.avdName}" (runs avdmanager)`,
           opts,
-          "Re-run with --yes --create-avd or run: picklab setup android --create-avd",
+          "Re-run with --yes --create-avd or run: pickforge-lab setup android --create-avd",
         ),
     },
   });
@@ -121,62 +121,31 @@ function planLabUserProvisioning(
         consentTo(
           `lab user "${snapshot.labUser.name}" (privileged, runs sudo)`,
           opts,
-          "Re-run with --yes --create-lab-user or run: picklab setup lab-user",
+          "Re-run with --yes --create-lab-user or run: pickforge-lab setup lab-user",
         ),
     },
   });
 }
 
-// eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/picklab#60
-export async function runInit(
-  opts: InitCliOptions,
-  env: EnvLike = process.env,
-): Promise<number> {
-  const profile = opts.profile ?? "generic";
-  const projectDir = path.resolve(opts.projectDir ?? process.cwd());
-  const snapshot = await collectSnapshot({ env, projectDir });
-  const allChecks = evaluateChecks(snapshot);
-  const requiredIds = requiredChecksForProfile(profile);
-  const checks = allChecks.filter((check) => requiredIds.includes(check.id));
-
-  if (opts.json !== true) {
-    for (const check of checks) {
-      console.log(formatCheckLine(check));
-    }
-  }
-
-  const sections: ProvisioningSection[] = [
-    {
-      kind: "plan",
-      plan: {
-        steps: [
-          {
-            id: "project-config",
-            title: `Write project config (profile: ${profile})`,
-            kind: "write-project-config",
-            privileged: false,
-            config: { profile },
-          },
-        ],
-      },
+function projectConfigSection(profile: PickforgeProfile): ProvisioningSection {
+  return {
+    kind: "plan",
+    plan: {
+      steps: [{
+        id: "project-config",
+        title: `Write project config (profile: ${profile})`,
+        kind: "write-project-config",
+        privileged: false,
+        config: { profile },
+      }],
     },
-  ];
-  const homePlan = planPicklabHome({
-    path: snapshot.picklabHome.path,
-    exists: snapshot.picklabHome.exists,
-  });
-  if (homePlan.steps.length > 0) {
-    sections.push({ kind: "plan", plan: homePlan, satisfies: "picklab-home" });
-  }
+  };
+}
 
-  const avdRequired = requiredIds.includes("avd");
-  if (!snapshot.android.avdExists && (avdRequired || opts.createAvd === true)) {
-    planAvdProvisioning(snapshot, opts, sections);
-  }
-  if (!snapshot.labUser.exists && opts.createLabUser === true) {
-    planLabUserProvisioning(snapshot, opts, sections);
-  }
-
+function addMissingCheckSections(
+  sections: ProvisioningSection[],
+  checks: DoctorCheck[],
+): void {
   for (const check of checks) {
     if (check.status !== "missing") continue;
     sections.push({
@@ -187,7 +156,80 @@ export async function runInit(
         (check.hint === undefined ? "" : ` Hint: ${check.hint}`),
     });
   }
+}
 
+function buildInitSections(
+  profile: PickforgeProfile,
+  snapshot: DetectionSnapshot,
+  checks: DoctorCheck[],
+  requiredIds: readonly string[],
+  opts: InitCliOptions,
+): ProvisioningSection[] {
+  const sections = [projectConfigSection(profile)];
+  const homePlan = planPickforgeHome({
+    path: snapshot.pickforgeHome.path,
+    exists: snapshot.pickforgeHome.exists,
+  });
+  if (homePlan.steps.length > 0) {
+    sections.push({ kind: "plan", plan: homePlan, satisfies: "pickforge-home" });
+  }
+  const avdRequired = requiredIds.includes("avd");
+  if (!snapshot.android.avdExists && (avdRequired || opts.createAvd === true)) {
+    planAvdProvisioning(snapshot, opts, sections);
+  }
+  if (!snapshot.labUser.exists && opts.createLabUser === true) {
+    planLabUserProvisioning(snapshot, opts, sections);
+  }
+  addMissingCheckSections(sections, checks);
+  return sections;
+}
+
+function applyExecution(
+  report: InitReport,
+  execution: ExecuteProvisioningResult,
+): void {
+  report.plan = execution.plan.steps;
+  report.results = execution.results;
+  report.ok = execution.ok;
+  report.status = execution.status;
+  if (execution.ok) return;
+  const errors =
+    execution.errors.length > 0 ? execution.errors : ["provisioning failed"];
+  const projectConfigWritten = execution.results.some(
+    (result) => result.id === "project-config" && result.ok,
+  );
+  if (projectConfigWritten) {
+    report.errors.push(
+      `${errors[0]}. Project config was written; fix the failed dependency and ` +
+        `re-run pickforge-lab init (idempotent), or check pickforge-lab doctor.`,
+      ...errors.slice(1),
+    );
+    return;
+  }
+  report.errors.push(...errors);
+}
+
+export async function runInit(
+  opts: InitCliOptions,
+  env: EnvLike = process.env,
+): Promise<number> {
+  const profile = opts.profile ?? "generic";
+  const projectDir = path.resolve(opts.projectDir ?? process.cwd());
+  const snapshot = await collectSnapshot({ env, projectDir });
+  const requiredIds = requiredChecksForProfile(profile);
+  const checks = evaluateChecks(snapshot).filter((check) =>
+    requiredIds.includes(check.id),
+  );
+  if (opts.json !== true) {
+    for (const check of checks) console.log(formatCheckLine(check));
+  }
+  const sections = buildInitSections(
+    profile,
+    snapshot,
+    checks,
+    requiredIds,
+    opts,
+  );
   const report: InitReport = {
     ok: false,
     status: "failed",
@@ -199,43 +241,19 @@ export async function runInit(
     results: [],
     errors: [],
   };
-
   const log =
     opts.json === true ? () => {} : (line: string) => console.log(line);
-  const execution = await executeProvisioning(
-    sections,
-    {
-      dryRun: opts.dryRun,
-      env,
-      projectDir,
-      log,
-      privilege: {
-        sudoPath: snapshot.sudo,
-        askpass: resolveAskpassCapability(env),
-      },
+  const execution = await executeProvisioning(sections, {
+    dryRun: opts.dryRun,
+    env,
+    projectDir,
+    log,
+    privilege: {
+      sudoPath: snapshot.sudo,
+      askpass: resolveAskpassCapability(env),
     },
-  );
-  report.plan = execution.plan.steps;
-  report.results = execution.results;
-  report.ok = execution.ok;
-  report.status = execution.status;
-  if (!execution.ok) {
-    const errors =
-      execution.errors.length > 0 ? execution.errors : ["provisioning failed"];
-    if (
-      execution.results.some(
-        (result) => result.id === "project-config" && result.ok,
-      )
-    ) {
-      report.errors.push(
-        `${errors[0]}. Project config was written; fix the failed dependency and ` +
-          `re-run picklab init (idempotent), or check picklab doctor.`,
-      );
-      report.errors.push(...errors.slice(1));
-    } else {
-      report.errors.push(...errors);
-    }
-  }
+  });
+  applyExecution(report, execution);
   emit(report, opts);
   return report.ok ? 0 : 1;
 }
@@ -252,12 +270,12 @@ function emit(report: InitReport, opts: InitCliOptions): void {
     console.log(
       report.dryRun
         ? `[dry-run] init complete for profile ${report.profile} (no changes made)`
-        : `Initialized PickLab project (profile: ${report.profile}) in ${report.projectDir}`,
+        : `Initialized Pickforge project (profile: ${report.profile}) in ${report.projectDir}`,
     );
     if (!report.dryRun) {
       console.log(
-        "Next: picklab agents install <codex|claude-code|cursor> to register " +
-          "the MCP server, then picklab doctor to verify dependencies.",
+        "Next: pickforge-lab agents install <codex|claude-code|cursor|pi> to register " +
+          "the MCP server, then pickforge-lab doctor to verify dependencies.",
       );
     }
   }

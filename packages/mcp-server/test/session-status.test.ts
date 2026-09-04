@@ -18,7 +18,7 @@ beforeEach(async () => {
   dirs = makeLabDirs();
   lab = await connectLab({
     projectDir: dirs.projectDir,
-    env: { PICKLAB_HOME: dirs.home, PATH: dirs.binDir },
+    env: { PICKFORGE_HOME: dirs.home, PATH: dirs.binDir },
   });
 });
 

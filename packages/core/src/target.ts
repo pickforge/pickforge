@@ -96,7 +96,7 @@ export async function resolveDesktopCapableSession(
     env: opts.env,
     projectDir: opts.projectDir,
     consumerLabel: "watch",
-    createHint: "create one with: picklab session create --type desktop",
+    createHint: "create one with: pickforge-lab session create --type desktop",
     selectHint: "pick one with --session <id>",
   });
   if (record.status !== "running") {

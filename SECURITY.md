@@ -1,6 +1,6 @@
 # Security
 
-PickLab automates real software on your machine. It spawns and drives native
+Pickforge automates real software on your machine. It spawns and drives native
 desktop apps and Android emulators, starts a local X display (Xvfb) and an
 optional VNC server, and runs ADB. Treat it like any tool that can launch
 processes and read screens: run it on hardware you control, against code you
@@ -21,7 +21,7 @@ fuller model.
 ## Recorded evidence and screenshots
 
 Computer-use evidence is stored as local run data, by default under
-`~/.pickforge/picklab/projects/<projectId>/runs/<runId>/` (outside the
+`~/.pickforge/lab/projects/<projectId>/runs/<runId>/` (outside the
 project; see the README's "Run storage" section for storage modes).
 `actions.jsonl` is the authoritative sanitized timeline; finalization
 produces an escaped, no-script `report.html` with a restrictive content
@@ -37,7 +37,7 @@ are redacted or omitted before persistence.
 **Screenshots are different: pixels cannot be redacted.** An explicitly
 requested desktop, Android, or DevTools screenshot stores the screen exactly as
 displayed and may therefore contain passwords, tokens, personal data, or other
-secrets. PickLab never takes an implicit screenshot for typing/fill actions.
+secrets. Pickforge never takes an implicit screenshot for typing/fill actions.
 Do not explicitly capture a sensitive screen. Files are ordinary local files,
 not encrypted storage; anyone who can read the project directory can read its
 evidence.
@@ -56,8 +56,8 @@ not appropriate:
 This opt-out disables the action timeline and its screenshot association; it
 does not block a screenshot command that was explicitly requested. The journal
 and associated artifacts have a 100 MiB recording threshold per run. The
-crossing record may exceed it; PickLab then writes one durable metadata-only
-truncation marker and stops appending payloads. PickLab retains the latest 20
+crossing record may exceed it; Pickforge then writes one durable metadata-only
+truncation marker and stops appending payloads. Pickforge retains the latest 20
 finalized evidence runs, while active/running and legacy runs are not pruned.
 
 ## VNC binds to loopback (SEC-01 — mitigated)
@@ -65,9 +65,9 @@ finalized evidence runs, while active/running and legacy runs are not pruned.
 The desktop VNC server (`x11vnc`) is started with `-localhost`, so it listens on
 `127.0.0.1` only and is not reachable from the network. It runs without a VNC
 password (`-nopw`); that is safe precisely because the socket never leaves the
-loopback interface. Normal `--vnc` and `picklab watch` observation is
+loopback interface. Normal `--vnc` and `pickforge-lab watch` observation is
 server-enforced read-only (`-viewonly`): a connecting client cannot inject
-keyboard or mouse input into the session, only watch it. `picklab watch`
+keyboard or mouse input into the session, only watch it. `pickforge-lab watch`
 starts this server lazily and closing its host-side viewer does not stop VNC,
 Xvfb, or the session. `--vnc-control` is an explicit writable escape hatch for
 entering a password, API key, or OTP directly into the lab app. Watch refuses
@@ -91,19 +91,19 @@ all-interface VNC server is a remote-takeover risk.
 ## desktop_launch runs as you (SEC-02 — known limitation)
 
 `desktop_launch` and the `desktop_*` input tools run the target app as the user
-who started PickLab. There is no uid sandbox yet, so a launched app has your
-filesystem and network access. PickLab provisions a dedicated locked
-`picklab-lab` user and a dedicated `picklab-avd`, but session processes do not
+who started Pickforge. There is no uid sandbox yet, so a launched app has your
+filesystem and network access. Pickforge provisions a dedicated locked
+`pickforge-lab` user and a dedicated `pickforge-avd`, but session processes do not
 yet run under that user — uid isolation is planned. Until then, launch only apps
 you trust, and prefer a throwaway user or VM for untrusted binaries.
 
 ## Browser sessions run as you (SEC-03 — known limitation)
 
 Browser sessions launch real headed Chrome/Chromium inside a private Xvfb
-display. PickLab hardens the launch, but v1 is for authorized, trusted
+display. Pickforge hardens the launch, but v1 is for authorized, trusted
 development and QA — it is **not** a sandbox for hostile web pages.
 
-What PickLab does do:
+What Pickforge does do:
 
 - Each session gets its own private Xvfb and its own **ephemeral** Chrome
   profile under the session directory. Profiles are never borrowed from your
@@ -115,9 +115,9 @@ What PickLab does do:
   (`--remote-debugging-port=0` plus an explicit `127.0.0.1` address). It is not
   reachable off-host.
 - The DevTools websocket path is a capability URL: whoever holds it controls the
-  browser. PickLab reads only the port from `DevToolsActivePort` and **never**
+  browser. Pickforge reads only the port from `DevToolsActivePort` and **never**
   persists the websocket path/GUID in session records or diagnostics.
-- `picklab browser devtools-mcp` resolves only a live browser session owned by the current project and derives `http://127.0.0.1:<port>` in memory. It accepts no arbitrary browser URL and stores no CDP endpoint or websocket GUID.
+- `pickforge-lab browser devtools-mcp` resolves only a live browser session owned by the current project and derives `http://127.0.0.1:<port>` in memory. It accepts no arbitrary browser URL and stores no CDP endpoint or websocket GUID.
 - The relay validates the installed `chrome-devtools-mcp` package name, exact `1.5.0` version, declared bin, and confined real path before starting it directly with Node (`shell: false`). Runtime `npx`, upstream update checks, and upstream usage statistics are disabled.
 - Relay stdout contains only validated LF-delimited JSON-RPC records, with pending records capped at 16 MiB. Upstream stderr lines are capped at 64 KiB, redacted, and forwarded only to stderr; over-limit lines are dropped with a safe notice. Malformed or incomplete protocol input fails closed and terminates the upstream process.
 - On destroy or reap, the whole Chrome **process group** is terminated and
@@ -128,12 +128,12 @@ What PickLab does do:
 What it does not do, and you must account for:
 
 - **Loopback is not isolation from local processes.** Chrome and the CDP
-  endpoint run as the user who started PickLab. Any local process running as
+  endpoint run as the user who started Pickforge. Any local process running as
   that user can reach the loopback CDP port and drive the browser. Loopback
   binding only keeps the network out, not other local processes.
 - There is **no uid sandbox** for the browser yet (same limitation as SEC-02).
   Launch only content you trust; prefer a throwaway user or VM otherwise.
-- The official Chrome DevTools MCP runs with the same user privileges as PickLab and exposes its upstream tool surface without method filtering. An agent with access to `picklab-browser` can inspect and control the isolated browser; grant that MCP entry only to agents you trust.
+- The official Chrome DevTools MCP runs with the same user privileges as Pickforge and exposes its upstream tool surface without method filtering. An agent with access to `pickforge-lab-browser` can inspect and control the isolated browser; grant that MCP entry only to agents you trust.
 
 Planned hardening tracked separately: per-session uid isolation, and moving CDP
 off a TCP port onto `--remote-debugging-pipe`.
@@ -143,7 +143,7 @@ off a TCP port onto `--remote-debugging-pipe`.
 Please report privately. Do not open a public issue for security bugs.
 
 - GitHub: open a private advisory at
-  <https://github.com/pickforge/picklab/security/advisories/new>
+  <https://github.com/pickforge/pickforge/security/advisories/new>
 - Email: <security@pickforge.dev>
 
 We aim to acknowledge within a few days, and we will credit reporters who want it.

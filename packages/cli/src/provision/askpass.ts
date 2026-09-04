@@ -1,5 +1,5 @@
 // Linux graphical `sudo` (askpass) capability detection —
-// pickforge/picklab#27.
+// pickforge/pickforge#27.
 //
 // Implements the *detection* half of the "Shared graphical sudo (askpass)
 // security contract — locked v1" pinned on that issue (shared with
@@ -9,8 +9,8 @@
 // fail-closed when nothing resolves. The *injection* half — passing
 // `SUDO_ASKPASS`, and only that variable, into the spawned privileged
 // command — lives in ./executor.ts (materializePrivilegedStep), since
-// PickLab programmatically issues `sudo -A` rather than hosting an
-// interactive shell the way PickForge does.
+// Pickforge programmatically issues `sudo -A` rather than hosting an
+// interactive shell the way the legacy Pickforge IDE does.
 //
 // Scope: macOS/Windows are out of scope for this release.
 // `detectAskpassCapability` is a pure function so every branch — including
@@ -19,12 +19,12 @@
 // Linux, matching where the feature actually activates.
 
 import fs from "node:fs";
-import type { EnvLike } from "@pickforge/picklab-core";
+import type { EnvLike } from "@pickforge/lab-core";
 
 /**
  * Fixed, documented askpass helper probe list per the locked v1 contract —
  * checked in this order after a user-set `SUDO_ASKPASS`. No dynamic
- * discovery beyond this list; PickLab never ships, generates, or installs
+ * discovery beyond this list; Pickforge never ships, generates, or installs
  * its own askpass helper.
  */
 export const ASKPASS_PROBE_PATHS: readonly string[] = [
@@ -110,8 +110,8 @@ function isExecutableFile(target: string): boolean {
  * locked v1 contract's scope — macOS/Windows are always
  * `unsupported-platform`, never a half-implementation.
  *
- * Unlike PickForge's long-lived desktop process (which caches this once per
- * process lifetime), the PickLab CLI is a short one-shot invocation that
+ * Unlike the legacy Pickforge IDE's long-lived desktop process (which caches this once per
+ * process lifetime), the Pickforge CLI is a short one-shot invocation that
  * re-execs per command, so there is no stale-cache risk to guard against
  * here: detection simply re-runs, cheaply, against the current environment
  * each time a provisioning command resolves it.

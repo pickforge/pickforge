@@ -1,29 +1,49 @@
 #!/bin/sh
-# PickLab installer: curl -fsSL https://pickforge.dev/picklab/install.sh | sh
-# Installs @pickforge/picklab globally with bun (preferred) or npm.
+# Pickforge installer: curl -fsSL https://pickforge.dev/install.sh | sh
+# Installs pickforge globally with bun (preferred) or npm.
 # Never uses sudo.
 set -eu
 
+warned_legacy_envs=""
+warn_legacy_env() {
+  legacy_name="$1"
+  current_name="$2"
+  case " ${warned_legacy_envs} " in
+    *" ${legacy_name} "*) return ;;
+  esac
+  warned_legacy_envs="${warned_legacy_envs} ${legacy_name}"
+  echo "warning: ${legacy_name} is deprecated; use ${current_name} instead" >&2
+}
+
 resolve_package_spec() {
-  package_spec="@pickforge/picklab"
-  if [ "${PICKLAB_INSTALL_FROM_TARBALL:-}" != "" ]; then
-    if [ ! -f "${PICKLAB_INSTALL_FROM_TARBALL}" ]; then
-      echo "error: PICKLAB_INSTALL_FROM_TARBALL points to a missing file: ${PICKLAB_INSTALL_FROM_TARBALL}" >&2
+  package_spec="pickforge"
+  tarball="${PICKFORGE_INSTALL_FROM_TARBALL:-}"
+  if [ "${PICKFORGE_INSTALL_FROM_TARBALL+set}" != "set" ] && [ "${PICKLAB_INSTALL_FROM_TARBALL+set}" = "set" ]; then
+    warn_legacy_env PICKLAB_INSTALL_FROM_TARBALL PICKFORGE_INSTALL_FROM_TARBALL
+    tarball="${PICKLAB_INSTALL_FROM_TARBALL}"
+  fi
+  if [ "${tarball}" != "" ]; then
+    if [ ! -f "${tarball}" ]; then
+      echo "error: PICKFORGE_INSTALL_FROM_TARBALL points to a missing file: ${tarball}" >&2
       exit 1
     fi
-    package_spec="${PICKLAB_INSTALL_FROM_TARBALL}"
+    package_spec="${tarball}"
   fi
 }
 
 resolve_runtime() {
-  runtime="${PICKLAB_INSTALL_RUNTIME:-}"
+  runtime="${PICKFORGE_INSTALL_RUNTIME:-}"
+  if [ "${PICKFORGE_INSTALL_RUNTIME+set}" != "set" ] && [ "${PICKLAB_INSTALL_RUNTIME+set}" = "set" ]; then
+    warn_legacy_env PICKLAB_INSTALL_RUNTIME PICKFORGE_INSTALL_RUNTIME
+    runtime="${PICKLAB_INSTALL_RUNTIME}"
+  fi
   if [ "${runtime}" = "" ]; then
     if command -v bun >/dev/null 2>&1; then
       runtime="bun"
     elif command -v npm >/dev/null 2>&1; then
       runtime="npm"
     else
-      echo "error: PickLab needs bun or Node.js >= 20 with npm." >&2
+      echo "error: Pickforge needs bun or Node.js >= 20 with npm." >&2
       echo "Install one of them and re-run this script." >&2
       exit 1
     fi
@@ -32,7 +52,7 @@ resolve_runtime() {
 
 check_node_version() {
   if ! command -v node >/dev/null 2>&1; then
-    echo "error: PickLab needs Node.js ^20.19, ^22.12, or >=23, but node is not on PATH." >&2
+    echo "error: Pickforge needs Node.js ^20.19, ^22.12, or >=23, but node is not on PATH." >&2
     echo "Install a supported Node.js version (with or without bun) and re-run this script." >&2
     exit 1
   fi
@@ -54,7 +74,7 @@ check_node_version() {
     supported=1
   fi
   if [ "${supported}" -ne 1 ]; then
-    echo "error: PickLab needs Node.js ^20.19, ^22.12, or >=23 (found ${node_version})." >&2
+    echo "error: Pickforge needs Node.js ^20.19, ^22.12, or >=23 (found ${node_version})." >&2
     echo "Install a supported Node.js version (with or without bun) and re-run this script." >&2
     exit 1
   fi
@@ -74,7 +94,7 @@ resolve_bun_bin_dir() {
 
 install_with_bun() {
   if ! command -v bun >/dev/null 2>&1; then
-    echo "error: PICKLAB_INSTALL_RUNTIME=bun but bun is not installed" >&2
+    echo "error: PICKFORGE_INSTALL_RUNTIME=bun but bun is not installed" >&2
     exit 1
   fi
   echo "Installing ${package_spec} with bun..."
@@ -87,7 +107,7 @@ install_with_bun() {
 
 install_with_npm() {
   if ! command -v npm >/dev/null 2>&1; then
-    echo "error: PICKLAB_INSTALL_RUNTIME=npm but npm is not installed" >&2
+    echo "error: PICKFORGE_INSTALL_RUNTIME=npm but npm is not installed" >&2
     exit 1
   fi
   echo "Installing ${package_spec} with npm..."
@@ -101,25 +121,25 @@ install_with_npm() {
 }
 
 verify_install() {
-  picklab_bin="${bin_dir}/picklab"
-  if [ ! -x "${picklab_bin}" ]; then
-    echo "error: install finished but ${picklab_bin} was not found or is not executable" >&2
+  pickforge_lab_bin="${bin_dir}/pickforge-lab"
+  if [ ! -x "${pickforge_lab_bin}" ]; then
+    echo "error: install finished but ${pickforge_lab_bin} was not found or is not executable" >&2
     exit 1
   fi
-  version="$("${picklab_bin}" --version)"
-  echo "picklab ${version} installed."
-  resolved="$(command -v picklab 2>/dev/null || true)"
+  version="$("${pickforge_lab_bin}" --version)"
+  echo "pickforge-lab ${version} installed."
+  resolved="$(command -v pickforge-lab 2>/dev/null || true)"
   if [ "${resolved}" = "" ]; then
-    echo "note: ${bin_dir} is not on your PATH; add it to run \"picklab\" directly."
-  elif [ "${resolved}" != "${picklab_bin}" ]; then
-    echo "note: \"picklab\" on PATH is ${resolved}; this install wrote ${picklab_bin}."
+    echo "note: ${bin_dir} is not on your PATH; add it to run \"pickforge-lab\" directly."
+  elif [ "${resolved}" != "${pickforge_lab_bin}" ]; then
+    echo "note: \"pickforge-lab\" on PATH is ${resolved}; this install wrote ${pickforge_lab_bin}."
     echo "note: if those differ, remove the other install or reorder PATH."
   fi
   echo "Next steps:"
-  echo "  1. picklab agents install <codex|claude-code|cursor>  # register the MCP server"
-  echo "  2. picklab init --profile <flutter-desktop|android|desktop+android>  # inside your project"
-  echo "  3. picklab doctor  # verify dependencies; --fix repairs what it can"
-  echo "Agent-driven setup guide: https://github.com/pickforge/picklab/blob/main/INSTALL.md"
+  echo "  1. pickforge-lab agents install <codex|claude-code|cursor|pi>  # register the MCP server"
+  echo "  2. pickforge-lab init --profile <flutter-desktop|android|desktop+android>  # inside your project"
+  echo "  3. pickforge-lab doctor  # verify dependencies; --fix repairs what it can"
+  echo "Agent-driven setup guide: https://github.com/pickforge/pickforge/blob/main/INSTALL.md"
 }
 
 main() {
@@ -135,7 +155,7 @@ main() {
       install_with_npm
       ;;
     *)
-      echo "error: unsupported PICKLAB_INSTALL_RUNTIME \"${runtime}\" (expected bun or npm)" >&2
+      echo "error: unsupported PICKFORGE_INSTALL_RUNTIME \"${runtime}\" (expected bun or npm)" >&2
       exit 1
       ;;
   esac

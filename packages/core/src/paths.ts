@@ -1,55 +1,54 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { readPickforgeEnv, type EnvLike } from "./env-compat.js";
 
-export type EnvLike = Record<string, string | undefined>;
+export type { EnvLike } from "./env-compat.js";
 
 /**
- * The PickLab home root, shared by every product under the Pickforge company
- * root (`~/.pickforge/<product-slug>/`). `PICKLAB_HOME` remains the override
- * for automation/tests/custom installs.
+ * The Pickforge Lab state root. `PICKFORGE_HOME` remains the override for
+ * automation, tests, and custom installs.
  */
-export function picklabHome(env: EnvLike = process.env): string {
-  const fromEnv = env.PICKLAB_HOME;
+export function pickforgeHome(env: EnvLike = process.env): string {
+  const fromEnv = readPickforgeEnv(env, "HOME");
   if (fromEnv !== undefined && fromEnv !== "") {
     return fromEnv;
   }
-  return path.join(os.homedir(), ".pickforge", "picklab");
+  return path.join(os.homedir(), ".pickforge", "lab");
 }
 
 /**
- * The pre-#34 PickLab home (`~/.picklab`). Only meaningful when the caller is
- * on the default root (no explicit `PICKLAB_HOME`): once a user sets
- * `PICKLAB_HOME` themselves they have taken explicit control and no legacy
- * fallback applies. Existing global config, agent state, and sessions under
- * this path are never migrated or deleted — callers that read single files or
- * list directories fall back to this path only when the new default has
- * nothing yet, so nothing already there is silently orphaned.
+ * Earlier default state roots, in read precedence order. They apply only when
+ * no home override is set. Callers never migrate, rewrite, or remove them as
+ * part of fallback discovery.
  */
-export function legacyPicklabHome(env: EnvLike = process.env): string | undefined {
-  const fromEnv = env.PICKLAB_HOME;
+export function legacyPickforgeHomes(
+  env: EnvLike = process.env,
+): string[] {
+  const fromEnv = readPickforgeEnv(env, "HOME");
   if (fromEnv !== undefined && fromEnv !== "") {
-    return undefined;
+    return [];
   }
-  return path.join(os.homedir(), ".picklab");
+  return [
+    path.join(os.homedir(), ".pickforge", "picklab"),
+    path.join(os.homedir(), ".picklab"),
+  ];
 }
 
 export function sessionsDir(env: EnvLike = process.env): string {
-  return path.join(picklabHome(env), "sessions");
+  return path.join(pickforgeHome(env), "sessions");
 }
 
-export function legacySessionsDir(env: EnvLike = process.env): string | undefined {
-  const legacyHome = legacyPicklabHome(env);
-  return legacyHome === undefined ? undefined : path.join(legacyHome, "sessions");
+export function legacySessionsDirs(env: EnvLike = process.env): string[] {
+  return legacyPickforgeHomes(env).map((home) => path.join(home, "sessions"));
 }
 
 export function agentsDir(env: EnvLike = process.env): string {
-  return path.join(picklabHome(env), "agents");
+  return path.join(pickforgeHome(env), "agents");
 }
 
-export function legacyAgentsDir(env: EnvLike = process.env): string | undefined {
-  const legacyHome = legacyPicklabHome(env);
-  return legacyHome === undefined ? undefined : path.join(legacyHome, "agents");
+export function legacyAgentsDirs(env: EnvLike = process.env): string[] {
+  return legacyPickforgeHomes(env).map((home) => path.join(home, "agents"));
 }
 
 export function projectConfigPath(projectDir: string): string {
@@ -57,12 +56,11 @@ export function projectConfigPath(projectDir: string): string {
 }
 
 export function globalConfigPath(env: EnvLike = process.env): string {
-  return path.join(picklabHome(env), "config.json");
+  return path.join(pickforgeHome(env), "config.json");
 }
 
-export function legacyGlobalConfigPath(env: EnvLike = process.env): string | undefined {
-  const legacyHome = legacyPicklabHome(env);
-  return legacyHome === undefined ? undefined : path.join(legacyHome, "config.json");
+export function legacyGlobalConfigPaths(env: EnvLike = process.env): string[] {
+  return legacyPickforgeHomes(env).map((home) => path.join(home, "config.json"));
 }
 
 /** The project-local runs layout (`<project>/.picklab/runs`), used by the
@@ -77,30 +75,26 @@ export async function ensureDir(dir: string): Promise<string> {
   return dir;
 }
 
-/**
- * Resolve which of a primary path and an optional legacy path to read: the
- * primary wins whenever it exists; otherwise the legacy path is used verbatim
- * so an existing single-file read (global config, agent state) keeps working
- * across the `~/.picklab` → `~/.pickforge/picklab` default-root change without
- * a migration step. Writes always target the primary path (callers never pass
- * this through a writer), so nothing legacy is ever mutated.
- */
+/** Resolve the first existing path without moving or changing any candidate. */
 export async function resolveReadablePath(
   primaryPath: string,
-  legacyPath: string | undefined,
+  legacyPaths: string | readonly string[] | undefined,
 ): Promise<string> {
-  if (legacyPath === undefined) return primaryPath;
-  try {
-    await fs.promises.access(primaryPath, fs.constants.F_OK);
-    return primaryPath;
-  } catch {
+  const fallbacks =
+    legacyPaths === undefined
+      ? []
+      : typeof legacyPaths === "string"
+        ? [legacyPaths]
+        : legacyPaths;
+  for (const candidate of [primaryPath, ...fallbacks]) {
     try {
-      await fs.promises.access(legacyPath, fs.constants.F_OK);
-      return legacyPath;
+      await fs.promises.access(candidate, fs.constants.F_OK);
+      return candidate;
     } catch {
-      return primaryPath;
+      continue;
     }
   }
+  return primaryPath;
 }
 
 /** Directory listing that returns `[]` instead of throwing when missing. */

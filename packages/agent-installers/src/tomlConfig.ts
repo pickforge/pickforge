@@ -1,14 +1,37 @@
 import fs from "node:fs";
-import { writeFileAtomic } from "@pickforge/picklab-core";
+import { writeFileAtomic } from "@pickforge/lab-core";
 import { backupFile } from "./backup.js";
-import { renderTomlSnippet } from "./snippet.js";
+import {
+  LEGACY_BROWSER_MCP_SERVER_NAME,
+  LEGACY_MCP_SERVER_NAME,
+  renderTomlSnippet,
+} from "./snippet.js";
 import type { ChangeResult, McpServerEntry } from "./types.js";
 
-export const TOML_MARKER_BEGIN = "# >>> picklab >>>";
-export const TOML_MARKER_END = "# <<< picklab <<<";
+export const TOML_MARKER_BEGIN = "# >>> pickforge-lab >>>";
+export const TOML_MARKER_END = "# <<< pickforge-lab <<<";
+export const LEGACY_TOML_MARKER_BEGIN = "# >>> picklab >>>";
+export const LEGACY_TOML_MARKER_END = "# <<< picklab <<<";
 
 const SECTION_PATTERN =
-  /^[ \t]*\[mcp_servers\.(?:picklab|picklab-browser|"picklab"|"picklab-browser")(?:\.[^\]\r\n]*)?\][ \t]*\r?$/m;
+  /^[ \t]*\[mcp_servers\.(?:picklab|picklab-browser|pickforge-lab|pickforge-lab-browser|"picklab"|"picklab-browser"|"pickforge-lab"|"pickforge-lab-browser")(?:\.[^\]\r\n]*)?\][ \t]*\r?$/m;
+
+interface Markers {
+  begin: string;
+  end: string;
+  label: string;
+}
+
+const CURRENT_MARKERS: Markers = {
+  begin: TOML_MARKER_BEGIN,
+  end: TOML_MARKER_END,
+  label: "pickforge-lab",
+};
+const LEGACY_MARKERS: Markers = {
+  begin: LEGACY_TOML_MARKER_BEGIN,
+  end: LEGACY_TOML_MARKER_END,
+  label: "legacy picklab",
+};
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -50,16 +73,20 @@ interface MarkerSplit {
   after: string;
 }
 
-function splitMarkers(content: string, filePath: string): MarkerSplit {
-  const begin = findMarkerLine(content, TOML_MARKER_BEGIN);
-  const end = findMarkerLine(content, TOML_MARKER_END);
+function splitMarkers(
+  content: string,
+  filePath: string,
+  markers: Markers,
+): MarkerSplit {
+  const begin = findMarkerLine(content, markers.begin);
+  const end = findMarkerLine(content, markers.end);
   if (begin === undefined && end === undefined) {
     return { before: content, block: undefined, after: "" };
   }
   if (begin === undefined || end === undefined || end.start < begin.start) {
     throw new Error(
-      `Refusing to edit ${filePath}: unbalanced picklab markers ` +
-        `("${TOML_MARKER_BEGIN}" / "${TOML_MARKER_END}"). Fix the file and retry.`,
+      `Refusing to edit ${filePath}: unbalanced ${markers.label} markers ` +
+        `("${markers.begin}" / "${markers.end}"). Fix the file and retry.`,
     );
   }
   let blockEnd = end.end;
@@ -74,13 +101,67 @@ function splitMarkers(content: string, filePath: string): MarkerSplit {
 }
 
 function assertNoForeignSection(split: MarkerSplit, filePath: string): void {
-  if (SECTION_PATTERN.test(split.before) || SECTION_PATTERN.test(split.after)) {
-    throw new Error(
-      `Refusing to edit ${filePath}: an [mcp_servers.picklab] section exists ` +
-        `outside the picklab markers. Remove it (or move it between ` +
-        `"${TOML_MARKER_BEGIN}" and "${TOML_MARKER_END}") and retry.`,
-    );
+  if (!SECTION_PATTERN.test(split.before) && !SECTION_PATTERN.test(split.after)) {
+    return;
   }
+  throw new Error(
+    `Refusing to edit ${filePath}: a Pickforge Lab MCP section exists ` +
+      `outside the managed markers. Remove it (or move it between ` +
+      `"${TOML_MARKER_BEGIN}" and "${TOML_MARKER_END}") and retry.`,
+  );
+}
+
+interface PreparedContent {
+  content: string;
+  legacyInsertAt?: number;
+  legacyBlockPresent: boolean;
+  migratedLegacyEntries: string[];
+}
+
+function legacyNamesInBlock(block: string): string[] {
+  const names: string[] = [];
+  if (/^\[mcp_servers\.(?:picklab|"picklab")\]$/m.test(block)) {
+    names.push(LEGACY_MCP_SERVER_NAME);
+  }
+  if (/^\[mcp_servers\.(?:picklab-browser|"picklab-browser")\]$/m.test(block)) {
+    names.push(LEGACY_BROWSER_MCP_SERVER_NAME);
+  }
+  return names;
+}
+
+function prepareLegacyBlock(content: string, filePath: string): PreparedContent {
+  const legacy = splitMarkers(content, filePath, LEGACY_MARKERS);
+  if (legacy.block === undefined) {
+    return { content, legacyBlockPresent: false, migratedLegacyEntries: [] };
+  }
+  return {
+    content: `${legacy.before}${legacy.after}`,
+    legacyInsertAt: legacy.before.length,
+    legacyBlockPresent: true,
+    migratedLegacyEntries: legacyNamesInBlock(legacy.block),
+  };
+}
+
+function appendMarkerBlock(content: string, desired: string): string {
+  const separator = content === "" ? "" : content.endsWith("\n") ? "\n" : "\n\n";
+  return `${content}${separator}${desired}`;
+}
+
+function upsertPreparedContent(
+  prepared: PreparedContent,
+  desired: string,
+  filePath: string,
+): string {
+  const split = splitMarkers(prepared.content, filePath, CURRENT_MARKERS);
+  assertNoForeignSection(split, filePath);
+  if (split.block !== undefined) {
+    return `${split.before}${desired}${split.after}`;
+  }
+  if (prepared.legacyInsertAt !== undefined) {
+    const index = prepared.legacyInsertAt;
+    return `${prepared.content.slice(0, index)}${desired}${prepared.content.slice(index)}`;
+  }
+  return appendMarkerBlock(prepared.content, desired);
 }
 
 export async function upsertTomlMarkerBlock(
@@ -89,24 +170,33 @@ export async function upsertTomlMarkerBlock(
 ): Promise<ChangeResult> {
   const existing = await readTextIfExists(filePath);
   const content = existing ?? "";
-  const split = splitMarkers(content, filePath);
-  assertNoForeignSection(split, filePath);
+  const prepared = prepareLegacyBlock(content, filePath);
   const desired = markerBlock(entry);
-  if (split.block === desired) {
+  const next = upsertPreparedContent(prepared, desired, filePath);
+  if (next === content) {
     return { configPath: filePath, changed: false };
-  }
-  let next: string;
-  if (split.block === undefined) {
-    const separator =
-      content === "" ? "" : content.endsWith("\n") ? "\n" : "\n\n";
-    next = `${content}${separator}${desired}`;
-  } else {
-    next = `${split.before}${desired}${split.after}`;
   }
   const backupPath =
     existing === undefined ? undefined : await backupFile(filePath);
   await writeFileAtomic(filePath, next);
-  return { configPath: filePath, changed: true, backupPath };
+  return {
+    configPath: filePath,
+    changed: true,
+    backupPath,
+    migratedLegacyEntries: prepared.migratedLegacyEntries,
+  };
+}
+
+function withoutMarkerBlock(
+  content: string,
+  filePath: string,
+  markers: Markers,
+): { content: string; changed: boolean } {
+  const split = splitMarkers(content, filePath, markers);
+  if (split.block === undefined) {
+    return { content, changed: false };
+  }
+  return { content: `${split.before}${split.after}`, changed: true };
 }
 
 export async function removeTomlMarkerBlock(
@@ -116,12 +206,13 @@ export async function removeTomlMarkerBlock(
   if (existing === undefined) {
     return { configPath: filePath, changed: false };
   }
-  const split = splitMarkers(existing, filePath);
-  if (split.block === undefined) {
+  const current = withoutMarkerBlock(existing, filePath, CURRENT_MARKERS);
+  const legacy = withoutMarkerBlock(current.content, filePath, LEGACY_MARKERS);
+  if (!current.changed && !legacy.changed) {
     return { configPath: filePath, changed: false };
   }
   const backupPath = await backupFile(filePath);
-  await writeFileAtomic(filePath, `${split.before}${split.after}`);
+  await writeFileAtomic(filePath, legacy.content);
   return { configPath: filePath, changed: true, backupPath };
 }
 
@@ -129,7 +220,28 @@ export interface TomlInspection {
   exists: boolean;
   markersPresent: boolean;
   markersHaveSection: boolean;
+  legacyMarkersPresent: boolean;
   foreignSection: boolean;
+}
+
+function missingInspection(): TomlInspection {
+  return {
+    exists: false,
+    markersPresent: false,
+    markersHaveSection: false,
+    legacyMarkersPresent: false,
+    foreignSection: false,
+  };
+}
+
+function unbalancedInspection(): TomlInspection {
+  return {
+    exists: true,
+    markersPresent: true,
+    markersHaveSection: false,
+    legacyMarkersPresent: false,
+    foreignSection: false,
+  };
 }
 
 export async function inspectTomlFile(
@@ -137,32 +249,22 @@ export async function inspectTomlFile(
 ): Promise<TomlInspection> {
   const existing = await readTextIfExists(filePath);
   if (existing === undefined) {
-    return {
-      exists: false,
-      markersPresent: false,
-      markersHaveSection: false,
-      foreignSection: false,
-    };
+    return missingInspection();
   }
-  let split: MarkerSplit;
   try {
-    split = splitMarkers(existing, filePath);
-  } catch {
+    const prepared = prepareLegacyBlock(existing, filePath);
+    const split = splitMarkers(prepared.content, filePath, CURRENT_MARKERS);
     return {
       exists: true,
-      markersPresent: true,
-      markersHaveSection: false,
-      foreignSection: false,
+      markersPresent: split.block !== undefined,
+      markersHaveSection: split.block === markerBlock(),
+      legacyMarkersPresent: prepared.legacyBlockPresent,
+      foreignSection:
+        SECTION_PATTERN.test(split.before) || SECTION_PATTERN.test(split.after),
     };
+  } catch {
+    return unbalancedInspection();
   }
-  return {
-    exists: true,
-    markersPresent: split.block !== undefined,
-    markersHaveSection:
-      split.block !== undefined && split.block === markerBlock(),
-    foreignSection:
-      SECTION_PATTERN.test(split.before) || SECTION_PATTERN.test(split.after),
-  };
 }
 
 export async function tomlFileHasMcpServer(
@@ -174,13 +276,12 @@ export async function tomlFileHasMcpServer(
     if (existing === undefined) {
       return false;
     }
-    let split: MarkerSplit;
     try {
-      split = splitMarkers(existing, filePath);
+      const split = splitMarkers(existing, filePath, CURRENT_MARKERS);
+      return split.block?.includes(renderTomlSnippet(expected)) === true;
     } catch {
       return false;
     }
-    return split.block?.includes(renderTomlSnippet(expected)) === true;
   }
   const inspection = await inspectTomlFile(filePath);
   return inspection.markersHaveSection || inspection.foreignSection;

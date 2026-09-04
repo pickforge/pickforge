@@ -13,7 +13,7 @@ import { registerUserTools } from "./tools/user.js";
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json") as { version: string };
 
-export const packageName = "@pickforge/picklab-mcp-server";
+export const packageName = "@pickforge/lab-mcp-server";
 
 export type { CreateMcpServerOptions, ServerContext } from "./context.js";
 
@@ -21,7 +21,7 @@ export function createMcpServer(
   opts: CreateMcpServerOptions = {},
 ): McpServer {
   const ctx = resolveContext(opts);
-  const server = new McpServer({ name: "picklab", version });
+  const server = new McpServer({ name: "pickforge-lab", version });
   registerSessionTools(server, ctx);
   registerDesktopTools(server, ctx);
   registerAndroidTools(server, ctx);

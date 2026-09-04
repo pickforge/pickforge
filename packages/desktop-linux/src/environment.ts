@@ -1,7 +1,7 @@
-import type { EnvLike } from "@pickforge/picklab-core";
+import type { EnvLike } from "@pickforge/lab-core";
 import { parseDisplayNumber } from "./display.js";
 
-const WAYLAND_DISPLAY_POISON = "picklab-no-wayland";
+const WAYLAND_DISPLAY_POISON = "pickforge-no-wayland";
 const WAYLAND_VARIABLES_TO_UNSET = ["WAYLAND_SOCKET"] as const;
 
 const X11_BACKEND_HINTS = {
@@ -19,7 +19,7 @@ function isWaylandVariable(name: string): boolean {
 }
 
 /**
- * Build the complete environment for a process that must render on a PickLab
+ * Build the complete environment for a process that must render on a Pickforge
  * X11 display. The source is copied, never mutated.
  */
 export function createIsolatedDesktopEnvironment(

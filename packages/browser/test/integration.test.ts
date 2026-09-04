@@ -6,9 +6,10 @@ import {
   getSession,
   isPidAlive,
   listProcessGroupMembers,
+  readPickforgeEnv,
   type EnvLike,
-} from "@pickforge/picklab-core";
-import { findOnPath } from "@pickforge/picklab-desktop-linux";
+} from "@pickforge/lab-core";
+import { findOnPath } from "@pickforge/lab-desktop-linux";
 import {
   createBrowserSession,
   destroyBrowserSession,
@@ -21,7 +22,7 @@ const hasXvfb = findOnPath("Xvfb") !== null;
 const hasChrome = detectChromeBinary() !== null;
 const ready = hasXvfb && hasChrome;
 const TEST_TIMEOUT_MS = 60_000;
-const SECRET = "picklab-integration-secret-should-not-leak";
+const SECRET = "pickforge-lab-integration-secret-should-not-leak";
 
 let tmp: string;
 let home: string;
@@ -30,13 +31,13 @@ let registryEnv: EnvLike;
 let spawnEnv: EnvLike;
 
 beforeEach(() => {
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-browser-int-"));
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pf-browser-int-"));
   home = path.join(tmp, "home");
   projectDir = path.join(tmp, "project");
   fs.mkdirSync(home, { recursive: true });
   fs.mkdirSync(projectDir, { recursive: true });
-  registryEnv = { PICKLAB_HOME: home };
-  // Carry the real environment (so PICKLAB_CHROME_NO_SANDBOX from constrained CI
+  registryEnv = { PICKFORGE_HOME: home };
+  // Carry the real environment (so PICKFORGE_CHROME_NO_SANDBOX from constrained CI
   // is honored) plus a planted secret that must never reach the browser.
   spawnEnv = { ...process.env, SECRET_TOKEN: SECRET };
 });
@@ -56,12 +57,12 @@ async function fetchJson(url: string): Promise<unknown> {
   }
 }
 
-// The "no silent skip" guard: in CI (PICKLAB_REQUIRE_BROWSER=1) the browser and
+// The "no silent skip" guard: in CI (PICKFORGE_REQUIRE_BROWSER=1) the browser and
 // Xvfb prerequisites must actually be present, so this suite cannot pass by
 // silently skipping. Always runs.
 describe("browser integration prerequisites", () => {
   it("has the browser prerequisites when they are required", () => {
-    if (process.env.PICKLAB_REQUIRE_BROWSER === "1") {
+    if (readPickforgeEnv(process.env, "REQUIRE_BROWSER") === "1") {
       expect({ hasXvfb, hasChrome }).toEqual({ hasXvfb: true, hasChrome: true });
     } else {
       expect(true).toBe(true);

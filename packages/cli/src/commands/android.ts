@@ -11,8 +11,8 @@ import {
   screenshot,
   tap,
   typeText,
-} from "@pickforge/picklab-android";
-import { listSessions, redactSecrets } from "@pickforge/picklab-core";
+} from "@pickforge/lab-android";
+import { listSessions, redactSecrets } from "@pickforge/lab-core";
 import fs from "node:fs";
 import {
   captureToTarget,
@@ -237,7 +237,7 @@ export async function runAndroidLogcat(
   });
 }
 
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function runAndroidAdb(
   args: string[],
   opts: AndroidTargetOptions,
@@ -249,7 +249,7 @@ export async function runAndroidAdb(
       ({ serial, sessionId } = await resolveAndroidTarget(opts));
     } else {
       // Fall back to a raw, untargeted adb call only when there is genuinely no
-      // running android session anywhere under PICKLAB_HOME. If this project has
+      // running android session anywhere under PICKFORGE_HOME. If this project has
       // no session but other projects do, fail closed rather than guessing a
       // device another project owns. Ambiguous (multiple-session) or any other
       // resolution failure also fails closed.

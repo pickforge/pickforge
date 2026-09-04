@@ -12,7 +12,8 @@ import {
   processIdentityMatches,
   reapDeadRunningSessions,
   readProcessIdentity,
-  sessionsDir,
+  readPickforgeEnv,
+  sessionDataDir,
   startDaemon,
   stopProcessGroupVerified,
   updateSession,
@@ -23,7 +24,7 @@ import {
   type OwnedDaemonHandle,
   type ProcessIdentity,
   type SessionRecord,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
   XvfbStartError,
   startXvfb,
@@ -31,7 +32,7 @@ import {
   withSessionVncLock,
   type XvfbHandle,
   type XvfbPartialStart,
-} from "@pickforge/picklab-desktop-linux";
+} from "@pickforge/lab-desktop-linux";
 import { buildChromeArgs } from "./args.js";
 import { requireChromeBinary } from "./detect.js";
 import {
@@ -61,7 +62,7 @@ function assertNotAborted(signal: AbortSignal | undefined): void {
 
 export interface CreateBrowserSessionOptions {
   projectDir: string;
-  /** Registry env (PICKLAB_HOME) for session records. */
+  /** Registry env (PICKFORGE_HOME) for session records. */
   registryEnv?: EnvLike;
   /** Spawn env: source for PATH, locale, and Chrome binary detection. */
   env?: EnvLike;
@@ -101,7 +102,7 @@ export function browserSessionLogDir(
   id: string,
   registryEnv: EnvLike = process.env,
 ): string {
-  return path.join(sessionsDir(registryEnv), id);
+  return sessionDataDir(id, registryEnv);
 }
 
 async function makeRuntimeDirs(layout: BrowserRuntimeLayout): Promise<void> {
@@ -289,7 +290,7 @@ async function stopOwnedBrowserDaemon(
  * If cleanup cannot be confirmed, the error record retains every known
  * identity and is marked for a later reaper retry.
  */
-// eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function createBrowserSession(
   opts: CreateBrowserSessionOptions,
 ): Promise<BrowserSessionHandle> {
@@ -372,7 +373,9 @@ export async function createBrowserSession(
       profileDir: layout.profileDir,
       width: xvfb.width,
       height: xvfb.height,
-      noSandbox: opts.noSandbox ?? spawnEnv.PICKLAB_CHROME_NO_SANDBOX === "1",
+      noSandbox:
+        opts.noSandbox ??
+        readPickforgeEnv(spawnEnv, "CHROME_NO_SANDBOX") === "1",
       ...(opts.extraArgs !== undefined ? { extraArgs: opts.extraArgs } : {}),
       ...(opts.startUrl !== undefined ? { startUrl: opts.startUrl } : {}),
     });
@@ -577,7 +580,7 @@ export async function getBrowserSessionStatus(
  * into one error
  * and leave the record in `error` state for inspection.
  */
-// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/pickforge#60
 export async function teardownBrowserSession(
   id: string,
   registryEnv: EnvLike,
@@ -591,7 +594,7 @@ export async function teardownBrowserSession(
     throw new Error(`Session ${id} is not a browser session`);
   }
 
-  // eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/picklab#60
+  // eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/pickforge#60
   await withSessionVncLock(id, registryEnv, async () => {
     const record = await getSession(id, registryEnv);
     if (record === undefined) {

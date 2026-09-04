@@ -14,7 +14,7 @@ if (home === undefined || sessionId === undefined || !Number.isFinite(holdMs)) {
   process.exit(2);
 }
 
-const env = { ...process.env, PICKLAB_HOME: home };
+const env = { ...process.env, PICKFORGE_HOME: home };
 
 try {
   const lease = await acquireHumanLease(sessionId, env, { drainTimeoutMs: 2_000 });

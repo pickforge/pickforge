@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { EnvLike } from "@pickforge/picklab-core";
+import type { EnvLike } from "@pickforge/lab-core";
 import { findOnPath, isExecutableFile } from "./util.js";
 
 export type SdkToolName = "sdkmanager" | "avdmanager" | "emulator" | "adb";

@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import type { EnvLike } from "@pickforge/picklab-core";
+import type { EnvLike } from "@pickforge/lab-core";
 import {
   addCustomAgent,
   AGENT_KINDS,
@@ -12,7 +12,7 @@ import {
   type AgentKind,
   type AgentStatus,
   type ChangeResult,
-} from "@pickforge/picklab-agent-installers";
+} from "@pickforge/lab-agent-installers";
 import { runReported, type CommandResult } from "./shared.js";
 
 export interface AgentsCliOptions {
@@ -135,19 +135,26 @@ function changeLines(
   verb: "registered" | "removed",
 ): string[] {
   const lines: string[] = [];
+  const migratedLegacyEntries = result.migratedLegacyEntries ?? [];
   if (result.instructions !== undefined) {
     lines.push(result.instructions);
   } else if (result.changed) {
     lines.push(
       verb === "registered"
-        ? `Registered the picklab MCP server for ${name} in ${result.configPath}`
-        : `Removed the picklab MCP server entry for ${name} from ${result.configPath}`,
+        ? `Registered the pickforge-lab MCP server for ${name} in ${result.configPath}`
+        : `Removed the pickforge-lab MCP server entry for ${name} from ${result.configPath}`,
     );
   } else {
     lines.push(
       verb === "registered"
         ? `${name} is already registered in ${result.configPath} (no changes made)`
-        : `${name} has no picklab entry in ${result.configPath} (nothing to remove)`,
+        : `${name} has no pickforge-lab entry in ${result.configPath} (nothing to remove)`,
+    );
+  }
+  if (migratedLegacyEntries.length > 0) {
+    lines.push(
+      `Replaced owned legacy ${migratedLegacyEntries.join(", ")} ` +
+        "MCP entries with pickforge-lab in the same config update",
     );
   }
   if (result.backupPath !== undefined) {
@@ -193,6 +200,7 @@ export async function runAgentsLink(
         registered,
         changed: result.changed,
         backupPath: result.backupPath ?? null,
+        migratedLegacyEntries: result.migratedLegacyEntries ?? [],
         instructions: result.instructions ?? null,
         warning: result.warning ?? null,
         snippets,
@@ -219,7 +227,11 @@ export async function runAgentsUnlink(
             configPath: result.configPath,
             changed: result.changed,
           },
-          lines: [`Removed custom agent "${name}" (${result.configPath})`],
+          lines: [
+            result.changed
+              ? `Removed custom agent "${name}" (${result.configPath})`
+              : `Custom agent "${name}" was not removed (${result.configPath})`,
+          ],
         };
       }
       return unknownAgentError(name, env);

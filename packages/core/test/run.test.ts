@@ -10,8 +10,8 @@ let project: string;
 // storage to `project-local` explicitly rather than the new `home` default
 // (covered by storage.test.ts).
 beforeEach(async () => {
-  project = await fs.promises.mkdtemp(path.join(os.tmpdir(), "picklab-run-"));
-  vi.stubEnv("PICKLAB_STORAGE_MODE", "project-local");
+  project = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-run-"));
+  vi.stubEnv("PICKFORGE_STORAGE_MODE", "project-local");
 });
 
 afterEach(async () => {
@@ -177,7 +177,7 @@ describe("listRuns", () => {
 
   it("returns empty list when .picklab is a symlink pointing outside", async () => {
     const outside = await fs.promises.mkdtemp(
-      path.join(os.tmpdir(), "picklab-outside-"),
+      path.join(os.tmpdir(), "pickforge-lab-outside-"),
     );
     try {
       // Build a real runs tree (with a run) outside the project, then point

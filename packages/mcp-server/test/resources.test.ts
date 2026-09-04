@@ -6,7 +6,7 @@ import {
   appendAction,
   writeEvidenceReport,
   type RunManifest,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import {
   connectLab,
   makeLabDirs,
@@ -67,7 +67,7 @@ beforeEach(async () => {
   sessionId = writeDesktopSessionRecord(dirs.home, dirs.projectDir);
   lab = await connectLab({
     projectDir: dirs.projectDir,
-    env: { PICKLAB_HOME: dirs.home, PATH: dirs.binDir },
+    env: { PICKFORGE_HOME: dirs.home, PATH: dirs.binDir },
   });
 });
 
@@ -80,15 +80,15 @@ describe("resource listing", () => {
   it("lists run evidence, artifacts, and session statuses", async () => {
     const { resources } = await lab.client.listResources();
     const uris = resources.map((resource) => resource.uri);
-    expect(uris).toContain("picklab://runs");
-    expect(uris).toContain(`picklab://runs/${RUN_ID}/manifest`);
-    expect(uris).toContain(`picklab://runs/${RUN_ID}/actions`);
-    expect(uris).toContain(`picklab://runs/${RUN_ID}/report`);
+    expect(uris).toContain("pickforge://runs");
+    expect(uris).toContain(`pickforge://runs/${RUN_ID}/manifest`);
+    expect(uris).toContain(`pickforge://runs/${RUN_ID}/actions`);
+    expect(uris).toContain(`pickforge://runs/${RUN_ID}/report`);
     expect(uris).toContain(
-      `picklab://runs/${RUN_ID}/screenshots/screenshot.png`,
+      `pickforge://runs/${RUN_ID}/screenshots/screenshot.png`,
     );
-    expect(uris).toContain(`picklab://runs/${RUN_ID}/logs/app.log`);
-    expect(uris).toContain(`picklab://sessions/${sessionId}/status`);
+    expect(uris).toContain(`pickforge://runs/${RUN_ID}/logs/app.log`);
+    expect(uris).toContain(`pickforge://sessions/${sessionId}/status`);
   });
 
   it("exposes the parameterized resource templates", async () => {
@@ -98,12 +98,12 @@ describe("resource listing", () => {
     );
     expect(templates).toEqual(
       expect.arrayContaining([
-        "picklab://runs/{runId}/manifest",
-        "picklab://runs/{runId}/actions",
-        "picklab://runs/{runId}/report",
-        "picklab://runs/{runId}/screenshots/{name}",
-        "picklab://runs/{runId}/logs/{name}",
-        "picklab://sessions/{sessionId}/status",
+        "pickforge://runs/{runId}/manifest",
+        "pickforge://runs/{runId}/actions",
+        "pickforge://runs/{runId}/report",
+        "pickforge://runs/{runId}/screenshots/{name}",
+        "pickforge://runs/{runId}/logs/{name}",
+        "pickforge://sessions/{sessionId}/status",
       ]),
     );
   });
@@ -112,7 +112,7 @@ describe("resource listing", () => {
 describe("resource reads", () => {
   it("reads the run index as JSON", async () => {
     const { contents } = await lab.client.readResource({
-      uri: "picklab://runs",
+      uri: "pickforge://runs",
     });
     const runs = JSON.parse(first(contents).text as string);
     expect(runs[0].runId).toBe(RUN_ID);
@@ -120,7 +120,7 @@ describe("resource reads", () => {
 
   it("reads a run manifest as JSON", async () => {
     const { contents } = await lab.client.readResource({
-      uri: `picklab://runs/${RUN_ID}/manifest`,
+      uri: `pickforge://runs/${RUN_ID}/manifest`,
     });
     expect(first(contents).mimeType).toBe("application/json");
     const manifest = JSON.parse(first(contents).text as string);
@@ -130,7 +130,7 @@ describe("resource reads", () => {
 
   it("reads deterministically ordered actions with secrets redacted", async () => {
     const { contents } = await lab.client.readResource({
-      uri: `picklab://runs/${RUN_ID}/actions`,
+      uri: `pickforge://runs/${RUN_ID}/actions`,
     });
     expect(first(contents).mimeType).toBe("application/json");
     const text = first(contents).text as string;
@@ -142,7 +142,7 @@ describe("resource reads", () => {
 
   it("reads the escaped static HTML report without planted secrets", async () => {
     const { contents } = await lab.client.readResource({
-      uri: `picklab://runs/${RUN_ID}/report`,
+      uri: `pickforge://runs/${RUN_ID}/report`,
     });
     expect(first(contents).mimeType).toBe("text/html");
     const html = first(contents).text as string;
@@ -159,13 +159,13 @@ describe("resource reads", () => {
 
     const { resources } = await lab.client.listResources();
     const uris = resources.map((resource) => resource.uri);
-    expect(uris).not.toContain(`picklab://runs/${legacyId}/actions`);
-    expect(uris).not.toContain(`picklab://runs/${legacyId}/report`);
+    expect(uris).not.toContain(`pickforge://runs/${legacyId}/actions`);
+    expect(uris).not.toContain(`pickforge://runs/${legacyId}/report`);
     await expect(
-      lab.client.readResource({ uri: `picklab://runs/${legacyId}/actions` }),
+      lab.client.readResource({ uri: `pickforge://runs/${legacyId}/actions` }),
     ).rejects.toThrow(/not found/i);
     await expect(
-      lab.client.readResource({ uri: `picklab://runs/${legacyId}/report` }),
+      lab.client.readResource({ uri: `pickforge://runs/${legacyId}/report` }),
     ).rejects.toThrow(/not found/i);
   });
 
@@ -180,11 +180,11 @@ describe("resource reads", () => {
     fs.rmSync(actionsPath);
 
     await expect(
-      lab.client.readResource({ uri: `picklab://runs/${RUN_ID}/actions` }),
+      lab.client.readResource({ uri: `pickforge://runs/${RUN_ID}/actions` }),
     ).rejects.toThrow(/not found/i);
     const { resources } = await lab.client.listResources();
     expect(resources.map((resource) => resource.uri)).not.toContain(
-      `picklab://runs/${RUN_ID}/actions`,
+      `pickforge://runs/${RUN_ID}/actions`,
     );
   });
 
@@ -199,7 +199,7 @@ describe("resource reads", () => {
     fs.writeFileSync(actionsPath, '{"actionId":"ok"}\nnot-json\n');
 
     const result = lab.client.readResource({
-      uri: `picklab://runs/${RUN_ID}/actions`,
+      uri: `pickforge://runs/${RUN_ID}/actions`,
     });
     await expect(result).rejects.toThrow(/Corrupt evidence journal/);
     await expect(result).rejects.not.toThrow(dirs.projectDir);
@@ -207,7 +207,7 @@ describe("resource reads", () => {
 
   it("reads a screenshot as a base64 blob", async () => {
     const { contents } = await lab.client.readResource({
-      uri: `picklab://runs/${RUN_ID}/screenshots/screenshot.png`,
+      uri: `pickforge://runs/${RUN_ID}/screenshots/screenshot.png`,
     });
     expect(first(contents).mimeType).toBe("image/png");
     const data = Buffer.from(first(contents).blob as string, "base64");
@@ -228,7 +228,7 @@ describe("resource reads", () => {
       Buffer.concat([PNG_MAGIC, Buffer.alloc(8 * 1024 * 1024)]),
     );
     const { contents } = await lab.client.readResource({
-      uri: `picklab://runs/${RUN_ID}/screenshots/big.png`,
+      uri: `pickforge://runs/${RUN_ID}/screenshots/big.png`,
     });
     expect(first(contents).mimeType).toBe("text/plain");
     expect(first(contents).blob).toBeUndefined();
@@ -238,7 +238,7 @@ describe("resource reads", () => {
 
   it("reads a log with secrets redacted", async () => {
     const { contents } = await lab.client.readResource({
-      uri: `picklab://runs/${RUN_ID}/logs/app.log`,
+      uri: `pickforge://runs/${RUN_ID}/logs/app.log`,
     });
     const text = first(contents).text as string;
     expect(text).toContain("[REDACTED]");
@@ -264,7 +264,7 @@ describe("resource reads", () => {
     expect(fs.statSync(bigPath).size).toBeGreaterThan(1024 * 1024);
 
     const { contents } = await lab.client.readResource({
-      uri: `picklab://runs/${RUN_ID}/logs/big.log`,
+      uri: `pickforge://runs/${RUN_ID}/logs/big.log`,
     });
     const text = first(contents).text as string;
     expect(text).toContain("[truncated:");
@@ -277,7 +277,7 @@ describe("resource reads", () => {
 
   it("reads a session status as JSON", async () => {
     const { contents } = await lab.client.readResource({
-      uri: `picklab://sessions/${sessionId}/status`,
+      uri: `pickforge://sessions/${sessionId}/status`,
     });
     const status = JSON.parse(first(contents).text as string);
     expect(status.id).toBe(sessionId);
@@ -294,18 +294,18 @@ describe("resource reads", () => {
 
 describe("traversal protection", () => {
   it.each([
-    "picklab://runs/../x/manifest",
-    "picklab://runs/%2e%2e/manifest",
-    `picklab://runs/${RUN_ID}/logs/%2e%2e%2fmanifest.json`,
-    `picklab://runs/${RUN_ID}/screenshots/..%2f..%2fmanifest.json`,
-    "picklab://sessions/%2e%2e%2fdesk-000001/status",
+    "pickforge://runs/../x/manifest",
+    "pickforge://runs/%2e%2e/manifest",
+    `pickforge://runs/${RUN_ID}/logs/%2e%2e%2fmanifest.json`,
+    `pickforge://runs/${RUN_ID}/screenshots/..%2f..%2fmanifest.json`,
+    "pickforge://sessions/%2e%2e%2fdesk-000001/status",
   ])("rejects %s", async (uri) => {
     await expect(lab.client.readResource({ uri })).rejects.toThrow();
   });
 
   it("rejects an unknown run id", async () => {
     await expect(
-      lab.client.readResource({ uri: "picklab://runs/nope/manifest" }),
+      lab.client.readResource({ uri: "pickforge://runs/nope/manifest" }),
     ).rejects.toThrow();
   });
 });
@@ -329,13 +329,13 @@ describe("symlink protection", () => {
 
     await expect(
       lab.client.readResource({
-        uri: `picklab://runs/${RUN_ID}/${resource}`,
+        uri: `pickforge://runs/${RUN_ID}/${resource}`,
       }),
     ).rejects.toThrow(/not found/i);
 
     const { resources } = await lab.client.listResources();
     expect(resources.map((entry) => entry.uri)).not.toContain(
-      `picklab://runs/${RUN_ID}/${resource}`,
+      `pickforge://runs/${RUN_ID}/${resource}`,
     );
   });
 
@@ -377,7 +377,7 @@ describe("symlink protection", () => {
 
       try {
         const result = lab.client.readResource({
-          uri: `picklab://runs/${RUN_ID}/${resource}`,
+          uri: `pickforge://runs/${RUN_ID}/${resource}`,
         });
         await expect(result).rejects.toThrow(/not found/i);
         await expect(result).rejects.not.toThrow(PLANTED_TOKEN);
@@ -407,13 +407,13 @@ describe("symlink protection", () => {
 
     await expect(
       lab.client.readResource({
-        uri: `picklab://runs/${RUN_ID}/screenshots/escape.png`,
+        uri: `pickforge://runs/${RUN_ID}/screenshots/escape.png`,
       }),
     ).rejects.toThrow(/not found/i);
 
     const { resources } = await lab.client.listResources();
     expect(resources.map((r) => r.uri)).not.toContain(
-      `picklab://runs/${RUN_ID}/screenshots/escape.png`,
+      `pickforge://runs/${RUN_ID}/screenshots/escape.png`,
     );
   });
 
@@ -432,13 +432,13 @@ describe("symlink protection", () => {
 
     await expect(
       lab.client.readResource({
-        uri: `picklab://runs/${RUN_ID}/logs/escape.log`,
+        uri: `pickforge://runs/${RUN_ID}/logs/escape.log`,
       }),
     ).rejects.toThrow(/not found/i);
 
     const { resources } = await lab.client.listResources();
     expect(resources.map((r) => r.uri)).not.toContain(
-      `picklab://runs/${RUN_ID}/logs/escape.log`,
+      `pickforge://runs/${RUN_ID}/logs/escape.log`,
     );
   });
 
@@ -455,13 +455,13 @@ describe("symlink protection", () => {
 
     await expect(
       lab.client.readResource({
-        uri: `picklab://runs/${RUN_ID}/screenshots/link.png`,
+        uri: `pickforge://runs/${RUN_ID}/screenshots/link.png`,
       }),
     ).rejects.toThrow(/not found/i);
 
     const { resources } = await lab.client.listResources();
     expect(resources.map((r) => r.uri)).not.toContain(
-      `picklab://runs/${RUN_ID}/screenshots/link.png`,
+      `pickforge://runs/${RUN_ID}/screenshots/link.png`,
     );
   });
 
@@ -478,13 +478,13 @@ describe("symlink protection", () => {
 
     await expect(
       lab.client.readResource({
-        uri: `picklab://runs/${RUN_ID}/logs/link.log`,
+        uri: `pickforge://runs/${RUN_ID}/logs/link.log`,
       }),
     ).rejects.toThrow(/not found/i);
 
     const { resources } = await lab.client.listResources();
     expect(resources.map((r) => r.uri)).not.toContain(
-      `picklab://runs/${RUN_ID}/logs/link.log`,
+      `pickforge://runs/${RUN_ID}/logs/link.log`,
     );
   });
 
@@ -507,13 +507,13 @@ describe("symlink protection", () => {
 
     await expect(
       lab.client.readResource({
-        uri: `picklab://runs/${RUN_ID}/screenshots/leak.png`,
+        uri: `pickforge://runs/${RUN_ID}/screenshots/leak.png`,
       }),
     ).rejects.toThrow(/not found/i);
 
     const { resources } = await lab.client.listResources();
     expect(resources.map((r) => r.uri)).not.toContain(
-      `picklab://runs/${RUN_ID}/screenshots/leak.png`,
+      `pickforge://runs/${RUN_ID}/screenshots/leak.png`,
     );
   });
 
@@ -531,7 +531,7 @@ describe("symlink protection", () => {
     fs.symlinkSync(secret, manifestPath);
 
     const result = lab.client.readResource({
-      uri: `picklab://runs/${RUN_ID}/manifest`,
+      uri: `pickforge://runs/${RUN_ID}/manifest`,
     });
     await expect(result).rejects.toThrow(/Run not found/i);
     await expect(result).rejects.not.toThrow(/evil-leak/);
@@ -558,9 +558,9 @@ describe("symlink protection", () => {
     fs.rmSync(manifestPath, { force: true });
     fs.symlinkSync(secret, manifestPath);
 
-    // picklab://runs must not contain leaked fields/values or the skipped run.
+    // pickforge://runs must not contain leaked fields/values or the skipped run.
     const { contents } = await lab.client.readResource({
-      uri: "picklab://runs",
+      uri: "pickforge://runs",
     });
     const text = first(contents).text as string;
     expect(text).not.toContain(PLANTED_TOKEN);
@@ -570,15 +570,15 @@ describe("symlink protection", () => {
     // listResources() must not include the run's manifest or files.
     const { resources } = await lab.client.listResources();
     const uris = resources.map((r) => r.uri);
-    expect(uris).not.toContain(`picklab://runs/${RUN_ID}/manifest`);
+    expect(uris).not.toContain(`pickforge://runs/${RUN_ID}/manifest`);
     expect(uris).not.toContain(
-      `picklab://runs/${RUN_ID}/screenshots/screenshot.png`,
+      `pickforge://runs/${RUN_ID}/screenshots/screenshot.png`,
     );
-    expect(uris).not.toContain(`picklab://runs/${RUN_ID}/logs/app.log`);
+    expect(uris).not.toContain(`pickforge://runs/${RUN_ID}/logs/app.log`);
 
     // Direct manifest read still rejects without leaking.
     const result = lab.client.readResource({
-      uri: `picklab://runs/${RUN_ID}/manifest`,
+      uri: `pickforge://runs/${RUN_ID}/manifest`,
     });
     await expect(result).rejects.toThrow(/Run not found/i);
     await expect(result).rejects.not.toThrow(/evil-leak/);
@@ -603,13 +603,13 @@ describe("symlink protection", () => {
 
     await expect(
       lab.client.readResource({
-        uri: `picklab://runs/${RUN_ID}/logs/leak.log`,
+        uri: `pickforge://runs/${RUN_ID}/logs/leak.log`,
       }),
     ).rejects.toThrow(/not found/i);
 
     const { resources } = await lab.client.listResources();
     expect(resources.map((r) => r.uri)).not.toContain(
-      `picklab://runs/${RUN_ID}/logs/leak.log`,
+      `pickforge://runs/${RUN_ID}/logs/leak.log`,
     );
   });
 
@@ -640,27 +640,27 @@ describe("symlink protection", () => {
     fs.symlinkSync(outsideRun, runDir);
 
     const manifestResult = lab.client.readResource({
-      uri: `picklab://runs/${RUN_ID}/manifest`,
+      uri: `pickforge://runs/${RUN_ID}/manifest`,
     });
     await expect(manifestResult).rejects.toThrow(/not found/i);
     await expect(manifestResult).rejects.not.toThrow(/evil-leak/);
 
     await expect(
       lab.client.readResource({
-        uri: `picklab://runs/${RUN_ID}/logs/leak.log`,
+        uri: `pickforge://runs/${RUN_ID}/logs/leak.log`,
       }),
     ).rejects.toThrow(/not found/i);
     await expect(
       lab.client.readResource({
-        uri: `picklab://runs/${RUN_ID}/screenshots/leak.png`,
+        uri: `pickforge://runs/${RUN_ID}/screenshots/leak.png`,
       }),
     ).rejects.toThrow(/not found/i);
 
     const { resources } = await lab.client.listResources();
     const uris = resources.map((r) => r.uri);
-    expect(uris).not.toContain(`picklab://runs/${RUN_ID}/logs/leak.log`);
+    expect(uris).not.toContain(`pickforge://runs/${RUN_ID}/logs/leak.log`);
     expect(uris).not.toContain(
-      `picklab://runs/${RUN_ID}/screenshots/leak.png`,
+      `pickforge://runs/${RUN_ID}/screenshots/leak.png`,
     );
   });
 
@@ -668,7 +668,7 @@ describe("symlink protection", () => {
     // Build a real outside project whose `.picklab/runs` holds a leaking run,
     // then point this project's `.picklab` at the outside `.picklab`.
     const outsideProject = fs.mkdtempSync(
-      path.join(os.tmpdir(), "picklab-outside-proj-"),
+      path.join(os.tmpdir(), "pickforge-lab-outside-proj-"),
     );
     try {
       const leakRunId = "20260609-130000-leak";
@@ -695,16 +695,16 @@ describe("symlink protection", () => {
         }),
       );
 
-      const projectPicklab = path.join(dirs.projectDir, ".picklab");
-      fs.rmSync(projectPicklab, { recursive: true, force: true });
+      const projectPickforge = path.join(dirs.projectDir, ".picklab");
+      fs.rmSync(projectPickforge, { recursive: true, force: true });
       fs.symlinkSync(
         path.join(outsideProject, ".picklab"),
-        projectPicklab,
+        projectPickforge,
       );
 
-      // picklab://runs must be empty and leak nothing.
+      // pickforge://runs must be empty and leak nothing.
       const { contents } = await lab.client.readResource({
-        uri: "picklab://runs",
+        uri: "pickforge://runs",
       });
       const text = first(contents).text as string;
       expect(JSON.parse(text)).toEqual([]);
@@ -713,18 +713,18 @@ describe("symlink protection", () => {
 
       // Direct manifest/log/screenshot reads reject without leaking.
       const manifestResult = lab.client.readResource({
-        uri: `picklab://runs/${leakRunId}/manifest`,
+        uri: `pickforge://runs/${leakRunId}/manifest`,
       });
       await expect(manifestResult).rejects.toThrow(/not found/i);
       await expect(manifestResult).rejects.not.toThrow(/leaked-slug/);
       await expect(
         lab.client.readResource({
-          uri: `picklab://runs/${leakRunId}/logs/app.log`,
+          uri: `pickforge://runs/${leakRunId}/logs/app.log`,
         }),
       ).rejects.toThrow(/not found/i);
       await expect(
         lab.client.readResource({
-          uri: `picklab://runs/${leakRunId}/screenshots/screenshot.png`,
+          uri: `pickforge://runs/${leakRunId}/screenshots/screenshot.png`,
         }),
       ).rejects.toThrow(/not found/i);
 
@@ -777,7 +777,7 @@ describe("symlink protection", () => {
 
     // Direct manifest read rejects without leaking outside data.
     const manifestResult = lab.client.readResource({
-      uri: `picklab://runs/${RUN_ID}/manifest`,
+      uri: `pickforge://runs/${RUN_ID}/manifest`,
     });
     await expect(manifestResult).rejects.toThrow(/not found/i);
     await expect(manifestResult).rejects.not.toThrow(/evil-leak/);
@@ -786,20 +786,20 @@ describe("symlink protection", () => {
     // Direct log read rejects without leaking outside data.
     await expect(
       lab.client.readResource({
-        uri: `picklab://runs/${RUN_ID}/logs/leak.log`,
+        uri: `pickforge://runs/${RUN_ID}/logs/leak.log`,
       }),
     ).rejects.toThrow(/not found/i);
 
     // Direct screenshot read rejects without leaking outside data.
     await expect(
       lab.client.readResource({
-        uri: `picklab://runs/${RUN_ID}/screenshots/leak.png`,
+        uri: `pickforge://runs/${RUN_ID}/screenshots/leak.png`,
       }),
     ).rejects.toThrow(/not found/i);
 
     // Listing remains empty and exposes no outside resources.
     const { contents } = await lab.client.readResource({
-      uri: "picklab://runs",
+      uri: "pickforge://runs",
     });
     const text = first(contents).text as string;
     expect(JSON.parse(text)).toEqual([]);
@@ -808,10 +808,10 @@ describe("symlink protection", () => {
 
     const { resources } = await lab.client.listResources();
     const uris = resources.map((r) => r.uri);
-    expect(uris).not.toContain(`picklab://runs/${RUN_ID}/manifest`);
-    expect(uris).not.toContain(`picklab://runs/${RUN_ID}/logs/leak.log`);
+    expect(uris).not.toContain(`pickforge://runs/${RUN_ID}/manifest`);
+    expect(uris).not.toContain(`pickforge://runs/${RUN_ID}/logs/leak.log`);
     expect(uris).not.toContain(
-      `picklab://runs/${RUN_ID}/screenshots/leak.png`,
+      `pickforge://runs/${RUN_ID}/screenshots/leak.png`,
     );
   });
 });

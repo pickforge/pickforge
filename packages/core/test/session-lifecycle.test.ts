@@ -21,7 +21,7 @@ const desktopHandle = {
 };
 const androidHandle = {
   id: "andr-123456",
-  avdName: "picklab",
+  avdName: "pickforge-lab",
   serial: "emulator-5554",
   consolePort: 5554,
   logDir: "/logs/android",
@@ -237,7 +237,7 @@ describe("local session lifecycle", () => {
         id: "andr-123456",
         type: "android",
         desktop: undefined,
-        android: { avdName: "picklab", serial: "emulator-5554" },
+        android: { avdName: "pickforge-lab", serial: "emulator-5554" },
       }),
       status,
     );
@@ -296,7 +296,7 @@ describe("local session lifecycle", () => {
           id: "andr-123456",
           type: "android",
           desktop: undefined,
-          android: { avdName: "picklab" },
+          android: { avdName: "pickforge-lab" },
         }),
       ],
       runtime,

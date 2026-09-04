@@ -1,4 +1,4 @@
-// pickforge/picklab#27 — Linux graphical sudo (askpass) capability
+// pickforge/pickforge#27 — Linux graphical sudo (askpass) capability
 // detection. Mirrors the branch coverage of the shared Rust reference
 // (crates/pickforge-core/src/process/askpass.rs in pickforge/pickforge#215)
 // so both repos' implementations of the locked v1 contract stay provably in
@@ -126,7 +126,7 @@ describe("resolveAskpassCapability", () => {
 });
 
 describe("askpassUnavailableMessage", () => {
-  const manual = "sudo useradd -r -M picklab-lab";
+  const manual = "sudo useradd -r -M pickforge-lab";
 
   it.each([
     ["headless", { state: "headless" } as const, /graphical session/i],

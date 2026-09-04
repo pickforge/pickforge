@@ -5,9 +5,18 @@ import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
-import { teardownAndroidSession } from "../../android/src/session.js";
-import { teardownBrowserSession } from "../../browser/src/session.js";
-import { teardownDesktopSession } from "../../desktop-linux/src/session.js";
+import {
+  androidSessionLogDir,
+  teardownAndroidSession,
+} from "../../android/src/session.js";
+import {
+  browserSessionLogDir,
+  teardownBrowserSession,
+} from "../../browser/src/session.js";
+import {
+  desktopSessionLogDir,
+  teardownDesktopSession,
+} from "../../desktop-linux/src/session.js";
 import { isPidAlive, readProcessIdentity, stopPid } from "../src/proc.js";
 import {
   activePointerPath,
@@ -21,16 +30,17 @@ import {
   getSession,
   isSessionProcessAlive,
   listSessions,
+  sessionDataDir,
   updateSession,
   type SessionLivenessCheck,
 } from "../src/session.js";
 import { reapDeadRunningSessions as reapWithTypedRuntime } from "../src/session-lifecycle.js";
 
 let home: string;
-let env: { PICKLAB_HOME: string };
+let env: { PICKFORGE_HOME: string };
 
 function reapDeadRunningSessions(
-  registryEnv: { PICKLAB_HOME: string },
+  registryEnv: { PICKFORGE_HOME: string },
   isAlive?: SessionLivenessCheck,
 ) {
   return reapWithTypedRuntime(
@@ -54,8 +64,8 @@ function reapDeadRunningSessions(
 }
 
 beforeEach(async () => {
-  home = await fs.promises.mkdtemp(path.join(os.tmpdir(), "picklab-sess-"));
-  env = { PICKLAB_HOME: home };
+  home = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pickforge-lab-sess-"));
+  env = { PICKFORGE_HOME: home };
 });
 
 afterEach(async () => {
@@ -98,7 +108,7 @@ describe("session registry", () => {
           browserStartTimeTicks: 987654,
           binaryPath: "/usr/bin/chromium",
           profileMode: "ephemeral",
-          profileDir: "/tmp/picklab-profile",
+          profileDir: "/tmp/pickforge-lab-profile",
           cdpPort: 45123,
         },
       },
@@ -146,7 +156,7 @@ describe("session registry", () => {
       {
         type: "android",
         projectDir: "/proj",
-        android: { avdName: "picklab-avd", consolePort: 5554 },
+        android: { avdName: "pickforge-avd", consolePort: 5554 },
       },
       env,
     );
@@ -583,7 +593,7 @@ describe("session registry", () => {
               browserStartTimeTicks,
               binaryPath: "/usr/bin/chromium",
               profileMode: "ephemeral",
-              profileDir: "/tmp/picklab-profile",
+              profileDir: "/tmp/pickforge-lab-profile",
               cdpPort: 1,
             },
           },
@@ -936,7 +946,7 @@ describe("session registry", () => {
 
   it("does not delete a profile that escapes the session dir when reaping", async () => {
     const outside = await fs.promises.mkdtemp(
-      path.join(os.tmpdir(), "picklab-outside-"),
+      path.join(os.tmpdir(), "pickforge-lab-outside-"),
     );
     try {
       const stale = await createSession(
@@ -1142,7 +1152,7 @@ describe("legacy session home fallback", () => {
 
   beforeEach(async () => {
     fakeHome = await fs.promises.mkdtemp(
-      path.join(os.tmpdir(), "picklab-legacy-fakehome-"),
+      path.join(os.tmpdir(), "pickforge-lab-legacy-fakehome-"),
     );
     homedirSpy = vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
   });
@@ -1152,8 +1162,11 @@ describe("legacy session home fallback", () => {
     await fs.promises.rm(fakeHome, { recursive: true, force: true });
   });
 
-  function writeLegacySession(id: string): void {
-    const dir = path.join(fakeHome, ".picklab", "sessions");
+  function writeLegacySession(
+    id: string,
+    root = path.join(fakeHome, ".picklab"),
+  ): void {
+    const dir = path.join(root, "sessions");
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
       path.join(dir, `${id}.json`),
@@ -1167,10 +1180,20 @@ describe("legacy session home fallback", () => {
     );
   }
 
-  it("reads a legacy ~/.picklab session when PICKLAB_HOME is unset", async () => {
+  it("reads a legacy ~/.picklab session when PICKFORGE_HOME is unset", async () => {
     writeLegacySession("desk-1eaac1");
 
     const record = await getSession("desk-1eaac1", {});
+    expect(record?.projectDir).toBe("/legacy/project");
+  });
+
+  it("reads sessions from the former ~/.pickforge/picklab state root", async () => {
+    writeLegacySession(
+      "desk-1eaac6",
+      path.join(fakeHome, ".pickforge", "picklab"),
+    );
+
+    const record = await getSession("desk-1eaac6", {});
     expect(record?.projectDir).toBe("/legacy/project");
   });
 
@@ -1185,10 +1208,10 @@ describe("legacy session home fallback", () => {
     expect(ids).toEqual(["desk-1eaac2", created.id].sort());
   });
 
-  it("does not fall back once PICKLAB_HOME is set explicitly", async () => {
+  it("does not fall back once PICKFORGE_HOME is set explicitly", async () => {
     writeLegacySession("desk-1eaac3");
 
-    expect(await getSession("desk-1eaac3", { PICKLAB_HOME: "/other" })).toBeUndefined();
+    expect(await getSession("desk-1eaac3", { PICKFORGE_HOME: "/other" })).toBeUndefined();
   });
 
   it("destroying a session found via the legacy fallback removes it there, not just the new home", async () => {
@@ -1203,9 +1226,7 @@ describe("legacy session home fallback", () => {
     ).toBe(false);
   });
 
-  it("destroying a session that has copies at BOTH the legacy and new home removes both, so it cannot resurrect", async () => {
-    // A session created under the legacy home, later updated: writes always
-    // target the new home, leaving a stale copy at the legacy path too.
+  it("keeps updates and sidecar data beside a legacy session record", async () => {
     writeLegacySession("desk-1eaac5");
     await updateSession("desk-1eaac5", { status: "running" }, {});
 
@@ -1218,20 +1239,29 @@ describe("legacy session home fallback", () => {
     const newPath = path.join(
       fakeHome,
       ".pickforge",
-      "picklab",
+      "lab",
       "sessions",
       "desk-1eaac5.json",
     );
-    expect(fs.existsSync(legacyPath)).toBe(true);
-    expect(fs.existsSync(newPath)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(legacyPath, "utf8")).status).toBe(
+      "running",
+    );
+    expect(fs.existsSync(newPath)).toBe(false);
+    const expectedDataDir = path.join(
+      fakeHome,
+      ".picklab",
+      "sessions",
+      "desk-1eaac5",
+    );
+    expect(sessionDataDir("desk-1eaac5", {})).toBe(expectedDataDir);
+    expect(desktopSessionLogDir("desk-1eaac5", {})).toBe(expectedDataDir);
+    expect(browserSessionLogDir("desk-1eaac5", {})).toBe(expectedDataDir);
+    expect(androidSessionLogDir("desk-1eaac5", {})).toBe(expectedDataDir);
 
     await destroySessionRecord("desk-1eaac5", {});
 
     expect(fs.existsSync(legacyPath)).toBe(false);
     expect(fs.existsSync(newPath)).toBe(false);
-    expect(
-      (await listSessions({})).some((record) => record.id === "desk-1eaac5"),
-    ).toBe(false);
     expect(await getSession("desk-1eaac5", {})).toBeUndefined();
   });
 });

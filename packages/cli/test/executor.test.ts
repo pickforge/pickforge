@@ -21,7 +21,7 @@ const AVAILABLE_ASKPASS: AskpassCapability = {
 let tmpDir: string;
 
 beforeEach(() => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "picklab-executor-"));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-executor-"));
 });
 
 afterEach(() => {
@@ -76,7 +76,7 @@ describe("classifyPlan", () => {
 
 describe("executeProvisioning", () => {
   it("only logs redacted plan details in dry-run mode", async () => {
-    const target = path.join(tmpDir, "home", ".picklab");
+    const target = path.join(tmpDir, "home", "state");
     const lines: string[] = [];
     let adapterCalls = 0;
     const result = await executeProvisioning(
@@ -86,8 +86,8 @@ describe("executeProvisioning", () => {
           plan: {
             steps: [
               {
-                id: "picklab-home",
-                title: "Create PickLab home",
+                id: "pickforge-home",
+                title: "Create Pickforge home",
                 kind: "mkdir",
                 privileged: false,
                 dir: target,
@@ -326,7 +326,7 @@ describe("executeProvisioning", () => {
       privileged: true,
       command: {
         cmd: "useradd",
-        args: ["-r", "-M", "-s", "/usr/sbin/nologin", "picklab-lab"],
+        args: ["-r", "-M", "-s", "/usr/sbin/nologin", "pickforge-lab"],
       },
     };
     const result = await executeProvisioning(
@@ -356,7 +356,7 @@ describe("executeProvisioning", () => {
           "-M",
           "-s",
           "/usr/sbin/nologin",
-          "picklab-lab",
+          "pickforge-lab",
         ],
         env: { SUDO_ASKPASS: "/usr/bin/ksshaskpass" },
       },
@@ -368,7 +368,7 @@ describe("executeProvisioning", () => {
       "-M",
       "-s",
       "/usr/sbin/nologin",
-      "picklab-lab",
+      "pickforge-lab",
     ]);
   });
 
@@ -496,7 +496,7 @@ describe("executeProvisioning", () => {
   });
 
   it("merges global and project config through the local adapter", async () => {
-    const home = path.join(tmpDir, ".picklab");
+    const home = path.join(tmpDir, "state");
     const projectDir = path.join(tmpDir, "project");
     fs.mkdirSync(home, { recursive: true });
     fs.mkdirSync(projectDir);
@@ -515,7 +515,7 @@ describe("executeProvisioning", () => {
                 title: "global",
                 kind: "write-global-config",
                 privileged: false,
-                config: { android: { avdName: "picklab-avd" } },
+                config: { android: { avdName: "pickforge-avd" } },
               },
               {
                 id: "project",
@@ -528,14 +528,14 @@ describe("executeProvisioning", () => {
           },
         },
       ],
-      { env: { PICKLAB_HOME: home }, projectDir },
+      { env: { PICKFORGE_HOME: home }, projectDir },
     );
     expect(result.ok).toBe(true);
     expect(
       JSON.parse(fs.readFileSync(path.join(home, "config.json"), "utf8")),
     ).toEqual({
       profile: "android",
-      android: { extra: true, avdName: "picklab-avd" },
+      android: { extra: true, avdName: "pickforge-avd" },
     });
     expect(
       JSON.parse(
@@ -545,9 +545,9 @@ describe("executeProvisioning", () => {
   });
 });
 
-// pickforge/picklab#27 — "Shared graphical sudo (askpass) security contract
+// pickforge/pickforge#27 — "Shared graphical sudo (askpass) security contract
 // — locked v1". These tests cover the contract's verification list for the
-// PickLab side: available/missing/headless preflight, cancellation, env
+// Pickforge side: available/missing/headless preflight, cancellation, env
 // propagation, arg-array safety, and redaction.
 describe("privileged execution via graphical sudo (askpass)", () => {
   const sudoPath = "/usr/bin/sudo";
@@ -556,7 +556,7 @@ describe("privileged execution via graphical sudo (askpass)", () => {
     const adapter = createLocalExecutionAdapter({
       privilege: { sudoPath, askpass: AVAILABLE_ASKPASS },
     });
-    const step = command("root", true, ["-r", "-M", "picklab-lab"]);
+    const step = command("root", true, ["-r", "-M", "pickforge-lab"]);
     if (step.kind !== "command") throw new Error("expected a command step");
     step.command.env = { ANDROID_HOME: "/sdk" };
 
@@ -566,7 +566,7 @@ describe("privileged execution via graphical sudo (askpass)", () => {
     }
     expect(materialized.command).toEqual({
       cmd: sudoPath,
-      args: ["-A", process.execPath, "-r", "-M", "picklab-lab"],
+      args: ["-A", process.execPath, "-r", "-M", "pickforge-lab"],
       env: { ANDROID_HOME: "/sdk", SUDO_ASKPASS: "/usr/bin/ksshaskpass" },
     });
     // The raw step (and its env object) is untouched by materialization.
@@ -714,7 +714,7 @@ describe("privileged execution via graphical sudo (askpass)", () => {
       const result = await executeProvisioning(
         [
           approved({
-            steps: [command("root", true, ["-r", "-M", "picklab-lab"])],
+            steps: [command("root", true, ["-r", "-M", "pickforge-lab"])],
           }),
         ],
         { privilege: { sudoPath: fakeSudo, askpass: AVAILABLE_ASKPASS } },

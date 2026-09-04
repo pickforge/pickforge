@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { EnvLike } from "@pickforge/picklab-core";
+import type { EnvLike } from "@pickforge/lab-core";
 
 /**
  * Filesystem layout for a browser session's isolated runtime, all confined
@@ -84,7 +84,7 @@ export function buildBrowserEnv(
     // Toolkits (Chrome/ozone, GTK) try Wayland first, which would place the
     // window on the user's real desktop. Point WAYLAND_DISPLAY at a socket that
     // cannot exist so libwayland falls back to the isolated X11 display.
-    WAYLAND_DISPLAY: "picklab-no-wayland",
+    WAYLAND_DISPLAY: "pickforge-no-wayland",
   };
   for (const key of LOCALE_PASSTHROUGH) {
     const value = source[key];

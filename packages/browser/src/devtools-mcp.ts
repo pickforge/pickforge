@@ -15,7 +15,7 @@ import {
   sanitizeErrorText,
   type EnvLike,
   type SessionRecord,
-} from "@pickforge/picklab-core";
+} from "@pickforge/lab-core";
 import { createDeferred } from "./deferred.js";
 import {
   createDevtoolsEvidenceRecorder,
@@ -35,7 +35,7 @@ import {
 /** JSON-RPC error code for the stable "human control is active" busy response. */
 export const TAKEOVER_BUSY_ERROR_CODE = -32050;
 const TAKEOVER_BUSY_MESSAGE =
-  "PickLab: human control is active; agent input is paused until control returns";
+  "Pickforge: human control is active; agent input is paused until control returns";
 
 function jsonRpcRequestId(message: JsonRpcMessage): string | number | undefined {
   return typeof message.id === "string" || typeof message.id === "number"
@@ -45,13 +45,13 @@ function jsonRpcRequestId(message: JsonRpcMessage): string | number | undefined 
 
 /**
  * Fail-closed human-takeover gate for the DevTools relay
- * (pickforge/picklab#21): while the session's human lease is active, every
+ * (pickforge/pickforge#21): while the session's human lease is active, every
  * `tools/call` request is answered directly with a stable busy error instead
  * of ever reaching the child Chrome DevTools MCP process. Notifications (no
  * `id`) and non-tool-call requests pass through untouched.
  *
  * Evidencing asymmetry, by design: an MCP desktop-input tool blocked by the
- * same lease (`withAgentPermit`, in `@pickforge/picklab-desktop-linux`) is
+ * same lease (`withAgentPermit`, in `@pickforge/lab-desktop-linux`) is
  * evidenced as an `"error"`-status action, because it runs inside
  * `withMcpEvidence`'s existing per-call action lifecycle. A blocked DevTools
  * relay request has no equivalent per-call evidence lifecycle to hook —
@@ -215,7 +215,7 @@ export async function resolveLiveBrowserSession(
   }
   if (live.length === 0) {
     throw new Error(
-      "No live browser session for this project; create one with: picklab session create --type browser",
+      "No live browser session for this project; create one with: pickforge-lab session create --type browser",
     );
   }
   if (live.length > 1) {
@@ -233,7 +233,7 @@ export interface RelayHooks {
    * Checked before `beforeForward` on every agent -> child record. Returning
    * a message answers the caller directly on `output` and the record is
    * never forwarded to the child — used for the human-takeover fail-closed
-   * busy response (pickforge/picklab#21). See `JsonRpcIntercept`.
+   * busy response (pickforge/pickforge#21). See `JsonRpcIntercept`.
    */
   intercept?: JsonRpcIntercept;
 }
@@ -347,7 +347,7 @@ async function pumpRedactedDiagnostics(
         await writeWithBackpressure(
           destination,
           Buffer.from(
-            `[picklab: upstream diagnostic line exceeded ${maxLineBytes} bytes and was dropped]\n`,
+            `[pickforge-lab: upstream diagnostic line exceeded ${maxLineBytes} bytes and was dropped]\n`,
           ),
         );
         droppingLine = lf === -1;
@@ -401,7 +401,7 @@ async function stopChild(
   return exit;
 }
 
-// eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/picklab#60
+// eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function runDevtoolsMcpRelay(
   opts: RunDevtoolsMcpRelayOptions,
 ): Promise<RelayExit> {
@@ -438,7 +438,7 @@ export async function runDevtoolsMcpRelay(
   // client-facing stream. A shared write queue fully orders every write
   // issued to `output` across both of them, so a busy-rejection response
   // interleaved with an in-flight child response can never produce a torn or
-  // out-of-order frame on the wire (pickforge/picklab#21 P1-D).
+  // out-of-order frame on the wire (pickforge/pickforge#21 P1-D).
   const outputWriteQueue = createJsonRpcWriteQueue();
   const inputPump = pumpJsonRpcNdjson(input, child.stdin, {
     hook: opts.hooks?.beforeForward,
@@ -587,7 +587,7 @@ function reportProjectEvidenceFailure(
   );
   void writeWithBackpressure(
     destination,
-    Buffer.from(`[picklab evidence] chrome-devtools: ${detail}\n`),
+    Buffer.from(`[pickforge-lab evidence] chrome-devtools: ${detail}\n`),
   ).catch(() => {});
 }
 

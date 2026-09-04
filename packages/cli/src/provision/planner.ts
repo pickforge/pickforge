@@ -5,7 +5,7 @@ import {
   missingSdkMessage,
   sdkmanagerInstallCommand,
   type SystemImage,
-} from "@pickforge/picklab-android";
+} from "@pickforge/lab-android";
 import type { PlanResult, ProvisioningPlan, ProvisioningStep } from "./plan.js";
 
 export const RECOMMENDED_SYSTEM_IMAGE =
@@ -110,7 +110,7 @@ export function planLabUser(input: LabUserPlanInput): PlanResult {
   }
   steps.push({
     id: "persist-lab-user",
-    title: "Persist lab user in global PickLab config",
+    title: "Persist lab user in global Pickforge config",
     kind: "write-global-config",
     privileged: false,
     config: { labUser: { name: input.name, home: input.home } },
@@ -172,7 +172,7 @@ export interface AvdPlanInput {
 export function planCreateAvd(input: AvdPlanInput): PlanResult {
   const persistStep: ProvisioningStep = {
     id: "persist-avd",
-    title: "Persist AVD name in global PickLab config",
+    title: "Persist AVD name in global Pickforge config",
     kind: "write-global-config",
     privileged: false,
     config: { android: { avdName: input.avdName } },
@@ -265,13 +265,13 @@ export function planCreateAvd(input: AvdPlanInput): PlanResult {
   };
 }
 
-export interface PicklabHomePlanInput {
+export interface PickforgeHomePlanInput {
   path: string;
   exists: boolean;
 }
 
-export function planPicklabHome(
-  input: PicklabHomePlanInput,
+export function planPickforgeHome(
+  input: PickforgeHomePlanInput,
 ): ProvisioningPlan {
   if (input.exists) {
     return { steps: [] };
@@ -279,8 +279,8 @@ export function planPicklabHome(
   return {
     steps: [
       {
-        id: "picklab-home",
-        title: `Create PickLab home ${input.path}`,
+        id: "pickforge-home",
+        title: `Create Pickforge home ${input.path}`,
         kind: "mkdir",
         privileged: false,
         dir: input.path,
