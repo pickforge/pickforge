@@ -22,10 +22,6 @@ env:
   # To move it: `docker buildx imagetools inspect ghcr.io/cirruslabs/flutter:stable`,
   # update both places in the same commit, and re-run the smoke.
   FLUTTER_IMAGE: ghcr.io/cirruslabs/flutter@sha256:46691e311715845de03a3ba4753a475476936805b29431b1f00f1816981033f8
-  # The container needs a Node.js the lab supports. Pinned and checksummed from
-  # nodejs.org rather than piped from a remote setup script into a root shell.
-  SMOKE_NODE_VERSION: 24.20.0
-  SMOKE_NODE_SHA256: 2f2c0da162318f0de47665410c7c8c2ed3d36c8f3105de4bbc61176c70a7cbf2
 
 jobs:
   npm-tarball:
@@ -142,33 +138,41 @@ jobs:
           name: pickforge-linux-x86_64
           path: candidate/assets
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      # The image is the clean Flutter environment and already ships curl, tar,
+      # xz and CA certificates; it has no Node. Mount the runner's Node instead
+      # of provisioning one inside the gate: nothing is installed, nothing is
+      # fetched from a third-party apt repository, and no remote setup script is
+      # piped into a root shell. Runner and image are both Ubuntu 24.04
+      # (glibc 2.39), so the same official linux-x64 build runs in both.
       - name: Run the candidate smoke in a clean Flutter container
         env:
           VERSION: ${{ needs.npm-tarball.outputs.version }}
           TARBALL: ${{ needs.npm-tarball.outputs.tarball }}
         run: |
+          set -eu
           mkdir -m 777 -p smoke-evidence
+          NODE_ROOT="$(dirname "$(dirname "$(command -v node)")")"
+          test -x "$NODE_ROOT/bin/npm"
           docker run --rm --platform linux/amd64 \
             -v "$PWD/scripts:/opt/pickforge/scripts:ro" \
             -v "$PWD/candidate:/opt/pickforge/candidate:ro" \
             -v "$PWD/smoke-evidence:/opt/pickforge/evidence" \
+            -v "$NODE_ROOT:/opt/node:ro" \
             -e "PICKFORGE_SMOKE_VERSION=$VERSION" \
             -e PICKFORGE_SMOKE_ASSET_DIR=/opt/pickforge/candidate/assets \
             -e "PICKFORGE_SMOKE_TARBALL=/opt/pickforge/candidate/npm/$TARBALL" \
             -e PICKFORGE_SMOKE_EVIDENCE=/opt/pickforge/evidence \
-            -e "NODE_VERSION=$SMOKE_NODE_VERSION" \
-            -e "NODE_SHA256=$SMOKE_NODE_SHA256" \
             "$FLUTTER_IMAGE" bash -lc '
               set -eu
-              apt-get update -qq
-              apt-get install -y --no-install-recommends ca-certificates curl xz-utils >/dev/null 2>&1
-              curl -fsSL -o /tmp/node.tar.xz \
-                "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"
-              echo "${NODE_SHA256}  /tmp/node.tar.xz" | sha256sum -c -
-              mkdir -p /opt/node
-              tar -xJf /tmp/node.tar.xz -C /opt/node --strip-components=1
               export PATH="/opt/node/bin:$PATH"
-              node --version
+              case "$(node --version)" in
+                v24.*) ;;
+                *) echo "unexpected Node in the smoke container: $(node --version)" >&2; exit 1 ;;
+              esac
               exec /opt/pickforge/scripts/candidate-smoke.sh
             '
 

@@ -110,8 +110,6 @@ docker run --rm --platform linux/amd64 \
   ghcr.io/cirruslabs/flutter@sha256:46691e311715845de03a3ba4753a475476936805b29431b1f00f1816981033f8 \
   bash -lc '
     set -eu
-    apt-get update -qq
-    apt-get install -y --no-install-recommends ca-certificates curl xz-utils >/dev/null 2>&1
     curl -fsSL -o /tmp/node.tar.xz \
       "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"
     echo "${NODE_SHA256}  /tmp/node.tar.xz" | sha256sum -c -
@@ -124,9 +122,16 @@ docker run --rm --platform linux/amd64 \
 cat /tmp/smoke-evidence/summary.md
 ```
 
-The image digest, the Node.js version, and its checksum are the same values
-`.github/workflows/candidate-artifacts.yml` pins. Nothing on this gate floats:
-change them in both places in one commit and re-run this smoke.
+The image digest is the one `.github/workflows/candidate-artifacts.yml` pins:
+change it in both places in one commit and re-run this smoke. The image already
+ships `curl`, `tar`, `xz` and CA certificates, so nothing is installed into it.
+
+CI does not run those three Node.js lines. Its runner is the same Ubuntu 24.04
+as the image, so it mounts the runner's Node at `/opt/node` read-only and
+fetches nothing at all. This checklist downloads a pinned, checksummed Node
+instead, because your machine is probably neither Ubuntu 24.04 nor x86_64. To
+refresh that pin, take the version and its `linux-x64.tar.xz` line from
+`https://nodejs.org/dist/v<version>/SHASUMS256.txt`.
 
 On an Apple silicon Mac, run the same script against a downloaded asset:
 

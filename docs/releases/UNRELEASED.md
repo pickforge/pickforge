@@ -137,8 +137,10 @@ candidate artifacts that were actually executed.
   so a re-run or a second dispatch cannot replace published assets. Sourcemaps
   are uploaded from inside the verified tarball, unmodified, so what Sentry
   holds describes the bytes npm received.
-- The Linux gate's container is pinned by image digest, and its Node.js is
-  pinned by version and checksum rather than piped from a remote setup script.
+- The Linux gate's container is pinned by image digest, and nothing is
+  installed into it: it already ships the tools the smoke needs, and its
+  Node.js is the runner's own, mounted read-only, instead of a remote setup
+  script piped into a root shell.
 - The pull-request candidate smoke now runs for every input that can change the
   packed bytes, including the lockfile and every workspace package: the CLI
   bundles them all.
