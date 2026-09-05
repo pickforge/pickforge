@@ -441,7 +441,7 @@ describe("MCP process lifecycle", () => {
     expect(Buffer.byteLength(wire.stderr)).toBeLessThan(4_096);
   });
 
-  it.each(["SIGINT", "SIGTERM"] as const)(
+  it.each(["SIGINT", "SIGTERM", "SIGHUP"] as const)(
     "closes cleanly on %s with stdin open",
     async (signal) => {
       const wire = new WireProcess();

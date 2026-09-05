@@ -8,13 +8,20 @@ import { createMcpServer } from "@pickforge/lab-mcp-server";
 
 const MAX_ERROR_CHARS = 2_048;
 const MAX_ERROR_REPORTS = 8;
-const SHUTDOWN_SIGNALS: NodeJS.Signals[] = ["SIGINT", "SIGTERM"];
+const ERROR_REPORT_WINDOW_MS = 60_000;
+const SHUTDOWN_SIGNALS: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"];
 
 export function createMcpErrorReporter(
   write: (message: string) => void = (message) => process.stderr.write(message),
 ): (error: unknown) => void {
   let reports = 0;
+  let windowStartedAt = Date.now();
   return (error) => {
+    const now = Date.now();
+    if (now - windowStartedAt >= ERROR_REPORT_WINDOW_MS) {
+      reports = 0;
+      windowStartedAt = now;
+    }
     if (reports >= MAX_ERROR_REPORTS) return;
     reports += 1;
     const raw = error instanceof Error ? error.message : String(error);

@@ -37,7 +37,7 @@ import {
   runMcpServe,
 } from "../src/commands/mcp.js";
 
-const signals = ["SIGINT", "SIGTERM"] as const;
+const signals = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
 
 function listenerCounts(): Record<string, number> {
   return Object.fromEntries(
@@ -54,6 +54,7 @@ function listenerCounts(): Record<string, number> {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   closeHandle.mockClear();
   closeDuringStart.value = false;
@@ -97,6 +98,8 @@ it("handles a transport close racing stdio startup", async () => {
 });
 
 it("bounds, redacts, and rate-limits transport diagnostics", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-09-05T00:00:00Z"));
   const output: string[] = [];
   const report = createMcpErrorReporter((message) => output.push(message));
   const secret = `ghp_${"a".repeat(36)}`;
@@ -105,11 +108,16 @@ it("bounds, redacts, and rate-limits transport diagnostics", () => {
     report(new Error(`${secret}\n${"x".repeat(10_000)}`));
   }
 
-  const text = output.join("");
-  expect(text).not.toContain(secret);
-  expect(text).toContain("[REDACTED]");
-  expect(text).toContain("[truncated]");
-  expect(text).toContain("further errors suppressed");
+  const firstWindow = output.join("");
+  expect(firstWindow).not.toContain(secret);
+  expect(firstWindow).toContain("[REDACTED]");
+  expect(firstWindow).toContain("[truncated]");
+  expect(firstWindow).toContain("further errors suppressed");
   expect(output).toHaveLength(9);
-  expect(Buffer.byteLength(text)).toBeLessThan(18_000);
+  expect(Buffer.byteLength(firstWindow)).toBeLessThan(18_000);
+
+  vi.advanceTimersByTime(60_000);
+  report(new Error("diagnostics resumed"));
+  expect(output.at(-1)).toContain("diagnostics resumed");
+  expect(output).toHaveLength(10);
 });

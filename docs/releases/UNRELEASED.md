@@ -109,6 +109,18 @@ release description, then reset it after that release is published.
 - Nothing is migrated, replaced, or deleted when an unsafe entry is found; the
   offending path is named in the error.
 
+## MCP SDK v2
+
+- The lab MCP server now uses the stable split Model Context Protocol SDK v2
+  packages. Its documented dual-era stdio entrypoint keeps the protocol
+  revisions used by current Claude Code, Codex, and Pi clients and opts into
+  the `2026-07-28` revision without changing the server's tools, prompts, or
+  resources. Tasks remain out of scope.
+- MCP stdio now exits cleanly on EOF, transport close, `SIGINT`, `SIGTERM`, and
+  `SIGHUP`. Malformed-input diagnostics stay on stderr, redact secrets, bound
+  each message, and resume after a one-minute rate-limit window. Legacy user
+  elicitation keeps its previous 60-second response window.
+
 ## Validation
 
 - Updated during release preparation.

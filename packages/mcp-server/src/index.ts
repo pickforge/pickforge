@@ -21,7 +21,10 @@ export function createMcpServer(
   opts: CreateMcpServerOptions = {},
 ): McpServer {
   const ctx = resolveContext(opts);
-  const server = new McpServer({ name: "pickforge-lab", version });
+  const server = new McpServer(
+    { name: "pickforge-lab", version },
+    { inputRequired: { roundTimeoutMs: 60_000 } },
+  );
   registerSessionTools(server, ctx);
   registerDesktopTools(server, ctx);
   registerAndroidTools(server, ctx);
