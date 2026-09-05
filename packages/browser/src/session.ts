@@ -107,6 +107,119 @@ export function browserSessionLogDir(
   return sessionDataDir(id, registryEnv);
 }
 
+function hasErrnoCode(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && error.code === code;
+}
+
+/**
+ * Publish the short `/tmp` alias Chrome uses as `TMPDIR` (see
+ * `BrowserRuntimeLayout.chromeTmpDir`). Chrome's process singleton binds a Unix
+ * socket at `$TMPDIR/<random>/SingletonSocket`, and `sun_path` allows only 108
+ * bytes, so a deeply nested `PICKFORGE_HOME` made headed Chrome abort with
+ * "Socket path too long". The alias is a symlink into the session's own temp
+ * directory, so the socket and every temp file still live under the session
+ * directory and disappear with it. The per-uid alias root must be a real
+ * directory owned by this uid at mode 0700; anything else is refused rather
+ * than followed. The key is derived from the session directory, so an entry
+ * already at the alias path is either this session's own alias (reused as is),
+ * a dangling symlink left when a session directory was removed without a
+ * destroy (replaced: only this uid can create entries in the root), or
+ * something else, which is refused.
+ *
+ * @internal Exported for tests only.
+ */
+export async function ensureChromeTmpAlias(layout: BrowserRuntimeLayout): Promise<void> {
+  const root = path.dirname(layout.chromeTmpDir);
+  await fs.promises.mkdir(root, { recursive: true, mode: 0o700 });
+  const rootStat = await fs.promises.lstat(root);
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  if (
+    !rootStat.isDirectory() ||
+    rootStat.isSymbolicLink() ||
+    (uid !== undefined && rootStat.uid !== uid)
+  ) {
+    throw new Error(`Refusing unsafe browser temp alias root: ${root}`);
+  }
+  await fs.promises.chmod(root, 0o700);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await fs.promises.symlink(layout.tmpDir, layout.chromeTmpDir, "dir");
+      return;
+    } catch (error) {
+      if (!hasErrnoCode(error, "EEXIST")) throw error;
+      const existing = await classifyExistingAlias(layout);
+      if (existing === "own") return;
+      if (existing === "foreign" || attempt > 0) {
+        throw new Error(`Browser temp alias already exists: ${layout.chromeTmpDir}`);
+      }
+      await fs.promises.unlink(layout.chromeTmpDir);
+    }
+  }
+}
+
+/**
+ * What currently sits at the alias path: this session's own alias (`own`),
+ * a dangling symlink whose target is gone (`dangling`), or anything else
+ * (`foreign`): a symlink to a live directory that is not ours, or a real
+ * file or directory.
+ */
+async function classifyExistingAlias(
+  layout: BrowserRuntimeLayout,
+): Promise<"own" | "dangling" | "foreign"> {
+  const stat = await fs.promises.lstat(layout.chromeTmpDir);
+  if (!stat.isSymbolicLink()) return "foreign";
+  const target = await fs.promises.readlink(layout.chromeTmpDir);
+  if (
+    path.resolve(path.dirname(layout.chromeTmpDir), target) ===
+    path.resolve(layout.tmpDir)
+  ) {
+    return "own";
+  }
+  try {
+    await fs.promises.stat(layout.chromeTmpDir);
+    return "foreign";
+  } catch (error) {
+    return hasErrnoCode(error, "ENOENT") ? "dangling" : "foreign";
+  }
+}
+
+/**
+ * Remove the alias published by `ensureChromeTmpAlias`. Only a symlink that
+ * resolves to this session's own temp directory is unlinked; a missing alias is
+ * fine, and anything else at that path (a real directory, a symlink elsewhere)
+ * is reported as a cleanup failure instead of being removed. The per-uid root
+ * is removed only once it is empty.
+ *
+ * @internal Exported for tests only.
+ */
+export async function removeChromeTmpAlias(layout: BrowserRuntimeLayout): Promise<void> {
+  let stat: fs.Stats;
+  try {
+    stat = await fs.promises.lstat(layout.chromeTmpDir);
+  } catch (error) {
+    if (hasErrnoCode(error, "ENOENT")) return;
+    throw error;
+  }
+  const target = stat.isSymbolicLink()
+    ? await fs.promises.readlink(layout.chromeTmpDir)
+    : undefined;
+  if (
+    target === undefined ||
+    path.resolve(path.dirname(layout.chromeTmpDir), target) !==
+      path.resolve(layout.tmpDir)
+  ) {
+    throw new Error(`Refusing to remove unowned browser temp alias: ${layout.chromeTmpDir}`);
+  }
+  await fs.promises.unlink(layout.chromeTmpDir);
+  try {
+    await fs.promises.rmdir(path.dirname(layout.chromeTmpDir));
+  } catch (error) {
+    if (!hasErrnoCode(error, "ENOENT") && !hasErrnoCode(error, "ENOTEMPTY")) {
+      throw error;
+    }
+  }
+}
+
 async function makeRuntimeDirs(layout: BrowserRuntimeLayout): Promise<void> {
   const dirs = [
     path.dirname(layout.profileDir),
@@ -126,6 +239,7 @@ async function makeRuntimeDirs(layout: BrowserRuntimeLayout): Promise<void> {
     // directory, so enforce private permissions explicitly on every level.
     await fs.promises.chmod(dir, 0o700);
   }
+  await ensureChromeTmpAlias(layout);
 }
 
 async function removeRuntimeData(
@@ -133,6 +247,11 @@ async function removeRuntimeData(
   profileDir = layout.profileDir,
 ): Promise<Error[]> {
   const failures: Error[] = [];
+  try {
+    await removeChromeTmpAlias(layout);
+  } catch (error) {
+    failures.push(asError(error));
+  }
   for (const dir of [
     profileDir,
     layout.homeDir,

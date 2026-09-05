@@ -11,6 +11,7 @@ import {
 } from "@pickforge/lab-core";
 import { findOnPath } from "@pickforge/lab-desktop-linux";
 import {
+  browserRuntimeLayout,
   createBrowserSession,
   destroyBrowserSession,
   detectChromeBinary,
@@ -71,6 +72,45 @@ describe("browser integration prerequisites", () => {
 });
 
 describe.skipIf(!ready)("real headed Chrome under Xvfb", () => {
+  it(
+    "starts from a deeply nested home without exceeding Chrome socket limits",
+    { timeout: TEST_TIMEOUT_MS },
+    async () => {
+      const longHome = path.join(
+        tmp,
+        "nested-pickforge-home-aaaaaaaaaaaa",
+        "nested-release-evidence-bbbbbbbbbbbb",
+        "nested-browser-runtime-cccccccccccc",
+      );
+      fs.mkdirSync(longHome, { recursive: true });
+      const longEnv = { PICKFORGE_HOME: longHome };
+      const session = await createBrowserSession({
+        projectDir,
+        registryEnv: longEnv,
+        env: spawnEnv,
+      });
+      const layout = browserRuntimeLayout(session.logDir);
+      try {
+        const environ = fs.readFileSync(
+          `/proc/${session.browserPid}/environ`,
+          "utf8",
+        );
+        expect(environ.split("\0")).toContain(`TMPDIR=${layout.chromeTmpDir}`);
+        expect(fs.realpathSync(layout.chromeTmpDir)).toBe(layout.tmpDir);
+        // Chrome's process singleton directory (com.google.Chrome.* or
+        // org.chromium.Chromium.*) must land physically inside the session's
+        // own temp directory, not loose under /tmp.
+        expect(
+          fs.readdirSync(layout.tmpDir).filter((name) => /Chrom/i.test(name)),
+        ).not.toHaveLength(0);
+      } finally {
+        await destroyBrowserSession(session.id, longEnv).catch(() => {});
+      }
+      expect(fs.existsSync(layout.chromeTmpDir)).toBe(false);
+      expect(fs.existsSync(session.logDir)).toBe(false);
+    },
+  );
+
   it(
     "launches an isolated session, binds CDP to loopback, and scrubs secrets",
     // Real Xvfb + real Chrome startup is timing-sensitive on a saturated host;

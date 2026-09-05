@@ -50,6 +50,15 @@ candidate artifacts that were actually executed.
 
 ## Lab isolation
 
+- Headed Chrome now reaches its session-confined temporary directory through a
+  short private alias under `/tmp/pickforge-browser-<uid>/`, avoiding its fixed
+  Unix-socket path limit when `PICKFORGE_HOME` is deeply nested. Before this,
+  a browser session under a long home aborted at startup with Chrome's
+  `Socket path too long: .../tmp/com.google.Chrome.*/SingletonSocket`. The
+  socket and Chrome's temp files still live inside the session directory; the
+  alias root must be a real directory owned by the invoking user, and destroy
+  and failed-start cleanup verify and remove the alias with the rest of the
+  ephemeral runtime.
 - x11vnc now uses the isolated lab X11 environment instead of inheriting a
   Wayland host session that prevents it from starting.
 - Desktop commands now share one isolated X11 environment that points
