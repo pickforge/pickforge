@@ -140,6 +140,28 @@ async function waitFor(
   throw new Error("timed out waiting for test condition");
 }
 
+function fakeReadyAdbEnv(
+  opts: { logcat?: string } = {},
+): { env: Record<string, string>; adbLog: string } {
+  const adbLog = path.join(tmpDir, "adb-ready.log");
+  const logcatFile = path.join(tmpDir, "adb-ready.logcat");
+  fs.writeFileSync(logcatFile, `${opts.logcat ?? "I/App( 1): started"}\n`);
+  const body = [
+    'PATH="/usr/bin:/bin:$PATH"',
+    `printf '%s\\n' "$*" >> "${adbLog}"`,
+    'case "$*" in',
+    '  *"+%s"*) echo 1000 ;;',
+    `  *"logcat -d -v epoch"*) cat '${logcatFile}' ;;`,
+    '  *"install -r"*) echo Success ;;',
+    '  *resolve-activity*) echo "com.example.app/.MainActivity" ;;',
+    '  *"am start"*) echo "Status: ok"; echo "LaunchState: COLD" ;;',
+    "  *pidof*) echo 4242 ;;",
+    "esac",
+    "exit 0",
+  ].join("\n");
+  return { env: makeEnv({ bins: { adb: body } }), adbLog };
+}
+
 function fakeAdbEnv(): { env: Record<string, string>; adbLog: string } {
   const adbLog = path.join(tmpDir, "adb.log");
   const body = [
@@ -1255,6 +1277,182 @@ describe("pickforge-lab android (fake adb)", () => {
       `-s ${FAKE_SERIAL} shell am start -W -n com.example.app/.MainActivity`,
       `-s ${FAKE_SERIAL} shell pidof com.example.app`,
     ]);
+  });
+
+  it("waits for guest ready before install and launch when --wait-ready is set", async () => {
+    const { env, adbLog } = fakeReadyAdbEnv();
+    const apk = path.join(tmpDir, "app.apk");
+    fs.writeFileSync(apk, "apk");
+    const installed = await runCli(
+      [
+        "android",
+        "install-apk",
+        apk,
+        "--serial",
+        FAKE_SERIAL,
+        "--wait-ready",
+        "5",
+        "--json",
+      ],
+      env,
+    );
+    expect(installed.code).toBe(0);
+    expect(parseJson(installed).guestReady).toMatchObject({
+      kind: "guest-ready",
+      serial: FAKE_SERIAL,
+      lmkQuietS: null,
+      quietNeedS: 30,
+      boundMs: 5000,
+    });
+    expect(installed.stderr).toContain(
+      `guest ready on ${FAKE_SERIAL}: lowmemorykiller quiet never`,
+    );
+    const launched = await runCli(
+      [
+        "android",
+        "launch-app",
+        "com.example.app",
+        "--serial",
+        FAKE_SERIAL,
+        "--wait-ready",
+        "5",
+        "--json",
+      ],
+      env,
+    );
+    expect(launched.code).toBe(0);
+    expect(parseJson(launched)).toMatchObject({
+      packageName: "com.example.app",
+      pid: 4242,
+      guestReady: { kind: "guest-ready", lmkQuietS: null },
+    });
+    const lines = adbLogLines(adbLog);
+    expect(lines.filter((line) => line.includes("date +%s"))).toHaveLength(2);
+    expect(
+      lines.filter((line) => line.includes("logcat -d -v epoch")),
+    ).toHaveLength(2);
+    const installAt = lines.findIndex((line) => line.includes("install -r"));
+    const startAt = lines.findIndex((line) => line.includes("am start"));
+    expect(installAt).toBeGreaterThan(1);
+    expect(startAt).toBeGreaterThan(installAt);
+    expect(lines.slice(startAt)).toEqual([
+      `-s ${FAKE_SERIAL} shell am start -W -n com.example.app/.MainActivity`,
+      `-s ${FAKE_SERIAL} shell pidof com.example.app`,
+    ]);
+  });
+
+  it("fails closed with guest-not-ready and does not install or launch", async () => {
+    const { env, adbLog } = fakeReadyAdbEnv({
+      logcat: "999.0  1  1 I lowmemorykiller: Kill 'app' (9)",
+    });
+    const apk = path.join(tmpDir, "app.apk");
+    fs.writeFileSync(apk, "apk");
+    const installed = await runCli(
+      [
+        "android",
+        "install-apk",
+        apk,
+        "--serial",
+        FAKE_SERIAL,
+        "--wait-ready",
+        "1",
+        "--json",
+      ],
+      env,
+    );
+    expect(installed.code).toBe(1);
+    expect(parseJson(installed).errors.join("\n")).toContain(
+      "[guest-not-ready]",
+    );
+    expect(parseJson(installed).errors.join("\n")).toContain(
+      "this action was not started",
+    );
+    expect(installed.stderr).toContain("waiting for guest ready");
+    const launched = await runCli(
+      [
+        "android",
+        "launch-app",
+        "com.example.app",
+        "--serial",
+        FAKE_SERIAL,
+        "--wait-ready",
+        "1",
+        "--json",
+      ],
+      env,
+    );
+    expect(launched.code).toBe(1);
+    expect(parseJson(launched).errors.join("\n")).toContain(
+      "[guest-not-ready]",
+    );
+    expect(adbLogLines(adbLog).join("\n")).not.toMatch(/install -r|am start/);
+  });
+
+  it("treats --wait-ready 0 as the default no-wait", async () => {
+    const { env, adbLog } = fakeReadyAdbEnv();
+    const apk = path.join(tmpDir, "app.apk");
+    fs.writeFileSync(apk, "apk");
+    const result = await runCli(
+      [
+        "android",
+        "install-apk",
+        apk,
+        "--serial",
+        FAKE_SERIAL,
+        "--wait-ready",
+        "0",
+        "--json",
+      ],
+      env,
+    );
+    expect(result.code).toBe(0);
+    expect(parseJson(result).guestReady).toBeUndefined();
+    expect(adbLogLines(adbLog)).toEqual([
+      `-s ${FAKE_SERIAL} install -r ${apk}`,
+    ]);
+  });
+
+  it("rejects a non-integer --wait-ready", async () => {
+    const { env, adbLog } = fakeReadyAdbEnv();
+    for (const value of ["-1", "1.5", "foo"]) {
+      const result = await runCli(
+        [
+          "android",
+          "launch-app",
+          "com.example.app",
+          "--serial",
+          FAKE_SERIAL,
+          "--wait-ready",
+          value,
+          "--json",
+        ],
+        env,
+      );
+      expect(result.code).toBe(1);
+      expect(parseJson(result).errors.join("\n")).toContain("--wait-ready");
+    }
+    expect(adbLogLines(adbLog)).toEqual([]);
+  });
+
+  it("validates --wait-ready before looking up the session", async () => {
+    const { env, adbLog } = fakeReadyAdbEnv();
+    const result = await runCli(
+      [
+        "android",
+        "launch-app",
+        "com.example.app",
+        "--session",
+        "no-such-session",
+        "--wait-ready",
+        "foo",
+        "--json",
+      ],
+      env,
+    );
+    expect(result.code).toBe(1);
+    expect(parseJson(result).errors.join("\n")).toContain("--wait-ready");
+    expect(parseJson(result).errors.join("\n")).not.toMatch(/session/i);
+    expect(adbLogLines(adbLog)).toEqual([]);
   });
 
   it(

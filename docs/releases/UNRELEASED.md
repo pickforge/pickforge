@@ -229,8 +229,17 @@ candidate artifacts that were actually executed.
 - Known limit (#105): on a 2 GB Play-Store image the first launch of a freshly
   sideloaded APK right after a quickboot restore can be killed by the guest's
   lowmemorykiller while `am start -W` reports it drawn. Pickforge reports this
-  as a distinct launch error and does not retry; the live test waits, bounded,
-  until lowmemorykiller has been quiet for 30 s before each launch attempt.
+  as a distinct launch error and does not retry. RAM and settled-snapshot
+  provisioning for new `pickforge-avd` instances is #106.
+- `android install-apk` / `android launch-app` and the matching MCP tools accept
+  an opt-in `--wait-ready <seconds>` / `waitReadySeconds` (`0` or omitted: no
+  wait) that waits until guest lowmemorykiller has been quiet for 30 seconds
+  (`logcat -s lowmemorykiller:I` against the guest clock), reports each probe as
+  progress, fails with `guest-not-ready` or `aborted` without starting the
+  action if the bound is hit or the MCP request is cancelled, and treats an
+  unreadable guest clock or logcat as not quiet. This avoids launching into a
+  transient storm; it is not a retry, and a storm that never quiets still fails
+  closed.
 
 ## MCP SDK v2
 

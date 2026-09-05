@@ -7,6 +7,7 @@ import {
   installApk,
   launchApp,
   logcat,
+  maybeWaitForGuestReady,
   runAdb,
   screenshot,
   tap,
@@ -27,6 +28,18 @@ import {
 export interface AndroidTargetOptions extends BaseCliOptions {
   session?: string;
   serial?: string;
+  waitReady?: string;
+}
+
+function waitReadySecondsOf(opts: AndroidTargetOptions): number | undefined {
+  if (opts.waitReady === undefined) {
+    return undefined;
+  }
+  return parseIntArg(opts.waitReady, "--wait-ready");
+}
+
+function progressToStderr(message: string): void {
+  console.error(message);
 }
 
 interface AndroidTarget {
@@ -64,11 +77,21 @@ export async function runAndroidInstallApk(
   opts: AndroidTargetOptions,
 ): Promise<number> {
   return runReported(opts, async () => {
+    const waitReadySeconds = waitReadySecondsOf(opts);
     const target = await resolveAndroidTarget(opts);
     const apkPath = path.resolve(apk);
+    const guestReady = await maybeWaitForGuestReady({
+      serial: target.serial,
+      waitReadySeconds,
+      onProgress: progressToStderr,
+    });
     await installApk({ serial: target.serial, apkPath });
+    const data: Record<string, unknown> = { ...targetData(target), apkPath };
+    if (guestReady !== undefined) {
+      data.guestReady = guestReady;
+    }
     return {
-      data: { ...targetData(target), apkPath },
+      data,
       lines: [`installed ${apkPath} on ${target.serial}`],
     };
   });
@@ -83,14 +106,28 @@ export async function runAndroidLaunchApp(
   opts: AndroidLaunchAppOptions,
 ): Promise<number> {
   return runReported(opts, async () => {
+    const waitReadySeconds = waitReadySecondsOf(opts);
     const target = await resolveAndroidTarget(opts);
+    const guestReady = await maybeWaitForGuestReady({
+      serial: target.serial,
+      waitReadySeconds,
+      onProgress: progressToStderr,
+    });
     const launched = await launchApp({
       serial: target.serial,
       packageName,
       activity: opts.activity,
     });
+    const data: Record<string, unknown> = {
+      ...targetData(target),
+      packageName,
+      ...launched,
+    };
+    if (guestReady !== undefined) {
+      data.guestReady = guestReady;
+    }
     return {
-      data: { ...targetData(target), packageName, ...launched },
+      data,
       lines: [
         `launched ${launched.component} on ${target.serial} (pid ${launched.pid})`,
       ],
