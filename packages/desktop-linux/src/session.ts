@@ -30,6 +30,7 @@ import {
 } from "@pickforge/lab-core";
 import {
   XvfbStartError,
+  inspectDisplayRelease,
   isDisplayAlive,
   startXvfb,
   type XvfbHandle,
@@ -240,7 +241,15 @@ async function stopStartupXvfb(state: DesktopStartupState): Promise<boolean> {
       pid: xvfb.pid,
       startTicks: xvfb.startTimeTicks,
     });
-    return result.outcome === "terminated" || result.outcome === "already-dead";
+    const processGone =
+      result.outcome === "terminated" || result.outcome === "already-dead";
+    return (
+      processGone &&
+      inspectDisplayRelease(xvfb.display, {
+        pid: xvfb.pid,
+        startTicks: xvfb.startTimeTicks,
+      }).released
+    );
   } catch {
     return false;
   }
@@ -782,9 +791,10 @@ async function stopSessionXvfb(
   desktop: DesktopSessionInfo | undefined,
   failures: Error[],
 ): Promise<boolean> {
-  const xvfbPid = desktop?.xvfbPid;
+  if (desktop === undefined) return true;
+  const xvfbPid = desktop.xvfbPid;
   if (xvfbPid === undefined) return true;
-  const xvfbStartTimeTicks = desktop?.xvfbStartTimeTicks;
+  const xvfbStartTimeTicks = desktop.xvfbStartTimeTicks;
   if (xvfbStartTimeTicks === undefined) {
     if (!isPidAlive(xvfbPid)) return true;
     failures.push(
@@ -800,7 +810,17 @@ async function stopSessionXvfb(
       startTicks: xvfbStartTimeTicks,
     });
     if (result.outcome === "terminated" || result.outcome === "already-dead") {
-      return true;
+      const release = inspectDisplayRelease(desktop.display, {
+        pid: xvfbPid,
+        startTicks: xvfbStartTimeTicks,
+      });
+      if (release.released) return true;
+      failures.push(
+        new Error(
+          `Xvfb display ${desktop.display} is still owned by pid ${xvfbPid}`,
+        ),
+      );
+      return false;
     }
     failures.push(
       new Error(
