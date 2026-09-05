@@ -413,6 +413,6 @@ main() {
   summarize
 }
 
-if [ "${PICKFORGE_SMOKE_SOURCE_ONLY:-0}" != "1" ]; then
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   main "$@"
 fi

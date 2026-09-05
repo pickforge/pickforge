@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { canonicalProjectPath, deriveProjectId } from "../../packages/core/src/storage.js";
 
 const SMOKE = path.resolve(import.meta.dirname, "../../scripts/candidate-smoke.sh");
 const roots: string[] = [];
@@ -19,7 +20,7 @@ function capture(root: string, output: string): void {
     [
       "-c",
       `set -euo pipefail
-PICKFORGE_SMOKE_SOURCE_ONLY=1 source "$1"
+source "$1"
 REAL_HOME="$2/home"
 PROJECT="$2/work/project"
 mkdir -p "$REAL_HOME" "$2/work"
@@ -40,7 +41,7 @@ afterEach(() => {
 });
 
 describe("candidate smoke real-home snapshot", () => {
-  it("ignores unrelated populated state and records only bounded release targets", () => {
+  it("ignores unrelated populated state and records only bounded release targets", async () => {
     const root = makeRoot();
     const unrelated = path.join(root, "home/.pickforge/unrelated/runs/old");
     fs.mkdirSync(unrelated, { recursive: true });
@@ -50,10 +51,12 @@ describe("candidate smoke real-home snapshot", () => {
     capture(root, output);
 
     const snapshot = fs.readFileSync(output, "utf8");
+    const project = path.join(root, "work/project");
+    const projectId = deriveProjectId(await canonicalProjectPath(project));
     expect(snapshot).not.toContain("unrelated");
     expect(snapshot.trim().split("\n")).toHaveLength(8);
     expect(snapshot).toContain(".claude.json absent");
-    expect(snapshot).toContain(".pickforge/pickforge/projects/project-");
+    expect(snapshot).toContain(`.pickforge/pickforge/projects/${projectId} absent`);
   });
 
   it("detects a change to an exact harness config", () => {
