@@ -1,16 +1,21 @@
+import path from "node:path";
 import {
+  buildContainedCommand,
   isProcessGroupAlive,
   readProcessGroupLeaderIdentity,
   readProcessIdentity,
   runCommand,
   startDaemon,
   stopProcessGroupVerified,
+  type ContainmentMechanism,
+  type ContainmentScope,
   type EnvLike,
   type ProcessIdentity,
   type RunCommandResult,
 } from "@pickforge/lab-core";
 import { parseDisplayNumber } from "./display.js";
 import { createIsolatedDesktopEnvironment } from "./environment.js";
+import type { DesktopRuntimeLayout } from "./runtime.js";
 import { sleep } from "./util.js";
 
 const XDOTOOL_TIMEOUT_MS = 5_000;
@@ -27,11 +32,27 @@ export interface LaunchAppOptions {
   env?: EnvLike;
   logDir: string;
   cwd?: string;
+  /** Per-session `XDG_RUNTIME_DIR` and D-Bus endpoints (#86). */
+  runtime?: DesktopRuntimeLayout;
+  /**
+   * Session containment scope (#85). When given, the app is started through a
+   * supervisor that joins the scope before spawning it, so a double-forked or
+   * `setsid` descendant is still cleaned up with the session. Without it the
+   * app is only contained by its process group, which such a descendant can
+   * leave.
+   */
+  containment?: ContainmentScope;
 }
 
 export interface AppHandle {
+  /**
+   * The process group leader Pickforge owns. With containment this is the
+   * supervisor that spawned the app, not the app itself; it is the pid to
+   * signal, and the app is a member of its group.
+   */
   pid: number;
   logPath: string;
+  containment: ContainmentMechanism | "process-group";
 }
 
 interface StartedApp extends AppHandle {
@@ -71,15 +92,75 @@ async function stopAfterFailedAppWait(app: AppWaitOwnership): Promise<void> {
   }
 }
 
+/**
+ * What the operator should do when an app's process group dies without ever
+ * opening a window. Under real containment a daemonised descendant is still
+ * held and will be stopped with the session, so the old "go hunt for a stray
+ * process on your real desktop" advice would be wrong.
+ */
+function escapeAdvice(
+  containment: ContainmentMechanism | "process-group",
+): string {
+  if (containment === "process-group") {
+    return (
+      "A daemonising child may have escaped the lab and opened on your real desktop. " +
+      "Check your real desktop, find any stray process with `pgrep -af <app-name>`, " +
+      "and stop it with `kill <pid>`. "
+    );
+  }
+  return (
+    `Any daemonising child is still held by the session's ${containment} containment ` +
+    "and is stopped when the session is destroyed. "
+  );
+}
+
+function containmentLabel(
+  scope: ContainmentScope | undefined,
+): ContainmentMechanism | "process-group" {
+  return scope?.mechanism ?? "process-group";
+}
+
+/**
+ * Resolve what to actually spawn. With a containment scope the app runs under
+ * the containment supervisor, which joins the scope *before* exec so no
+ * descendant can be forked outside it.
+ */
+function resolveSpawnTarget(opts: LaunchAppOptions): {
+  command: string;
+  args: string[];
+  name: string;
+} {
+  const args = opts.args ?? [];
+  const name = path.basename(opts.command);
+  if (opts.containment === undefined) {
+    return { command: opts.command, args, name };
+  }
+  const contained = buildContainedCommand(
+    process.execPath,
+    opts.containment,
+    opts.command,
+    args,
+  );
+  return { command: contained.command, args: contained.args, name };
+}
+
 async function startApp(opts: LaunchAppOptions): Promise<StartedApp> {
   parseDisplayNumber(opts.display);
-  const daemon = await startDaemon(opts.command, opts.args ?? [], {
+  const target = resolveSpawnTarget(opts);
+  const daemon = await startDaemon(target.command, target.args, {
     logDir: opts.logDir,
+    name: target.name,
     cwd: opts.cwd,
-    env: createIsolatedDesktopEnvironment(opts.display, {
-      ...process.env,
-      ...opts.env,
-    }),
+    env: createIsolatedDesktopEnvironment(
+      opts.display,
+      { ...process.env, ...opts.env },
+      {
+        ...(opts.runtime === undefined ? {} : { runtime: opts.runtime }),
+        ...(opts.containment === undefined
+          ? {}
+          : { containment: opts.containment }),
+      },
+    ),
     cleanEnv: true,
   });
   const ownershipIdentity = readProcessGroupLeaderIdentity(daemon.pid);
@@ -90,8 +171,9 @@ async function startApp(opts: LaunchAppOptions): Promise<StartedApp> {
     while (Date.now() < graceDeadline) {
       if (!isProcessGroupAlive(daemon.pid)) {
         throw new Error(
-          `${opts.command} exited immediately after launch on ${opts.display}; ` +
-            `check the log at ${daemon.logPath}`,
+          `${opts.command} exited immediately after launch on ${opts.display}. ` +
+            escapeAdvice(containmentLabel(opts.containment)) +
+            `Log: ${daemon.logPath}`,
         );
       }
       identity ??= readProcessIdentity(daemon.pid);
@@ -103,12 +185,18 @@ async function startApp(opts: LaunchAppOptions): Promise<StartedApp> {
       );
     }
     succeeded = true;
-    return { pid: daemon.pid, logPath: daemon.logPath, identity };
+    return {
+      pid: daemon.pid,
+      logPath: daemon.logPath,
+      identity,
+      containment: containmentLabel(opts.containment),
+    };
   } finally {
     if (!succeeded) {
       await stopAfterFailedAppWait({
         pid: daemon.pid,
         logPath: daemon.logPath,
+        containment: containmentLabel(opts.containment),
         identity: identity ?? ownershipIdentity,
       });
     }
@@ -117,7 +205,11 @@ async function startApp(opts: LaunchAppOptions): Promise<StartedApp> {
 
 export async function launchApp(opts: LaunchAppOptions): Promise<AppHandle> {
   const app = await startApp(opts);
-  return { pid: app.pid, logPath: app.logPath };
+  return {
+    pid: app.pid,
+    logPath: app.logPath,
+    containment: app.containment,
+  };
 }
 
 export async function execApp(opts: ExecAppOptions): Promise<ExecAppHandle> {
@@ -139,16 +231,14 @@ export async function execApp(opts: ExecAppOptions): Promise<ExecAppHandle> {
           pid: app.pid,
           logPath: app.logPath,
           processGroupId: app.pid,
+          containment: app.containment,
           windows,
         };
       }
       if (!isProcessGroupAlive(app.pid)) {
         throw new Error(
-          `${opts.command} process group exited before opening a client window on ${opts.display}, ` +
-            "but a daemonising child may have escaped the lab and opened on your real desktop. " +
-            "Check your real desktop, find any stray process with `pgrep -af <app-name>`, " +
-            "and stop it with `kill <pid>`. " +
-            "Containment is tracked at https://github.com/pickforge/pickforge/issues/85. " +
+          `${opts.command} process group exited before opening a client window on ${opts.display}. ` +
+            escapeAdvice(app.containment) +
             `Log: ${app.logPath}`,
         );
       }

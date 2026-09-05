@@ -116,6 +116,30 @@ describe("buildVncEnv", () => {
     expect(env.XDG_SESSION_TYPE).toBe("x11");
     expect(env.PATH).toBe("/test/bin");
   });
+
+  it("replaces the caller's runtime dir and D-Bus addresses with the session's", () => {
+    const runtime = {
+      runtimeDir: "/lab/sessions/desk-1/runtime",
+      dbusSessionPath: "/lab/sessions/desk-1/runtime/bus",
+      dbusSystemPath: "/lab/sessions/desk-1/runtime/system_bus_socket",
+    };
+    const env = buildVncEnv(
+      ":92",
+      {
+        PATH: "/test/bin",
+        XDG_RUNTIME_DIR: "/run/user/1000",
+        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+        DBUS_SYSTEM_BUS_ADDRESS: "unix:path=/run/dbus/system_bus_socket",
+        NODE_OPTIONS: "--require /tmp/evil.cjs",
+      },
+      runtime,
+    );
+
+    expect(env.XDG_RUNTIME_DIR).toBe(runtime.runtimeDir);
+    expect(env.DBUS_SESSION_BUS_ADDRESS).toBe(`unix:path=${runtime.dbusSessionPath}`);
+    expect(env.DBUS_SYSTEM_BUS_ADDRESS).toBe(`unix:path=${runtime.dbusSystemPath}`);
+    expect(env).not.toHaveProperty("NODE_OPTIONS");
+  });
 });
 
 describe("buildScreenshotCommand", () => {

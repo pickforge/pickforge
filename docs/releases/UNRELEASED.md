@@ -16,6 +16,72 @@ release description, then reset it after that release is published.
 - Legacy `PICKLAB_*` environment variables keep working with a deprecation
   warning through the 0.4 release train.
 
+## Lab isolation
+
+- x11vnc now uses the isolated lab X11 environment instead of inheriting a
+  Wayland host session that prevents it from starting.
+- Desktop commands now share one isolated X11 environment that points
+  `WAYLAND_DISPLAY` at the non-existent `pickforge-no-wayland` socket, removes
+  other inherited `WAYLAND_*` variables, and sets Electron, GLFW, GTK, Qt,
+  SDL, winit, and session backend hints. The poison value prevents libwayland
+  from falling back to the user's default `wayland-0` socket when the variable
+  is unset.
+- Desktop sessions now contain daemonising apps. Each session owns a
+  containment scope — a private cgroup v2 directory where a delegated cgroup is
+  available, otherwise a per-session random `PICKFORGE_CONTAINMENT_TOKEN` — and
+  apps start through a supervisor that joins the scope before spawning them, so
+  a double-fork or `setsid` descendant cannot escape it, and that verifies its
+  cgroup membership from `/proc/self/cgroup` before spawning anything.
+  `session destroy` reports success only once the scope is confirmed empty,
+  treats a PID that exited during cleanup as gone, refuses to signal a live PID
+  whose identity no longer matches, and never kills the process running it:
+  a `session destroy` typed into a contained shell moves its own process chain
+  out of the session cgroup first, or refuses with an actionable reason.
+  `NODE_OPTIONS` and related code-injection variables are stripped from the
+  desktop environment. Neither mechanism requires `sudo`.
+- A containment scope is bound to the session that owns it. A scope cgroup must
+  be named `pickforge-<session id>`, so a tampered record can never point one
+  session's launch or cleanup at another session's valid-looking scope, and a
+  `cgroup` scope with no path is refused instead of silently starting an app
+  uncontained. Immediately before the kill, every process in the scope must be
+  shown to carry that session's token (or to descend from one that does), and
+  the caller's own process chain is moved out by pinned identity, so an
+  ancestor whose PID was recycled is refused rather than migrated. Cleanup also
+  never forgets a process it has already identified: one whose environment
+  stays unreadable is reported as an unconfirmed survivor instead of vanishing
+  from an empty scan.
+- A failed x11vnc startup now stops the whole process group it spawned and
+  reports what it owned, so a failed `session create` keeps the session runtime
+  directory and the VNC identity for a reaper retry unless that cleanup is
+  confirmed. `stopXvfb` refuses a live PID when no recorded start identity is
+  passed, rather than verifying a snapshot that proves nothing about the Xvfb
+  the caller meant.
+- Desktop sessions now get their own `XDG_RUNTIME_DIR` (mode `0700`, inside the
+  session directory) and their own D-Bus addresses, which point at sockets
+  Pickforge never creates, so toolkits and portals fail closed instead of
+  routing work back through the real user session. x11vnc gets the same
+  runtime whenever it is started, including by `desktop watch` and by a human
+  takeover. The directory is removed on destroy only once contained apps,
+  x11vnc and Xvfb are confirmed gone, and removal is refused for any path
+  outside the session directory, including through a symlink.
+- `desktop exec`, `desktop launch` and their MCP tools now report the
+  containment mechanism they achieved (`cgroup` or `marker`), and
+  `desktop env` prints the runtime, D-Bus and containment recipe so an app
+  started by hand from that shell is torn down with the session.
+- Xvfb teardown now uses the same group-signal-and-confirm discipline as the
+  browser supervisor, so an exited Xvfb is never reported gone while a member of
+  its process group survives.
+- `pickforge-lab desktop exec`, also available as MCP `desktop_exec`, starts a
+  command in its own process group and waits a bounded time for a client
+  window. If none appears, it stops the group before reporting a possible
+  real-desktop escape and suggests `--window-timeout` for slow first builds.
+  `pickforge-lab desktop env` prints the same recipe for parent shells, with
+  JSON output available.
+- Desktop screenshots now include the client-window count and warn when it is
+  zero instead of leaving a black frame unexplained. Without `xdotool`, capture
+  still succeeds and warns that the count is unavailable without raising the
+  zero-window escape warning.
+
 ## Run storage hardening
 
 - Run directories are now created through the same lstat/realpath trust

@@ -7,7 +7,6 @@ import {
   getSession,
   isDisplaySocketAlive,
   isPidAlive,
-  isProcessGroupAlive,
   isProfileConfined,
   processIdentityMatches,
   reapDeadRunningSessions,
@@ -15,6 +14,7 @@ import {
   readPickforgeEnv,
   sessionDataDir,
   startDaemon,
+  stopOwnedDaemonGroup,
   stopProcessGroupVerified,
   updateSession,
   type BrowserSessionInfo,
@@ -186,104 +186,17 @@ async function waitForOwnedIdentity(
   }
 }
 
-const OWNED_GROUP_CONFIRM_TIMEOUT_MS = 1_000;
-const OWNED_GROUP_POLL_INTERVAL_MS = 20;
-
 /**
- * Kill the daemon's whole process group, not just the daemon process itself.
- * The supervisor spawns Chrome as a plain (non-detached) child, so Chrome
- * shares the supervisor's process group (its pgid equals the supervisor's
- * pid, set at spawn via `detached: true`). Signaling only the supervisor can
- * orphan a live Chrome in the same group; signaling the group by its pgid
- * reaches every current member regardless of whether the supervisor itself
- * has already exited (e.g. crashed) by the time we act.
- *
- * This function itself does not decide whether `daemon.pid` is still safe to
- * treat as this daemon's group id — see `stopOwnedBrowserDaemon`'s doc
- * comment for the per-branch reasoning its two call sites rely on.
- */
-function killOwnedBrowserProcessGroup(daemon: OwnedDaemonHandle): void {
-  try {
-    process.kill(-daemon.pid, "SIGKILL");
-    return;
-  } catch {
-    // Group signal failed (already gone, or unsupported); fall through to a
-    // direct kill so the supervisor itself is at least reaped.
-  }
-  try {
-    daemon.child.kill("SIGKILL");
-  } catch {
-    // already gone
-  }
-}
-
-async function confirmOwnedGroupGone(pgid: number): Promise<boolean> {
-  const deadline = Date.now() + OWNED_GROUP_CONFIRM_TIMEOUT_MS;
-  while (isProcessGroupAlive(pgid)) {
-    if (Date.now() >= deadline) return false;
-    await sleep(OWNED_GROUP_POLL_INTERVAL_MS);
-  }
-  return true;
-}
-
-/**
- * Stop an owned browser daemon before its `/proc`-backed identity has been
- * captured (or ever will be, if the daemon crashed outright before capture
- * could finish). Returns true only once the whole process group is confirmed
- * to have no live members, so a crashed supervisor can never leave an
- * orphaned Chrome reported as cleaned up.
- *
- * `daemon.pid` doubles as the process-group id because `startDaemon` spawns
- * it detached (making it its own session/group leader). Signaling it without
- * a verified `ProcessIdentity` is only safe in one of the two branches below,
- * and for different reasons:
- *
- * - Not yet exited (`!ownedDaemonExited(daemon)`): safe by construction, not
- *   by verification. There is no `await` between that check and the group
- *   signal, so no event-loop turn runs in between — the daemon cannot exit,
- *   get reaped by libuv, and have its pid recycled to an unrelated process
- *   within that synchronous gap. Keep this branch synchronous; an `await`
- *   inserted between the check and the signal would reopen the gap.
- * - Already exited: NOT provably safe against pid reuse. Node/libuv reaps a
- *   child on SIGCHLD independent of any handle we hold, and `exitCode`/
- *   `signalCode` only become non-null after that reap, so by the time this
- *   branch runs the pid is OS-reusable in principle. This is an accepted,
- *   bounded residual risk rather than a reason to skip cleanup: both call
- *   sites live inside `createBrowserSession`'s synchronous startup flow,
- *   within the identity capture's own <=1s deadline; no reaper or other
- *   late path ever reaches this function; and no verified identity is
- *   obtainable here by the issue's own premise (identity capture is exactly
- *   what failed). The `isProcessGroupAlive` pre-check below avoids blindly
- *   signaling a group that has already been fully vacated, but it does not
- *   close the reuse gap: an unrelated process that happened to land on this
- *   pid and also happened to already be its own group leader would still be
- *   signaled.
+ * Stop an owned Chrome supervisor before its `/proc`-backed identity has been
+ * captured. Shared with the Xvfb supervisor (pickforge/pickforge#57) so both
+ * use one group-kill-and-confirm implementation; see `stopOwnedDaemonGroup`
+ * for the pid-reuse reasoning behind each branch.
  */
 async function stopOwnedBrowserDaemon(
   daemon: OwnedDaemonHandle,
 ): Promise<boolean> {
-  try {
-    if (ownedDaemonExited(daemon)) {
-      if (isProcessGroupAlive(daemon.pid)) {
-        killOwnedBrowserProcessGroup(daemon);
-      }
-    } else {
-      const closed = new Promise<void>((resolve) => {
-        daemon.child.once("close", () => resolve());
-      });
-      // No `await` between the exit check above and this signal: see the
-      // doc comment for why that is what keeps this branch safe.
-      killOwnedBrowserProcessGroup(daemon);
-      await closed;
-    }
-    return await confirmOwnedGroupGone(daemon.pid);
-  } catch {
-    return false;
-  } finally {
-    daemon.release();
-  }
+  return stopOwnedDaemonGroup(daemon);
 }
-
 
 interface BrowserCreationContext {
   opts: CreateBrowserSessionOptions;

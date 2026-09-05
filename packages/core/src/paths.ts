@@ -150,22 +150,20 @@ export async function writeFileAtomic(
 }
 
 /**
- * Confinement guard for an ephemeral browser profile. In addition to lexical
+ * Confinement guard for a directory a session owns and may delete: an ephemeral
+ * browser profile, or a per-session runtime dir. In addition to lexical
  * containment, every existing path from the sessions directory through the
- * profile is lstat'd and realpath-checked so a planted symlink can never turn
+ * target is lstat'd and realpath-checked so a planted symlink can never turn
  * cleanup into an out-of-tree removal. Missing paths are safe: force-removal is
  * already a no-op once the first missing ancestor is reached.
  */
-export async function isProfileConfined(
+export async function isPathConfined(
   sessionDir: string,
-  profileDir: string,
+  targetDir: string,
 ): Promise<boolean> {
   const base = path.resolve(sessionDir);
-  const target = path.resolve(profileDir);
-  if (
-    target !== path.join(base, "profile") &&
-    !target.startsWith(base + path.sep)
-  ) {
+  const target = path.resolve(targetDir);
+  if (!target.startsWith(base + path.sep)) {
     return false;
   }
 
@@ -205,3 +203,6 @@ export async function isProfileConfined(
     return false;
   }
 }
+
+/** Back-compat alias for the browser profile guard. */
+export const isProfileConfined = isPathConfined;
