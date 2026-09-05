@@ -264,6 +264,72 @@ config, agent state, sessions, and runs under `~/.pickforge/picklab/` or
 deleted. `pickforge-lab doctor` prints the active state directory and flags a
 detected legacy home.
 
+### Project state ownership
+
+Two programs write per-project state: the Rust integration CLI (`pickforge`)
+and the TypeScript lab (`pickforge-lab`). They default to separate roots —
+`~/.pickforge/pickforge` and `~/.pickforge/lab` — but a single `PICKFORGE_HOME`
+points both at one root, which is the normal setup for CI, automation, and
+isolated smokes. Inside that shared root they share exactly one directory per
+project:
+
+```text
+<PICKFORGE_HOME>/projects/<projectId>/
+```
+
+Ownership there is by entry name, exhaustive, and non-overlapping:
+
+| entry                             | owner                            |
+| --------------------------------- | -------------------------------- |
+| `layout.json`                     | shared — the layout marker       |
+| `project.json`                    | `pickforge` — integration receipt |
+| `project.json.pickforge-backup-*` | `pickforge` — receipt backups     |
+| `.pickforge-tmp-*`                | transient, either tool           |
+| `runs/`                           | `pickforge-lab` — runs           |
+| anything else                     | nobody                           |
+
+Each tool writes only what it owns. Neither writes, moves, or deletes the
+other's entries, or anything unowned. Above this directory the split is by
+name too: `sessions/`, `agents/`, and `config.json` at the root are the lab's,
+and `projects/` is the only shared parent.
+
+**Command order does not matter.** `pickforge init` and a lab run can happen in
+either order for the same project; whichever runs first claims the directory
+and the other joins it. (Before 0.4.0-alpha.2, `pickforge init` refused a
+project whose state directory already held lab runs — see #104.)
+
+**Layout version.** `layout.json` records the layout version, currently `1`:
+
+```json
+{
+  "layout": "pickforge-project-state",
+  "layoutVersion": 1
+}
+```
+
+Version 1 *describes the layout alpha.1 and alpha.2 already wrote* rather than
+replacing it, so no existing state needs migrating. A directory from an earlier
+release is adopted in place the next time either tool writes to it: the marker
+appears beside what is already there and nothing else changes.
+
+The marker is created at most once, published with `link(2)` so it is never
+observed half-written. When both tools reach a fresh project directory
+simultaneously, exactly one claims it and the other reads the winner's marker —
+first use cannot leave partial ownership.
+
+**Compatibility policy.** A tool refuses, with the exact manual action to take,
+rather than guessing:
+
+- A `layoutVersion` this build does not understand: upgrade Pickforge, or use a
+  different `PICKFORGE_HOME`. Nothing is written.
+- A `layout.json` that is not a Pickforge marker: move it aside, or use a
+  different `PICKFORGE_HOME`.
+- An unowned entry in the project state directory: `pickforge init` names the
+  path and the `mv` to run. It never moves or deletes it for you.
+
+A future layout version may add entries, but only under a name the table above
+does not already assign, and only with both tools able to read version 1.
+
 ### Evidence recording
 
 Computer-use tools record one session-scoped evidence run by default. MCP

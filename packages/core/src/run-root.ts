@@ -7,6 +7,7 @@ import {
   withDirHandle,
 } from "./dir-handle.js";
 import { pickforgeHome, type EnvLike } from "./paths.js";
+import { claimProjectStateLayout } from "./state-layout.js";
 import { resolveRunStorage, type ResolvedRunStorage } from "./storage.js";
 
 export { RunStorageAccessError, withDirHandle } from "./dir-handle.js";
@@ -84,6 +85,14 @@ interface RunWriteSpec {
   createTrusted: boolean;
   /** Components below the ancestor that must be real, unlinked directories. */
   components: string[];
+  /**
+   * Index in {@link components} of the shared project state directory, when
+   * this layout has one. Reaching it on a creating walk claims the layout
+   * marker (#104), so the lab and the Rust integration CLI agree on ownership
+   * of that directory whichever of them gets there first. Only `home` mode has
+   * one: `project-local` and `custom` roots are not shared with the Rust CLI.
+   */
+  claimLayoutAt?: number;
 }
 
 function writeSpecFor(
@@ -105,6 +114,7 @@ function writeSpecFor(
       trustedDir: pickforgeHome(env),
       createTrusted: true,
       components: ["projects", resolved.projectId, "runs"],
+      claimLayoutAt: 1,
     };
   }
   return {
@@ -181,7 +191,7 @@ async function openChain(
   let logical = spec.trustedDir;
   let handedOver = false;
   try {
-    for (const component of spec.components) {
+    for (const [index, component] of spec.components.entries()) {
       logical = path.join(logical, component);
       let next: DirHandle;
       try {
@@ -191,6 +201,18 @@ async function openChain(
       } catch (error) {
         if (!create && isAbsent(error)) return undefined;
         throw rewriteChildError(error, logical);
+      }
+      // Claim the shared project state directory before descending into the
+      // lab's own subtree, so ownership is settled before any run exists
+      // under it and a concurrent `pickforge init` sees a claimed directory
+      // rather than a half-populated one.
+      if (create && index === spec.claimLayoutAt) {
+        try {
+          await claimProjectStateLayout(next);
+        } catch (error) {
+          await next.close().catch(() => {});
+          throw error;
+        }
       }
       await current.close();
       current = next;

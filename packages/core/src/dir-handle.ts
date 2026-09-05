@@ -292,6 +292,18 @@ export class DirHandle {
   }
 
   /**
+   * Hard-link `from` to `to` inside this directory, through the pinned
+   * descriptor. Unlike a rename this *fails* with `EEXIST` when `to` already
+   * exists, which is what makes it a create-at-most-once publish of content
+   * that is already complete on disk.
+   */
+  async linkChild(from: string, to: string): Promise<void> {
+    assertSafeEntryName(from);
+    assertSafeEntryName(to);
+    await fs.promises.link(this.resolve(from), this.resolve(to));
+  }
+
+  /**
    * Atomically publish `content` as `name` inside this directory: an exclusive
    * (`wx`) temp file, then a rename over the destination. Both steps resolve
    * through the pinned descriptor, so the bytes land in the verified directory

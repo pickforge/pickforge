@@ -77,6 +77,9 @@ pub struct InitPlanReport {
 pub struct InitPlan {
     pub report: InitPlanReport,
     files: Vec<FilePlan>,
+    /// The project state directory whose shared layout `apply` claims. `None`
+    /// when planning found a conflict there and wrote no receipt action.
+    layout_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Error)]
@@ -159,11 +162,33 @@ fn validate_existing_receipt(
     Ok(())
 }
 
+/// The exact manual action offered for anything Pickforge will not adopt. The
+/// CLI never moves or deletes state it does not own, so the remedy is always
+/// the user's to take.
+fn manual_action(path: &Path, reason: &str) -> String {
+    format!(
+        "{} {reason}. Pickforge will not move or delete it. Move it aside \
+         (`mv {} {}.bak`) and re-run `pickforge init`, or run with a different \
+         PICKFORGE_HOME.",
+        path.display(),
+        path.display(),
+        path.display()
+    )
+}
+
+/// Inspect the entries the integration CLI owns in a state directory that has
+/// no receipt yet, deciding whether `init` may still claim it.
+///
+/// Entries owned by the TypeScript lab ([`state::Owner::Lab`]) are skipped
+/// untouched: a lab run that happened before `pickforge init` is normal, not a
+/// conflict (#104). The shared layout marker is likewise not ours to judge
+/// beyond its version, which the caller already validated. Only a genuinely
+/// foreign entry, or an unreadable/oversized owned one, blocks init.
 fn recoverable_state_artifacts(
     state_dir: &Path,
     expected_path: &str,
     expected_id: &str,
-) -> Result<bool, String> {
+) -> Result<(), String> {
     let entries = std::fs::read_dir(state_dir).map_err(|error| {
         format!(
             "could not inspect state directory {}: {error}",
@@ -177,6 +202,28 @@ fn recoverable_state_artifacts(
                 state_dir.display()
             )
         })?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return Err(manual_action(
+                &entry.path(),
+                "has a name that is not valid UTF-8 and cannot be attributed to an owner",
+            ));
+        };
+        let owner = state::classify_entry(name);
+        match owner {
+            // The lab owns its own tree, including whether a symlinked `runs`
+            // is acceptable; the integration CLI never reads or writes through
+            // it, so it has nothing to validate here.
+            state::Owner::Lab | state::Owner::Shared => continue,
+            state::Owner::Foreign => {
+                return Err(manual_action(
+                    &entry.path(),
+                    "is not owned by Pickforge or the Pickforge lab",
+                ))
+            }
+            state::Owner::Transient | state::Owner::Integration => {}
+        }
+
         let file_type = entry.file_type().map_err(|error| {
             format!(
                 "could not inspect state artifact {}: {error}",
@@ -184,7 +231,10 @@ fn recoverable_state_artifacts(
             )
         })?;
         if file_type.is_symlink() {
-            return Ok(false);
+            return Err(manual_action(
+                &entry.path(),
+                "is a symlink where Pickforge expects a regular file",
+            ));
         }
         let metadata = entry.metadata().map_err(|error| {
             format!(
@@ -192,34 +242,66 @@ fn recoverable_state_artifacts(
                 entry.path().display()
             )
         })?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            return Ok(false);
-        };
-        if name.starts_with(".pickforge-tmp-")
+        // A transient left by a crashed write is inert: bound its size and
+        // shape as a sanity check, then leave it alone.
+        if owner == state::Owner::Transient
             && metadata.is_file()
             && metadata.len() <= MAX_STATE_ARTIFACT_BYTES
         {
             continue;
         }
         if !metadata.is_file() || metadata.len() > MAX_STATE_ARTIFACT_BYTES {
-            return Ok(false);
+            return Err(manual_action(
+                &entry.path(),
+                "is not a regular file of the expected size for Pickforge state",
+            ));
         }
-        if name.starts_with("project.json.pickforge-backup-") {
-            let (_, bytes) = transaction::inspect_file(entry.path(), true).map_err(|error| {
-                format!(
-                    "could not safely read state backup {}: {error}",
-                    entry.path().display()
-                )
-            })?;
-            let bytes = bytes
-                .ok_or_else(|| format!("state backup {} disappeared", entry.path().display()))?;
-            validate_existing_receipt(&bytes, expected_path, expected_id)?;
-            continue;
-        }
-        return Ok(false);
+        let (_, bytes) = transaction::inspect_file(entry.path(), true).map_err(|error| {
+            format!(
+                "could not safely read state backup {}: {error}",
+                entry.path().display()
+            )
+        })?;
+        let bytes =
+            bytes.ok_or_else(|| format!("state backup {} disappeared", entry.path().display()))?;
+        validate_existing_receipt(&bytes, expected_path, expected_id)?;
     }
-    Ok(true)
+    Ok(())
+}
+
+/// Plan the integration receipt for `state_dir`, or describe why the CLI may
+/// not claim that directory.
+///
+/// This is the whole ownership decision for the shared project state
+/// directory: the layout version must be one this build understands, an
+/// existing receipt must be this project's, and a directory without a receipt
+/// must hold nothing but entries Pickforge or the lab owns.
+fn plan_receipt(
+    state_dir: &Path,
+    receipt_bytes: Vec<u8>,
+    project_path: &str,
+    project_id: &str,
+) -> Result<FilePlan, String> {
+    let (file, existing) =
+        transaction::plan_file(state_dir.join("project.json"), receipt_bytes, true)
+            .map_err(|error| error.to_string())?;
+    let physical_state_dir = file
+        .path()
+        .parent()
+        .expect("receipt target always has a parent");
+
+    // A layout stamped by a newer build, or a stray `layout.json`, is reported
+    // before anything else: the ownership rules below are only meaningful for
+    // a layout this build understands.
+    if let Err(error) = state::read_layout(physical_state_dir) {
+        return Err(error.to_string());
+    }
+    if let Some(bytes) = existing {
+        validate_existing_receipt(&bytes, project_path, project_id)?;
+    } else if physical_state_dir.is_dir() {
+        recoverable_state_artifacts(physical_state_dir, project_path, project_id)?;
+    }
+    Ok(file)
 }
 
 fn normalized_harnesses(selected: &[Harness]) -> Vec<Harness> {
@@ -428,43 +510,26 @@ pub fn plan_init(request: &InitRequest, env: &Environment) -> Result<InitPlan, I
     };
     let mut receipt_bytes = serde_json::to_vec_pretty(&receipt).expect("receipt is serializable");
     receipt_bytes.push(b'\n');
-    let receipt_path = state_dir.join("project.json");
     let mut reported_state_dir = state_dir.clone();
-    match transaction::plan_file(receipt_path.clone(), receipt_bytes, true) {
-        Ok((file, existing)) => {
+    let mut layout_dir = None;
+    match plan_receipt(&state_dir, receipt_bytes, &project_path, &project_id) {
+        Ok(file) => {
             let physical_state_dir = file
                 .path()
                 .parent()
                 .expect("receipt target always has a parent");
-            let receipt_conflict = if let Some(bytes) = existing {
-                validate_existing_receipt(&bytes, &project_path, &project_id).err()
-            } else if physical_state_dir.is_dir() {
-                match recoverable_state_artifacts(physical_state_dir, &project_path, &project_id) {
-                    Ok(false) => Some(format!(
-                        "state directory {} is non-empty but has no Pickforge project receipt",
-                        physical_state_dir.display()
-                    )),
-                    Ok(true) => None,
-                    Err(error) => Some(error),
-                }
-            } else {
-                None
-            };
-            if let Some(conflict) = receipt_conflict {
-                conflicts.push(conflict);
-            } else {
-                reported_state_dir = physical_state_dir.to_path_buf();
-                actions.push(action(
-                    file.path(),
-                    &file,
-                    "Write external project receipt".into(),
-                    vec![],
-                    None,
-                ));
-                files.push(file);
-            }
+            reported_state_dir = physical_state_dir.to_path_buf();
+            layout_dir = Some(physical_state_dir.to_path_buf());
+            actions.push(action(
+                file.path(),
+                &file,
+                "Write external project receipt".into(),
+                vec![],
+                None,
+            ));
+            files.push(file);
         }
-        Err(error) => conflicts.push(error.to_string()),
+        Err(conflict) => conflicts.push(conflict),
     }
     if !conflicts.is_empty() {
         let mut unique = BTreeSet::new();
@@ -486,21 +551,58 @@ pub fn plan_init(request: &InitRequest, env: &Environment) -> Result<InitPlan, I
             actions,
         },
         files,
+        layout_dir,
     })
 }
 
+/// Stamp the shared layout marker before any file is written.
+///
+/// Claiming first means a state directory is either unclaimed or carries a
+/// marker this build understands for the whole of `apply`; it can never end up
+/// holding a receipt under a layout nobody agreed on. The claim is atomic and
+/// additive, so it is also how an alpha.1/alpha.2 directory is adopted: the
+/// marker appears, and nothing already there is touched.
+fn claim_layout_for(plan: &InitPlan) -> Result<bool, String> {
+    match &plan.layout_dir {
+        Some(dir) => state::claim_layout(dir).map_err(|error| error.to_string()),
+        None => Ok(false),
+    }
+}
+
 pub fn apply_init(plan: &InitPlan, backup_stamp: &str) -> ApplyReport {
+    let claimed = match claim_layout_for(plan) {
+        Ok(claimed) => claimed,
+        Err(error) => {
+            return ApplyReport {
+                schema_version: INIT_SCHEMA_VERSION,
+                outcome: ApplyState::FailedRolledBack,
+                changed: false,
+                backup_paths: vec![],
+                rollback_residuals: vec![],
+                error: Some(error),
+            }
+        }
+    };
     let changed = plan.files.iter().any(FilePlan::is_changed);
     if !changed {
         return ApplyReport {
             schema_version: INIT_SCHEMA_VERSION,
-            outcome: ApplyState::NoOp,
-            changed: false,
+            outcome: if claimed {
+                ApplyState::Success
+            } else {
+                ApplyState::NoOp
+            },
+            changed: claimed,
             backup_paths: vec![],
             rollback_residuals: vec![],
             error: None,
         };
     }
+    apply_planned_files(plan, backup_stamp)
+}
+
+/// Apply the planned files. Only called once at least one file changed.
+fn apply_planned_files(plan: &InitPlan, backup_stamp: &str) -> ApplyReport {
     match transaction::apply_files(&plan.files, backup_stamp) {
         Ok(backups) => ApplyReport {
             schema_version: INIT_SCHEMA_VERSION,

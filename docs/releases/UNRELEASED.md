@@ -16,6 +16,38 @@ candidate artifacts that were actually executed.
 - Legacy `PICKLAB_*` environment variables keep working with a deprecation
   warning through the 0.4 release train.
 
+## Project state ownership
+
+- `pickforge init` no longer refuses a project the lab has already used. When
+  one `PICKFORGE_HOME` is shared by both tools, a lab run created
+  `projects/<id>/runs/` and the Rust CLI then read the whole directory as
+  unowned state, so `init` failed with "state directory ... is non-empty but
+  has no Pickforge project receipt". The documented order (`init` first) hid
+  it; the real Android pass for #93 hit the other one (#104).
+- Ownership of `<PICKFORGE_HOME>/projects/<projectId>/` is now written down and
+  enforced by entry name, exhaustively and without overlap: `project.json` and
+  its backups belong to the Rust CLI, `runs/` to the lab, `.pickforge-tmp-*` is
+  a transient of either, `layout.json` is shared, and anything else is owned by
+  nobody. Each tool writes only what it owns and refuses to move or delete the
+  rest. See "Project state ownership" in `README.md`.
+- The layout is versioned by a `layout.json` marker. Version 1 *describes the
+  layout alpha.1 and alpha.2 already wrote*, so no state is migrated: an
+  existing project directory is adopted in place, the marker appearing beside
+  what is already there. Nothing is rewritten, moved, or deleted.
+- First use is atomic. The marker is staged in a temp entry and published with
+  `link(2)`, so it is never observed half-written and concurrent first use by
+  both tools yields exactly one claim — first use cannot leave partial
+  ownership. A crash before publication leaves at most an inert
+  `.pickforge-tmp-` entry.
+- Both tools fail closed on a layout they do not understand, naming the exact
+  manual action: a newer `layoutVersion` asks for an upgrade, a stray
+  `layout.json` asks to move it aside, and an unowned entry is reported with
+  the `mv` to run. No state is written in any of those cases.
+- `scripts/state-ownership-smoke.sh` proves both orders — `init` then a lab
+  run, and a lab run then `init` — against one canonical project in isolated
+  homes, using the real Rust binary and the real lab, and checks that both
+  converge on the same claimed layout with the lab's runs untouched.
+
 ## Lab isolation
 
 - x11vnc now uses the isolated lab X11 environment instead of inheriting a
