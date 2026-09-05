@@ -128,6 +128,22 @@ export {
 } from "./adb.js";
 
 export {
+  DEFAULT_LMK_QUIET_S,
+  DEFAULT_READY_POLL_MS,
+  GUEST_ABORTED,
+  GUEST_NOT_READY,
+  GuestReadinessError,
+  isGuestReadinessError,
+  maybeWaitForGuestReady,
+  parseGuestNowSeconds,
+  parseLmkQuietSeconds,
+  waitForGuestReady,
+  type GuestReadinessKind,
+  type GuestReadinessProbe,
+  type WaitForGuestReadyOptions,
+} from "./guest-readiness.js";
+
+export {
   ANDROID_START_FAILURE_META_KEY,
   androidSessionLogDir,
   createAndroidSession,

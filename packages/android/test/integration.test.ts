@@ -16,13 +16,17 @@ import {
   getAndroidSessionStatus,
   getUiTree,
   installApk,
+  isGuestReadinessError,
   launchApp,
   listDevices,
   listSystemImages,
   logcat,
+  parseGuestNowSeconds,
+  parseLmkQuietSeconds,
   runAdb,
   screenshot,
   tap,
+  waitForGuestReady,
   type AndroidSessionHandle,
 } from "../src/index.js";
 
@@ -187,6 +191,11 @@ interface GuestPressure {
   swapFreeKb: number;
 }
 
+function pressureNumber(pattern: RegExp, text: string, fallback: number): number {
+  const value = Number(pattern.exec(text)?.[1]);
+  return Number.isFinite(value) ? value : fallback;
+}
+
 /** Guest pressure signals; worst-case values when unreadable. */
 async function guestPressure(serial: string): Promise<GuestPressure> {
   const [meminfo, kills] = await Promise.all([
@@ -198,24 +207,20 @@ async function guestPressure(serial: string): Promise<GuestPressure> {
         "date +%s; cat /proc/loadavg; cat /proc/pressure/io; grep -E 'MemFree|SwapFree' /proc/meminfo",
       ],
     }),
-    runAdb({ serial, ...opOpts, args: ["logcat", "-d", "-v", "epoch"] }),
+    runAdb({
+      serial,
+      ...opOpts,
+      args: ["logcat", "-d", "-v", "epoch", "-s", "lowmemorykiller:I"],
+    }),
   ]);
-  const num = (pattern: RegExp, text: string, fallback: number): number => {
-    const value = Number(pattern.exec(text)?.[1]);
-    return Number.isFinite(value) ? value : fallback;
-  };
-  const guestNow = num(/^(\d+)\s*$/m, meminfo.stdout, 0);
-  const lastKill = kills.stdout
-    .split("\n")
-    .filter((line) => line.includes("lowmemorykiller: Kill"))
-    .map((line) => num(/^\s*(\d+)/, line, 0))
-    .at(-1);
+  const guestNow = parseGuestNowSeconds(meminfo.stdout) ?? 0;
+  const quietS = parseLmkQuietSeconds(kills.stdout, guestNow);
   return {
-    lmkQuietS: lastKill === undefined ? Infinity : guestNow - lastKill,
-    load1: num(/^([\d.]+) [\d.]+ [\d.]+ /m, meminfo.stdout, Infinity),
-    ioFullAvg10: num(/^full avg10=([\d.]+)/m, meminfo.stdout, Infinity),
-    memFreeKb: num(/MemFree:\s*(\d+)/, meminfo.stdout, 0),
-    swapFreeKb: num(/SwapFree:\s*(\d+)/, meminfo.stdout, 0),
+    lmkQuietS: quietS === null ? Infinity : quietS,
+    load1: pressureNumber(/^([\d.]+) [\d.]+ [\d.]+ /m, meminfo.stdout, Infinity),
+    ioFullAvg10: pressureNumber(/^full avg10=([\d.]+)/m, meminfo.stdout, Infinity),
+    memFreeKb: pressureNumber(/MemFree:\s*(\d+)/, meminfo.stdout, 0),
+    swapFreeKb: pressureNumber(/SwapFree:\s*(\d+)/, meminfo.stdout, 0),
   };
 }
 
@@ -232,22 +237,30 @@ async function guestPressure(serial: string): Promise<GuestPressure> {
  * for the record. The wait is bounded.
  */
 async function waitForGuestSettled(serial: string): Promise<void> {
-  const deadline = Date.now() + GUEST_SETTLE_TIMEOUT_MS;
-  let pressure: GuestPressure | undefined;
-  while (Date.now() < deadline) {
-    pressure = await guestPressure(serial);
-    console.log(
-      `guest pressure: lmkd quiet ${pressure.lmkQuietS}s, load1 ${pressure.load1}, io full avg10 ` +
-        `${pressure.ioFullAvg10}, MemFree ${pressure.memFreeKb} kB, SwapFree ${pressure.swapFreeKb} kB`,
-    );
-    if (pressure.lmkQuietS >= GUEST_SETTLE_LMK_QUIET_S) {
-      return;
-    }
-    await sleep(APP_SETTLE_POLL_MS);
-  }
-  console.warn(
-    `guest still busy after ${GUEST_SETTLE_TIMEOUT_MS}ms (${JSON.stringify(pressure)}); launching anyway`,
+  const pressure = await guestPressure(serial);
+  console.log(
+    `guest pressure: lmkd quiet ${pressure.lmkQuietS}s, load1 ${pressure.load1}, io full avg10 ` +
+      `${pressure.ioFullAvg10}, MemFree ${pressure.memFreeKb} kB, SwapFree ${pressure.swapFreeKb} kB`,
   );
+  try {
+    const probe = await waitForGuestReady({
+      serial,
+      ...opOpts,
+      boundSeconds: GUEST_SETTLE_TIMEOUT_MS / 1000,
+      quietSeconds: GUEST_SETTLE_LMK_QUIET_S,
+      pollIntervalMs: APP_SETTLE_POLL_MS,
+      onProgress: (message) => console.log(message),
+    });
+    console.log(`guest ready: ${JSON.stringify(probe)}`);
+  } catch (error) {
+    if (!isGuestReadinessError(error) || error.kind === "aborted") {
+      throw error;
+    }
+    console.warn(
+      `guest still busy after ${GUEST_SETTLE_TIMEOUT_MS}ms ` +
+        `(${JSON.stringify({ pressure, probe: error.probe })}); launching anyway`,
+    );
+  }
 }
 
 async function launchOnce(

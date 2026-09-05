@@ -301,6 +301,7 @@ export function parseAdbDevices(output: string): AdbDevice[] {
 
 interface ExecAdbRunOptions {
   timeoutMs?: number;
+  killGraceMs?: number;
   binary?: boolean;
   maxOutputBytes?: number;
 }
@@ -324,6 +325,7 @@ async function execAdb(
   const baseOpts = {
     env: opts.env,
     timeoutMs: runOpts.timeoutMs ?? ADB_TIMEOUT_MS,
+    killGraceMs: runOpts.killGraceMs,
     maxOutputBytes: runOpts.maxOutputBytes,
   };
   if (runOpts.binary === true) {
@@ -608,6 +610,7 @@ export async function runAdb(
     sdk?: string | null;
     env?: EnvLike;
     timeoutMs?: number;
+    killGraceMs?: number;
   },
 ): Promise<RunCommandResult> {
   const args = [...opts.args];
@@ -615,5 +618,8 @@ export async function runAdb(
     assertSerial(opts.serial);
     args.unshift("-s", opts.serial);
   }
-  return execAdb(opts, args, { timeoutMs: opts.timeoutMs });
+  return execAdb(opts, args, {
+    timeoutMs: opts.timeoutMs,
+    killGraceMs: opts.killGraceMs,
+  });
 }
