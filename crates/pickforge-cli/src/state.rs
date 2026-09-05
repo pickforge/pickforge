@@ -292,33 +292,30 @@ fn capability_path(_handle: &File) -> Option<PathBuf> {
     None
 }
 
+/// What an *open* file is: which volume it lives on, which file it is there,
+/// and how many names it has. Every check reads this from the descriptor, so
+/// it describes the file that was actually opened rather than whatever a
+/// pathname resolves to a moment later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileFacts {
+    volume: u64,
+    index: u64,
+    links: u64,
+}
+
 #[cfg(unix)]
-fn identity(metadata: &std::fs::Metadata) -> (u64, u64) {
+fn file_facts(file: &File) -> io::Result<FileFacts> {
     use std::os::unix::fs::MetadataExt;
-    (metadata.dev(), metadata.ino())
+    let metadata = file.metadata()?;
+    Ok(FileFacts {
+        volume: metadata.dev(),
+        index: metadata.ino(),
+        links: metadata.nlink(),
+    })
 }
 
 #[cfg(windows)]
-fn identity(metadata: &std::fs::Metadata) -> (u64, u64) {
-    use std::os::windows::fs::MetadataExt;
-    (metadata.creation_time(), metadata.file_size())
-}
-
-#[cfg(not(any(unix, windows)))]
-fn identity(metadata: &std::fs::Metadata) -> (u64, u64) {
-    (0, metadata.len())
-}
-
-/// How many names the open file has, read from the descriptor rather than
-/// from a pathname, so it describes the file that was actually opened.
-#[cfg(unix)]
-fn link_count(file: &File) -> io::Result<u64> {
-    use std::os::unix::fs::MetadataExt;
-    Ok(file.metadata()?.nlink())
-}
-
-#[cfg(windows)]
-fn link_count(file: &File) -> io::Result<u64> {
+fn file_facts(file: &File) -> io::Result<FileFacts> {
     use std::mem::MaybeUninit;
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
@@ -335,14 +332,23 @@ fn link_count(file: &File) -> io::Result<u64> {
     }
     // SAFETY: GetFileInformationByHandle succeeded and initialized the structure.
     let information = unsafe { information.assume_init() };
-    Ok(u64::from(information.nNumberOfLinks))
+    Ok(FileFacts {
+        volume: u64::from(information.dwVolumeSerialNumber),
+        index: (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow),
+        links: u64::from(information.nNumberOfLinks),
+    })
 }
 
-/// Nowhere else exposes a link count, so a marker's shape is judged by the
-/// no-follow open and the regular-file check alone.
+/// Nowhere else exposes file identity or a link count, so a marker's shape is
+/// judged by the no-follow open and the regular-file check alone, and the
+/// staging entry is only removed when it is still a regular file.
 #[cfg(not(any(unix, windows)))]
-fn link_count(_file: &File) -> io::Result<u64> {
-    Ok(1)
+fn file_facts(_file: &File) -> io::Result<FileFacts> {
+    Ok(FileFacts {
+        volume: 0,
+        index: 0,
+        links: 1,
+    })
 }
 
 // --- reading the marker --------------------------------------------------
@@ -444,11 +450,11 @@ fn read_marker_once(dir: &PinnedDir) -> Result<MarkerRead, LayoutError> {
     if metadata.len() > MAX_MARKER_BYTES {
         return Err(refused("is too large to be a Pickforge layout marker"));
     }
-    let links = link_count(&file).map_err(|error| LayoutError::Unreadable {
+    let facts = file_facts(&file).map_err(|error| LayoutError::Unreadable {
         path: dir.marker_display().display().to_string(),
         message: error.to_string(),
     })?;
-    if links > 1 {
+    if facts.links > 1 {
         return Ok(MarkerRead::MultiplyLinked);
     }
     let mut bytes = Vec::new();
@@ -569,7 +575,7 @@ fn assert_adoptable(dir: &PinnedDir) -> Result<(), LayoutError> {
 struct Staged {
     name: String,
     path: PathBuf,
-    identity: (u64, u64),
+    facts: FileFacts,
 }
 
 /// Create an unpredictable, exclusively created, no-follow staging file with
@@ -588,7 +594,7 @@ fn stage_marker(dir: &PinnedDir) -> io::Result<Staged> {
             }
             options.open(path)
         })?;
-    let identity = identity(&staged.as_file().metadata()?);
+    let facts = file_facts(staged.as_file())?;
     {
         let mut file = staged.as_file();
         file.write_all(&layout_marker_bytes())?;
@@ -600,20 +606,19 @@ fn stage_marker(dir: &PinnedDir) -> io::Result<Staged> {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    Ok(Staged {
-        name,
-        path,
-        identity,
-    })
+    Ok(Staged { name, path, facts })
 }
 
-/// Remove the staging entry only when the name still resolves to the inode
-/// this invocation created.
+/// Remove the staging entry only when its name still resolves to the file this
+/// invocation created — checked by opening it and comparing the identity read
+/// from that descriptor, never by the name alone. A pre-existing or planted
+/// entry that took the name is left exactly where it is.
 fn discard_staged(dir: &PinnedDir, staged: &Staged) {
-    let Ok(metadata) = std::fs::symlink_metadata(dir.child(&staged.name)) else {
+    let current = File::open(dir.child(&staged.name)).and_then(|file| file_facts(&file));
+    let Ok(current) = current else {
         return;
     };
-    if metadata.is_file() && identity(&metadata) == staged.identity {
+    if current.volume == staged.facts.volume && current.index == staged.facts.index {
         let _ = std::fs::remove_file(&staged.path);
     }
 }
