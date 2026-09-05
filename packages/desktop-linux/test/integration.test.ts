@@ -163,6 +163,7 @@ function writeFakeXvfb(binDir: string): void {
     fakeServer,
     [
       'const fs = require("node:fs");',
+      'const net = require("node:net");',
       'const display = process.argv[2].slice(1);',
       'const lock = `/tmp/.X${display}-lock`;',
       'const socketDir = "/tmp/.X11-unix";',
@@ -170,7 +171,8 @@ function writeFakeXvfb(binDir: string): void {
       "const createdSocketDir = !fs.existsSync(socketDir);",
       "fs.mkdirSync(socketDir, { recursive: true });",
       'fs.writeFileSync(lock, `${process.pid}\\n`);',
-      'fs.writeFileSync(socket, "");',
+      "const server = net.createServer(() => {});",
+      "server.listen(socket);",
       "const cleanup = () => {",
       "  fs.rmSync(lock, { force: true });",
       "  fs.rmSync(socket, { force: true });",
