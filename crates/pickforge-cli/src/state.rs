@@ -309,17 +309,40 @@ fn identity(metadata: &std::fs::Metadata) -> (u64, u64) {
     (0, metadata.len())
 }
 
+/// How many names the open file has, read from the descriptor rather than
+/// from a pathname, so it describes the file that was actually opened.
 #[cfg(unix)]
-fn link_count(metadata: &std::fs::Metadata) -> u64 {
+fn link_count(file: &File) -> io::Result<u64> {
     use std::os::unix::fs::MetadataExt;
-    metadata.nlink()
+    Ok(file.metadata()?.nlink())
 }
 
-/// Only Unix exposes a link count, so elsewhere a marker's shape is judged by
-/// the no-follow open and the regular-file check alone.
-#[cfg(not(unix))]
-fn link_count(_metadata: &std::fs::Metadata) -> u64 {
-    1
+#[cfg(windows)]
+fn link_count(file: &File) -> io::Result<u64> {
+    use std::mem::MaybeUninit;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+    // SAFETY: the handle is owned by `file`, and Windows initializes
+    // `information` on success.
+    let succeeded =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) };
+    if succeeded == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: GetFileInformationByHandle succeeded and initialized the structure.
+    let information = unsafe { information.assume_init() };
+    Ok(u64::from(information.nNumberOfLinks))
+}
+
+/// Nowhere else exposes a link count, so a marker's shape is judged by the
+/// no-follow open and the regular-file check alone.
+#[cfg(not(any(unix, windows)))]
+fn link_count(_file: &File) -> io::Result<u64> {
+    Ok(1)
 }
 
 // --- reading the marker --------------------------------------------------
@@ -368,12 +391,17 @@ fn open_marker(dir: &PinnedDir) -> io::Result<File> {
         .open(dir.child(LAYOUT_MARKER))
 }
 
+/// Without `O_NOFOLLOW` the entry's own type is checked first, and the open is
+/// limited to a regular file so a directory or device never reaches the read.
 #[cfg(not(unix))]
 fn open_marker(dir: &PinnedDir) -> io::Result<File> {
     let path = dir.child(LAYOUT_MARKER);
     let metadata = std::fs::symlink_metadata(&path)?;
     if metadata.file_type().is_symlink() {
         return Err(io::Error::other("layout marker is a symbolic link"));
+    }
+    if !metadata.is_file() {
+        return Err(io::Error::other("layout marker is not a regular file"));
     }
     File::open(path)
 }
@@ -416,7 +444,11 @@ fn read_marker_once(dir: &PinnedDir) -> Result<MarkerRead, LayoutError> {
     if metadata.len() > MAX_MARKER_BYTES {
         return Err(refused("is too large to be a Pickforge layout marker"));
     }
-    if link_count(&metadata) > 1 {
+    let links = link_count(&file).map_err(|error| LayoutError::Unreadable {
+        path: dir.marker_display().display().to_string(),
+        message: error.to_string(),
+    })?;
+    if links > 1 {
         return Ok(MarkerRead::MultiplyLinked);
     }
     let mut bytes = Vec::new();
