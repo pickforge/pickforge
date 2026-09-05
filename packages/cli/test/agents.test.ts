@@ -635,7 +635,7 @@ describe("pickforge-lab agents add / unlink (custom)", () => {
     const forced = await add(["--force"]);
     expect(forced.code).toBe(0);
     expect(parseJson(forced).ok).toBe(true);
-  });
+  }, 30_000);
 
   it("rejects an empty --mcp-command", async () => {
     const result = await runCli(

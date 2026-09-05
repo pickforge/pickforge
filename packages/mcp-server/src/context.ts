@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult } from "@modelcontextprotocol/server";
 import {
   readPickforgeEnv,
   resolveConfinedPath,
