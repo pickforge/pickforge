@@ -54,17 +54,54 @@ describe("ensureChromeTmpAlias", () => {
     await removeChromeTmpAlias(layout);
   });
 
-  it("refuses to reuse an alias that already exists", async () => {
+  it("reuses an alias that already points at this session", async () => {
     const layout = layoutFor("brow-00000002");
     await ensureChromeTmpAlias(layout);
     try {
-      await expect(ensureChromeTmpAlias(layout)).rejects.toThrow(
-        /already exists/,
-      );
-      // The existing alias is left exactly as it was.
+      await expect(ensureChromeTmpAlias(layout)).resolves.toBeUndefined();
       expect(fs.readlinkSync(layout.chromeTmpDir)).toBe(layout.tmpDir);
     } finally {
       await removeChromeTmpAlias(layout);
+    }
+  });
+
+  it("replaces a dangling alias left by a session directory removed out of band", async () => {
+    const layout = layoutFor("brow-00000007");
+    const gone = path.join(tmp, "removed-session", "tmp");
+    fs.mkdirSync(path.dirname(layout.chromeTmpDir), { recursive: true, mode: 0o700 });
+    fs.symlinkSync(gone, layout.chromeTmpDir, "dir");
+    expect(fs.existsSync(gone)).toBe(false);
+
+    await ensureChromeTmpAlias(layout);
+    try {
+      expect(fs.readlinkSync(layout.chromeTmpDir)).toBe(layout.tmpDir);
+    } finally {
+      await removeChromeTmpAlias(layout);
+    }
+  });
+
+  it("refuses an alias that points at a live directory that is not this session's", async () => {
+    const layout = layoutFor("brow-00000008");
+    const foreign = fs.mkdtempSync(path.join(tmp, "live-foreign-"));
+    fs.mkdirSync(path.dirname(layout.chromeTmpDir), { recursive: true, mode: 0o700 });
+    fs.symlinkSync(foreign, layout.chromeTmpDir, "dir");
+    try {
+      await expect(ensureChromeTmpAlias(layout)).rejects.toThrow(/already exists/);
+      // Left exactly as found.
+      expect(fs.readlinkSync(layout.chromeTmpDir)).toBe(foreign);
+    } finally {
+      fs.unlinkSync(layout.chromeTmpDir);
+    }
+  });
+
+  it("refuses a real directory sitting at the alias path", async () => {
+    const layout = layoutFor("brow-00000009");
+    fs.mkdirSync(layout.chromeTmpDir, { recursive: true, mode: 0o700 });
+    try {
+      await expect(ensureChromeTmpAlias(layout)).rejects.toThrow(/already exists/);
+      expect(fs.lstatSync(layout.chromeTmpDir).isDirectory()).toBe(true);
+    } finally {
+      fs.rmSync(layout.chromeTmpDir, { recursive: true, force: true });
     }
   });
 

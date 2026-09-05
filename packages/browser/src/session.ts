@@ -120,9 +120,11 @@ function hasErrnoCode(error: unknown, code: string): boolean {
  * directory, so the socket and every temp file still live under the session
  * directory and disappear with it. The per-uid alias root must be a real
  * directory owned by this uid at mode 0700; anything else is refused rather
- * than followed. An alias that already exists is refused too: the key is
- * derived from the session directory, so a collision means stale state that a
- * destroy or reaper pass must clear first.
+ * than followed. The key is derived from the session directory, so an entry
+ * already at the alias path is either this session's own alias (reused as is),
+ * a dangling symlink left when a session directory was removed without a
+ * destroy (replaced: only this uid can create entries in the root), or
+ * something else, which is refused.
  *
  * @internal Exported for tests only.
  */
@@ -139,13 +141,45 @@ export async function ensureChromeTmpAlias(layout: BrowserRuntimeLayout): Promis
     throw new Error(`Refusing unsafe browser temp alias root: ${root}`);
   }
   await fs.promises.chmod(root, 0o700);
-  try {
-    await fs.promises.symlink(layout.tmpDir, layout.chromeTmpDir, "dir");
-  } catch (error) {
-    if (hasErrnoCode(error, "EEXIST")) {
-      throw new Error(`Browser temp alias already exists: ${layout.chromeTmpDir}`);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await fs.promises.symlink(layout.tmpDir, layout.chromeTmpDir, "dir");
+      return;
+    } catch (error) {
+      if (!hasErrnoCode(error, "EEXIST")) throw error;
+      const existing = await classifyExistingAlias(layout);
+      if (existing === "own") return;
+      if (existing === "foreign" || attempt > 0) {
+        throw new Error(`Browser temp alias already exists: ${layout.chromeTmpDir}`);
+      }
+      await fs.promises.unlink(layout.chromeTmpDir);
     }
-    throw error;
+  }
+}
+
+/**
+ * What currently sits at the alias path: this session's own alias (`own`),
+ * a dangling symlink whose target is gone (`dangling`), or anything else
+ * (`foreign`): a symlink to a live directory that is not ours, or a real
+ * file or directory.
+ */
+async function classifyExistingAlias(
+  layout: BrowserRuntimeLayout,
+): Promise<"own" | "dangling" | "foreign"> {
+  const stat = await fs.promises.lstat(layout.chromeTmpDir);
+  if (!stat.isSymbolicLink()) return "foreign";
+  const target = await fs.promises.readlink(layout.chromeTmpDir);
+  if (
+    path.resolve(path.dirname(layout.chromeTmpDir), target) ===
+    path.resolve(layout.tmpDir)
+  ) {
+    return "own";
+  }
+  try {
+    await fs.promises.stat(layout.chromeTmpDir);
+    return "foreign";
+  } catch (error) {
+    return hasErrnoCode(error, "ENOENT") ? "dangling" : "foreign";
   }
 }
 
