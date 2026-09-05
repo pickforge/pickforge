@@ -4,6 +4,12 @@ import { formatChromeStartupDiagnostics } from "./startup-diagnostics.js";
 import { sleep } from "./util.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 100;
+/**
+ * Readiness-probe budget. A cold DevTools endpoint on a loaded host answers
+ * `/json/version` well after the poll interval, so the probe gets a full second
+ * rather than the poll interval.
+ */
+const DEFAULT_PROBE_TIMEOUT_MS = 1_000;
 
 /**
  * Parse the CDP port from a `DevToolsActivePort` file. Chrome writes the port
@@ -121,14 +127,18 @@ export async function waitForDevToolsPort(
 ): Promise<DevToolsPortResult> {
   const poll = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const deadline = Date.now() + opts.timeoutMs;
+  // Aborting a probe resets the DevTools connection, so an over-eager budget
+  // makes a live-but-slow endpoint look unready on every poll and can bury a
+  // loaded host under connection churn until the overall deadline expires.
+  // Give each probe real time, but never more than the wait has left.
+  const probeBudget =
+    opts.probeTimeoutMs ?? Math.max(poll, DEFAULT_PROBE_TIMEOUT_MS);
+  const probeTimeout = (): number =>
+    Math.max(poll, Math.min(probeBudget, deadline - Date.now()));
   const isReady =
     opts.isReady ??
     ((port: number) =>
-      probeDevToolsHttp(
-        port,
-        opts.probeTimeoutMs ?? Math.max(poll, 100),
-        opts.signal,
-      ));
+      probeDevToolsHttp(port, probeTimeout(), opts.signal));
   // Read through a function so cancellation that occurs during the awaited
   // probe is observed instead of being hidden by TypeScript's prior narrowing.
   const creationAborted = (): boolean => opts.signal?.aborted === true;

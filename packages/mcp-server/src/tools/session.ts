@@ -1,9 +1,7 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type {
-  ServerNotification,
-  ServerRequest,
-} from "@modelcontextprotocol/sdk/types.js";
+  McpServer,
+  ServerContext as SdkServerContext,
+} from "@modelcontextprotocol/server";
 import { z } from "zod";
 import {
   createAndroidSession,
@@ -48,17 +46,17 @@ export interface SessionLifecycle extends LocalSessionLifecycle {
 }
 
 export function progressReporter(
-  extra: RequestHandlerExtra<ServerRequest, ServerNotification>,
+  context: SdkServerContext,
 ): ((message: string) => void) | undefined {
-  const progressToken = extra._meta?.progressToken;
+  const progressToken = context.mcpReq._meta?.progressToken;
   if (progressToken === undefined) {
     return undefined;
   }
   let progress = 0;
   return (message: string) => {
     progress += 1;
-    void extra
-      .sendNotification({
+    void context.mcpReq
+      .notify({
         method: "notifications/progress",
         params: { progressToken, progress, message },
       })
@@ -205,8 +203,7 @@ export async function sessionStatusEntry(
   return entry;
 }
 
-// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/pickforge#60
-export function registerSessionTools(
+function registerSessionCreateTool(
   server: McpServer,
   ctx: ServerContext,
 ): void {
@@ -251,13 +248,18 @@ export function registerSessionTools(
       runTool(async () => {
         const sessions = await createSessions(ctx, args, {
           onProgress: progressReporter(extra),
-          signal: extra.signal,
+          signal: extra.mcpReq.signal,
         });
         await recordCreatedSessionsEvidence(ctx, sessions, "session_create");
         return { data: { sessions } };
       }),
   );
+}
 
+function registerSessionStatusTool(
+  server: McpServer,
+  ctx: ServerContext,
+): void {
   server.registerTool(
     "session_status",
     {
@@ -287,7 +289,12 @@ export function registerSessionTools(
         return { data: { sessions } };
       }),
   );
+}
 
+function registerSessionDestroyTool(
+  server: McpServer,
+  ctx: ServerContext,
+): void {
   server.registerTool(
     "session_destroy",
     {
@@ -341,4 +348,13 @@ export function registerSessionTools(
         return { data: { destroyed }, errors };
       }),
   );
+}
+
+export function registerSessionTools(
+  server: McpServer,
+  ctx: ServerContext,
+): void {
+  registerSessionCreateTool(server, ctx);
+  registerSessionStatusTool(server, ctx);
+  registerSessionDestroyTool(server, ctx);
 }

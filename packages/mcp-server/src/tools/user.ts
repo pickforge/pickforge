@@ -1,7 +1,14 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { ElicitRequestFormParams } from "@modelcontextprotocol/sdk/types.js";
+import {
+  CLIENT_CAPABILITIES_META_KEY,
+  inputRequired,
+  inputResponse,
+  type ClientCapabilities,
+  type ElicitRequestFormParams,
+  type McpServer,
+  type ServerContext,
+} from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { runTool } from "../context.js";
+import { reportResult } from "../context.js";
 
 const SECRET_QUESTION_PATTERN =
   /password|api[_ -]?key|token|secret|2fa|otp|credential/i;
@@ -20,6 +27,41 @@ const SECRET_GUIDANCE =
 const NO_ELICITATION_GUIDANCE =
   "This client does not support elicitation. Relay the question to the " +
   "user in your conversation and wait for their answer before continuing.";
+
+const INVALID_ELICITATION_GUIDANCE =
+  "The client returned an invalid elicitation response. Relay the question " +
+  "in your conversation and wait for a valid answer before continuing.";
+
+const INPUT_RESPONSE_KEY = "userInput";
+
+function supportsElicitation(server: McpServer, context: ServerContext): boolean {
+  const envelope = context.mcpReq.envelope as
+    | Record<string, unknown>
+    | undefined;
+  const modernCapabilities = envelope?.[
+    CLIENT_CAPABILITIES_META_KEY
+  ] as ClientCapabilities | undefined;
+  const capabilities =
+    modernCapabilities ?? server.server.getClientCapabilities();
+  return capabilities?.elicitation !== undefined;
+}
+
+function requestedSchema(
+  kind: "text" | "confirm",
+  question: string,
+): ElicitRequestFormParams["requestedSchema"] {
+  const fieldName = kind === "confirm" ? "confirmed" : "answer";
+  return {
+    type: "object",
+    properties: {
+      [fieldName]:
+        kind === "confirm"
+          ? { type: "boolean", title: "Confirm", description: question }
+          : { type: "string", title: "Answer", description: question },
+    },
+    required: [fieldName],
+  };
+}
 
 export function registerUserTools(server: McpServer): void {
   server.registerTool(
@@ -54,66 +96,64 @@ export function registerUserTools(server: McpServer): void {
           .describe("Why this input is needed, shown alongside the question"),
       },
     },
-    (args) =>
-      runTool(async () => {
-        const kind = args.kind ?? "text";
-        if (kind === "text" && SECRET_QUESTION_PATTERN.test(args.question)) {
-          return { errors: [SECRET_GUIDANCE] };
-        }
-        if (server.server.getClientCapabilities()?.elicitation === undefined) {
-          return { errors: [NO_ELICITATION_GUIDANCE] };
+    (args, context) => {
+      const kind = args.kind ?? "text";
+      if (kind === "text" && SECRET_QUESTION_PATTERN.test(args.question)) {
+        return reportResult({ errors: [SECRET_GUIDANCE] });
+      }
+      const response = inputResponse(
+        context.mcpReq.inputResponses,
+        INPUT_RESPONSE_KEY,
+      );
+      if (response.kind === "missing") {
+        if (!supportsElicitation(server, context)) {
+          return reportResult({ errors: [NO_ELICITATION_GUIDANCE] });
         }
         const message =
           args.context === undefined
             ? args.question
             : `${args.question}\n\nContext: ${args.context}`;
-        const fieldName = kind === "confirm" ? "confirmed" : "answer";
-        const requestedSchema: ElicitRequestFormParams["requestedSchema"] = {
-          type: "object",
-          properties: {
-            [fieldName]:
-              kind === "confirm"
-                ? {
-                    type: "boolean",
-                    title: "Confirm",
-                    description: args.question,
-                  }
-                : {
-                    type: "string",
-                    title: "Answer",
-                    description: args.question,
-                  },
+        return inputRequired({
+          inputRequests: {
+            [INPUT_RESPONSE_KEY]: inputRequired.elicit({
+              message,
+              requestedSchema: requestedSchema(kind, args.question),
+            }),
           },
-          required: [fieldName],
-        };
-        const result = await server.server.elicitInput({
-          message,
-          requestedSchema,
         });
-        if (result.action === "accept") {
-          const value =
-            kind === "confirm"
-              ? result.content?.confirmed
-              : result.content?.answer;
-          return { data: { action: "accept", value } };
-        }
-        if (result.action === "decline") {
-          return {
-            data: { action: "decline" },
-            errors: [
-              "The user declined to answer. Do not ask again through this " +
-                "tool; continue without this input or ask in your " +
-                "conversation.",
-            ],
-          };
-        }
-        return {
-          data: { action: "cancel" },
+      }
+      if (response.kind !== "elicit") {
+        return reportResult({ errors: [INVALID_ELICITATION_GUIDANCE] });
+      }
+      if (response.action === "accept") {
+        const value =
+          kind === "confirm"
+            ? response.content?.confirmed
+            : response.content?.answer;
+        const valid =
+          kind === "confirm"
+            ? typeof value === "boolean"
+            : typeof value === "string";
+        return valid
+          ? reportResult({ data: { action: "accept", value } })
+          : reportResult({ errors: [INVALID_ELICITATION_GUIDANCE] });
+      }
+      if (response.action === "decline") {
+        return reportResult({
+          data: { action: "decline" },
           errors: [
-            "The user dismissed the prompt without answering. Relay the " +
-              "question in your conversation, or retry later.",
+            "The user declined to answer. Do not ask again through this " +
+              "tool; continue without this input or ask in your conversation.",
           ],
-        };
-      }),
+        });
+      }
+      return reportResult({
+        data: { action: "cancel" },
+        errors: [
+          "The user dismissed the prompt without answering. Relay the " +
+            "question in your conversation, or retry later.",
+        ],
+      });
+    },
   );
 }

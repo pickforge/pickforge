@@ -1,10 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
-  ElicitRequestSchema,
+  Client,
+  InMemoryTransport,
   type ElicitResult,
-} from "@modelcontextprotocol/sdk/types.js";
+} from "@modelcontextprotocol/client";
 import { createMcpServer } from "../src/index.js";
 import {
   connectLab,
@@ -33,7 +32,7 @@ async function connectElicitingLab(dirs: LabDirs): Promise<ElicitingLab> {
   );
   const requests: Array<{ message: string; requestedSchema: unknown }> = [];
   let nextResult: ElicitResult = { action: "cancel" };
-  client.setRequestHandler(ElicitRequestSchema, async (request) => {
+  client.setRequestHandler("elicitation/create", async (request) => {
     const params = request.params as {
       message: string;
       requestedSchema: unknown;

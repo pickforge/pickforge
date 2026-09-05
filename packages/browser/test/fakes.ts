@@ -21,7 +21,8 @@ export type FakeChromeMode =
  * from there). It records its scrubbed environment, argv, and PID next to the
  * profile (env/argv inside the profile, pid in the parent session dir so it
  * survives profile deletion), then:
- *   - ready: binds a loopback socket and publishes DevToolsActivePort
+ *   - ready: binds a loopback socket and publishes DevToolsActivePort, and,
+ *     like a real Chrome, keeps serving after a probe hangs up mid-response
  *   - crash: exits non-zero immediately
  *   - crash-after-port: publishes a port, closes it, then exits non-zero
  *   - stall: stays alive but never publishes a port
@@ -57,7 +58,14 @@ export function writeFakeChrome(binDir: string, mode: FakeChromeMode): void {
       'if (MODE === "crash") { console.error("fake Chrome crashed before publishing a port"); process.exit(1); }',
       'if (MODE === "ready" || MODE === "crash-after-port") {',
       '  const response = "HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nContent-Length: 2\\r\\nConnection: close\\r\\n\\r\\n{}";',
-      "  const server = net.createServer((s) => s.end(response));",
+      "  const server = net.createServer((s) => {",
+      // A real Chrome survives a DevTools client that hangs up mid-response.
+      // Readiness probes abort on a timeout, which resets the connection, and
+      // an unhandled socket 'error' would kill this fake and be reported as
+      // "Chrome exited during startup" (pickforge/pickforge#100).
+      "    s.on(\"error\", () => {});",
+      "    s.end(response);",
+      "  });",
       '  server.listen(0, "127.0.0.1", () => {',
       "    const addr = server.address();",
       '    const port = typeof addr === "object" && addr ? addr.port : 0;',
