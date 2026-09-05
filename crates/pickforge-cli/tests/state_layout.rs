@@ -464,7 +464,10 @@ fn symlink(target: &Path, link: &Path) {
 fn a_failed_apply_after_a_new_claim_reports_the_marker_as_a_residual() {
     let (_temp, project, env) = fixture();
     let plan = plan_init(&receipt_only_request(&project), &env).unwrap();
-    let state_dir = state_dir_for(&project, &env);
+    // The reported directory, so the residual is compared against the same
+    // physical path the report names (Windows resolves the temp root
+    // differently from the path the environment was built with).
+    let state_dir = PathBuf::from(&plan.report.state_dir);
 
     // The receipt target drifts between planning and applying: a directory
     // now sits where the file belongs, so writing it fails.
