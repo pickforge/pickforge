@@ -74,6 +74,8 @@ function createRuntime(
     vnc?: boolean;
     vncControl?: boolean;
     avdName?: string;
+    coldBoot?: boolean;
+    readOnly?: boolean;
   },
   lifecycle: SessionLifecycle,
 ): LocalSessionCreateRuntime {
@@ -113,6 +115,8 @@ function createRuntime(
           onProgress: lifecycle.onProgress,
           signal: lifecycle.signal,
           ...(avdName === undefined ? {} : { avdName }),
+          ...(args.coldBoot === true ? { coldBoot: true } : {}),
+          ...(args.readOnly === true ? { readOnly: true } : {}),
         });
       },
     },
@@ -165,6 +169,8 @@ export async function createSessions(
     vnc?: boolean;
     vncControl?: boolean;
     avdName?: string;
+    coldBoot?: boolean;
+    readOnly?: boolean;
   },
   lifecycle: SessionLifecycle = {},
 ): Promise<LocalSessionSummary[]> {
@@ -205,8 +211,7 @@ export async function sessionStatusEntry(
   return entry;
 }
 
-// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/pickforge#60
-export function registerSessionTools(
+function registerSessionCreateTool(
   server: McpServer,
   ctx: ServerContext,
 ): void {
@@ -245,6 +250,16 @@ export function registerSessionTools(
             "Expose writable VNC for explicit manual secret entry; input is not coordinated with the agent",
           ),
         avdName: z.string().min(1).optional().describe("Android AVD name"),
+        coldBoot: z
+          .boolean()
+          .optional()
+          .describe("Skip the AVD's saved state (emulator -no-snapshot-load)"),
+        readOnly: z
+          .boolean()
+          .optional()
+          .describe(
+            "Share the AVD with another running emulator (emulator -read-only)",
+          ),
       },
     },
     (args, extra) =>
@@ -257,7 +272,12 @@ export function registerSessionTools(
         return { data: { sessions } };
       }),
   );
+}
 
+function registerSessionStatusTool(
+  server: McpServer,
+  ctx: ServerContext,
+): void {
   server.registerTool(
     "session_status",
     {
@@ -287,7 +307,32 @@ export function registerSessionTools(
         return { data: { sessions } };
       }),
   );
+}
 
+async function resolveDestroyTargets(
+  ctx: ServerContext,
+  args: { sessionId?: string; all?: boolean },
+): Promise<SessionRecord[]> {
+  if (args.sessionId !== undefined && args.all === true) {
+    throw new Error('Pass either "sessionId" or "all", not both');
+  }
+  if (args.sessionId === undefined && args.all !== true) {
+    throw new Error('Pass a "sessionId" or set "all" to true');
+  }
+  if (args.sessionId === undefined) {
+    return listSessions(ctx.env);
+  }
+  const record = await getSession(args.sessionId, ctx.env);
+  if (record === undefined) {
+    throw new Error(`Session not found: ${args.sessionId}`);
+  }
+  return [record];
+}
+
+function registerSessionDestroyTool(
+  server: McpServer,
+  ctx: ServerContext,
+): void {
   server.registerTool(
     "session_destroy",
     {
@@ -302,22 +347,7 @@ export function registerSessionTools(
     },
     (args) =>
       runTool(async () => {
-        if (args.sessionId !== undefined && args.all === true) {
-          throw new Error('Pass either "sessionId" or "all", not both');
-        }
-        if (args.sessionId === undefined && args.all !== true) {
-          throw new Error('Pass a "sessionId" or set "all" to true');
-        }
-        const records: SessionRecord[] = [];
-        if (args.sessionId !== undefined) {
-          const record = await getSession(args.sessionId, ctx.env);
-          if (record === undefined) {
-            throw new Error(`Session not found: ${args.sessionId}`);
-          }
-          records.push(record);
-        } else {
-          records.push(...(await listSessions(ctx.env)));
-        }
+        const records = await resolveDestroyTargets(ctx, args);
         const { destroyed, errors } = await destroyLocalSessions(
           records,
           destroyRuntime(ctx),
@@ -341,4 +371,13 @@ export function registerSessionTools(
         return { data: { destroyed }, errors };
       }),
   );
+}
+
+export function registerSessionTools(
+  server: McpServer,
+  ctx: ServerContext,
+): void {
+  registerSessionCreateTool(server, ctx);
+  registerSessionStatusTool(server, ctx);
+  registerSessionDestroyTool(server, ctx);
 }

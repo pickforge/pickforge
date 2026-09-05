@@ -42,6 +42,12 @@ fs.mkdirSync(home, { recursive: true });
 fs.mkdirSync(projectDir, { recursive: true });
 const registryEnv: EnvLike = { ...process.env, PICKFORGE_HOME: home };
 
+/** A fake AVD home that satisfies the pre-flight "AVD exists" check. */
+const avdHome = path.join(tmpRoot, "avd");
+fs.mkdirSync(avdHome, { recursive: true });
+fs.writeFileSync(path.join(avdHome, "pickforge-avd.ini"), "avd.ini.encoding=UTF-8\n");
+const toolEnv: EnvLike = { PATH: "", ANDROID_AVD_HOME: avdHome };
+
 afterAll(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
@@ -80,7 +86,7 @@ describe("android reaper tracking", () => {
       registryEnv,
       sdk,
       port: 5554,
-      env: { PATH: "" },
+      env: toolEnv,
       bootPollIntervalMs: 20,
       bootTimeoutMs: 5_000,
     });
@@ -97,7 +103,7 @@ describe("android reaper tracking", () => {
       await expect(
         destroyAndroidSession(session.id, registryEnv, {
           sdk,
-          env: { PATH: "" },
+          env: toolEnv,
           timeoutMs: 300,
         }),
       ).rejects.toThrow(/Failed to stop emulator/);
@@ -117,7 +123,7 @@ describe("android reaper tracking", () => {
           teardownAndroidSession(
             id,
             registryEnv,
-            { sdk, env: { PATH: "" }, timeoutMs: 300 },
+            { sdk, env: toolEnv, timeoutMs: 300 },
             finalize,
           ),
       },

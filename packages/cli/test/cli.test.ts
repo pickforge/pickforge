@@ -63,9 +63,19 @@ interface FakeSdkOptions {
 function makeFakeSdk(root: string, opts: FakeSdkOptions = {}): string {
   const bin = path.join(root, "cmdline-tools", "latest", "bin");
   writeScript(path.join(bin, "sdkmanager"), "exit 0");
+  // Like the real avdmanager, create the AVD's ini in the directory Pickforge
+  // pins through ANDROID_AVD_HOME so the emulator can find it afterwards.
   writeScript(
     path.join(bin, "avdmanager"),
-    `printf '%s\\n' "$*" >> ${path.join(root, "avdmanager.log")}\nexit 0`,
+    [
+      `printf '%s\\n' "$*" >> ${path.join(root, "avdmanager.log")}`,
+      'name=""',
+      'while [ $# -gt 0 ]; do [ "$1" = "-n" ] && name="$2"; shift; done',
+      'if [ -n "$name" ] && [ -n "$ANDROID_AVD_HOME" ]; then',
+      '  mkdir -p "$ANDROID_AVD_HOME" && : > "$ANDROID_AVD_HOME/$name.ini"',
+      "fi",
+      "exit 0",
+    ].join("\n"),
   );
   const avdLines = (opts.avdNames ?? [])
     .map((name) => `echo ${name}`)

@@ -250,11 +250,75 @@ describe("input ops against a fake adb", () => {
   });
 });
 
-describe("launchApp via monkey", () => {
-  it("treats monkey aborted output as a launch failure", async () => {
-    const bin = fakeAdbDir(
-      'echo "** Monkey aborted due to error."; echo "Events injected: 0"',
+describe("launchApp", () => {
+  const RESOLVE_LINE =
+    "com.example.app/.MainActivity";
+  const START_OK = [
+    'echo "Starting: Intent { cmp=com.example.app/.MainActivity }"',
+    'echo "Status: ok"',
+    'echo "LaunchState: COLD"',
+    'echo "TotalTime: 812"',
+  ].join("; ");
+
+  function launchAdb(callLog: string, overrides: Record<string, string> = {}): string {
+    const cases = {
+      "*resolve-activity*": `echo "priority=0 preferredOrder=0 match=0x108000"; echo "${RESOLVE_LINE}"`,
+      '*"am start"*': START_OK,
+      "*pidof*": "echo 4242",
+      ...overrides,
+    };
+    return fakeAdbDir(
+      [
+        `echo "$*" >> '${callLog}'`,
+        'case "$*" in',
+        ...Object.entries(cases).map(([pattern, body]) => `  ${pattern}) ${body} ;;`),
+        "esac",
+      ].join("\n"),
     );
+  }
+
+  it("resolves the launcher activity, starts it with am start -W, and confirms the process", async () => {
+    const callLog = path.join(tmpRoot, "launch-calls.log");
+    const bin = launchAdb(callLog);
+    const launched = await launchApp({
+      serial: SERIAL,
+      packageName: "com.example.app",
+      sdk: null,
+      env: { PATH: bin },
+    });
+    expect(launched).toEqual({
+      component: "com.example.app/.MainActivity",
+      pid: 4242,
+      launchState: "COLD",
+    });
+    expect(fs.readFileSync(callLog, "utf8").trim().split("\n")).toEqual([
+      `-s ${SERIAL} shell cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER com.example.app`,
+      `-s ${SERIAL} shell am start -W -n com.example.app/.MainActivity`,
+      `-s ${SERIAL} shell pidof com.example.app`,
+    ]);
+  });
+
+  it("skips resolution when the activity is given", async () => {
+    const callLog = path.join(tmpRoot, "launch-explicit.log");
+    const bin = launchAdb(callLog);
+    await launchApp({
+      serial: SERIAL,
+      packageName: "com.example.app",
+      activity: ".Other",
+      sdk: null,
+      env: { PATH: bin },
+    });
+    expect(fs.readFileSync(callLog, "utf8").trim().split("\n")).toEqual([
+      `-s ${SERIAL} shell am start -W -n com.example.app/.Other`,
+      `-s ${SERIAL} shell pidof com.example.app`,
+    ]);
+  });
+
+  it("fails distinctly when no launcher activity resolves", async () => {
+    const callLog = path.join(tmpRoot, "launch-unresolved.log");
+    const bin = launchAdb(callLog, {
+      "*resolve-activity*": 'echo "No activity found"',
+    });
     await expect(
       launchApp({
         serial: SERIAL,
@@ -262,7 +326,42 @@ describe("launchApp via monkey", () => {
         sdk: null,
         env: { PATH: bin },
       }),
-    ).rejects.toThrow(/launch of com\.example\.app failed[\s\S]*Monkey aborted/);
+    ).rejects.toThrow(
+      /No launcher activity found for com\.example\.app on emulator-5554; is the APK installed\?.*No activity found/,
+    );
+    expect(fs.readFileSync(callLog, "utf8")).not.toContain("am start");
+  });
+
+  it("treats an am start error as a launch failure", async () => {
+    const bin = launchAdb(path.join(tmpRoot, "launch-error.log"), {
+      '*"am start"*':
+        'echo "Error type 3"; echo "Error: Activity class {com.example.app/.MainActivity} does not exist."',
+    });
+    await expect(
+      launchApp({
+        serial: SERIAL,
+        packageName: "com.example.app",
+        sdk: null,
+        env: { PATH: bin },
+      }),
+    ).rejects.toThrow(/launch of com\.example\.app failed[\s\S]*does not exist/);
+  });
+
+  it("fails when the start was accepted but the process is gone", async () => {
+    const bin = launchAdb(path.join(tmpRoot, "launch-dead.log"), {
+      "*pidof*": "exit 1",
+    });
+    await expect(
+      launchApp({
+        serial: SERIAL,
+        packageName: "com.example.app",
+        sdk: null,
+        env: { PATH: bin },
+        settleTimeoutMs: 100,
+      }),
+    ).rejects.toThrow(
+      /launch of com\.example\.app was accepted \(am start -W printed: Starting: Intent[^)]*Status: ok[^)]*\) but no com\.example\.app process is alive after 100ms/,
+    );
   });
 });
 

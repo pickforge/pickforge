@@ -43,6 +43,52 @@ release description, then reset it after that release is published.
 - Nothing is migrated, replaced, or deleted when an unsafe entry is found; the
   offending path is named in the error.
 
+## Android lab start hardening
+
+- The live Android integration test could fail in two seconds with "exited
+  before finishing boot" and then delete the emulator log it pointed at (#93).
+  Root cause: `avdmanager` honours `XDG_CONFIG_HOME` and wrote the freshly
+  created AVD to `~/.config/.android/avd`, while the emulator only searches
+  `$ANDROID_AVD_HOME`, `$ANDROID_SDK_HOME/avd` and `$HOME/.android/avd`.
+  Pickforge now resolves one AVD directory and passes it as `ANDROID_AVD_HOME`
+  to `avdmanager`, `emulator -list-avds`, and the emulator, verifies the ini
+  landed there after creation, and fails before spawning when the requested AVD
+  is not where the emulator will look.
+- Start failures are diagnosed distinctly: `avd-missing`, `avd-in-use` (a live
+  emulator pid holds the AVD's lock; `--read-only` shares it), `port-collision`,
+  `snapshot`, `kvm`, `process-exit`, `boot-timeout` with the adb device state
+  (`missing`, `offline`, `unauthorized`, `device`), and `aborted`. Every message
+  carries the kind, a hint, the emulator log path, and the log's last lines, and
+  the failed session record keeps the same diagnosis under
+  `meta.androidStartFailure`, so a deleted temp directory no longer erases the
+  cause.
+- Console ports are probed with a loopback bind on the console and adb ports
+  before launch, on top of the adb listing and the per-home reservation
+  registry, so sessions from different Pickforge homes do not race for the same
+  pair. An emulator that still reports a collision is retried on a fresh pair,
+  at most twice, with each attempt reported as progress.
+- New `--cold-boot` (`-no-snapshot-load`) and `--read-only` (`-read-only`)
+  options on `session create` and `android start`, and `coldBoot`/`readOnly` on
+  the `session_create` and `android_start` MCP tools. Sessions report
+  `bootMode` (`warm`/`cold`/`unknown`) and `readOnly`. The emulator shares an
+  AVD only among read-only instances; a running writable instance is reported
+  as `avd-in-use` before spawning, for read-only requests too.
+- `android launch-app` / `android_launch_app` no longer fire a `monkey` event
+  and report success regardless. They resolve the package's launcher activity
+  (`cmd package resolve-activity`), start it with `am start -W`, and confirm a
+  process for the package is alive, returning the component, pid, and launch
+  state. A launch the device drops at startup is now a distinct error. The real
+  APK pass exposed this: the first launch after install on a freshly restored
+  snapshot returned success while the launcher stayed on screen.
+- Graceful emulator shutdown now waits up to 30 seconds after `adb emu kill`
+  before signalling, so a snapshot save is not interrupted.
+- The live integration test preserves its temp root (emulator logs and session
+  records) on failure, copies them to `PICKFORGE_LIVE_ANDROID_ARTIFACTS` when
+  set, boots an existing AVD named by `PICKFORGE_LIVE_ANDROID_AVD` or creates a
+  throwaway one under its temp root instead of the real AVD home, optionally
+  installs and launches a real APK, and proves a cold-boot session and a
+  concurrent read-only session from a second home do not collide.
+
 ## Validation
 
 - Updated during release preparation.

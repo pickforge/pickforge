@@ -84,14 +84,16 @@ export async function runAndroidLaunchApp(
 ): Promise<number> {
   return runReported(opts, async () => {
     const target = await resolveAndroidTarget(opts);
-    await launchApp({
+    const launched = await launchApp({
       serial: target.serial,
       packageName,
       activity: opts.activity,
     });
     return {
-      data: { ...targetData(target), packageName },
-      lines: [`launched ${packageName} on ${target.serial}`],
+      data: { ...targetData(target), packageName, ...launched },
+      lines: [
+        `launched ${launched.component} on ${target.serial} (pid ${launched.pid})`,
+      ],
     };
   });
 }

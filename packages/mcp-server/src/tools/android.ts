@@ -84,13 +84,28 @@ function registerAndroidTool1(server: McpServer, ctx: ServerContext): void {
         "Start an Android emulator session (boots the dedicated Pickforge AVD).",
       inputSchema: {
         avdName: z.string().min(1).optional().describe("Android AVD name"),
+        coldBoot: z
+          .boolean()
+          .optional()
+          .describe("Skip the AVD's saved state (emulator -no-snapshot-load)"),
+        readOnly: z
+          .boolean()
+          .optional()
+          .describe(
+            "Share the AVD with another running emulator (emulator -read-only)",
+          ),
       },
     },
     (args, extra) =>
       runTool(async () => {
         const sessions = await createSessions(
           ctx,
-          { type: "android", avdName: args.avdName },
+          {
+            type: "android",
+            avdName: args.avdName,
+            coldBoot: args.coldBoot,
+            readOnly: args.readOnly,
+          },
           { onProgress: progressReporter(extra), signal: extra.signal },
         );
         await recordCreatedSessionsEvidence(ctx, sessions, "android_start");
@@ -161,14 +176,18 @@ function registerAndroidTool3(server: McpServer, ctx: ServerContext): void {
             target: { name: args.packageName },
           },
           async () => {
-            await launchApp({
+            const launched = await launchApp({
               serial: target.serial,
               packageName: args.packageName,
               activity: args.activity,
               env: ctx.env,
             });
             return {
-              data: { ...targetData(target), packageName: args.packageName },
+              data: {
+                ...targetData(target),
+                packageName: args.packageName,
+                ...launched,
+              },
             };
           },
         );

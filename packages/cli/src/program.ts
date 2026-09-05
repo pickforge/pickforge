@@ -181,6 +181,11 @@ function registerSessionCommands(program: Command): void {
           "expose writable VNC for explicit manual secret entry (not coordinated)",
         )
         .option("--avd-name <name>", "Android AVD name")
+        .option("--cold-boot", "skip the AVD's saved state (emulator -no-snapshot-load)")
+        .option(
+          "--read-only",
+          "share the AVD with another running emulator (emulator -read-only)",
+        )
         .option("--viewer", "open a read-only host viewer after creation")
         .option(
           "--no-viewer",
@@ -442,7 +447,12 @@ function registerAndroidSessionCommands(android: Command): void {
       android
         .command("start")
         .description("Start an Android emulator session (alias for session create)")
-        .option("--avd-name <name>", "Android AVD name"),
+        .option("--avd-name <name>", "Android AVD name")
+        .option("--cold-boot", "skip the AVD's saved state (emulator -no-snapshot-load)")
+        .option(
+          "--read-only",
+          "share the AVD with another running emulator (emulator -read-only)",
+        ),
     ),
   ).action(async (opts) => {
     process.exitCode = await runSessionCreate({ ...opts, type: "android" });

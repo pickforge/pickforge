@@ -23,12 +23,18 @@ export {
 } from "./sdk.js";
 
 export {
+  avdDataDir,
+  avdExists,
   avdHomeDir,
+  avdIniPath,
+  avdLockPath,
+  avdToolEnv,
   buildCreateAvdArgs,
   createAvd,
   DEFAULT_AVD_NAME,
   listAvds,
   parseEmulatorListAvds,
+  readAvdLockOwner,
   scanAvdHome,
   type CreateAvdArgsOptions,
   type CreateAvdOptions,
@@ -37,12 +43,31 @@ export {
 } from "./avd.js";
 
 export {
+  classifyEmulatorLog,
+  describeDeviceState,
+  detectBootMode,
+  deviceStateHint,
+  EmulatorStartError,
+  isEmulatorStartError,
+  LOG_TAIL_LINES,
+  readLogTail,
+  startFailureRecord,
+  type EmulatorBootMode,
+  type EmulatorFailureKind,
+  type EmulatorStartDiagnostics,
+} from "./diagnostics.js";
+
+export {
   assertConsolePort,
   AUTO_MIN_CONSOLE_PORT,
   buildEmulatorArgs,
+  consolePortFromSerial,
   consolePortLockPath,
   emulatorSerial,
+  isConsolePortPairFree,
+  isTcpPortFree,
   MAX_CONSOLE_PORT,
+  MAX_PORT_COLLISION_RETRIES,
   MIN_CONSOLE_PORT,
   pickConsolePort,
   releaseConsolePort,
@@ -64,6 +89,8 @@ export {
   buildKeyeventArgs,
   buildLaunchAppArgs,
   buildLogcatArgs,
+  buildPidofArgs,
+  buildResolveLauncherArgs,
   buildScreenshotArgs,
   buildTapArgs,
   buildTypeTextArgs,
@@ -81,6 +108,7 @@ export {
   listDevices,
   logcat,
   parseAdbDevices,
+  parseResolvedLauncher,
   pressKey,
   resolveAdb,
   runAdb,
@@ -92,10 +120,13 @@ export {
   type AdbDevice,
   type AdbTargetOptions,
   type GetUiTreeOptions,
+  type LaunchAppOptions,
+  type LaunchAppResult,
   type LogcatArgsOptions,
 } from "./adb.js";
 
 export {
+  ANDROID_START_FAILURE_META_KEY,
   androidSessionLogDir,
   createAndroidSession,
   destroyAndroidSession,

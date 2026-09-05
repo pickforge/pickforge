@@ -6,10 +6,12 @@ import {
   createSession,
   getSession,
   isPidAlive,
+  REAPER_CLEANUP_PENDING_META_KEY,
   updateSession,
   type EnvLike,
 } from "@pickforge/lab-core";
 import {
+  ANDROID_START_FAILURE_META_KEY,
   androidSessionLogDir,
   consolePortLockPath,
   createAndroidSession,
@@ -24,6 +26,12 @@ const projectDir = path.join(tmpRoot, "project");
 fs.mkdirSync(home, { recursive: true });
 fs.mkdirSync(projectDir, { recursive: true });
 const registryEnv: EnvLike = { ...process.env, PICKFORGE_HOME: home };
+
+/** A fake AVD home that satisfies the pre-flight "AVD exists" check. */
+const avdHome = path.join(tmpRoot, "avd");
+fs.mkdirSync(avdHome, { recursive: true });
+fs.writeFileSync(path.join(avdHome, "pickforge-avd.ini"), "avd.ini.encoding=UTF-8\n");
+const toolEnv: EnvLike = { PATH: "", ANDROID_AVD_HOME: avdHome };
 
 afterAll(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
@@ -68,7 +76,7 @@ describe("createAndroidSession", () => {
         registryEnv,
         sdk,
         port: 5554,
-        env: { PATH: "" },
+        env: toolEnv,
         bootPollIntervalMs: 20,
         bootTimeoutMs: 5_000,
       });
@@ -87,18 +95,22 @@ describe("createAndroidSession", () => {
           serial: "emulator-5554",
           emulatorPid: session.emulatorPid,
           consolePort: 5554,
+          bootMode: "unknown",
+          readOnly: false,
         });
+        expect(session.bootMode).toBe("unknown");
+        expect(session.readOnly).toBe(false);
 
         const status = await getAndroidSessionStatus(session.id, registryEnv, {
           sdk,
-          env: { PATH: "" },
+          env: toolEnv,
         });
         expect(status.emulatorAlive).toBe(true);
         expect(status.deviceState).toBe("device");
       } finally {
         await destroyAndroidSession(session.id, registryEnv, {
           sdk,
-          env: { PATH: "" },
+          env: toolEnv,
           timeoutMs: 300,
         });
       }
@@ -118,7 +130,7 @@ describe("createAndroidSession", () => {
         registryEnv: isolatedEnv,
         sdk,
         port: 5556,
-        env: { PATH: "" },
+        env: toolEnv,
         bootPollIntervalMs: 20,
         bootTimeoutMs: 200,
       }),
@@ -132,6 +144,23 @@ describe("createAndroidSession", () => {
     const record = await getSession(id, isolatedEnv);
     expect(record?.status).toBe("error");
     expect(record?.android?.avdName).toBe("pickforge-avd");
+    // The diagnosis survives in the registry after the process and log are gone.
+    const failure = record?.meta?.[ANDROID_START_FAILURE_META_KEY] as Record<
+      string,
+      unknown
+    >;
+    expect(failure).toMatchObject({
+      kind: "boot-timeout",
+      avdName: "pickforge-avd",
+      serial: "emulator-5556",
+      consolePort: 5556,
+      deviceState: "missing",
+    });
+    expect(failure.logPath).toBe(
+      path.join(androidSessionLogDir(id, isolatedEnv), "emulator.log"),
+    );
+    expect(Array.isArray(failure.logTail)).toBe(true);
+    expect(record?.meta?.[REAPER_CLEANUP_PENDING_META_KEY]).toBeUndefined();
   });
 
   it("fails actionably when the emulator binary is missing", async () => {
@@ -142,7 +171,7 @@ describe("createAndroidSession", () => {
         projectDir,
         registryEnv,
         sdk,
-        env: { PATH: "" },
+        env: toolEnv,
       }),
     ).rejects.toThrow(/emulator binary not found[\s\S]*sdkmanager "emulator"/);
   });
@@ -177,7 +206,7 @@ describe("createAndroidSession", () => {
       registryEnv: isolatedEnv,
       sdk,
       port: 5560,
-      env: { PATH: "" },
+      env: toolEnv,
       bootPollIntervalMs: 20,
       bootTimeoutMs: 5_000,
     });
@@ -187,7 +216,7 @@ describe("createAndroidSession", () => {
     } finally {
       await destroyAndroidSession(session.id, isolatedEnv, {
         sdk,
-        env: { PATH: "" },
+        env: toolEnv,
         timeoutMs: 300,
       });
     }
@@ -206,7 +235,7 @@ describe("startEmulator failure detail", () => {
         sdk,
         port: 5558,
         logDir: path.join(tmpRoot, "emu-logs"),
-        env: { PATH: "" },
+        env: toolEnv,
         registryEnv: failureEnv,
         bootTimeoutMs: 200,
         bootPollIntervalMs: 20,

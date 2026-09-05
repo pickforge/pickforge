@@ -14,7 +14,11 @@ import {
 } from "@pickforge/lab-core";
 import { listDevices } from "./adb.js";
 import { DEFAULT_AVD_NAME } from "./avd.js";
+import { startFailureRecord, type EmulatorBootMode } from "./diagnostics.js";
 import { startEmulator, stopEmulator, type EmulatorHandle } from "./emulator.js";
+
+/** Session record `meta` key that keeps the last emulator start diagnostics. */
+export const ANDROID_START_FAILURE_META_KEY = "androidStartFailure";
 
 export interface CreateAndroidSessionOptions {
   projectDir: string;
@@ -24,6 +28,10 @@ export interface CreateAndroidSessionOptions {
   sdk?: string | null;
   headless?: boolean;
   port?: number;
+  /** Skip the AVD's saved state (emulator `-no-snapshot-load`). */
+  coldBoot?: boolean;
+  /** Share the AVD with another running emulator (emulator `-read-only`). */
+  readOnly?: boolean;
   bootTimeoutMs?: number;
   bootPollIntervalMs?: number;
   onProgress?: (message: string) => void;
@@ -38,6 +46,8 @@ export interface AndroidSessionHandle {
   emulatorPid: number;
   logPath: string;
   logDir: string;
+  bootMode: EmulatorBootMode;
+  readOnly: boolean;
 }
 
 export interface AndroidSessionStatus {
@@ -59,11 +69,49 @@ export function androidSessionLogDir(
   return sessionDataDir(id, registryEnv);
 }
 
+async function recordStartFailure(
+  record: SessionRecord,
+  avdName: string,
+  emulator: EmulatorHandle | undefined,
+  error: unknown,
+  opts: CreateAndroidSessionOptions,
+  registryEnv: EnvLike,
+): Promise<void> {
+  let emulatorGone = true;
+  if (emulator !== undefined) {
+    emulatorGone = await stopEmulator({
+      serial: emulator.serial,
+      pid: emulator.pid,
+      sdk: opts.sdk,
+      env: opts.env,
+      registryEnv,
+    }).catch(() => false);
+  }
+  const meta: Record<string, unknown> = { ...record.meta };
+  delete meta[REAPER_CLEANUP_PENDING_META_KEY];
+  const failure = startFailureRecord(error);
+  if (failure !== undefined) {
+    meta[ANDROID_START_FAILURE_META_KEY] = failure;
+  }
+  const patch: Partial<SessionRecord> = { status: "error", meta };
+  if (!emulatorGone) {
+    meta[REAPER_CLEANUP_PENDING_META_KEY] = true;
+    patch.android = {
+      avdName,
+      serial: emulator?.serial,
+      emulatorPid: emulator?.pid,
+      consolePort: emulator?.consolePort,
+    };
+  }
+  await updateSession(record.id, patch, registryEnv).catch(() => {});
+}
+
 export async function createAndroidSession(
   opts: CreateAndroidSessionOptions,
 ): Promise<AndroidSessionHandle> {
   const registryEnv = opts.registryEnv ?? process.env;
   const avdName = opts.avdName ?? DEFAULT_AVD_NAME;
+  const readOnly = opts.readOnly === true;
   await reapDeadRunningSessions(registryEnv, {
     android: {
       teardown: (id, finalize) =>
@@ -88,6 +136,8 @@ export async function createAndroidSession(
       sdk: opts.sdk,
       headless: opts.headless,
       port: opts.port,
+      coldBoot: opts.coldBoot,
+      readOnly,
       logDir,
       env: opts.env,
       registryEnv,
@@ -102,6 +152,8 @@ export async function createAndroidSession(
       serial: emulator.serial,
       emulatorPid: emulator.pid,
       consolePort: emulator.consolePort,
+      bootMode: emulator.bootMode,
+      readOnly,
     };
     await updateSession(record.id, { status: "running", android }, registryEnv);
 
@@ -113,43 +165,11 @@ export async function createAndroidSession(
       emulatorPid: emulator.pid,
       logPath: emulator.logPath,
       logDir,
+      bootMode: emulator.bootMode,
+      readOnly,
     };
   } catch (error) {
-    let emulatorGone = true;
-    if (emulator !== undefined) {
-      try {
-        emulatorGone = await stopEmulator({
-          serial: emulator.serial,
-          pid: emulator.pid,
-          sdk: opts.sdk,
-          env: opts.env,
-          registryEnv,
-        });
-      } catch {
-        emulatorGone = false;
-      }
-    }
-    const clearedMeta = { ...record.meta };
-    delete clearedMeta[REAPER_CLEANUP_PENDING_META_KEY];
-    await updateSession(
-      record.id,
-      emulatorGone
-        ? { status: "error", meta: clearedMeta }
-        : {
-            status: "error",
-            meta: {
-              ...record.meta,
-              [REAPER_CLEANUP_PENDING_META_KEY]: true,
-            },
-            android: {
-              avdName,
-              serial: emulator?.serial,
-              emulatorPid: emulator?.pid,
-              consolePort: emulator?.consolePort,
-            },
-          },
-      registryEnv,
-    ).catch(() => {});
+    await recordStartFailure(record, avdName, emulator, error, opts, registryEnv);
     throw error;
   }
 }
