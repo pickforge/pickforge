@@ -1,9 +1,11 @@
 import fs from "node:fs";
+import net from "node:net";
 import {
   isDisplaySocketAlive,
   isPidAlive,
   processIdentityMatches,
   readProcessIdentity,
+  readProcessStartTicks,
   startDaemon,
   stopOwnedDaemonGroup,
   stopProcessGroupVerified,
@@ -82,6 +84,108 @@ function readLockPid(displayNumber: number): number | null {
   return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
+function displaySocketInodes(displayNumber: number): Set<string> | undefined {
+  const socketPath = displaySocketPath(displayNumber);
+  let table: string;
+  try {
+    table = fs.readFileSync("/proc/net/unix", "utf8");
+  } catch {
+    return undefined;
+  }
+  const inodes = new Set<string>();
+  for (const line of table.split("\n")) {
+    const fields = line.trim().split(/\s+/);
+    if (fields[7] === socketPath && fields[6] !== undefined) {
+      inodes.add(fields[6]);
+    }
+  }
+  return inodes;
+}
+
+function processOwnsDisplaySocket(
+  pid: number,
+  displayNumber: number,
+): boolean | undefined {
+  const inodes = displaySocketInodes(displayNumber);
+  if (inodes === undefined) return undefined;
+  if (inodes.size === 0) return false;
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(`/proc/${pid}/fd`);
+  } catch {
+    return undefined;
+  }
+  for (const entry of entries) {
+    try {
+      const target = fs.readlinkSync(`/proc/${pid}/fd/${entry}`);
+      const match = /^socket:\[(\d+)]$/.exec(target);
+      if (match !== null && inodes.has(match[1]!)) return true;
+    } catch {
+      // File descriptors can close while they are enumerated.
+    }
+  }
+  return false;
+}
+
+function liveLockOwner(displayNumber: number): number | null {
+  const pid = readLockPid(displayNumber);
+  return pid !== null && readProcessStartTicks(pid) !== undefined ? pid : null;
+}
+
+function liveDisplayOwner(displayNumber: number): number | null {
+  if (!fs.existsSync(displaySocketPath(displayNumber))) return null;
+  const pid = liveLockOwner(displayNumber);
+  if (pid === null) return null;
+  return processOwnsDisplaySocket(pid, displayNumber) === false ? null : pid;
+}
+
+interface DisplayReservation {
+  display: string;
+  release: () => Promise<void>;
+}
+
+function reservationAddress(displayNumber: number): string {
+  return `\0pickforge-x-display-${displayNumber}`;
+}
+
+async function tryReserveDisplay(
+  displayNumber: number,
+): Promise<DisplayReservation | undefined> {
+  const server = net.createServer((socket) => socket.destroy());
+  server.unref();
+  const acquired = await new Promise<boolean>((resolve, reject) => {
+    server.once("error", (error: NodeJS.ErrnoException) => {
+      if (error.code === "EADDRINUSE") resolve(false);
+      else reject(error);
+    });
+    server.once("listening", () => resolve(true));
+    server.listen(reservationAddress(displayNumber));
+  });
+  if (!acquired) return undefined;
+  return {
+    display: `:${displayNumber}`,
+    release: () =>
+      new Promise((resolve, reject) => {
+        server.close((error) => (error === undefined ? resolve() : reject(error)));
+      }),
+  };
+}
+
+async function reserveFreeDisplay(
+  start: number,
+  maxAttempts = DEFAULT_MAX_ATTEMPTS,
+): Promise<DisplayReservation> {
+  for (let n = start; n < start + maxAttempts; n += 1) {
+    const reservation = await tryReserveDisplay(n);
+    if (reservation === undefined) continue;
+    if (liveLockOwner(n) === null) return reservation;
+    await reservation.release();
+  }
+  throw new Error(
+    `No free X display found between :${start} and :${start + maxAttempts - 1}`,
+  );
+}
+
 function assertPositiveInteger(value: number, label: string): void {
   if (!Number.isInteger(value) || value <= 0) {
     throw new Error(`Invalid ${label} ${value}: expected a positive integer`);
@@ -115,12 +219,7 @@ export function allocateDisplay(opts: AllocateDisplayOptions = {}): string {
   const start = opts.start ?? DEFAULT_START_DISPLAY;
   const maxAttempts = opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
   for (let n = start; n < start + maxAttempts; n += 1) {
-    if (
-      !fs.existsSync(displayLockPath(n)) &&
-      !fs.existsSync(displaySocketPath(n))
-    ) {
-      return `:${n}`;
-    }
+    if (liveLockOwner(n) === null) return `:${n}`;
   }
   throw new Error(
     `No free X display found between :${start} and :${start + maxAttempts - 1}`,
@@ -128,8 +227,50 @@ export function allocateDisplay(opts: AllocateDisplayOptions = {}): string {
 }
 
 export function isDisplayAlive(display: string): boolean {
-  parseDisplayNumber(display);
-  return isDisplaySocketAlive(display);
+  if (!DISPLAY_PATTERN.test(display)) return false;
+  return liveDisplayOwner(Number.parseInt(display.slice(1), 10)) !== null;
+}
+
+export interface DisplayReleasePostcondition {
+  /** The recorded Xvfb identity no longer owns the display. */
+  released: boolean;
+  /** A new X server could claim this number despite any stale artifacts. */
+  available: boolean;
+  artifacts: "absent" | "stale" | "live-owned" | "live-unrelated";
+  ownerPid?: number;
+}
+
+/**
+ * Classify the display after stopping an owned Xvfb. Socket existence alone is
+ * not liveness: SIGKILL and test crashes can leave stale X11 paths behind.
+ * Pickforge never unlinks those paths. Xvfb reclaims stale paths with the X
+ * server lock protocol on the next start, while artifacts for a live unrelated
+ * server remain untouched.
+ */
+export function inspectDisplayRelease(
+  display: string,
+  owned: ProcessIdentity,
+): DisplayReleasePostcondition {
+  const displayNumber = parseDisplayNumber(display);
+  const socketExists = isDisplaySocketAlive(display);
+  const lockExists = fs.existsSync(displayLockPath(displayNumber));
+  const ownerPid = liveDisplayOwner(displayNumber);
+  if (ownerPid === null) {
+    const blockingPid = liveLockOwner(displayNumber);
+    return {
+      released: true,
+      available: blockingPid === null,
+      artifacts: socketExists || lockExists ? "stale" : "absent",
+      ...(blockingPid === null ? {} : { ownerPid: blockingPid }),
+    };
+  }
+  const ownedAlive = processIdentityMatches(owned) && ownerPid === owned.pid;
+  return {
+    released: !ownedAlive,
+    available: false,
+    artifacts: ownedAlive ? "live-owned" : "live-unrelated",
+    ownerPid,
+  };
 }
 
 export type XvfbStartFailureReason =
@@ -214,23 +355,27 @@ async function cleanupPartialStart(
   partial: XvfbPartialStart,
   daemon: OwnedDaemonHandle,
 ): Promise<XvfbPartialStart> {
-  let cleanupConfirmed = false;
+  let processGone = false;
   try {
     const result = await stopProcessGroupVerified({
       pid: partial.pid,
       startTicks: partial.startTimeTicks,
     });
-    cleanupConfirmed =
+    processGone =
       result.outcome === "terminated" || result.outcome === "already-dead";
   } catch {
-    cleanupConfirmed = false;
+    processGone = false;
   }
-  if (!cleanupConfirmed) {
-    cleanupConfirmed = await stopOwnedDaemon(daemon);
+  if (!processGone) {
+    processGone = await stopOwnedDaemon(daemon);
   } else {
     daemon.release();
   }
-  return { ...partial, cleanupConfirmed };
+  const displayReleased = inspectDisplayRelease(partial.display, {
+    pid: partial.pid,
+    startTicks: partial.startTimeTicks,
+  }).released;
+  return { ...partial, cleanupConfirmed: processGone && displayReleased };
 }
 
 function failureMessage(
@@ -364,12 +509,9 @@ type DisplayClaim = "ready" | "lost-race" | "pending";
  * race, or nobody yet.
  */
 function readDisplayClaim(displayNumber: number, ownPid: number): DisplayClaim {
-  if (!fs.existsSync(displaySocketPath(displayNumber))) return "pending";
-  const lockPid = readLockPid(displayNumber);
-  if (lockPid !== null && lockPid !== ownPid && isPidAlive(lockPid)) {
-    return "lost-race";
-  }
-  return lockPid === null || lockPid === ownPid ? "ready" : "pending";
+  const ownerPid = liveDisplayOwner(displayNumber);
+  if (ownerPid === ownPid) return "ready";
+  return ownerPid === null ? "pending" : "lost-race";
 }
 
 /** Poll until the display is claimed, Xvfb dies, or the deadline passes. */
@@ -441,20 +583,45 @@ async function attemptStartXvfb(
   };
 }
 
+async function startReservedXvfb(
+  reservation: DisplayReservation,
+  opts: StartXvfbOptions,
+): Promise<XvfbAttempt> {
+  try {
+    return await attemptStartXvfb(reservation.display, opts);
+  } finally {
+    await reservation.release();
+  }
+}
+
+async function startExplicitXvfb(
+  display: string,
+  opts: StartXvfbOptions,
+): Promise<XvfbHandle> {
+  const displayNumber = parseDisplayNumber(display);
+  const reservation = await tryReserveDisplay(displayNumber);
+  if (reservation === undefined || liveLockOwner(displayNumber) !== null) {
+    await reservation?.release();
+    throw new XvfbStartError(
+      "lost-race",
+      `Xvfb could not claim ${display}: another X server owns it, its lock names a live process, or a Pickforge session is starting`,
+    );
+  }
+  const attempt = await startReservedXvfb(reservation, opts);
+  if (attempt.outcome === "ready") return attempt.handle;
+  throw attempt.error;
+}
+
 export async function startXvfb(opts: StartXvfbOptions): Promise<XvfbHandle> {
   if (isAborted(opts.signal)) throw abortedBeforeSpawn();
-  if (opts.display !== undefined) {
-    const attempt = await attemptStartXvfb(opts.display, opts);
-    if (attempt.outcome === "ready") return attempt.handle;
-    throw attempt.error;
-  }
+  if (opts.display !== undefined) return startExplicitXvfb(opts.display, opts);
 
   let searchFrom = opts.displayStart ?? DEFAULT_START_DISPLAY;
   let lastError: XvfbStartError | undefined;
   for (let retry = 0; retry < ALLOCATION_RETRY_LIMIT; retry += 1) {
     if (isAborted(opts.signal)) throw abortedBeforeSpawn();
-    const display = allocateDisplay({ start: searchFrom });
-    const attempt = await attemptStartXvfb(display, opts);
+    const reservation = await reserveFreeDisplay(searchFrom);
+    const attempt = await startReservedXvfb(reservation, opts);
     if (attempt.outcome === "ready") return attempt.handle;
     lastError = attempt.error;
     if (
@@ -464,7 +631,7 @@ export async function startXvfb(opts: StartXvfbOptions): Promise<XvfbHandle> {
     ) {
       throw attempt.error;
     }
-    searchFrom = parseDisplayNumber(display) + 1;
+    searchFrom = parseDisplayNumber(reservation.display) + 1;
   }
   throw (
     lastError ??
