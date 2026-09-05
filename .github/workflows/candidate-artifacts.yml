@@ -1,0 +1,273 @@
+name: Candidate artifacts
+
+# Builds the exact artifacts a release would publish and then executes them.
+# Every job here is read-only: this workflow can build and prove a candidate,
+# but it has no permission to publish anything. The release workflow calls it
+# and gates publishing on its result.
+
+on:
+  workflow_call:
+    outputs:
+      version:
+        description: The candidate version these artifacts were built from.
+        value: ${{ jobs.npm-tarball.outputs.version }}
+
+permissions:
+  contents: read
+
+env:
+  # A clean-Flutter stand-in that holds a publish must not float. Pinned to the
+  # multi-arch index digest of `ghcr.io/cirruslabs/flutter:stable`, resolved on
+  # 2026-09-04; `docs/releases/CHECKLIST.md` step 5 uses the same digest.
+  # To move it: `docker buildx imagetools inspect ghcr.io/cirruslabs/flutter:stable`,
+  # update both places in the same commit, and re-run the smoke.
+  FLUTTER_IMAGE: ghcr.io/cirruslabs/flutter@sha256:46691e311715845de03a3ba4753a475476936805b29431b1f00f1816981033f8
+
+jobs:
+  npm-tarball:
+    name: Pack the candidate npm tarball
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pack.outputs.version }}
+      tarball: ${{ steps.pack.outputs.tarball }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.12
+
+      - run: bun install --frozen-lockfile
+
+      - run: bun run build
+
+      # `npm pack` produces the byte-for-byte tarball that `npm publish` would
+      # upload. The smokes install this file; the publish job uploads this file.
+      - name: Pack the candidate
+        id: pack
+        run: |
+          VERSION="$(node scripts/check-release-versions.mjs)"
+          mkdir -p candidate/npm
+          (cd packages/cli && npm pack --pack-destination "$GITHUB_WORKSPACE/candidate/npm")
+          TARBALL="pickforge-${VERSION}.tgz"
+          test -f "candidate/npm/${TARBALL}"
+          (cd candidate/npm && sha256sum "${TARBALL}" > "${TARBALL}.sha256")
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tarball=${TARBALL}" >> "$GITHUB_OUTPUT"
+          cat "candidate/npm/${TARBALL}.sha256" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: candidate-npm
+          path: candidate/
+          if-no-files-found: error
+          retention-days: 7
+
+  rust-binaries:
+    name: Build ${{ matrix.asset-target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rust-target: x86_64-unknown-linux-gnu
+            asset-target: linux-x86_64
+          - os: macos-14
+            rust-target: aarch64-apple-darwin
+            asset-target: macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.rust-target }}
+
+      - name: Build Rust binary
+        run: cargo build --release --locked --target "${{ matrix.rust-target }}" -p pickforge-cli
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          asset="pickforge-${{ matrix.asset-target }}"
+          cp "target/${{ matrix.rust-target }}/release/pickforge" "release-assets/$asset"
+          strip "release-assets/$asset"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # `strip` invalidates the ad-hoc signature the linker applied, and
+            # Apple silicon refuses to execute an arm64 Mach-O with a broken
+            # signature. Re-sign before hashing so the published bytes run.
+            codesign --force --sign - "release-assets/$asset"
+            codesign --verify --strict "release-assets/$asset"
+          fi
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd release-assets && sha256sum "$asset" > "$asset.sha256")
+          else
+            (cd release-assets && shasum -a 256 "$asset" > "$asset.sha256")
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pickforge-${{ matrix.asset-target }}
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 7
+
+  linux-smoke:
+    name: Clean Flutter container smoke
+    needs: [npm-tarball, rust-binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-npm
+          path: candidate
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: pickforge-linux-x86_64
+          path: candidate/assets
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      # The image is the clean Flutter environment and already ships curl, tar,
+      # xz and CA certificates; it has no Node. Mount the runner's Node instead
+      # of provisioning one inside the gate: nothing is installed, nothing is
+      # fetched from a third-party apt repository, and no remote setup script is
+      # piped into a root shell. Runner and image are both Ubuntu 24.04
+      # (glibc 2.39), so the same official linux-x64 build runs in both.
+      - name: Run the candidate smoke in a clean Flutter container
+        env:
+          VERSION: ${{ needs.npm-tarball.outputs.version }}
+          TARBALL: ${{ needs.npm-tarball.outputs.tarball }}
+        run: |
+          set -eu
+          mkdir -m 777 -p smoke-evidence
+          NODE_ROOT="$(dirname "$(dirname "$(command -v node)")")"
+          test -x "$NODE_ROOT/bin/npm"
+          docker run --rm --platform linux/amd64 \
+            -v "$PWD/scripts:/opt/pickforge/scripts:ro" \
+            -v "$PWD/candidate:/opt/pickforge/candidate:ro" \
+            -v "$PWD/smoke-evidence:/opt/pickforge/evidence" \
+            -v "$NODE_ROOT:/opt/node:ro" \
+            -e "PICKFORGE_SMOKE_VERSION=$VERSION" \
+            -e PICKFORGE_SMOKE_ASSET_DIR=/opt/pickforge/candidate/assets \
+            -e "PICKFORGE_SMOKE_TARBALL=/opt/pickforge/candidate/npm/$TARBALL" \
+            -e PICKFORGE_SMOKE_EVIDENCE=/opt/pickforge/evidence \
+            "$FLUTTER_IMAGE" bash -lc '
+              set -eu
+              export PATH="/opt/node/bin:$PATH"
+              case "$(node --version)" in
+                v24.*) ;;
+                *) echo "unexpected Node in the smoke container: $(node --version)" >&2; exit 1 ;;
+              esac
+              exec /opt/pickforge/scripts/candidate-smoke.sh
+            '
+
+      - name: Summarize
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -f smoke-evidence/summary.md ]; then
+            cat smoke-evidence/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'The Linux candidate smoke did not reach its summary.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: candidate-smoke-linux
+          path: smoke-evidence/
+          if-no-files-found: warn
+          retention-days: 14
+
+  macos-smoke:
+    name: Apple silicon candidate smoke
+    needs: [npm-tarball, rust-binaries]
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert this runner is Apple silicon
+        run: |
+          test "$(uname -m)" = arm64 || { echo "not an arm64 runner: $(uname -m)" >&2; exit 1; }
+          sysctl -n machdep.cpu.brand_string
+          sw_vers
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: pickforge-macos-arm64
+          path: candidate/assets
+
+      - name: Verify the exact candidate asset
+        run: |
+          cd candidate/assets
+          shasum -a 256 -c pickforge-macos-arm64.sha256
+          chmod +x pickforge-macos-arm64
+
+      - name: Enforce the macOS signing policy
+        run: |
+          mkdir -p smoke-evidence
+          bash scripts/smoke/macos-asset-policy.sh \
+            candidate/assets/pickforge-macos-arm64 smoke-evidence/macos-asset-policy.txt
+
+      - name: Execute the candidate asset
+        env:
+          VERSION: ${{ needs.npm-tarball.outputs.version }}
+        run: |
+          actual="$(./candidate/assets/pickforge-macos-arm64 --version)"
+          test "$actual" = "pickforge $VERSION" \
+            || { echo "asset reported \"$actual\", expected \"pickforge $VERSION\"" >&2; exit 1; }
+          echo "$actual" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+
+      - name: Warm the Flutter toolchain
+        run: |
+          flutter --version
+          dart --version
+          flutter precache --macos
+
+      - name: Run the candidate smoke against the downloaded asset
+        env:
+          PICKFORGE_SMOKE_VERSION: ${{ needs.npm-tarball.outputs.version }}
+          PICKFORGE_SMOKE_ASSET_DIR: ${{ github.workspace }}/candidate/assets
+          PICKFORGE_SMOKE_ASSET: pickforge-macos-arm64
+          PICKFORGE_SMOKE_EXPECT_ARCH: arm64
+          PICKFORGE_SMOKE_EVIDENCE: ${{ github.workspace }}/smoke-evidence
+        run: bash scripts/candidate-smoke.sh
+
+      - name: Summarize
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -f smoke-evidence/summary.md ]; then
+            cat smoke-evidence/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'The macOS candidate smoke did not reach its summary.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: candidate-smoke-macos
+          path: smoke-evidence/
+          if-no-files-found: warn
+          retention-days: 14

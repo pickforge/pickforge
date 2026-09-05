@@ -1,8 +1,8 @@
 # Pickforge 0.4.0-alpha.2
 
-Draft release notes for the second Pickforge prerelease. `0.4.0-alpha.1` is
-published; its notes live on the GitHub release. Use this file as the next
-release description, then reset it after that release is published.
+The second Pickforge prerelease: the Flutter integration becomes the normal
+`pickforge init` path, run storage is hardened, and releases are now gated on
+candidate artifacts that were actually executed.
 
 ## Flutter integration is the normal path
 
@@ -109,9 +109,43 @@ release description, then reset it after that release is published.
 - Nothing is migrated, replaced, or deleted when an unsafe entry is found; the
   offending path is named in the error.
 
-## Validation
+## Release gates
 
-- Updated during release preparation.
+- Publishing now depends on two smokes that run the exact candidate artifacts
+  this release ships. The npm tarball is packed once and published unchanged;
+  the Rust assets are built once and executed before they are attached.
+- The Linux gate installs only the candidate tarball and the candidate
+  `pickforge-linux-x86_64` asset into a clean Flutter container, then checks
+  all three command versions, Flutter project detection, `doctor`, `init`
+  dry-run isolation, `init` idempotency, a real Dart MCP handshake, evidence
+  recording, an unchanged project tree, and an untouched real home.
+- The macOS gate runs on Apple silicon, verifies the asset checksum and its
+  ad-hoc signature, executes the binary, and repeats the same Flutter workflow
+  with an isolated `HOME` and `PICKFORGE_HOME`.
+- The macOS asset is re-signed after `strip`. Stripping invalidates the ad-hoc
+  signature that Apple silicon requires, so earlier assets could fail to run.
+- Both gates verify a checksum before they use an artifact: the Rust asset, and
+  now the npm tarball where it is installed, re-checked after the install so
+  the bytes that were exercised are provably the packed candidate.
+- A manual dispatch of the release workflow is a dry run unless the exact
+  release tag is typed in its `confirm` input; only the publish job holds any
+  write or OIDC permission.
+- The release version must be semver, and a release tag must be `v<semver>`,
+  before either reaches a tarball name, a container environment, or a workflow
+  output.
+- The publish job refuses to touch a GitHub release that is no longer a draft,
+  so a re-run or a second dispatch cannot replace published assets. Sourcemaps
+  are uploaded from inside the verified tarball, unmodified, so what Sentry
+  holds describes the bytes npm received.
+- The Linux gate's container is pinned by image digest, and nothing is
+  installed into it: it already ships the tools the smoke needs, and its
+  Node.js is the runner's own, mounted read-only, instead of a remote setup
+  script piped into a root shell.
+- The pull-request candidate smoke now runs for every input that can change the
+  packed bytes, including the lockfile and every workspace package: the CLI
+  bundles them all.
+- macOS signing and notarization policy: `docs/releases/SIGNING.md`. Assets are
+  ad-hoc signed and not notarized, verified by checksum and npm provenance.
 
 ## Known limits
 
@@ -126,3 +160,10 @@ release description, then reset it after that release is published.
 - A swap performed *before* an operation opens its directory is not silently
   tolerated: the open fails verification and the operation reports the unsafe
   path. Only the redirection of an already verified write is prevented.
+- The macOS gate covers the Rust CLI only. The TypeScript lab stays Linux-only
+  and is not installed or exercised on macOS.
+- The clean container has no agent harness installed, so `doctor` reports that
+  one readiness gap by design. The gate requires every other check to pass and
+  requires `doctor` to exit non-zero rather than claim readiness.
+- Neither gate covers the Android lab or a real desktop session; those stay
+  covered by the device pass and the Android live tests.
