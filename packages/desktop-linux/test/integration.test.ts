@@ -332,7 +332,7 @@ describe("launchApp early exit", () => {
         command: "false",
         logDir: path.join(tmpRoot, "app-logs"),
       }),
-    ).rejects.toThrow(/exited immediately[\s\S]*check the log at/);
+    ).rejects.toThrow(/exited immediately[\s\S]*Log: /);
   });
 });
 
