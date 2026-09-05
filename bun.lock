@@ -16,21 +16,21 @@
     },
     "packages/agent-installers": {
       "name": "@pickforge/lab-agent-installers",
-      "version": "0.4.0-alpha.1",
+      "version": "0.4.0-alpha.2",
       "dependencies": {
         "@pickforge/lab-core": "*",
       },
     },
     "packages/android": {
       "name": "@pickforge/lab-android",
-      "version": "0.4.0-alpha.1",
+      "version": "0.4.0-alpha.2",
       "dependencies": {
         "@pickforge/lab-core": "*",
       },
     },
     "packages/browser": {
       "name": "@pickforge/lab-browser",
-      "version": "0.4.0-alpha.1",
+      "version": "0.4.0-alpha.2",
       "dependencies": {
         "@pickforge/lab-core": "*",
         "@pickforge/lab-desktop-linux": "*",
@@ -39,7 +39,7 @@
     },
     "packages/cli": {
       "name": "pickforge",
-      "version": "0.4.0-alpha.1",
+      "version": "0.4.0-alpha.2",
       "bin": {
         "pickforge-lab": "dist/pickforge-lab.js",
         "pickforge-mcp": "dist/pickforge-mcp.js",
@@ -64,18 +64,18 @@
     },
     "packages/core": {
       "name": "@pickforge/lab-core",
-      "version": "0.4.0-alpha.1",
+      "version": "0.4.0-alpha.2",
     },
     "packages/desktop-linux": {
       "name": "@pickforge/lab-desktop-linux",
-      "version": "0.4.0-alpha.1",
+      "version": "0.4.0-alpha.2",
       "dependencies": {
         "@pickforge/lab-core": "*",
       },
     },
     "packages/mcp-server": {
       "name": "@pickforge/lab-mcp-server",
-      "version": "0.4.0-alpha.1",
+      "version": "0.4.0-alpha.2",
       "dependencies": {
         "@modelcontextprotocol/server": "2.0.0",
         "@pickforge/lab-android": "*",

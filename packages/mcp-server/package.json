@@ -1,6 +1,6 @@
 {
   "name": "@pickforge/lab-mcp-server",
-  "version": "0.4.0-alpha.1",
+  "version": "0.4.0-alpha.2",
   "private": true,
   "description": "MCP server implementation for Pickforge",
   "type": "module",

@@ -1,6 +1,6 @@
 {
   "name": "@pickforge/lab-android",
-  "version": "0.4.0-alpha.1",
+  "version": "0.4.0-alpha.2",
   "private": true,
   "description": "AVD, emulator, ADB, UIAutomator, and logcat orchestration for Pickforge",
   "type": "module",

@@ -1,6 +1,6 @@
 {
   "name": "@pickforge/lab-agent-installers",
-  "version": "0.4.0-alpha.1",
+  "version": "0.4.0-alpha.2",
   "private": true,
   "description": "Codex, Claude Code, Cursor, Pi, and custom agent registration for Pickforge",
   "type": "module",

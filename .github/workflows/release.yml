@@ -203,13 +203,12 @@ jobs:
         run: npm install --global npm@11.5.1
 
       # Uploads the sourcemaps that are *inside* the verified tarball, and the
-      # JavaScript they belong to, unmodified. The old job injected debug IDs
-      # into a copy of `dist` after the smokes had already installed the packed
-      # tarball, so the maps Sentry held described bytes npm never received.
-      # Nothing may rewrite the candidate: `telemetry.ts` reports
-      # `release: pickforge@<version>`, which is the same release name used
-      # here, so Sentry resolves these maps by release without a debug ID.
-      - name: Upload the published tarball's sourcemaps to Sentry
+      # JavaScript they belong to, unmodified. This proves byte identity only.
+      # Resolution of absolute installed frame paths without debug IDs has not
+      # been demonstrated, so do not treat this best-effort upload as proof of
+      # resolved production stacks. The follow-up is recorded in the release
+      # notes alongside #98; it must inject before packing, never mutate this artifact.
+      - name: Upload the candidate tarball's sourcemaps to Sentry
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: pickforge

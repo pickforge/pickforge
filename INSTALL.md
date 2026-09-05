@@ -48,7 +48,7 @@ the Rust download at a directory containing `pickforge-linux-x86_64` or
 `pickforge-macos-arm64` plus its same-named `.sha256` file:
 
 ```sh
-PICKFORGE_INSTALL_FROM_TARBALL=/absolute/path/pickforge-0.4.0-alpha.1.tgz \
+PICKFORGE_INSTALL_FROM_TARBALL=/absolute/path/pickforge-0.4.0-alpha.2.tgz \
 PICKFORGE_INSTALL_RELEASE_BASE_URL=file:///absolute/path/release-assets \
 PICKFORGE_INSTALL_RUNTIME=npm \
 sh scripts/install.sh

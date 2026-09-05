@@ -152,7 +152,7 @@ this file to `gh release create --notes-file`.
 
 ```sh
 $EDITOR docs/releases/UNRELEASED.md
-grep -n -i -E 'draft|to be updated|not executed|TODO' docs/releases/UNRELEASED.md   # must print nothing
+grep -n -i -E 'to be updated|not executed|TODO|draft(ing)? (notes|instructions|placeholder|copy)' docs/releases/UNRELEASED.md   # must print nothing
 git commit -am "docs(release): notes for $VERSION"
 git push origin main
 ```
