@@ -737,9 +737,16 @@ mod tests {
 
     #[test]
     fn the_manual_action_is_quoted_and_never_clobbers() {
-        let action = manual_action(Path::new("/tmp/a b/it's here"), "is not owned by Pickforge");
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("a b").join("it's here");
+        let quoted = |value: &Path| format!("'{}'", value.to_str().unwrap().replace('\'', r"'\''"));
+        let action = manual_action(&path, "is not owned by Pickforge");
         assert!(
-            action.contains(r"`mv -n -- '/tmp/a b/it'\''s here' '/tmp/a b/it'\''s here.bak'`"),
+            action.contains(&format!(
+                "`mv -n -- {} {}`",
+                quoted(&path),
+                quoted(&path.with_file_name("it's here.bak"))
+            )),
             "{action}"
         );
     }

@@ -309,6 +309,7 @@ fn claiming_a_newer_layout_fails_closed() {
 /// Plant `layout.json` as a symlink pointing at bytes that are a valid marker.
 /// Following it would let an attacker certify a directory — and, before this
 /// PR, have the CLI write through it.
+#[cfg(unix)]
 #[test]
 fn a_symlinked_marker_is_refused_even_with_valid_bytes() {
     let (_temp, project, env) = fixture();
@@ -365,6 +366,7 @@ fn a_marker_that_is_not_a_regular_file_is_refused() {
 /// A crashed write — or a planted file with a name a previous build would
 /// have reused after PID reuse — is inert: the claim neither writes through it
 /// nor removes it.
+#[cfg(unix)]
 #[test]
 fn a_planted_transient_is_neither_adopted_nor_removed() {
     let temp = TempDir::new().unwrap();
@@ -452,11 +454,6 @@ fn a_claimed_directory_is_not_re_policed() {
 #[cfg(unix)]
 fn symlink(target: &Path, link: &Path) {
     std::os::unix::fs::symlink(target, link).unwrap();
-}
-
-#[cfg(windows)]
-fn symlink(target: &Path, link: &Path) {
-    std::os::windows::fs::symlink_file(target, link).unwrap();
 }
 
 // --- failure after a claim -----------------------------------------------
