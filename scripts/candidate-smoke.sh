@@ -24,8 +24,10 @@ SMOKE_HELPERS="${SCRIPT_DIR}/smoke"
 MAX_LOG_BYTES=262144
 # Planted in the evidence document to prove the recorder redacts secrets.
 SMOKE_SECRET="ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII"
-# Pickforge and harness state that must never appear in the caller's real home.
-REAL_HOME_PATHS=".pickforge .claude .claude.json .codex .pi .agents .config/mcp"
+# Exact Pickforge and harness targets that must never change in the caller's
+# real home. Keep this bounded: populated harness and state roots can contain
+# hundreds of thousands of unrelated files.
+REAL_HOME_CONFIG_PATHS=".claude.json .codex/config.toml .config/mcp/mcp.json .claude/skills/pickforge-flutter/SKILL.md .agents/skills/pickforge-flutter/SKILL.md"
 
 log() { printf '\n=== %s\n' "$*"; }
 fail() { printf 'candidate smoke failed: %s\n' "$*" >&2; exit 1; }
@@ -300,20 +302,44 @@ assert_clean_project() {
   cp "${WORK}/project-after.txt" "${EVIDENCE}/project-tree.txt"
 }
 
-# Records the Pickforge and harness paths of the caller's real home so that any
-# write to them, including one to a path that did not exist before, is visible.
+# The only real-home state directories either binary could derive for this
+# disposable project. The project path is unique, so these must start absent;
+# that lets the smoke detect a leak without hashing every existing run in the
+# user's state roots.
+set_real_home_paths() {
+  project_id="$(node -e '
+    const crypto = require("node:crypto");
+    const path = require("node:path");
+    const project = path.resolve(process.argv[1]);
+    const slug = (path.basename(project).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "project").slice(0, 40);
+    const hash = crypto.createHash("sha256").update(project).digest("hex").slice(0, 16);
+    process.stdout.write(slug + "-" + hash);
+  ' "${PROJECT}")"
+  REAL_HOME_PROJECT_PATHS=".pickforge/pickforge/projects/${project_id} .pickforge/lab/projects/${project_id} .picklab/projects/${project_id}"
+}
+
+assert_real_home_project_paths_absent() {
+  for relative in ${REAL_HOME_PROJECT_PATHS}; do
+    [ ! -e "${REAL_HOME}/${relative}" ] && [ ! -L "${REAL_HOME}/${relative}" ] \
+      || fail "real-home project path already exists; use a fresh smoke work directory: ${REAL_HOME}/${relative}"
+  done
+}
+
+# Records only exact config, skill, and project-state targets. This is bounded
+# regardless of how much unrelated state exists in the caller's home.
 capture_real_home() {
   target="$1"
   : > "${target}"
-  for relative in ${REAL_HOME_PATHS}; do
+  for relative in ${REAL_HOME_CONFIG_PATHS} ${REAL_HOME_PROJECT_PATHS}; do
     path="${REAL_HOME}/${relative}"
     if [ -L "${path}" ]; then
       printf '%s symlink %s\n' "${relative}" "$(readlink "${path}")" >> "${target}"
+    elif [ -f "${path}" ]; then
+      printf '%s file %s\n' "${relative}" "$(sha256_file "${path}")" >> "${target}"
     elif [ -d "${path}" ]; then
       printf '%s dir\n' "${relative}" >> "${target}"
-      snapshot "${path}" | sed "s|^|${relative}/|" >> "${target}"
     elif [ -e "${path}" ]; then
-      printf '%s file %s\n' "${relative}" "$(sha256_file "${path}")" >> "${target}"
+      printf '%s other\n' "${relative}" >> "${target}"
     else
       printf '%s absent\n' "${relative}" >> "${target}"
     fi
@@ -361,6 +387,8 @@ main() {
   HARNESS_ARGS=(--harness claude-code --harness codex --harness pi)
   case "$(uname -s)" in Darwin) PLATFORM=macos ;; *) PLATFORM=linux ;; esac
   mkdir -p "${EVIDENCE}" "${SMOKE_HOME}" "${PREFIX}/bin"
+  set_real_home_paths
+  assert_real_home_project_paths_absent
 
   record_facts
   verify_asset
@@ -385,4 +413,6 @@ main() {
   summarize
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

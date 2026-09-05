@@ -1,6 +1,6 @@
 {
   "name": "pickforge",
-  "version": "0.4.0-alpha.1",
+  "version": "0.4.0-alpha.2",
   "description": "Native app and Android emulator automation for AI coding agents",
   "type": "module",
   "license": "MIT",

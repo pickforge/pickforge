@@ -1,6 +1,6 @@
 {
   "name": "@pickforge/lab-core",
-  "version": "0.4.0-alpha.1",
+  "version": "0.4.0-alpha.2",
   "private": true,
   "description": "Config, sessions, artifacts, manifests, and process supervision for Pickforge",
   "type": "module",

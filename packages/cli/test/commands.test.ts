@@ -2294,7 +2294,7 @@ describe("pickforge-lab mcp serve", () => {
     const init = responses.get(1);
     expect(init?.result?.serverInfo).toMatchObject({
       name: "pickforge-lab",
-      version: "0.4.0-alpha.1",
+      version: "0.4.0-alpha.2",
     });
     const tools = responses.get(2)?.result?.tools as Array<{ name: string }>;
     const names = tools.map((tool) => tool.name);
