@@ -20,6 +20,13 @@ file. It supports Linux x86_64 and Apple silicon macOS. On another target it
 leaves the TypeScript commands installed, clearly reports that they still
 work, and refuses to install an unsupported Rust binary.
 
+On macOS the Rust binary is ad-hoc signed and not notarized. Installed through
+this script it runs normally, because a `curl`/`wget` download carries no
+quarantine attribute. If the user downloads the asset with a browser instead,
+Gatekeeper blocks the first run: verify the `.sha256` file, then clear the
+attribute with `xattr -d com.apple.quarantine ./pickforge-macos-arm64`. The
+policy is in `docs/releases/SIGNING.md`.
+
 The npm-only alternatives, `npm install -g pickforge@next` and
 `bun add -g pickforge@next`, do not install the Rust binary. Never install with
 sudo.

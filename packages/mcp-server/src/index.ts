@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@modelcontextprotocol/server";
 import { resolveContext, type CreateMcpServerOptions } from "./context.js";
 import { registerPrompts } from "./prompts.js";
 import { registerResources } from "./resources.js";
@@ -21,7 +21,10 @@ export function createMcpServer(
   opts: CreateMcpServerOptions = {},
 ): McpServer {
   const ctx = resolveContext(opts);
-  const server = new McpServer({ name: "pickforge-lab", version });
+  const server = new McpServer(
+    { name: "pickforge-lab", version },
+    { inputRequired: { roundTimeoutMs: 60_000 } },
+  );
   registerSessionTools(server, ctx);
   registerDesktopTools(server, ctx);
   registerAndroidTools(server, ctx);

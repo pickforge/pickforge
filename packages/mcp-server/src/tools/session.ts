@@ -1,9 +1,7 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type {
-  ServerNotification,
-  ServerRequest,
-} from "@modelcontextprotocol/sdk/types.js";
+  McpServer,
+  ServerContext as SdkServerContext,
+} from "@modelcontextprotocol/server";
 import { z } from "zod";
 import {
   createAndroidSession,
@@ -48,17 +46,17 @@ export interface SessionLifecycle extends LocalSessionLifecycle {
 }
 
 export function progressReporter(
-  extra: RequestHandlerExtra<ServerRequest, ServerNotification>,
+  context: SdkServerContext,
 ): ((message: string) => void) | undefined {
-  const progressToken = extra._meta?.progressToken;
+  const progressToken = context.mcpReq._meta?.progressToken;
   if (progressToken === undefined) {
     return undefined;
   }
   let progress = 0;
   return (message: string) => {
     progress += 1;
-    void extra
-      .sendNotification({
+    void context.mcpReq
+      .notify({
         method: "notifications/progress",
         params: { progressToken, progress, message },
       })
@@ -266,7 +264,7 @@ function registerSessionCreateTool(
       runTool(async () => {
         const sessions = await createSessions(ctx, args, {
           onProgress: progressReporter(extra),
-          signal: extra.signal,
+          signal: extra.mcpReq.signal,
         });
         await recordCreatedSessionsEvidence(ctx, sessions, "session_create");
         return { data: { sessions } };

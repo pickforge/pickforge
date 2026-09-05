@@ -1,9 +1,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { createMcpServer } from "../src/index.js";
 
 export const FAKE_SERIAL = "emulator-5554";

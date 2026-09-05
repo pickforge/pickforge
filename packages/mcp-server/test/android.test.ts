@@ -432,7 +432,6 @@ describe("android_start (fake sdk)", () => {
       const started = parseToolJson(
         await startLab.client.callTool(
           { name: "android_start", arguments: {} },
-          undefined,
           {
             timeout: 9_000,
             resetTimeoutOnProgress: true,

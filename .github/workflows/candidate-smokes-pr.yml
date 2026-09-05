@@ -1,0 +1,38 @@
+name: Candidate smokes
+
+# Runs the release candidate smokes on pull requests that touch the release
+# path, so the gate is exercised before it has to hold a real release. The
+# pull_request token is read-only and this workflow has no publish step.
+#
+# The filter must cover everything that can change the packed bytes. `tsup` sets
+# `noExternal: [/^@pickforge\//]`, so every workspace package is bundled into the
+# CLI: a core-only change ships in the tarball and has to run this gate. So do
+# the lockfile, the root manifest, and the TypeScript build configuration.
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/candidate-artifacts.yml"
+      - ".github/workflows/candidate-smokes-pr.yml"
+      - ".github/workflows/release.yml"
+      - "crates/**"
+      - "packages/**"
+      - "scripts/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "bun.lock"
+      - "package.json"
+      - "tsconfig.base.json"
+      - "tsconfig.json"
+
+concurrency:
+  group: candidate-smokes-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  candidates:
+    uses: ./.github/workflows/candidate-artifacts.yml
+    permissions:
+      contents: read
