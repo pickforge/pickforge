@@ -28,9 +28,11 @@ import {
   scanAvdHome,
 } from "./avd.js";
 import {
+  AVD_SHARING_POLICY,
   classifyEmulatorLog,
   describeDeviceState,
   detectBootMode,
+  DEVICE_STATE_UNKNOWN,
   deviceStateHint,
   EmulatorStartError,
   isEmulatorStartError,
@@ -243,7 +245,7 @@ async function queryDeviceState(opts: WaitForBootOptions): Promise<string> {
     timeoutMs: DEVICE_STATE_TIMEOUT_MS,
   }).catch(() => null);
   if (result === null || !result.ok) {
-    return "unknown (adb devices failed)";
+    return DEVICE_STATE_UNKNOWN;
   }
   return describeDeviceState(parseAdbDevices(result.stdout), opts.serial);
 }
@@ -251,27 +253,43 @@ async function queryDeviceState(opts: WaitForBootOptions): Promise<string> {
 async function bootTimedOut(
   opts: WaitForBootOptions,
   timeoutMs: number,
+  probeError?: string,
 ): Promise<EmulatorStartError> {
   const deviceState = await queryDeviceState(opts);
+  let hint = deviceStateHint(deviceState);
+  if (probeError !== undefined) {
+    const detail = `the last sys.boot_completed probe failed to run: ${probeError}`;
+    hint = hint === undefined ? detail : `${hint}; ${detail}`;
+  }
   return new EmulatorStartError(
     `Emulator ${opts.serial} did not finish booting within ${timeoutMs}ms`,
-    bootDiagnostics(opts, "boot-timeout", {
-      deviceState,
-      hint: deviceStateHint(deviceState),
-    }),
+    bootDiagnostics(opts, "boot-timeout", { deviceState, hint }),
   );
 }
 
+/**
+ * One `sys.boot_completed` probe. A probe that cannot even run (adb missing
+ * or not executable, spawn failure) counts as "not booted yet" and is
+ * remembered in `probe`, so the caller still ends in a typed
+ * `EmulatorStartError` with the log path and tail instead of a bare spawn
+ * error that loses the diagnosis.
+ */
 async function bootCompleted(
   opts: WaitForBootOptions,
   remainingMs: number,
+  probe: { lastError?: string },
 ): Promise<boolean> {
-  const result = await runCommand(
-    opts.adbPath,
-    ["-s", opts.serial, "shell", "getprop", "sys.boot_completed"],
-    { env: opts.env, timeoutMs: Math.min(GETPROP_TIMEOUT_MS, remainingMs) },
-  );
-  return result.ok && result.stdout.trim() === "1";
+  try {
+    const result = await runCommand(
+      opts.adbPath,
+      ["-s", opts.serial, "shell", "getprop", "sys.boot_completed"],
+      { env: opts.env, timeoutMs: Math.min(GETPROP_TIMEOUT_MS, remainingMs) },
+    );
+    return result.ok && result.stdout.trim() === "1";
+  } catch (error) {
+    probe.lastError = error instanceof Error ? error.message : String(error);
+    return false;
+  }
 }
 
 export async function waitForBoot(opts: WaitForBootOptions): Promise<void> {
@@ -280,6 +298,7 @@ export async function waitForBoot(opts: WaitForBootOptions): Promise<void> {
   const pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_BOOT_POLL_INTERVAL_MS;
   const startedAt = Date.now();
   const deadline = startedAt + timeoutMs;
+  const probe: { lastError?: string } = {};
   for (;;) {
     assertStillStarting(opts);
     opts.onProgress?.(
@@ -288,14 +307,14 @@ export async function waitForBoot(opts: WaitForBootOptions): Promise<void> {
     );
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) {
-      throw await bootTimedOut(opts, timeoutMs);
+      throw await bootTimedOut(opts, timeoutMs, probe.lastError);
     }
-    if (await bootCompleted(opts, remainingMs)) {
+    if (await bootCompleted(opts, remainingMs, probe)) {
       assertStillStarting(opts);
       return;
     }
     if (Date.now() + pollIntervalMs > deadline) {
-      throw await bootTimedOut(opts, timeoutMs);
+      throw await bootTimedOut(opts, timeoutMs, probe.lastError);
     }
     await sleep(pollIntervalMs);
   }
@@ -472,9 +491,10 @@ function assertAvdStartable(
       },
     );
   }
-  // The lock is held only by a writable instance, and the emulator refuses
-  // every further instance (writable or read-only) while one runs. Read-only
-  // instances hold no lock and can share the AVD among themselves.
+  // The lock is held only by a writable instance; read-only instances hold no
+  // lock. Pickforge's policy (AVD_SHARING_POLICY) refuses any start, writable
+  // or read-only, while a writable instance holds the AVD, whatever the
+  // emulator itself would admit.
   const owner = readAvdLockOwner(avdName, env);
   if (owner !== null && isPidAlive(owner) && isEmulatorProcess(owner)) {
     throw new EmulatorStartError(
@@ -484,8 +504,8 @@ function assertAvdStartable(
         avdName,
         logTail: [],
         hint:
-          `lock ${avdLockPath(avdName, env)}; the emulator only shares an AVD ` +
-          "when every instance runs read-only, so stop that emulator" +
+          `lock ${avdLockPath(avdName, env)}; ${AVD_SHARING_POLICY}, ` +
+          "so stop that emulator" +
           (readOnly ? "" : " or start every session on this AVD with --read-only") +
           ", or use a different AVD",
       },

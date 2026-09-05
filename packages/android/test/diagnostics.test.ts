@@ -3,9 +3,12 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
+  AVD_SHARING_POLICY,
+  avdHomeDir,
   classifyEmulatorLog,
   describeDeviceState,
   detectBootMode,
+  DEVICE_STATE_UNKNOWN,
   deviceStateHint,
   EmulatorStartError,
   isEmulatorStartError,
@@ -42,6 +45,31 @@ describe("classifyEmulatorLog", () => {
     expect(classifyEmulatorLog([]).kind).toBe("process-exit");
     expect(classifyEmulatorLog([]).hint).toBeUndefined();
     expect(classifyEmulatorLog(["Unknown AVD name [x]"]).hint).toContain("ANDROID_AVD_HOME");
+  });
+
+  it("names the directories the emulator really searches, matching avdHomeDir", () => {
+    const hint = classifyEmulatorLog(["ERROR        | Unknown AVD name [x]"]).hint ?? "";
+    // Every directory the hint names must be the one avdHomeDir resolves for
+    // that variable, so a user following the hint puts the AVD where
+    // Pickforge (and the emulator) will look.
+    expect(hint).toContain("$ANDROID_SDK_HOME/.android/avd");
+    expect(hint).not.toMatch(/\$ANDROID_SDK_HOME\/avd\b/);
+    expect(hint).toContain("$ANDROID_PREFS_ROOT/.android/avd");
+    expect(hint).toContain("$ANDROID_USER_HOME/avd");
+    expect(hint).toContain("$ANDROID_EMULATOR_HOME/avd");
+    expect(avdHomeDir({ ANDROID_SDK_HOME: "/p" })).toBe("/p/.android/avd");
+    expect(avdHomeDir({ ANDROID_PREFS_ROOT: "/p" })).toBe("/p/.android/avd");
+    expect(avdHomeDir({ ANDROID_USER_HOME: "/p" })).toBe("/p/avd");
+    expect(avdHomeDir({ ANDROID_EMULATOR_HOME: "/p" })).toBe("/p/avd");
+  });
+
+  it("states AVD sharing as Pickforge's own policy, not as emulator behaviour", () => {
+    const hint =
+      classifyEmulatorLog(["ERROR        | Another emulator instance is running"]).hint ?? "";
+    expect(hint).toContain(AVD_SHARING_POLICY);
+    expect(AVD_SHARING_POLICY).toMatch(/^Pickforge shares an AVD only among read-only sessions/);
+    expect(hint).not.toMatch(/the emulator only shares/);
+    expect(hint).toContain("--read-only");
   });
 
   it("does not mistake the emulator's normal snapshot chatter for a failure", () => {
@@ -111,6 +139,7 @@ describe("device state helpers", () => {
     expect(describeDeviceState(devices, "emulator-5558")).toBe("missing");
     expect(deviceStateHint("unauthorized")).toContain("adbkey");
     expect(deviceStateHint("missing")).toContain("never listed");
+    expect(deviceStateHint(DEVICE_STATE_UNKNOWN)).toContain("adb itself could not be run");
     expect(deviceStateHint("weird")).toBeUndefined();
   });
 });

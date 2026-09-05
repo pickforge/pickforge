@@ -88,10 +88,12 @@ const AVD_HOME_SOURCES: ReadonlyArray<{ key: string; suffix: string[] }> = [
  * The single AVD directory Pickforge uses for both `avdmanager` and the
  * emulator. The two tools disagree on their defaults: `avdmanager` honours
  * `XDG_CONFIG_HOME` (writing to `$XDG_CONFIG_HOME/.android/avd`) while the
- * emulator only searches `$ANDROID_AVD_HOME`, `$ANDROID_SDK_HOME/avd` and
- * `$HOME/.android/avd`. Pickforge resolves one directory here and passes it
- * as `ANDROID_AVD_HOME` to every tool so an AVD created by one is found by
- * the other.
+ * emulator resolves, in order, `$ANDROID_AVD_HOME`, `$ANDROID_USER_HOME/avd`,
+ * `$ANDROID_EMULATOR_HOME/avd`, `$ANDROID_PREFS_ROOT/.android/avd`,
+ * `$ANDROID_SDK_HOME/.android/avd` and finally `$HOME/.android/avd` (the
+ * `AVD_HOME_SOURCES` order above). Pickforge resolves one directory here and
+ * passes it as `ANDROID_AVD_HOME` to every tool so an AVD created by one is
+ * found by the other.
  */
 export function avdHomeDir(env: EnvLike = process.env): string {
   for (const source of AVD_HOME_SOURCES) {

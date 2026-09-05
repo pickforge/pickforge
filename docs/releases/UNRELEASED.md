@@ -114,8 +114,10 @@ release description, then reset it after that release is published.
 - The live Android integration test could fail in two seconds with "exited
   before finishing boot" and then delete the emulator log it pointed at (#93).
   Root cause: `avdmanager` honours `XDG_CONFIG_HOME` and wrote the freshly
-  created AVD to `~/.config/.android/avd`, while the emulator only searches
-  `$ANDROID_AVD_HOME`, `$ANDROID_SDK_HOME/avd` and `$HOME/.android/avd`.
+  created AVD to `~/.config/.android/avd`, while the emulator resolves
+  `$ANDROID_AVD_HOME`, then `$ANDROID_USER_HOME/avd`,
+  `$ANDROID_EMULATOR_HOME/avd`, `$ANDROID_PREFS_ROOT/.android/avd`,
+  `$ANDROID_SDK_HOME/.android/avd`, and finally `$HOME/.android/avd`.
   Pickforge now resolves one AVD directory and passes it as `ANDROID_AVD_HOME`
   to `avdmanager`, `emulator -list-avds`, and the emulator, verifies the ini
   landed there after creation, and fails before spawning when the requested AVD
@@ -136,9 +138,17 @@ release description, then reset it after that release is published.
 - New `--cold-boot` (`-no-snapshot-load`) and `--read-only` (`-read-only`)
   options on `session create` and `android start`, and `coldBoot`/`readOnly` on
   the `session_create` and `android_start` MCP tools. Sessions report
-  `bootMode` (`warm`/`cold`/`unknown`) and `readOnly`. The emulator shares an
-  AVD only among read-only instances; a running writable instance is reported
-  as `avd-in-use` before spawning, for read-only requests too.
+  `bootMode` (`warm`/`cold`/`unknown`) and `readOnly`. Sharing one AVD is
+  governed by a Pickforge policy, not by what the emulator happens to admit:
+  Pickforge shares an AVD only among read-only sessions and refuses to start
+  any session, writable or read-only, while a writable emulator holds the
+  AVD's lock (`avd-in-use`, reported before spawning). A writable instance
+  keeps rewriting the disk overlays and the quickboot snapshot that a
+  read-only instance maps, so the refusal fails closed on purpose.
+- A `sys.boot_completed` probe that cannot run at all (adb missing or not
+  executable mid-boot) no longer surfaces as a bare spawn error: the wait
+  keeps polling and ends in the typed `boot-timeout` diagnosis with the adb
+  state, the emulator log path, the log tail, and the probe's own error.
 - `android launch-app` / `android_launch_app` no longer fire a `monkey` event
   and report success regardless. They resolve the package's launcher activity
   (`cmd package resolve-activity`), start it with `am start -W`, and confirm a

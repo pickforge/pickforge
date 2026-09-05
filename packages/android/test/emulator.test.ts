@@ -6,13 +6,16 @@ import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { runCommand, type EnvLike } from "@pickforge/lab-core";
 import {
+  AVD_SHARING_POLICY,
   avdLockPath,
   consolePortLockPath,
+  DEVICE_STATE_UNKNOWN,
   EmulatorStartError,
   releaseConsolePort,
   startEmulator,
   stopEmulator,
   tryReserveConsolePort,
+  waitForBoot,
   type EmulatorHandle,
 } from "../src/index.js";
 
@@ -427,9 +430,12 @@ describe("AVD pre-flight checks", () => {
       expect(error.kind).toBe("avd-in-use");
       expect(error.message).toContain(`writable emulator pid ${holder.pid}`);
       expect(error.message).toContain("--read-only");
+      // The refusal is stated as Pickforge's policy, not as an emulator rule.
+      expect(error.message).toContain(AVD_SHARING_POLICY);
+      expect(error.message).not.toMatch(/the emulator only shares/);
       expect(fs.existsSync(marker)).toBe(false);
 
-      // The emulator refuses a read-only instance next to a writable one too.
+      // Pickforge refuses a read-only instance next to a writable one too.
       const readOnlyError = await startFailure(
         startEmulator({
           avdName: "pickforge-avd",
@@ -441,7 +447,8 @@ describe("AVD pre-flight checks", () => {
         }),
       );
       expect(readOnlyError.kind).toBe("avd-in-use");
-      expect(readOnlyError.message).not.toContain("--read-only");
+      expect(readOnlyError.message).toContain(AVD_SHARING_POLICY);
+      expect(readOnlyError.message).not.toContain("with --read-only");
       expect(fs.existsSync(marker)).toBe(false);
     } finally {
       fs.rmSync(lockPath, { force: true });
@@ -585,6 +592,68 @@ describe("start failure diagnostics", () => {
     );
     expect(error.diagnostics.deviceState).toBe("missing");
     expect(error.message).toContain("adb never listed the device");
+  });
+
+  it("keeps the typed diagnosis, log path, and tail when the adb probe itself cannot run", async () => {
+    // adb vanishes (or stops being executable) while the emulator is booting:
+    // the boot probe must not surface as a bare spawn error that loses the
+    // kind, the log path, and the redacted tail.
+    const logPath = path.join(tmpRoot, "probe-cannot-run.log");
+    fs.writeFileSync(
+      logPath,
+      "INFO         | Android emulator version 36.5.10.0\nINFO         | token=sk-live-abcdefghijklmnopqrstuvwxyz0123456789\n",
+    );
+    let error: unknown;
+    try {
+      await waitForBoot({
+        serial: "emulator-5590",
+        adbPath: path.join(tmpRoot, "no-such-adb"),
+        logPath,
+        avdName: "pickforge-avd",
+        timeoutMs: 100,
+        pollIntervalMs: 10,
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(EmulatorStartError);
+    const typed = error as EmulatorStartError;
+    expect(typed.kind).toBe("boot-timeout");
+    expect(typed.diagnostics.logPath).toBe(logPath);
+    expect(typed.diagnostics.logTail).toEqual([
+      "INFO         | Android emulator version 36.5.10.0",
+      "INFO         | token=[REDACTED]",
+    ]);
+    expect(typed.diagnostics.deviceState).toBe(DEVICE_STATE_UNKNOWN);
+    expect(typed.message).toContain("[boot-timeout]");
+    expect(typed.message).toContain("adb itself could not be run");
+    expect(typed.message).toMatch(/probe failed to run: .*ENOENT/);
+    expect(typed.message).toContain(`check the log at ${logPath}`);
+    expect(typed.message).not.toContain("abcdefghijklmnopqrstuvwxyz");
+
+    // The same failure through startEmulator lands in the same typed error.
+    const sdk = makeFakeSdk(BOOTING_ADB_SCRIPT);
+    fs.writeFileSync(path.join(sdk, "platform-tools", "adb"), "#!/nonexistent/interpreter\n", {
+      mode: 0o755,
+    });
+    const registryEnv = makeRegistryEnv();
+    const started = await startFailure(
+      startEmulator({
+        avdName: "pickforge-avd",
+        sdk,
+        port: 5590,
+        logDir: path.join(tmpRoot, "emu-probe-cannot-run"),
+        env: toolEnv,
+        registryEnv,
+        bootTimeoutMs: 200,
+        bootPollIntervalMs: 20,
+      }),
+    );
+    expect(started.kind).toBe("boot-timeout");
+    expect(started.diagnostics.deviceState).toBe(DEVICE_STATE_UNKNOWN);
+    expect(started.diagnostics.logPath).toMatch(/emulator\.log$/);
+    expect(started.message).toMatch(/probe failed to run: .*ENOENT/);
+    expect(fs.existsSync(consolePortLockPath(5590, registryEnv))).toBe(false);
   });
 
   it("reports the boot mode from the emulator log and honours cold boot", async () => {

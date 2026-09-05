@@ -45,6 +45,23 @@ export interface EmulatorStartDiagnostics {
 export const LOG_TAIL_LINES = 25;
 const LOG_TAIL_MAX_BYTES = 64 * 1024;
 
+/**
+ * Pickforge's own rule for sharing one AVD, stated in every message that
+ * enforces it. The emulator refuses a second *writable* instance of an AVD and
+ * lets `-read-only` instances share it; whether it also admits a read-only
+ * instance next to a running writable one is not something Pickforge relies
+ * on. A writable instance keeps mutating the qcow2 overlays and the quickboot
+ * snapshot that a read-only reader maps, so Pickforge fails closed and admits
+ * sharing only when every instance on the AVD is read-only.
+ */
+export const AVD_SHARING_POLICY =
+  "Pickforge shares an AVD only among read-only sessions and refuses to " +
+  "start any session while a writable emulator holds it (a writable " +
+  "instance rewrites the disk overlays and snapshot a read-only one maps)";
+
+/** adb device state reported when the `adb devices` probe itself could not run. */
+export const DEVICE_STATE_UNKNOWN = "unknown (adb devices failed)";
+
 interface LogSignature {
   kind: EmulatorFailureKind;
   pattern: RegExp;
@@ -56,8 +73,10 @@ const LOG_SIGNATURES: readonly LogSignature[] = [
     kind: "avd-missing",
     pattern: /Unknown AVD name/i,
     hint:
-      "the emulator only searches $ANDROID_AVD_HOME, $ANDROID_SDK_HOME/avd " +
-      "and $HOME/.android/avd; set ANDROID_AVD_HOME to the directory that " +
+      "the emulator looks for AVDs in $ANDROID_AVD_HOME, else " +
+      "$ANDROID_USER_HOME/avd, $ANDROID_EMULATOR_HOME/avd, " +
+      "$ANDROID_PREFS_ROOT/.android/avd, $ANDROID_SDK_HOME/.android/avd, " +
+      "then $HOME/.android/avd; set ANDROID_AVD_HOME to the directory that " +
       "holds the AVD",
   },
   {
@@ -65,9 +84,10 @@ const LOG_SIGNATURES: readonly LogSignature[] = [
     pattern:
       /multiple emulators with the same AVD|Another emulator instance is running/i,
     hint:
-      "another emulator is running this AVD; the emulator only shares an AVD " +
-      "when every instance runs read-only (--read-only), so stop the writable " +
-      "instance or start all sessions on this AVD read-only, or use a different AVD",
+      "another emulator is running this AVD; " +
+      AVD_SHARING_POLICY +
+      ", so stop that instance, start every session on this AVD with " +
+      "--read-only, or use a different AVD",
   },
   {
     kind: "port-collision",
@@ -98,6 +118,9 @@ const DEVICE_STATE_HINTS: Record<string, string> = {
     "the guest does not trust the adb server's key; use the same " +
     "~/.android/adbkey (or ADB_VENDOR_KEYS) the AVD was first booted with",
   device: "adb saw the device but sys.boot_completed never became 1",
+  [DEVICE_STATE_UNKNOWN]:
+    "adb itself could not be run to probe the device; check that the adb " +
+    "binary under <sdk>/platform-tools is present and executable",
 };
 
 export function readLogTail(

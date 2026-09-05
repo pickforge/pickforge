@@ -358,8 +358,9 @@ describe.skipIf(!hasAndroidStack)("android integration (emulator + adb)", () => 
   it(
     "cold boots a read-only session and runs a concurrent read-only session from another home without collisions",
     async () => {
-      // The emulator shares an AVD only among read-only instances, so both
-      // concurrent sessions run read-only; the first also skips the snapshot.
+      // Pickforge shares an AVD only among read-only sessions (see
+      // AVD_SHARING_POLICY), so both concurrent sessions run read-only; the
+      // first also skips the snapshot.
       const first = await createAndroidSession({
         projectDir: projectA,
         registryEnv: registryEnvA,

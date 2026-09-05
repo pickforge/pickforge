@@ -43,9 +43,11 @@ export {
 } from "./avd.js";
 
 export {
+  AVD_SHARING_POLICY,
   classifyEmulatorLog,
   describeDeviceState,
   detectBootMode,
+  DEVICE_STATE_UNKNOWN,
   deviceStateHint,
   EmulatorStartError,
   isEmulatorStartError,
