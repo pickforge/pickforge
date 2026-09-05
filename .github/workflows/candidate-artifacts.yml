@@ -15,6 +15,18 @@ on:
 permissions:
   contents: read
 
+env:
+  # A clean-Flutter stand-in that holds a publish must not float. Pinned to the
+  # multi-arch index digest of `ghcr.io/cirruslabs/flutter:stable`, resolved on
+  # 2026-09-04; `docs/releases/CHECKLIST.md` step 5 uses the same digest.
+  # To move it: `docker buildx imagetools inspect ghcr.io/cirruslabs/flutter:stable`,
+  # update both places in the same commit, and re-run the smoke.
+  FLUTTER_IMAGE: ghcr.io/cirruslabs/flutter@sha256:46691e311715845de03a3ba4753a475476936805b29431b1f00f1816981033f8
+  # The container needs a Node.js the lab supports. Pinned and checksummed from
+  # nodejs.org rather than piped from a remote setup script into a root shell.
+  SMOKE_NODE_VERSION: 24.20.0
+  SMOKE_NODE_SHA256: 2f2c0da162318f0de47665410c7c8c2ed3d36c8f3105de4bbc61176c70a7cbf2
+
 jobs:
   npm-tarball:
     name: Pack the candidate npm tarball
@@ -48,7 +60,6 @@ jobs:
           TARBALL="pickforge-${VERSION}.tgz"
           test -f "candidate/npm/${TARBALL}"
           (cd candidate/npm && sha256sum "${TARBALL}" > "${TARBALL}.sha256")
-          cp -R packages/cli/dist candidate/dist
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tarball=${TARBALL}" >> "$GITHUB_OUTPUT"
           cat "candidate/npm/${TARBALL}.sha256" >> "$GITHUB_STEP_SUMMARY"
@@ -145,12 +156,19 @@ jobs:
             -e PICKFORGE_SMOKE_ASSET_DIR=/opt/pickforge/candidate/assets \
             -e "PICKFORGE_SMOKE_TARBALL=/opt/pickforge/candidate/npm/$TARBALL" \
             -e PICKFORGE_SMOKE_EVIDENCE=/opt/pickforge/evidence \
-            ghcr.io/cirruslabs/flutter:stable bash -lc '
+            -e "NODE_VERSION=$SMOKE_NODE_VERSION" \
+            -e "NODE_SHA256=$SMOKE_NODE_SHA256" \
+            "$FLUTTER_IMAGE" bash -lc '
               set -eu
               apt-get update -qq
-              apt-get install -y --no-install-recommends ca-certificates curl >/dev/null 2>&1
-              curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1
-              apt-get install -y --no-install-recommends nodejs >/dev/null 2>&1
+              apt-get install -y --no-install-recommends ca-certificates curl xz-utils >/dev/null 2>&1
+              curl -fsSL -o /tmp/node.tar.xz \
+                "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"
+              echo "${NODE_SHA256}  /tmp/node.tar.xz" | sha256sum -c -
+              mkdir -p /opt/node
+              tar -xJf /tmp/node.tar.xz -C /opt/node --strip-components=1
+              export PATH="/opt/node/bin:$PATH"
+              node --version
               exec /opt/pickforge/scripts/candidate-smoke.sh
             '
 

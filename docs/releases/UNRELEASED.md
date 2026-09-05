@@ -124,9 +124,24 @@ candidate artifacts that were actually executed.
   with an isolated `HOME` and `PICKFORGE_HOME`.
 - The macOS asset is re-signed after `strip`. Stripping invalidates the ad-hoc
   signature that Apple silicon requires, so earlier assets could fail to run.
+- Both gates verify a checksum before they use an artifact: the Rust asset, and
+  now the npm tarball where it is installed, re-checked after the install so
+  the bytes that were exercised are provably the packed candidate.
 - A manual dispatch of the release workflow is a dry run unless the exact
   release tag is typed in its `confirm` input; only the publish job holds any
   write or OIDC permission.
+- The release version must be semver, and a release tag must be `v<semver>`,
+  before either reaches a tarball name, a container environment, or a workflow
+  output.
+- The publish job refuses to touch a GitHub release that is no longer a draft,
+  so a re-run or a second dispatch cannot replace published assets. Sourcemaps
+  are uploaded from inside the verified tarball, unmodified, so what Sentry
+  holds describes the bytes npm received.
+- The Linux gate's container is pinned by image digest, and its Node.js is
+  pinned by version and checksum rather than piped from a remote setup script.
+- The pull-request candidate smoke now runs for every input that can change the
+  packed bytes, including the lockfile and every workspace package: the CLI
+  bundles them all.
 - macOS signing and notarization policy: `docs/releases/SIGNING.md`. Assets are
   ad-hoc signed and not notarized, verified by checksum and npm provenance.
 

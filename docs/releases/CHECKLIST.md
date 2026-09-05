@@ -95,6 +95,7 @@ rm -rf /tmp/candidate && mkdir -p /tmp/candidate/npm /tmp/candidate/assets
 cp target/release/pickforge /tmp/candidate/assets/pickforge-linux-x86_64
 strip /tmp/candidate/assets/pickforge-linux-x86_64
 (cd /tmp/candidate/assets && sha256sum pickforge-linux-x86_64 > pickforge-linux-x86_64.sha256)
+(cd /tmp/candidate/npm && sha256sum "pickforge-${VERSION}.tgz" > "pickforge-${VERSION}.tgz.sha256")
 rm -rf /tmp/smoke-evidence && mkdir -m 777 /tmp/smoke-evidence
 docker run --rm --platform linux/amd64 \
   -v "$PWD/scripts:/opt/pickforge/scripts:ro" \
@@ -104,16 +105,28 @@ docker run --rm --platform linux/amd64 \
   -e PICKFORGE_SMOKE_ASSET_DIR=/opt/pickforge/candidate/assets \
   -e "PICKFORGE_SMOKE_TARBALL=/opt/pickforge/candidate/npm/pickforge-${VERSION}.tgz" \
   -e PICKFORGE_SMOKE_EVIDENCE=/opt/pickforge/evidence \
-  ghcr.io/cirruslabs/flutter:stable bash -lc '
+  -e NODE_VERSION=24.20.0 \
+  -e NODE_SHA256=2f2c0da162318f0de47665410c7c8c2ed3d36c8f3105de4bbc61176c70a7cbf2 \
+  ghcr.io/cirruslabs/flutter@sha256:46691e311715845de03a3ba4753a475476936805b29431b1f00f1816981033f8 \
+  bash -lc '
     set -eu
     apt-get update -qq
-    apt-get install -y --no-install-recommends ca-certificates curl >/dev/null 2>&1
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1
-    apt-get install -y --no-install-recommends nodejs >/dev/null 2>&1
+    apt-get install -y --no-install-recommends ca-certificates curl xz-utils >/dev/null 2>&1
+    curl -fsSL -o /tmp/node.tar.xz \
+      "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"
+    echo "${NODE_SHA256}  /tmp/node.tar.xz" | sha256sum -c -
+    mkdir -p /opt/node
+    tar -xJf /tmp/node.tar.xz -C /opt/node --strip-components=1
+    export PATH="/opt/node/bin:$PATH"
+    node --version
     exec /opt/pickforge/scripts/candidate-smoke.sh
   '
 cat /tmp/smoke-evidence/summary.md
 ```
+
+The image digest, the Node.js version, and its checksum are the same values
+`.github/workflows/candidate-artifacts.yml` pins. Nothing on this gate floats:
+change them in both places in one commit and re-run this smoke.
 
 On an Apple silicon Mac, run the same script against a downloaded asset:
 
@@ -146,20 +159,31 @@ candidate artifacts, runs both smokes and every gate, and publishes nothing.
 The publish job is the only job with `contents: write` and `id-token: write`,
 and it does not run unless `confirm` is exactly `$TAG` on `main`.
 
+Record the head commit first, then select the run by that commit and by this
+event. `--limit 1` alone can return an unrelated `release.yml` run — including
+the tag run of step 8 — and `gh run watch` would then report on the wrong one.
+
 ```sh
+HEAD_SHA="$(git rev-parse HEAD)"
 gh workflow run release.yml --repo "$REPO" --ref main -f confirm=
 sleep 10
-RUN_ID="$(gh run list --repo "$REPO" --workflow release.yml --limit 1 \
-  --json databaseId --jq '.[0].databaseId')"
+RUN_ID="$(gh run list --repo "$REPO" --workflow release.yml \
+  --event workflow_dispatch --branch main --limit 20 \
+  --json databaseId,headSha --jq \
+  "[.[] | select(.headSha == \"$HEAD_SHA\")] | .[0].databaseId")"
+test -n "$RUN_ID"
 gh run watch "$RUN_ID" --repo "$REPO" --exit-status
 ```
 
-Download the evidence the smokes uploaded:
+Download the evidence the smokes uploaded. Two `-n` names extract into one
+directory per artifact, so read each summary at its own path:
 
 ```sh
+rm -rf /tmp/candidate-evidence
 gh run download "$RUN_ID" --repo "$REPO" \
   -n candidate-smoke-linux -n candidate-smoke-macos -D /tmp/candidate-evidence
-cat /tmp/candidate-evidence/summary.md
+cat /tmp/candidate-evidence/candidate-smoke-linux/summary.md
+cat /tmp/candidate-evidence/candidate-smoke-macos/summary.md
 ```
 
 ## 8. Create the tag and wait for the release workflow
@@ -174,12 +198,31 @@ test "$(git branch --show-current)" = main
 git pull --ff-only
 git tag -a "$TAG" -m "Pickforge $VERSION"
 git push origin "$TAG"
-sleep 10
-RUN_ID="$(gh run list --repo "$REPO" --workflow release.yml --limit 1 \
-  --json databaseId --jq '.[0].databaseId')"
+```
+
+Select the run by the tag *and* its commit. A dry run from step 7 is a run of
+the same workflow, and it is often newer than the tag run for the first few
+seconds: `--limit 1` would watch that dry run, exit green immediately, and send
+step 9 to inspect a draft the tag run has not created yet.
+
+```sh
+TAG_SHA="$(git rev-parse "$TAG^{commit}")"
+RUN_ID=""
+for _ in $(seq 1 30); do
+  RUN_ID="$(gh run list --repo "$REPO" --workflow release.yml \
+    --event push --branch "$TAG" --limit 20 \
+    --json databaseId,headSha --jq \
+    "[.[] | select(.headSha == \"$TAG_SHA\")] | .[0].databaseId")"
+  [ -n "$RUN_ID" ] && break
+  sleep 10
+done
 test -n "$RUN_ID"
+gh run view "$RUN_ID" --repo "$REPO" --json event,headBranch,headSha --jq \
+  '"\(.event) \(.headBranch) \(.headSha)"'
 gh run watch "$RUN_ID" --repo "$REPO" --exit-status
 ```
+
+Confirm the printed line is `push`, `$TAG`, and `$TAG_SHA` before continuing.
 
 ## 9. Inspect the draft and its assets
 
@@ -207,7 +250,19 @@ The asset list must be exactly:
 
 The workflow already executed both binaries on their own platforms. Confirm the
 published assets are the smoked ones by comparing the checksums above with the
-`candidate-smoke-linux` and `candidate-smoke-macos` evidence from the same run.
+evidence from the *same* `$RUN_ID`:
+
+```sh
+rm -rf /tmp/tag-evidence
+gh run download "$RUN_ID" --repo "$REPO" \
+  -n candidate-smoke-linux -n candidate-smoke-macos -D /tmp/tag-evidence
+grep -h 'sha256' /tmp/tag-evidence/candidate-smoke-linux/facts.txt \
+  /tmp/tag-evidence/candidate-smoke-macos/facts.txt
+(cd "$ASSET_DIR" && sha256sum pickforge-linux-x86_64 pickforge-macos-arm64)
+```
+
+Each `asset sha256` line must match the corresponding published asset, and the
+Linux `npm tarball sha256` must match the checksum the publish job verified.
 
 ## 10. Publish and verify the public paths
 
@@ -247,7 +302,8 @@ git push origin main
 
 If anything fails after the npm publish or the tag push, leave the GitHub
 release as a draft and fix forward with a new version and tag. Never move or
-overwrite a published tag.
+overwrite a published tag. The publish job enforces this: once the release for
+`$TAG` is no longer a draft, a re-run fails instead of replacing public assets.
 
 ## One-time setup (done; kept for recovery)
 

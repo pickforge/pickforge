@@ -7,7 +7,11 @@ import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-const TIMEOUT_MS = 120_000;
+// Overridable only so the timeout itself can be exercised against a server that
+// never answers. Anything that is not a positive number keeps the real budget.
+const override = Number(process.env.PICKFORGE_MCP_TIMEOUT_MS);
+const TIMEOUT_MS = Number.isFinite(override) && override > 0 ? override : 120_000;
+const KILL_GRACE_MS = 5_000;
 
 function parseArgs(argv) {
   const options = {};
@@ -37,6 +41,16 @@ function resolveServer(options) {
   return server;
 }
 
+// A hung server must fail this gate at TIMEOUT_MS, not sit on the job until
+// GitHub's own timeout. Every pending request rejects on timeout, on spawn
+// failure, and on child exit, so nothing here can wait forever.
+function failAllPending(pending, error) {
+  for (const [id, entry] of pending) {
+    pending.delete(id);
+    entry.reject(error);
+  }
+}
+
 function collectResponses(child, pending) {
   let buffer = "";
   child.stdout.setEncoding("utf8");
@@ -55,23 +69,37 @@ function collectResponses(child, pending) {
       } catch {
         continue;
       }
-      const resolve = pending.get(message.id);
-      if (resolve) {
+      const entry = pending.get(message.id);
+      if (entry) {
         pending.delete(message.id);
-        resolve(message);
+        entry.resolve(message);
       }
     }
   });
 }
 
 function request(child, pending, id, method, params) {
-  const response = new Promise((resolve) => pending.set(id, resolve));
+  const response = new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
   child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
   return response;
 }
 
 function notify(child, method) {
   child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method })}\n`);
+}
+
+// SIGTERM first so a well-behaved server can flush and exit, SIGKILL if it does
+// not, and always wait for the exit so the smoke leaves no orphan behind.
+async function terminate(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise((resolve) => child.once("exit", resolve));
+  child.kill("SIGTERM");
+  const hard = setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS);
+  try {
+    await exited;
+  } finally {
+    clearTimeout(hard);
+  }
 }
 
 function assertOk(message, label) {
@@ -90,21 +118,47 @@ async function handshake(options) {
   child.stderr.on("data", (chunk) => stderr.push(chunk));
   const pending = new Map();
   collectResponses(child, pending);
-  const timer = setTimeout(() => {
-    child.kill("SIGKILL");
-  }, TIMEOUT_MS);
+
+  // The deadline rejects the whole handshake, not just the in-flight request:
+  // a server that answers `initialize` and then hangs on `tools/list` still
+  // fails at TIMEOUT_MS.
+  let expired;
+  const deadline = new Promise((_, reject) => {
+    expired = setTimeout(() => {
+      reject(new Error(`no MCP response within ${TIMEOUT_MS}ms`));
+    }, TIMEOUT_MS);
+  });
+  // Node keeps the process alive for a pending timer; the handshake owns the
+  // lifetime, so let an early success exit rather than idle until the deadline.
+  expired.unref?.();
+  deadline.catch(() => {});
+
+  child.on("error", (error) => {
+    failAllPending(pending, new Error(`could not run ${server.command}: ${error.message}`));
+  });
+  // A server that died already makes stdin a broken pipe. That is a handshake
+  // failure, not an unhandled stream error that takes the smoke down with it.
+  child.stdin.on("error", (error) => {
+    failAllPending(pending, new Error(`could not write to ${server.command}: ${error.message}`));
+  });
+  child.on("exit", (code, signal) => {
+    failAllPending(pending, new Error(`the MCP server exited (code ${code}, signal ${signal}) mid-handshake`));
+  });
+  const race = (promise) => Promise.race([promise, deadline]);
 
   try {
     const initialized = assertOk(
-      await request(child, pending, 1, "initialize", {
-        protocolVersion: "2025-03-26",
-        capabilities: { roots: { listChanged: false } },
-        clientInfo: { name: "pickforge-candidate-smoke", version: "1" },
-      }),
+      await race(
+        request(child, pending, 1, "initialize", {
+          protocolVersion: "2025-03-26",
+          capabilities: { roots: { listChanged: false } },
+          clientInfo: { name: "pickforge-candidate-smoke", version: "1" },
+        }),
+      ),
       "initialize",
     );
     notify(child, "notifications/initialized");
-    const tools = assertOk(await request(child, pending, 2, "tools/list", {}), "tools/list");
+    const tools = assertOk(await race(request(child, pending, 2, "tools/list", {})), "tools/list");
     if (!initialized?.serverInfo?.name) throw new Error("initialize returned no server name");
     if (!tools?.tools?.length) throw new Error("the MCP server listed no tools");
     const reported = initialized.serverInfo.version;
@@ -120,10 +174,13 @@ async function handshake(options) {
       tools: tools.tools.map((tool) => tool.name).sort(),
       stderr: Buffer.concat(stderr).toString("utf8").slice(0, 4096),
     };
+  } catch (error) {
+    const captured = Buffer.concat(stderr).toString("utf8").slice(-2048).trim();
+    throw captured ? new Error(`${error.message}\nserver stderr:\n${captured}`) : error;
   } finally {
-    clearTimeout(timer);
+    clearTimeout(expired);
     child.stdin.end();
-    child.kill("SIGKILL");
+    await terminate(child);
   }
 }
 

@@ -14,7 +14,17 @@ function packageVersion(relative) {
   return JSON.parse(readFileSync(path.join(root, relative), "utf8")).version;
 }
 
+// The version is interpolated into tarball names, `docker run -e`, and
+// `$GITHUB_OUTPUT`. Pin it to semver before any of that, so a manifest edit
+// cannot smuggle a newline, a quote, or a shell metacharacter downstream.
+const SEMVER =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
+
 const version = packageVersion("packages/cli/package.json");
+if (typeof version !== "string" || !SEMVER.test(version)) {
+  console.error(`release version mismatch:\n- packages/cli/package.json version ${JSON.stringify(version)} is not semver`);
+  process.exit(1);
+}
 
 for (const name of readdirSync(path.join(root, "packages"))) {
   const relative = `packages/${name}/package.json`;
@@ -35,8 +45,14 @@ const cargoVersion = cargo.match(/^version = "([^"]+)"$/m)?.[1];
 if (cargoVersion !== version) problems.push(`Cargo.toml is ${cargoVersion}, expected ${version}`);
 
 const expectedTag = process.argv[2];
-if (expectedTag && expectedTag !== `v${version}`) {
-  problems.push(`tag ${expectedTag} does not match package version ${version}`);
+if (expectedTag) {
+  // Checked against the same charset before comparing, so a ref name that is
+  // not a plain `v<semver>` tag is rejected on its own terms.
+  if (!expectedTag.startsWith("v") || !SEMVER.test(expectedTag.slice(1))) {
+    problems.push(`tag ${JSON.stringify(expectedTag)} is not a v<semver> release tag`);
+  } else if (expectedTag !== `v${version}`) {
+    problems.push(`tag ${expectedTag} does not match package version ${version}`);
+  }
 }
 
 if (problems.length > 0) {

@@ -202,22 +202,33 @@ jobs:
       - name: Install npm with trusted publishing support
         run: npm install --global npm@11.5.1
 
-      - name: Upload sourcemaps to Sentry
+      # Uploads the sourcemaps that are *inside* the verified tarball, and the
+      # JavaScript they belong to, unmodified. The old job injected debug IDs
+      # into a copy of `dist` after the smokes had already installed the packed
+      # tarball, so the maps Sentry held described bytes npm never received.
+      # Nothing may rewrite the candidate: `telemetry.ts` reports
+      # `release: pickforge@<version>`, which is the same release name used
+      # here, so Sentry resolves these maps by release without a debug ID.
+      - name: Upload the published tarball's sourcemaps to Sentry
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: pickforge
           SENTRY_PROJECT: pickforge-lab
         run: |
-          if [ -z "$SENTRY_AUTH_TOKEN" ]; then
+          set -eu
+          if [ -z "${SENTRY_AUTH_TOKEN:-}" ]; then
             echo "SENTRY_AUTH_TOKEN not set; skipping"
             exit 0
           fi
-          if ! {
-            npx --yes @sentry/cli sourcemaps inject candidate/dist &&
-            npx --yes @sentry/cli sourcemaps upload --release "pickforge@$RELEASE_VERSION" candidate/dist
-          }; then
+          rm -rf sentry-sourcemaps
+          mkdir -p sentry-sourcemaps
+          tar -xzf "$TARBALL" -C sentry-sourcemaps
+          test -d sentry-sourcemaps/package/dist
+          if ! npx --yes @sentry/cli sourcemaps upload \
+            --release "pickforge@$RELEASE_VERSION" sentry-sourcemaps/package/dist; then
             echo "::warning::Sentry sourcemap upload failed; continuing release"
           fi
+          rm -rf sentry-sourcemaps
 
       # Publishing the packed tarball, not a rebuild, is what makes the smokes
       # meaningful. If npm ever rejects provenance for a tarball publish, fix
@@ -233,13 +244,22 @@ jobs:
             npm publish "$TARBALL" --access public --provenance
           fi
 
+      # A published release is public and immutable as far as this job is
+      # concerned: CHECKLIST.md step 11 forbids overwriting a published tag, so
+      # the job must refuse too. Assets are only ever replaced on a draft, and a
+      # re-run that finds the draft already complete leaves it exactly as it is.
       - name: Create the draft GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "GitHub release $RELEASE_TAG already exists; reusing"
+            if [ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" != "true" ]; then
+              echo "::error::$RELEASE_TAG is already published; refusing to replace public assets." \
+                "Fix forward with a new version and tag."
+              exit 1
+            fi
+            echo "GitHub release $RELEASE_TAG exists and is still a draft; reusing"
           elif [[ "$RELEASE_TAG" == *-* ]]; then
             gh release create "$RELEASE_TAG" --draft --prerelease \
               --title "Pickforge $RELEASE_VERSION" --notes-file docs/releases/UNRELEASED.md

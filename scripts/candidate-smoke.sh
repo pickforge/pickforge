@@ -11,6 +11,7 @@
 #   PICKFORGE_SMOKE_ASSET_DIR     required  directory holding the Rust asset and its .sha256
 #   PICKFORGE_SMOKE_ASSET         optional  exact asset name (default: derived from uname)
 #   PICKFORGE_SMOKE_TARBALL       optional  npm candidate tarball; installs the lab too
+#   PICKFORGE_SMOKE_TARBALL_SHA256 optional checksum file for it (default: <tarball>.sha256)
 #   PICKFORGE_SMOKE_EXPECT_ARCH   optional  required `uname -m` value
 #   PICKFORGE_SMOKE_WORK          optional  work directory (default: mktemp -d)
 #   PICKFORGE_SMOKE_EVIDENCE      optional  evidence directory (default: <work>/evidence)
@@ -130,6 +131,35 @@ verify_asset() {
   actual="$(sha256_file "${asset_path}")"
   [ "${expected}" = "${actual}" ] || fail "asset checksum mismatch: ${actual} != ${expected}"
   printf 'asset sha256: %s\n' "${actual}" | tee -a "${EVIDENCE}/facts.txt"
+}
+
+# The npm tarball crosses an artifact upload/download before it gets here, and
+# publish only checks it much later. Verify it where it is actually installed,
+# so the bytes this smoke exercises are provably the packed candidate.
+verify_tarball() {
+  log "verify candidate npm tarball"
+  tarball="${PICKFORGE_SMOKE_TARBALL}"
+  [ -f "${tarball}" ] || fail "candidate tarball is missing: ${tarball}"
+  checksum="${PICKFORGE_SMOKE_TARBALL_SHA256:-${tarball}.sha256}"
+  [ -f "${checksum}" ] || fail "candidate tarball checksum is missing: ${checksum}"
+  TARBALL_SHA256="$(awk 'NR==1{print $1}' "${checksum}" | tr 'A-F' 'a-f')"
+  case "${TARBALL_SHA256}" in
+    *[!0-9a-f]*|"") fail "candidate tarball checksum is not a SHA-256 value: ${checksum}" ;;
+  esac
+  [ "${#TARBALL_SHA256}" -eq 64 ] \
+    || fail "candidate tarball checksum is not a SHA-256 value: ${checksum}"
+  actual="$(sha256_file "${tarball}")"
+  [ "${TARBALL_SHA256}" = "${actual}" ] \
+    || fail "npm tarball checksum mismatch: ${actual} != ${TARBALL_SHA256}"
+  printf 'npm tarball sha256: %s\n' "${actual}" | tee -a "${EVIDENCE}/facts.txt"
+}
+
+# The installer is given a path, not a copy. Re-hashing afterwards proves the
+# install consumed the verified bytes and left them alone.
+assert_tarball_unchanged() {
+  actual="$(sha256_file "${PICKFORGE_SMOKE_TARBALL}")"
+  [ "${TARBALL_SHA256}" = "${actual}" ] \
+    || fail "the npm tarball changed during install: ${actual} != ${TARBALL_SHA256}"
 }
 
 install_from_tarball() {
@@ -301,7 +331,7 @@ summarize() {
   {
     printf '# Candidate artifact smoke\n\n'
     cat "${EVIDENCE}/facts.txt"
-    printf '\nchecks: versions, flutter detection, doctor, init dry-run isolation, '
+    printf '\nchecks: artifact checksums, versions, flutter detection, doctor, init dry-run isolation, '
     printf 'init apply, Dart MCP handshake, init idempotency, evidence recording, '
     printf 'clean project tree, clean real home\n'
   } > "${EVIDENCE}/summary.md"
@@ -336,7 +366,9 @@ main() {
   verify_asset
   capture_real_home "${WORK}/real-home-before.txt"
   if [ -n "${PICKFORGE_SMOKE_TARBALL:-}" ]; then
+    verify_tarball
     install_from_tarball
+    assert_tarball_unchanged
   else
     install_asset_only
   fi
