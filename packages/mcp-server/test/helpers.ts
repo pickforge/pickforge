@@ -95,7 +95,9 @@ export function writeFakeAdbSdk(root: string, adbLog: string): string {
     `  *"cat /sdcard/pickforge-lab-ui.xml"*) printf '<?xml version="1.0"?><hierarchy rotation="0"><node text="token=${PLANTED_TOKEN}" /></hierarchy>' ;;`,
     `  *"logcat -d"*) printf 'I/Auth( 123): authToken=${PLANTED_TOKEN}\\nI/App( 123): started\\n' ;;`,
     '  *"install -r"*) echo Success ;;',
-    '  *monkey*) echo "Events injected: 1" ;;',
+    '  *resolve-activity*) echo "com.example.app/.MainActivity" ;;',
+    '  *"am start"*) echo "Status: ok" ;;',
+    "  *pidof*) echo 4242 ;;",
     "esac",
     "exit 0",
   ].join("\n");
@@ -117,12 +119,17 @@ export function makeFakeAndroidSdk(
   sdk: string;
   adbLog: string;
   pidFile: string;
+  /** Pass as ANDROID_AVD_HOME so the pre-flight AVD check finds pickforge-avd. */
+  avdHome: string;
 } {
   const sdk = path.join(root, "sdk");
   const pidFile = path.join(sdk, "emulator.pid");
   const adbLog = path.join(sdk, "adb.log");
   const bootCount = path.join(sdk, "boot.count");
   const bootAfterPolls = opts.bootAfterPolls ?? 1;
+  const avdHome = path.join(root, "avd");
+  fs.mkdirSync(avdHome, { recursive: true });
+  fs.writeFileSync(path.join(avdHome, "pickforge-avd.ini"), "avd.ini.encoding=UTF-8\n");
   writeScript(
     path.join(sdk, "emulator", "emulator"),
     `echo $$ > "${pidFile}"\nPATH=/usr/bin:/bin\nexec sleep 120`,
@@ -144,7 +151,7 @@ export function makeFakeAndroidSdk(
       "exit 0",
     ].join("\n"),
   );
-  return { sdk, adbLog, pidFile };
+  return { sdk, adbLog, pidFile, avdHome };
 }
 
 export function killFakeEmulator(pidFile: string): void {

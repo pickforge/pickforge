@@ -156,9 +156,13 @@ describe("android tools (fake adb)", () => {
       }),
     );
     expect(report.ok).toBe(true);
+    expect(report.component).toBe("com.example.app/.MainActivity");
+    expect(report.pid).toBe(4242);
     expect(adbLogLines(adbLog)).toEqual([
-      `-s ${FAKE_SERIAL} shell monkey -p com.example.app ` +
-        "-c android.intent.category.LAUNCHER 1",
+      `-s ${FAKE_SERIAL} shell cmd package resolve-activity --brief ` +
+        "-a android.intent.action.MAIN -c android.intent.category.LAUNCHER com.example.app",
+      `-s ${FAKE_SERIAL} shell am start -W -n com.example.app/.MainActivity`,
+      `-s ${FAKE_SERIAL} shell pidof com.example.app`,
     ]);
   });
 
@@ -312,13 +316,14 @@ describe("android tools (fake adb)", () => {
 describe("android_start (fake sdk)", () => {
   it("starts and destroys an emulator session", async () => {
     const startDirs = makeLabDirs();
-    const { sdk, pidFile } = makeFakeAndroidSdk(startDirs.root);
+    const { sdk, pidFile, avdHome } = makeFakeAndroidSdk(startDirs.root);
     const startLab = await connectLab({
       projectDir: startDirs.projectDir,
       env: {
         PICKFORGE_HOME: startDirs.home,
         PATH: startDirs.binDir,
         ANDROID_HOME: sdk,
+        ANDROID_AVD_HOME: avdHome,
       },
     });
     try {
@@ -410,7 +415,7 @@ describe("android_start (fake sdk)", () => {
 
   it("emits progress notifications while the emulator boots", async () => {
     const startDirs = makeLabDirs();
-    const { sdk, pidFile } = makeFakeAndroidSdk(startDirs.root, {
+    const { sdk, pidFile, avdHome } = makeFakeAndroidSdk(startDirs.root, {
       bootAfterPolls: 2,
     });
     const startLab = await connectLab({
@@ -419,6 +424,7 @@ describe("android_start (fake sdk)", () => {
         PICKFORGE_HOME: startDirs.home,
         PATH: startDirs.binDir,
         ANDROID_HOME: sdk,
+        ANDROID_AVD_HOME: avdHome,
       },
     });
     const progress: Array<{ progress: number; message?: string }> = [];

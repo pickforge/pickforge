@@ -30,6 +30,8 @@ export interface AndroidLegHandle {
   serial: string;
   consolePort: number;
   logDir: string;
+  bootMode?: "warm" | "cold" | "unknown";
+  readOnly?: boolean;
 }
 
 export interface BrowserLegHandle {
@@ -187,7 +189,7 @@ function desktopSummary(handle: DesktopLegHandle): LocalSessionSummary {
 }
 
 function androidSummary(handle: AndroidLegHandle): LocalSessionSummary {
-  return {
+  const summary: LocalSessionSummary = {
     id: handle.id,
     type: "android",
     avdName: handle.avdName,
@@ -195,6 +197,9 @@ function androidSummary(handle: AndroidLegHandle): LocalSessionSummary {
     consolePort: handle.consolePort,
     logDir: handle.logDir,
   };
+  if (handle.bootMode !== undefined) summary.bootMode = handle.bootMode;
+  if (handle.readOnly !== undefined) summary.readOnly = handle.readOnly;
+  return summary;
 }
 
 function browserSummary(handle: BrowserLegHandle): LocalSessionSummary {

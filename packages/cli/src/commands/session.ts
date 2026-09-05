@@ -48,6 +48,8 @@ export interface SessionCreateOptions extends BaseCliOptions {
   vnc?: boolean;
   vncControl?: boolean;
   avdName?: string;
+  coldBoot?: boolean;
+  readOnly?: boolean;
   viewer?: boolean;
 }
 
@@ -89,9 +91,12 @@ function createRuntime(opts: SessionCreateOptions): LocalSessionCreateRuntime {
       create: async () => {
         const config = await loadConfig(projectDir);
         const avdName = opts.avdName ?? config.android?.avdName;
-        return createAndroidSession(
-          avdName === undefined ? { projectDir } : { projectDir, avdName },
-        );
+        return createAndroidSession({
+          projectDir,
+          ...(avdName === undefined ? {} : { avdName }),
+          ...(opts.coldBoot === true ? { coldBoot: true } : {}),
+          ...(opts.readOnly === true ? { readOnly: true } : {}),
+        });
       },
     },
   };

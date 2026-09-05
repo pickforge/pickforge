@@ -20,6 +20,12 @@ const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 const ADB_TIMEOUT_MS = 30_000;
 const INSTALL_TIMEOUT_MS = 300_000;
+/** `am start -W` blocks until the activity is drawn; a debug build can be slow. */
+const LAUNCH_TIMEOUT_MS = 120_000;
+const DEFAULT_LAUNCH_SETTLE_MS = 10_000;
+const LAUNCH_SETTLE_POLL_MS = 500;
+const LAUNCHER_COMPONENT_PATTERN =
+  /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+\/\.?[A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*$/;
 const SCREENSHOT_TIMEOUT_MS = 60_000;
 const SCREENSHOT_MAX_BYTES = 64 * 1024 * 1024;
 const DEFAULT_LOGCAT_LINES = 500;
@@ -103,36 +109,81 @@ export function buildInstallApkArgs(serial: string, apkPath: string): string[] {
   return ["-s", serial, "install", "-r", apkPath];
 }
 
-export function buildLaunchAppArgs(
+/** Ask the package manager which activity the launcher would start. */
+export function buildResolveLauncherArgs(
   serial: string,
   packageName: string,
-  activity?: string,
 ): string[] {
   assertSerial(serial);
   assertPackageName(packageName);
-  if (activity !== undefined) {
-    assertActivity(activity);
-    return [
-      "-s",
-      serial,
-      "shell",
-      "am",
-      "start",
-      "-n",
-      `${packageName}/${activity}`,
-    ];
-  }
   return [
     "-s",
     serial,
     "shell",
-    "monkey",
-    "-p",
-    packageName,
+    "cmd",
+    "package",
+    "resolve-activity",
+    "--brief",
+    "-a",
+    "android.intent.action.MAIN",
     "-c",
     "android.intent.category.LAUNCHER",
-    "1",
+    packageName,
   ];
+}
+
+/**
+ * Start one explicit activity and wait for it to be drawn (`-W`), so the
+ * command's `Status:` line says whether the launch happened instead of a
+ * fire-and-forget `monkey` event that reports success even when nothing runs.
+ */
+export function buildLaunchAppArgs(
+  serial: string,
+  packageName: string,
+  activity: string,
+): string[] {
+  assertSerial(serial);
+  assertPackageName(packageName);
+  assertActivity(activity);
+  return [
+    "-s",
+    serial,
+    "shell",
+    "am",
+    "start",
+    "-W",
+    "-n",
+    `${packageName}/${activity}`,
+  ];
+}
+
+export function buildPidofArgs(serial: string, packageName: string): string[] {
+  assertSerial(serial);
+  assertPackageName(packageName);
+  return ["-s", serial, "shell", "pidof", packageName];
+}
+
+/**
+ * The activity part of the last `package/activity` line printed by
+ * `cmd package resolve-activity --brief`, or undefined when nothing resolved.
+ */
+export function parseResolvedLauncher(
+  output: string,
+  packageName: string,
+): string | undefined {
+  const component = output
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "")
+    .at(-1);
+  if (
+    component === undefined ||
+    !component.startsWith(`${packageName}/`) ||
+    !LAUNCHER_COMPONENT_PATTERN.test(component)
+  ) {
+    return undefined;
+  }
+  return component.slice(packageName.length + 1);
 }
 
 export function buildScreenshotArgs(serial: string): string[] {
@@ -313,19 +364,96 @@ export async function installApk(
   }
 }
 
-export async function launchApp(
-  opts: AdbTargetOptions & { packageName: string; activity?: string },
-): Promise<void> {
-  const args = buildLaunchAppArgs(opts.serial, opts.packageName, opts.activity);
+export interface LaunchAppOptions extends AdbTargetOptions {
+  packageName: string;
+  activity?: string;
+  /** How long to wait for the app process after a successful start. */
+  settleTimeoutMs?: number;
+}
+
+export interface LaunchAppResult {
+  component: string;
+  pid: number;
+  /** `am start -W` LaunchState (COLD, WARM, HOT) when the device reports one. */
+  launchState?: string;
+}
+
+async function resolveLauncherActivity(opts: LaunchAppOptions): Promise<string> {
+  const args = buildResolveLauncherArgs(opts.serial, opts.packageName);
   const result = await execAdb(opts, args);
-  if (
+  const activity = result.ok
+    ? parseResolvedLauncher(result.stdout, opts.packageName)
+    : undefined;
+  if (activity === undefined) {
+    const printed = result.stdout.trim() || result.stderr.trim() || "nothing";
+    throw new Error(
+      `No launcher activity found for ${opts.packageName} on ${opts.serial}; ` +
+        `is the APK installed? (adb ${args.join(" ")} printed: ${printed})`,
+    );
+  }
+  return activity;
+}
+
+function launchRejected(result: RunCommandResult): boolean {
+  const status = /^Status:\s*(\S+)/m.exec(result.stdout)?.[1];
+  return (
     !result.ok ||
     /^Error/m.test(result.stdout) ||
-    /monkey aborted/i.test(result.stdout) ||
-    /monkey aborted/i.test(result.stderr)
-  ) {
+    (status !== undefined && status !== "ok")
+  );
+}
+
+async function waitForAppProcess(
+  opts: LaunchAppOptions,
+  settleMs: number,
+): Promise<number | undefined> {
+  const deadline = Date.now() + settleMs;
+  const args = buildPidofArgs(opts.serial, opts.packageName);
+  for (;;) {
+    const result = await execAdb(opts, args);
+    const pid = Number(result.stdout.trim().split(/\s+/)[0]);
+    if (result.ok && Number.isInteger(pid) && pid > 0) {
+      return pid;
+    }
+    if (Date.now() >= deadline) {
+      return undefined;
+    }
+    await sleep(LAUNCH_SETTLE_POLL_MS);
+  }
+}
+
+/**
+ * Launch the app's launcher activity (or the given one) and confirm it is
+ * running. Fails distinctly when no launcher activity resolves, when
+ * `am start -W` reports an error, and when the start was accepted but no
+ * process for the package is alive afterwards.
+ */
+export async function launchApp(opts: LaunchAppOptions): Promise<LaunchAppResult> {
+  const activity = opts.activity ?? (await resolveLauncherActivity(opts));
+  const args = buildLaunchAppArgs(opts.serial, opts.packageName, activity);
+  const result = await execAdb(opts, args, { timeoutMs: LAUNCH_TIMEOUT_MS });
+  if (launchRejected(result)) {
     throw commandFailure(`launch of ${opts.packageName}`, args, result);
   }
+  const settleMs = opts.settleTimeoutMs ?? DEFAULT_LAUNCH_SETTLE_MS;
+  const pid = await waitForAppProcess(opts, settleMs);
+  if (pid === undefined) {
+    const accepted = result.stdout.trim().replace(/\s+/g, " ") || "no output";
+    throw new Error(
+      `launch of ${opts.packageName} was accepted (am start -W printed: ${accepted}) ` +
+        `but no ${opts.packageName} process is alive after ${settleMs}ms; ` +
+        "the system may have killed it at startup, check logcat",
+    );
+  }
+  const launchState = /^LaunchState:\s*(\S+)/m.exec(result.stdout)?.[1];
+  const launched: LaunchAppResult = {
+    component: `${opts.packageName}/${activity}`,
+    pid,
+  };
+  if (launchState !== undefined) {
+    launched.launchState = launchState;
+  }
+  return launched;
 }
 
 export async function screenshot(

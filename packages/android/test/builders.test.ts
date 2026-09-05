@@ -7,6 +7,8 @@ import {
   buildKeyeventArgs,
   buildLaunchAppArgs,
   buildLogcatArgs,
+  buildPidofArgs,
+  buildResolveLauncherArgs,
   buildScreenshotArgs,
   buildTapArgs,
   buildTypeTextArgs,
@@ -18,6 +20,7 @@ import {
   KEYCODE_BACK,
   KEYCODE_HOME,
   parseAdbDevices,
+  parseResolvedLauncher,
   parseEmulatorListAvds,
   pickConsolePort,
   splitInputText,
@@ -94,6 +97,30 @@ describe("buildEmulatorArgs", () => {
     expect(args).toContain("-no-audio");
   });
 
+  it("adds the cold boot and read-only flags only when asked", () => {
+    expect(buildEmulatorArgs({ avdName: "pickforge-avd", port: 5556 })).not.toContain(
+      "-no-snapshot-load",
+    );
+    expect(
+      buildEmulatorArgs({
+        avdName: "pickforge-avd",
+        port: 5556,
+        coldBoot: true,
+        readOnly: true,
+      }),
+    ).toEqual([
+      "-avd",
+      "pickforge-avd",
+      "-no-window",
+      "-no-audio",
+      "-no-boot-anim",
+      "-port",
+      "5556",
+      "-no-snapshot-load",
+      "-read-only",
+    ]);
+  });
+
   it("rejects hostile avd names and invalid ports", () => {
     for (const value of HOSTILE) {
       expect(() => buildEmulatorArgs({ avdName: value })).toThrow(
@@ -142,37 +169,71 @@ describe("adb arg builders", () => {
     ]);
   });
 
-  it("builds am start args when an activity is given", () => {
+  it("builds am start -W args for an explicit activity", () => {
     expect(buildLaunchAppArgs(SERIAL, "com.example.app", ".MainActivity")).toEqual(
-      ["-s", SERIAL, "shell", "am", "start", "-n", "com.example.app/.MainActivity"],
+      ["-s", SERIAL, "shell", "am", "start", "-W", "-n", "com.example.app/.MainActivity"],
     );
   });
 
-  it("builds monkey args when only a package is given", () => {
-    expect(buildLaunchAppArgs(SERIAL, "com.example.app")).toEqual([
+  it("builds the launcher resolution and pidof args", () => {
+    expect(buildResolveLauncherArgs(SERIAL, "com.example.app")).toEqual([
       "-s",
       SERIAL,
       "shell",
-      "monkey",
-      "-p",
-      "com.example.app",
+      "cmd",
+      "package",
+      "resolve-activity",
+      "--brief",
+      "-a",
+      "android.intent.action.MAIN",
       "-c",
       "android.intent.category.LAUNCHER",
-      "1",
+      "com.example.app",
     ]);
+    expect(buildPidofArgs(SERIAL, "com.example.app")).toEqual([
+      "-s",
+      SERIAL,
+      "shell",
+      "pidof",
+      "com.example.app",
+    ]);
+  });
+
+  it("parses the resolved launcher component and rejects foreign or hostile output", () => {
+    expect(
+      parseResolvedLauncher(
+        "priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true\ncom.example.app/.MainActivity\n",
+        "com.example.app",
+      ),
+    ).toBe(".MainActivity");
+    expect(
+      parseResolvedLauncher("com.example.app/com.example.app.Main$Entry", "com.example.app"),
+    ).toBe("com.example.app.Main$Entry");
+    expect(parseResolvedLauncher("No activity found", "com.example.app")).toBeUndefined();
+    expect(parseResolvedLauncher("", "com.example.app")).toBeUndefined();
+    expect(
+      parseResolvedLauncher("com.other.app/.MainActivity", "com.example.app"),
+    ).toBeUndefined();
+    expect(
+      parseResolvedLauncher("com.example.app/.Main;rm -rf /", "com.example.app"),
+    ).toBeUndefined();
   });
 
   it("rejects hostile package names, activities, and serials", () => {
     for (const value of HOSTILE) {
-      expect(() => buildLaunchAppArgs(SERIAL, value)).toThrow(
+      expect(() => buildLaunchAppArgs(SERIAL, value, ".MainActivity")).toThrow(
         /Invalid package name/,
       );
+      expect(() => buildResolveLauncherArgs(SERIAL, value)).toThrow(
+        /Invalid package name/,
+      );
+      expect(() => buildPidofArgs(SERIAL, value)).toThrow(/Invalid package name/);
       expect(() => buildLaunchAppArgs(SERIAL, "com.example.app", value)).toThrow(
         /Invalid activity/,
       );
       expect(() => buildTapArgs(value, 1, 2)).toThrow(/Invalid device serial/);
     }
-    expect(() => buildLaunchAppArgs(SERIAL, "singleword")).toThrow(
+    expect(() => buildLaunchAppArgs(SERIAL, "singleword", ".MainActivity")).toThrow(
       /Invalid package name/,
     );
   });

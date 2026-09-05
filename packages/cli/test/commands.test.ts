@@ -150,7 +150,9 @@ function fakeAdbEnv(): { env: Record<string, string>; adbLog: string } {
     `  *"cat /sdcard/pickforge-lab-ui.xml"*) printf '<?xml version="1.0"?><hierarchy rotation="0"><node text="token=${PLANTED_TOKEN}" /></hierarchy>' ;;`,
     `  *"logcat -d"*) printf 'I/Auth( 123): authToken=${PLANTED_TOKEN}\\nI/App( 123): started\\n' ;;`,
     '  *"install -r"*) echo Success ;;',
-    '  *monkey*) echo "Events injected: 1" ;;',
+    '  *resolve-activity*) echo "com.example.app/.MainActivity" ;;',
+    '  *"am start"*) echo "Status: ok"; echo "LaunchState: COLD" ;;',
+    "  *pidof*) echo 4242 ;;",
     "esac",
     "exit 0",
   ].join("\n");
@@ -168,6 +170,7 @@ interface FakeAndroidSdk {
   sdk: string;
   adbLog: string;
   pidFile: string;
+  emulatorArgsLog: string;
 }
 
 function makeFakeAndroidSdk(
@@ -176,11 +179,16 @@ function makeFakeAndroidSdk(
   const root = path.join(tmpDir, "sdk");
   const pidFile = path.join(root, "emulator.pid");
   const adbLog = path.join(root, "adb.log");
+  const emulatorArgsLog = path.join(root, "emulator.args");
+  // The dedicated AVD lives where the emulator looks with makeEnv's HOME.
+  const avdDir = path.join(tmpDir, "home", ".android", "avd");
+  fs.mkdirSync(avdDir, { recursive: true });
+  fs.writeFileSync(path.join(avdDir, "pickforge-avd.ini"), "avd.ini.encoding=UTF-8\n");
   writeScript(
     path.join(root, "emulator", "emulator"),
     opts.emulatorExits === true
       ? "exit 1"
-      : `echo $$ > "${pidFile}"\nPATH=/usr/bin:/bin\nexec sleep 120`,
+      : `printf '%s\\n' "$*" >> "${emulatorArgsLog}"\necho $$ > "${pidFile}"\nPATH=/usr/bin:/bin\nexec sleep 120`,
   );
   writeScript(
     path.join(root, "platform-tools", "adb"),
@@ -194,7 +202,7 @@ function makeFakeAndroidSdk(
       "exit 0",
     ].join("\n"),
   );
-  return { sdk: root, adbLog, pidFile };
+  return { sdk: root, adbLog, pidFile, emulatorArgsLog };
 }
 
 function writeSyntheticRun(
@@ -1206,9 +1214,9 @@ describe("pickforge-lab android (fake adb)", () => {
     ]);
   });
 
-  it("launches apps via monkey and am start", async () => {
+  it("launches apps through the resolved launcher activity and am start -W", async () => {
     const { env, adbLog } = fakeAdbEnv();
-    const monkey = await runCli(
+    const resolved = await runCli(
       [
         "android",
         "launch-app",
@@ -1219,7 +1227,13 @@ describe("pickforge-lab android (fake adb)", () => {
       ],
       env,
     );
-    expect(monkey.code).toBe(0);
+    expect(resolved.code).toBe(0);
+    expect(parseJson(resolved)).toMatchObject({
+      packageName: "com.example.app",
+      component: "com.example.app/.MainActivity",
+      pid: 4242,
+      launchState: "COLD",
+    });
     const activity = await runCli(
       [
         "android",
@@ -1235,8 +1249,11 @@ describe("pickforge-lab android (fake adb)", () => {
     );
     expect(activity.code).toBe(0);
     expect(adbLogLines(adbLog)).toEqual([
-      `-s ${FAKE_SERIAL} shell monkey -p com.example.app -c android.intent.category.LAUNCHER 1`,
-      `-s ${FAKE_SERIAL} shell am start -n com.example.app/.MainActivity`,
+      `-s ${FAKE_SERIAL} shell cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER com.example.app`,
+      `-s ${FAKE_SERIAL} shell am start -W -n com.example.app/.MainActivity`,
+      `-s ${FAKE_SERIAL} shell pidof com.example.app`,
+      `-s ${FAKE_SERIAL} shell am start -W -n com.example.app/.MainActivity`,
+      `-s ${FAKE_SERIAL} shell pidof com.example.app`,
     ]);
   });
 
@@ -1592,6 +1609,83 @@ describe("pickforge-lab android session lifecycle (fake sdk)", () => {
 
       const after = await runCli(["session", "status", "--json"], env);
       expect(parseJson(after).sessions).toEqual([]);
+    },
+    60_000,
+  );
+
+  it(
+    "passes --cold-boot and --read-only through to the emulator and the summary",
+    async () => {
+      const { sdk, emulatorArgsLog } = makeFakeAndroidSdk();
+      const env = makeEnv({ extra: { ANDROID_HOME: sdk } });
+      cleanupEnvs.push(env);
+      const projectDir = makeProjectDir();
+
+      const started = await runCli(
+        [
+          "session",
+          "create",
+          "--type",
+          "android",
+          "--cold-boot",
+          "--read-only",
+          "--json",
+          "--project-dir",
+          projectDir,
+        ],
+        env,
+      );
+      expect(started.code).toBe(0);
+      const session = parseJson(started).sessions[0];
+      expect(session.bootMode).toBe("cold");
+      expect(session.readOnly).toBe(true);
+      const emulatorArgs = fs.readFileSync(emulatorArgsLog, "utf8");
+      expect(emulatorArgs).toContain("-no-snapshot-load");
+      expect(emulatorArgs).toContain("-read-only");
+
+      const status = parseJson(
+        await runCli(["session", "status", session.id, "--json"], env),
+      );
+      expect(status.sessions[0].android.bootMode).toBe("cold");
+      expect(status.sessions[0].android.readOnly).toBe(true);
+
+      const destroyed = await runCli(
+        ["session", "destroy", session.id, "--json"],
+        env,
+      );
+      expect(destroyed.code).toBe(0);
+    },
+    60_000,
+  );
+
+  it(
+    "reports a missing AVD before spawning the emulator",
+    async () => {
+      const { sdk, emulatorArgsLog } = makeFakeAndroidSdk();
+      const env = makeEnv({ extra: { ANDROID_HOME: sdk } });
+      const projectDir = makeProjectDir();
+
+      const result = await runCli(
+        [
+          "android",
+          "start",
+          "--avd-name",
+          "absent-avd",
+          "--json",
+          "--project-dir",
+          projectDir,
+        ],
+        env,
+      );
+      expect(result.code).toBe(1);
+      const report = parseJson(result);
+      expect(report.ok).toBe(false);
+      expect(report.errors.join("\n")).toMatch(
+        /AVD "absent-avd" not found[^\n]*\[avd-missing\][^\n]*available AVDs in [^\n]*: pickforge-avd/,
+      );
+      expect(fs.existsSync(emulatorArgsLog)).toBe(false);
+      const after = await runCli(["session", "status", "--json"], env);
+      expect(parseJson(after).sessions[0].status).toBe("error");
     },
     60_000,
   );

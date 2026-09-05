@@ -178,7 +178,7 @@ describe("behavioral: MCP server with poisoned PATH", () => {
       const startDirs = makeLabDirs();
       const startSudoRecord = path.join(startDirs.root, "sudo-invocations.log");
       plantSudoRecorder(startDirs.binDir, startSudoRecord);
-      const { sdk, pidFile } = makeFakeAndroidSdk(startDirs.root);
+      const { sdk, pidFile, avdHome } = makeFakeAndroidSdk(startDirs.root);
       const startLab = await connectLab({
         projectDir: startDirs.projectDir,
         env: {
@@ -186,6 +186,7 @@ describe("behavioral: MCP server with poisoned PATH", () => {
           PICKFORGE_HOME: startDirs.home,
           PATH: startDirs.binDir,
           ANDROID_HOME: sdk,
+          ANDROID_AVD_HOME: avdHome,
         },
       });
       try {

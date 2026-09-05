@@ -38,6 +38,10 @@ export interface AndroidSessionInfo {
   serial?: string;
   emulatorPid?: number;
   consolePort?: number;
+  /** Whether the emulator restored a snapshot (`warm`) or booted fresh (`cold`). */
+  bootMode?: "warm" | "cold" | "unknown";
+  /** The emulator runs with `-read-only`, sharing the AVD without writing it. */
+  readOnly?: boolean;
 }
 
 export interface BrowserSessionInfo {
