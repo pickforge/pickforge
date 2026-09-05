@@ -3,9 +3,30 @@ export const packageName = "@pickforge/lab-core";
 export { readPickforgeEnv, type EnvLike } from "./env-compat.js";
 
 export {
+  buildContainedCommand,
+  CONTAINMENT_TOKEN_ENV,
+  containmentEnv,
+  containmentScopeProblem,
+  createContainmentScope,
+  destroyContainmentScope,
+  ensureContainmentScope,
+  listContainedProcesses,
+  processCarriesToken,
+  readOwnCgroupPath,
+  scopeCgroupProblem,
+  type ContainedCommand,
+  type ContainmentCleanupResult,
+  type ContainmentMechanism,
+  type ContainmentScope,
+  type CreateContainmentScopeOptions,
+  type DestroyContainmentOptions,
+} from "./containment.js";
+
+export {
   agentsDir,
   ensureDir,
   globalConfigPath,
+  isPathConfined,
   isProfileConfined,
   legacyAgentsDirs,
   legacyGlobalConfigPaths,
@@ -139,6 +160,7 @@ export {
   readProcessStartTicks,
   runCommand,
   startDaemon,
+  stopOwnedDaemonGroup,
   stopPid,
   stopProcessGroupVerified,
   type DaemonHandle,

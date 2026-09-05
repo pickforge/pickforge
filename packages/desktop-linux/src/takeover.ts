@@ -20,12 +20,12 @@ import {
 } from "@pickforge/lab-core";
 import { screenshot } from "./screenshot.js";
 import {
-  desktopSessionLogDir,
   recoverStaleTakeoverLocked,
+  startSessionVnc,
   stopOwnedSessionVnc,
   withSessionVncLock,
 } from "./session.js";
-import { startVnc, type VncHandle } from "./vnc.js";
+import type { VncHandle } from "./vnc.js";
 
 /**
  * Desktop-linux orchestration for supervised pause / human takeover
@@ -139,10 +139,9 @@ export async function startHumanTakeover(
       if (desktop.vncPid !== undefined && desktop.vncViewOnly === true) {
         await stopOwnedSessionVnc(id, desktop);
       }
-      vnc = await startVnc({
+      vnc = await startSessionVnc(id, registryEnv, {
         display: desktop.display,
         port: desktop.vncPort,
-        logDir: desktopSessionLogDir(id, registryEnv),
         env: opts.env,
         viewOnly: false,
       });
@@ -256,10 +255,9 @@ export async function endHumanTakeover(
     if (desktop !== undefined && desktop.vncPid === handle.vncPid) {
       await stopOwnedSessionVnc(handle.sessionId, desktop).catch(() => {});
       try {
-        const readOnly = await startVnc({
+        const readOnly = await startSessionVnc(handle.sessionId, registryEnv, {
           display: handle.display,
           port: handle.vncPort,
-          logDir: desktopSessionLogDir(handle.sessionId, registryEnv),
           env: opts.env,
           viewOnly: true,
         });

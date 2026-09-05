@@ -151,12 +151,29 @@ pickforge-lab desktop exec --session <id> --window-timeout 120000 -- flutter run
 
 If no client window appears while the command is still alive, Pickforge stops
 its process group and reports that the app may have escaped to the real desktop
-instead of leaving a silent black frame. Process-group stopping does not contain
-daemonising apps that double-fork or start a new session. Check the real desktop
-and stop any stray process if the original group exits without a lab window.
-Full containment is tracked in [#85](https://github.com/pickforge/pickforge/issues/85).
-Increase `--window-timeout` for a slow first build. `desktop launch` uses the
-same isolated environment and remains the shorter path for an already-built app.
+instead of leaving a silent black frame. Increase `--window-timeout` for a slow
+first build. `desktop launch` uses the same isolated environment and remains the
+shorter path for an already-built app.
+
+A process group is not enough on its own: an app that double-forks or calls
+`setsid` leaves the group and would survive a group kill. Every desktop session
+therefore also owns a **containment scope**, and `desktop exec`/`desktop launch`
+start the app inside it:
+
+- On a host with a delegated cgroup v2 (a normal systemd user session), the
+  session gets its own cgroup. A process cannot leave a cgroup without
+  privileges, so daemonised descendants stay members and `cgroup.kill` stops
+  them all at once.
+- Otherwise Pickforge falls back to a per-session random token exported as
+  `PICKFORGE_CONTAINMENT_TOKEN`. Descendants inherit it, and cleanup finds them
+  by reading `/proc/<pid>/environ`.
+
+Both report which mechanism was used (`containment: cgroup` or
+`containment: marker`) and neither ever needs `sudo`. `session destroy` stops
+every contained process and only reports success once none remains. It never
+kills the shell it was typed into: run from inside a contained shell, it moves
+its own process chain out of the session first, or refuses and tells you to run
+it from outside.
 
 When a shell or another parent process must launch the app itself, apply the
 same environment first:
@@ -167,9 +184,15 @@ flutter run -d linux
 ```
 
 `desktop env --json` returns the same `exports`, `unset`, and `script` recipe
-without including unrelated environment variables or secrets. Desktop sessions
-still inherit the user's XDG runtime and D-Bus; isolation is tracked in
-[#86](https://github.com/pickforge/pickforge/issues/86). Desktop
+without including unrelated environment variables or secrets. It also carries
+the session's containment token, so an app you start by hand from that shell is
+torn down with the session rather than surviving it.
+
+Each desktop session also gets its own `XDG_RUNTIME_DIR` (mode `0700`, inside
+the session directory) and its own D-Bus addresses, which point at socket paths
+Pickforge never creates. A toolkit or portal therefore fails to reach a bus
+instead of quietly routing work back through your real user session, and the
+whole directory is removed when the session is destroyed. Desktop
 screenshots report the visible client-window count and warn when it is zero.
 If `xdotool` is missing, capture still succeeds and warns that the count is
 unavailable instead of reporting a possible escape.
