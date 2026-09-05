@@ -1,0 +1,33 @@
+{
+  "comment": [
+    "The project-state layout contract shared by the Rust integration CLI and",
+    "the TypeScript lab (#104). This file is the single source both suites",
+    "check: crates/pickforge-cli/tests/state_layout.rs and",
+    "packages/core/test/state-layout.test.ts. Changing one implementation's",
+    "table without changing this file fails both suites, so the two tools",
+    "cannot silently diverge.",
+    "",
+    "Owners: 'shared' is written by both tools, 'integration' by the Rust CLI,",
+    "'transient' is an in-flight write by either tool, and 'foreign' is owned by",
+    "nobody and refused rather than adopted."
+  ],
+  "layoutKind": "pickforge-project-state",
+  "layoutVersion": 1,
+  "markerContent": "{\n  \"layout\": \"pickforge-project-state\",\n  \"layoutVersion\": 1\n}\n",
+  "ownership": [
+    { "entry": "layout.json", "owner": "shared" },
+    { "entry": "runs", "owner": "shared" },
+    { "entry": "project.json", "owner": "integration" },
+    { "entry": "project.json.pickforge-backup-20260101", "owner": "integration" },
+    { "entry": ".pickforge-tmp-abcd", "owner": "transient" },
+    { "entry": ".pickforge-tmp-layout-0f1e2d3c", "owner": "transient" },
+    { "entry": "sessions", "owner": "foreign" },
+    { "entry": "config.json", "owner": "foreign" },
+    { "entry": "notes.txt", "owner": "foreign" },
+    { "entry": "", "owner": "foreign" },
+    { "entry": "runs2", "owner": "foreign" },
+    { "entry": "Runs", "owner": "foreign" },
+    { "entry": "project.json.bak", "owner": "foreign" },
+    { "entry": "layout.json.bak", "owner": "foreign" }
+  ]
+}

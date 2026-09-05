@@ -268,6 +268,12 @@ export class DirHandle {
     }
   }
 
+  /** Names of the entries directly inside this directory, through the pinned
+   * descriptor. */
+  readEntryNames(): Promise<string[]> {
+    return fs.promises.readdir(this.resolve());
+  }
+
   /** Read an entry of this directory, or `undefined` when it is missing. */
   async readFileIfPresent(name: string): Promise<string | undefined> {
     try {

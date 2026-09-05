@@ -26,27 +26,48 @@ candidate artifacts that were actually executed.
   it; the real Android pass for #93 hit the other one (#104).
 - Ownership of `<PICKFORGE_HOME>/projects/<projectId>/` is now written down and
   enforced by entry name, exhaustively and without overlap: `project.json` and
-  its backups belong to the Rust CLI, `runs/` to the lab, `.pickforge-tmp-*` is
-  a transient of either, `layout.json` is shared, and anything else is owned by
-  nobody. Each tool writes only what it owns and refuses to move or delete the
-  rest. See "Project state ownership" in `README.md`.
+  its backups belong to the Rust CLI, `layout.json` and `runs/` are shared,
+  `.pickforge-tmp-*` is a transient of either tool, and anything else is owned
+  by nobody. `runs/` is shared because both tools write into it — the lab
+  creates run directories there and `pickforge evidence record` writes its own
+  — and each writes only its own runs. See "Project state ownership" in
+  `README.md`.
+- Every writer of project state on both sides goes through one claim:
+  `pickforge init`, `pickforge evidence record`, and the lab's run storage. A
+  layout version this build does not understand, a marker that is not one of
+  ours, and an unowned entry in a directory nobody has claimed yet all fail
+  closed on the same path, before anything is written.
 - The layout is versioned by a `layout.json` marker. Version 1 *describes the
   layout alpha.1 and alpha.2 already wrote*, so no state is migrated: an
   existing project directory is adopted in place, the marker appearing beside
   what is already there. Nothing is rewritten, moved, or deleted.
-- First use is atomic. The marker is staged in a temp entry and published with
-  `link(2)`, so it is never observed half-written and concurrent first use by
-  both tools yields exactly one claim — first use cannot leave partial
-  ownership. A crash before publication leaves at most an inert
-  `.pickforge-tmp-` entry.
-- Both tools fail closed on a layout they do not understand, naming the exact
-  manual action: a newer `layoutVersion` asks for an upgrade, a stray
-  `layout.json` asks to move it aside, and an unowned entry is reported with
-  the `mv` to run. No state is written in any of those cases.
-- `scripts/state-ownership-smoke.sh` proves both orders — `init` then a lab
-  run, and a lab run then `init` — against one canonical project in isolated
-  homes, using the real Rust binary and the real lab, and checks that both
-  converge on the same claimed layout with the lab's runs untouched.
+- First adoption validates the whole directory. Before either tool stamps the
+  marker on an unclaimed directory, every direct entry must be one the
+  ownership table assigns to an owner; a single unowned entry stops the
+  adoption. A directory that already carries a marker is not re-judged.
+- First use is atomic and cannot be diverted. The marker is staged in an
+  exclusively created, unpredictably named file with its bytes already complete
+  and published with `link(2)`, so it is never observed half-written, never
+  overwrites an unrelated file, and never follows a link out of the directory.
+  The staging entry is removed only when its name still resolves to the file
+  the run created, so a crash remnant — or a planted entry with the name a
+  previous build would have reused after PID reuse — is left untouched. On
+  Linux every lookup resolves through the state directory's own descriptor.
+  Both tools refuse a marker that is a symlink, a hard link, or not a regular
+  file, and both read back and validate whichever marker won a race.
+- The Rust CLI creates project state directories with owner-only (`0700`)
+  permissions, matching the transaction layer.
+- A `pickforge init` that fails after publishing a new marker now reports
+  `failed-partial` with `changed: true` and the marker as a residual, instead
+  of claiming a clean rollback it did not perform.
+- Refusal messages carry a shell-quoted, no-clobber command
+  (`mv -n -- <path> <unused>.bak`). A path whose name cannot be rendered as a
+  safe shell word is described instead of being offered as a copyable command.
+- `scripts/state-ownership-smoke.sh` proves both command orders including
+  evidence recording, races the real Rust binary against the real lab on a
+  fresh project state directory, and requires both tools to fail closed on an
+  unsupported version, a stray marker, a symlinked marker, and an unowned
+  entry — all in isolated homes.
 
 ## Lab isolation
 

@@ -92,6 +92,7 @@ export {
   LAYOUT_KIND,
   LAYOUT_MARKER,
   LAYOUT_VERSION,
+  manualAction,
   readProjectStateLayout,
   StateLayoutError,
   type StateEntryOwner,

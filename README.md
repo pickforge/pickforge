@@ -279,24 +279,30 @@ project:
 
 Ownership there is by entry name, exhaustive, and non-overlapping:
 
-| entry                             | owner                            |
-| --------------------------------- | -------------------------------- |
-| `layout.json`                     | shared — the layout marker       |
+| entry                             | owner                             |
+| --------------------------------- | --------------------------------- |
+| `layout.json`                     | shared — the layout marker        |
+| `runs/`                           | shared — one run tree, two writers |
 | `project.json`                    | `pickforge` — integration receipt |
 | `project.json.pickforge-backup-*` | `pickforge` — receipt backups     |
-| `.pickforge-tmp-*`                | transient, either tool           |
-| `runs/`                           | `pickforge-lab` — runs           |
-| anything else                     | nobody                           |
+| `.pickforge-tmp-*`                | transient, either tool            |
+| anything else                     | nobody                            |
 
-Each tool writes only what it owns. Neither writes, moves, or deletes the
-other's entries, or anything unowned. Above this directory the split is by
-name too: `sessions/`, `agents/`, and `config.json` at the root are the lab's,
-and `projects/` is the only shared parent.
+`runs/` is shared because both tools write into it: the lab creates run
+directories there, and `pickforge evidence record` writes its own. Each writes
+only its own run directories and neither reads, rewrites, or deletes the
+other's. Everything else each tool writes is its own, and neither writes,
+moves, or deletes anything unowned. Above this directory the split is by name
+too: `sessions/`, `agents/`, and `config.json` at the root are the lab's, and
+`projects/` is the only shared parent.
 
-**Command order does not matter.** `pickforge init` and a lab run can happen in
-either order for the same project; whichever runs first claims the directory
-and the other joins it. (Before 0.4.0-alpha.2, `pickforge init` refused a
-project whose state directory already held lab runs — see #104.)
+**Command order does not matter.** `pickforge init`, `pickforge evidence
+record`, and a lab run can happen in any order for the same project; whichever
+runs first claims the directory and the others join it. Every writer on both
+sides goes through the same claim, so the layout version, the marker's shape,
+and the ownership rule below are checked on one path. (Before 0.4.0-alpha.2,
+`pickforge init` refused a project whose state directory already held lab runs
+— see #104.)
 
 **Layout version.** `layout.json` records the layout version, currently `1`:
 
@@ -312,20 +318,39 @@ replacing it, so no existing state needs migrating. A directory from an earlier
 release is adopted in place the next time either tool writes to it: the marker
 appears beside what is already there and nothing else changes.
 
-The marker is created at most once, published with `link(2)` so it is never
-observed half-written. When both tools reach a fresh project directory
-simultaneously, exactly one claims it and the other reads the winner's marker —
-first use cannot leave partial ownership.
+**First adoption checks the whole directory.** Before either tool stamps the
+marker on a directory nobody has claimed yet, every entry directly inside it
+must be one the table above assigns to an owner. A single unowned entry stops
+the adoption, and nothing is written. After a directory carries a marker it is
+not re-judged: ownership was settled when it was claimed, and re-policing it
+would let an entry added later break a tool that never reads it.
+
+**The marker is created at most once.** It is staged in an exclusively created,
+unpredictably named file inside the same directory, with its bytes complete and
+flushed, and published with `link(2)` — which fails rather than replacing
+anything that is already there. It is therefore never observed half-written,
+never overwrites another file, and never follows a link out of the directory.
+Cleanup removes the staging entry only when that name still resolves to the
+file this run created, so a crash remnant or a planted entry is left alone. On
+Linux every lookup resolves through the state directory's own descriptor, so an
+ancestor swapped mid-run cannot redirect any of it. A marker that is a symlink,
+a hard link to another file, or not a regular file is refused rather than
+trusted, by both tools. When both tools reach a fresh project directory
+simultaneously, exactly one claims it and the other reads back and validates
+the winner's marker — first use cannot leave partial ownership.
 
 **Compatibility policy.** A tool refuses, with the exact manual action to take,
 rather than guessing:
 
 - A `layoutVersion` this build does not understand: upgrade Pickforge, or use a
   different `PICKFORGE_HOME`. Nothing is written.
-- A `layout.json` that is not a Pickforge marker: move it aside, or use a
-  different `PICKFORGE_HOME`.
-- An unowned entry in the project state directory: `pickforge init` names the
-  path and the `mv` to run. It never moves or deletes it for you.
+- A `layout.json` that is not a Pickforge marker, or is a link rather than a
+  regular file: move it aside, or use a different `PICKFORGE_HOME`.
+- An unowned entry in an unclaimed project state directory: the tool names the
+  path and a shell-quoted `mv -n -- <path> <unused>.bak` to run. It never moves
+  or deletes it for you, and the suggested command never clobbers. A path whose
+  name cannot be shown as a safe shell word is described instead, without a
+  copyable command.
 
 A future layout version may add entries, but only under a name the table above
 does not already assign, and only with both tools able to read version 1.
