@@ -47,9 +47,9 @@ const STOP_TIMEOUT_MS = 90_000;
 const TEST_TIMEOUT_MS = 900_000;
 const APP_SETTLE_TIMEOUT_MS = 60_000;
 const APP_SETTLE_POLL_MS = 2_000;
-const GUEST_SETTLE_TIMEOUT_MS = 120_000;
-const GUEST_SETTLE_MIN_AVAILABLE_KB = 800 * 1024;
-const GUEST_SETTLE_MAX_LOAD1 = 2.5;
+const GUEST_SETTLE_TIMEOUT_MS = 240_000;
+/** lowmemorykiller must have killed nothing for this long before a launch. */
+const GUEST_SETTLE_LMK_QUIET_S = 30;
 const LAUNCH_ATTEMPTS = 3;
 const ADB_FORGET_TIMEOUT_MS = 15_000;
 
@@ -177,44 +177,76 @@ async function waitForAppInUiTree(
   return { xml, owned: false };
 }
 
-/** MemAvailable (kB) and the 1-minute load average of the guest; zeros when unreadable. */
-async function guestPressure(serial: string): Promise<{ availableKb: number; load1: number }> {
-  const result = await runAdb({
-    serial,
-    ...opOpts,
-    args: ["shell", "grep MemAvailable /proc/meminfo; cat /proc/loadavg"],
-  });
-  const availableKb = Number(/MemAvailable:\s*(\d+)/.exec(result.stdout)?.[1] ?? 0);
-  const load1 = Number(/^([\d.]+) /m.exec(result.stdout.split("\n").at(-2) ?? "")?.[1] ?? 0);
+interface GuestPressure {
+  /** Seconds since lowmemorykiller last killed a process; Infinity when it never did. */
+  lmkQuietS: number;
+  load1: number;
+  /** io PSI `full avg10`; a quickboot restore's lazy page-in shows up here. */
+  ioFullAvg10: number;
+  memFreeKb: number;
+  swapFreeKb: number;
+}
+
+/** Guest pressure signals; worst-case values when unreadable. */
+async function guestPressure(serial: string): Promise<GuestPressure> {
+  const [meminfo, kills] = await Promise.all([
+    runAdb({
+      serial,
+      ...opOpts,
+      args: [
+        "shell",
+        "date +%s; cat /proc/loadavg; cat /proc/pressure/io; grep -E 'MemFree|SwapFree' /proc/meminfo",
+      ],
+    }),
+    runAdb({ serial, ...opOpts, args: ["logcat", "-d", "-v", "epoch"] }),
+  ]);
+  const num = (pattern: RegExp, text: string, fallback: number): number => {
+    const value = Number(pattern.exec(text)?.[1]);
+    return Number.isFinite(value) ? value : fallback;
+  };
+  const guestNow = num(/^(\d+)\s*$/m, meminfo.stdout, 0);
+  const lastKill = kills.stdout
+    .split("\n")
+    .filter((line) => line.includes("lowmemorykiller: Kill"))
+    .map((line) => num(/^\s*(\d+)/, line, 0))
+    .at(-1);
   return {
-    availableKb: Number.isFinite(availableKb) ? availableKb : 0,
-    load1: Number.isFinite(load1) ? load1 : 0,
+    lmkQuietS: lastKill === undefined ? Infinity : guestNow - lastKill,
+    load1: num(/^([\d.]+) [\d.]+ [\d.]+ /m, meminfo.stdout, Infinity),
+    ioFullAvg10: num(/^full avg10=([\d.]+)/m, meminfo.stdout, Infinity),
+    memFreeKb: num(/MemFree:\s*(\d+)/, meminfo.stdout, 0),
+    swapFreeKb: num(/SwapFree:\s*(\d+)/, meminfo.stdout, 0),
   };
 }
 
 /**
- * Right after a quickboot restore, and again right after an APK install on a
- * Play image (Play Protect verifies the sideload), a 2 GB AVD sits at the
- * low-memory watermark and kills the first launched process (see the #93
- * evidence). Wait for the guest to report room and a falling load before
- * launching; the wait is bounded and logged.
+ * On this 2 GB Play image the guest sits at the low-memory watermark with no
+ * swap left after a quickboot restore; a fresh sideload (Play Protect
+ * verification) plus the app start can trip lowmemorykiller into a storm that
+ * kills every oom_score_adj 0 process, including the app just launched (see
+ * the #93 evidence, investigation-first-launch). MemAvailable stays around
+ * 1 GB during the storm, and load and io pressure are just as high on a
+ * restore whose first launch survives, so none of them predicts it; the
+ * direct signal is lowmemorykiller itself. Launch only once it has been
+ * quiet for GUEST_SETTLE_LMK_QUIET_S seconds; the other readings are logged
+ * for the record. The wait is bounded.
  */
 async function waitForGuestSettled(serial: string): Promise<void> {
   const deadline = Date.now() + GUEST_SETTLE_TIMEOUT_MS;
-  let pressure = { availableKb: 0, load1: 0 };
+  let pressure: GuestPressure | undefined;
   while (Date.now() < deadline) {
     pressure = await guestPressure(serial);
-    if (
-      pressure.availableKb >= GUEST_SETTLE_MIN_AVAILABLE_KB &&
-      pressure.load1 <= GUEST_SETTLE_MAX_LOAD1
-    ) {
+    console.log(
+      `guest pressure: lmkd quiet ${pressure.lmkQuietS}s, load1 ${pressure.load1}, io full avg10 ` +
+        `${pressure.ioFullAvg10}, MemFree ${pressure.memFreeKb} kB, SwapFree ${pressure.swapFreeKb} kB`,
+    );
+    if (pressure.lmkQuietS >= GUEST_SETTLE_LMK_QUIET_S) {
       return;
     }
     await sleep(APP_SETTLE_POLL_MS);
   }
   console.warn(
-    `guest still busy after ${GUEST_SETTLE_TIMEOUT_MS}ms (MemAvailable ${pressure.availableKb} kB, ` +
-      `load1 ${pressure.load1}); launching anyway`,
+    `guest still busy after ${GUEST_SETTLE_TIMEOUT_MS}ms (${JSON.stringify(pressure)}); launching anyway`,
   );
 }
 
