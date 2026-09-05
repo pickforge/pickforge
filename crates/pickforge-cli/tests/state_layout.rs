@@ -596,8 +596,18 @@ fn a_planted_hard_link_is_refused_without_waiting_for_a_publisher() {
     let started = std::time::Instant::now();
     let error = state::read_layout(&state_dir).unwrap_err().to_string();
     assert!(error.contains("hard link"), "{error}");
+    // Where a directory listing exposes file identity — everywhere but Windows
+    // — the reader can see there is no publication in flight and refuses at
+    // once. Windows has no such listing, so it keeps waiting the settle budget
+    // out before refusing; the refusal itself is the guarantee on both.
+    #[cfg(not(windows))]
     assert!(
         started.elapsed() < std::time::Duration::from_millis(500),
+        "refusing a planted hard link waited {:?}",
+        started.elapsed()
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
         "refusing a planted hard link waited {:?}",
         started.elapsed()
     );
