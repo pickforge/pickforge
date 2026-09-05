@@ -164,6 +164,11 @@ release description, then reset it after that release is published.
   throwaway one under its temp root instead of the real AVD home, optionally
   installs and launches a real APK, and proves a cold-boot session and a
   concurrent read-only session from a second home do not collide.
+- Known limit (#105): on a 2 GB Play-Store image the first launch of a freshly
+  sideloaded APK right after a quickboot restore can be killed by the guest's
+  lowmemorykiller while `am start -W` reports it drawn. Pickforge reports this
+  as a distinct launch error and does not retry; the live test waits, bounded,
+  until lowmemorykiller has been quiet for 30 s before each launch attempt.
 
 ## Validation
 
