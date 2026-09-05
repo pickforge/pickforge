@@ -34,13 +34,25 @@ vi.mock("@pickforge/lab-desktop-linux", async (importOriginal) => {
   };
 });
 
-import { createBrowserSession } from "../src/session.js";
+import { browserRuntimeLayout } from "../src/env.js";
+import { createBrowserSession, removeChromeTmpAlias } from "../src/session.js";
 import { writeFakeChrome } from "./fakes.js";
 
 let root: string | undefined;
 
-afterEach(() => {
-  if (root !== undefined) fs.rmSync(root, { recursive: true, force: true });
+afterEach(async () => {
+  if (root !== undefined) {
+    // These cases deliberately leave the session runtime behind for a reaper
+    // retry, which includes Chrome's /tmp alias into it. Remove the alias
+    // before the temp root goes, or it would dangle in /tmp after the test.
+    const sessionsDir = path.join(root, "pickforge-home", "sessions");
+    for (const entry of fs.existsSync(sessionsDir) ? fs.readdirSync(sessionsDir) : []) {
+      if (fs.statSync(path.join(sessionsDir, entry)).isDirectory()) {
+        await removeChromeTmpAlias(browserRuntimeLayout(path.join(sessionsDir, entry)));
+      }
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
   root = undefined;
 });
 

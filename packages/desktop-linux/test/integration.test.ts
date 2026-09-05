@@ -776,9 +776,14 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
         registryEnv: env,
       });
       try {
-        const run = await createRun(projectDir, "desktop-shot", {
-          sessionId: session.id,
-        });
+        // Pass the isolated env: without it the run resolves the default
+        // "home" storage and lands in the developer's real ~/.pickforge/lab.
+        const run = await createRun(
+          projectDir,
+          "desktop-shot",
+          { sessionId: session.id },
+          env,
+        );
         const outPath = path.join(run.dir, "screenshots", "desktop.png");
         await screenshot({ display: session.display, outPath });
         await run.addArtifact("screenshot", "desktop.png", outPath);

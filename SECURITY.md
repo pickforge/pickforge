@@ -197,7 +197,10 @@ What Pickforge does do:
 
 - Each session gets its own private Xvfb and its own **ephemeral** Chrome
   profile under the session directory. Profiles are never borrowed from your
-  real browser and are deleted on destroy.
+  real browser and are deleted on destroy. Chrome's temporary files stay in
+  that directory too, reached through a short, private `/tmp` symlink so its
+  fixed Unix-socket path limit also works with deeply nested Pickforge homes;
+  the symlink is identity-checked and removed on destroy.
 - Chrome starts from a **scrubbed environment** (`cleanEnv`): only the isolated
   display, isolated `HOME`/`XDG_*` paths, `PATH`, and locale reach it. Secrets
   in your shell environment are not inherited by the browser.

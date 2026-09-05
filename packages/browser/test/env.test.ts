@@ -5,9 +5,10 @@ import { browserRuntimeLayout, buildBrowserEnv } from "../src/env.js";
 const SESSION_DIR = "/home/lab/.pickforge/lab/sessions/brow-abcdef01";
 
 describe("browserRuntimeLayout", () => {
-  it("confines every runtime path under the session directory", () => {
+  it("confines runtime storage and gives Chrome a short temp alias", () => {
     const layout = browserRuntimeLayout(SESSION_DIR);
-    for (const dir of Object.values(layout)) {
+    for (const [name, dir] of Object.entries(layout)) {
+      if (name === "chromeTmpDir") continue;
       expect(dir.startsWith(SESSION_DIR + path.sep)).toBe(true);
     }
     expect(layout.profileDir).toBe(path.join(SESSION_DIR, "profile"));
@@ -15,6 +16,10 @@ describe("browserRuntimeLayout", () => {
     expect(layout.xdgConfigHome).toBe(
       path.join(SESSION_DIR, "home", ".config"),
     );
+    expect(layout.chromeTmpDir).toMatch(
+      /^\/tmp\/pickforge-browser-[^/]+\/[0-9a-f]{16}$/,
+    );
+    expect(layout.chromeTmpDir.length).toBeLessThan(64);
   });
 });
 
@@ -43,6 +48,7 @@ describe("buildBrowserEnv", () => {
     // The real user's HOME/runtime dir must be replaced, not inherited.
     expect(env.HOME).toBe(layout.homeDir);
     expect(env.XDG_RUNTIME_DIR).toBe(layout.xdgRuntimeDir);
+    expect(env.TMPDIR).toBe(layout.chromeTmpDir);
     // Only the allowlist appears.
     expect(new Set(Object.keys(env))).toEqual(
       new Set([
