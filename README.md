@@ -318,11 +318,20 @@ replacing it, so no existing state needs migrating. A directory from an earlier
 release is adopted in place the next time either tool writes to it: the marker
 appears beside what is already there and nothing else changes.
 
-**First adoption checks the whole directory.** Before either tool stamps the
-marker on a directory nobody has claimed yet, every entry directly inside it
-must be one the table above assigns to an owner. A single unowned entry stops
-the adoption, and nothing is written. After a directory carries a marker it is
-not re-judged: ownership was settled when it was claimed, and re-policing it
+**First adoption checks every entry name — and the shape of every owned
+entry.** Before either tool stamps the marker on a directory nobody has claimed
+yet, every entry directly inside it must be one the table above assigns to an
+owner, and every owned entry must already have the shape its owner writes:
+`runs/` a real directory, `project.json` and its backups real regular files. A
+single unowned entry, an entry whose name is not valid UTF-8, or a symlinked
+`runs/` stops the adoption, and nothing is written — stamping the marker beside
+a symlinked run tree would tell the other tool a layout is sound when both
+would refuse to write through it. An in-flight `.pickforge-tmp-*` entry is left
+alone: it is uniquely named, never adopted, and never opened. The project state
+directory itself must be a real directory too; both tools refuse a symlinked
+`projects/<projectId>`. `pickforge init --dry-run` previews exactly these
+refusals, and writes nothing either way. After a directory carries a marker it
+is not re-judged: ownership was settled when it was claimed, and re-policing it
 would let an entry added later break a tool that never reads it.
 
 **The marker is created at most once.** It is staged in an exclusively created,
@@ -334,8 +343,14 @@ Cleanup removes the staging entry only when that name still resolves to the
 file this run created, so a crash remnant or a planted entry is left alone. On
 Linux every lookup resolves through the state directory's own descriptor, so an
 ancestor swapped mid-run cannot redirect any of it. A marker that is a symlink,
-a hard link to another file, or not a regular file is refused rather than
-trusted, by both tools. When both tools reach a fresh project directory
+a hard link to another file, or not a regular file — a directory, a named pipe,
+a socket, a device node — is refused rather than trusted, by both tools, and
+the open that classifies it never blocks, so a planted pipe or device is
+refused instead of hanging the tool. A marker is briefly multiply linked while
+its writer publishes it; a reader waits that window out only while the second
+name is visibly that publication (a `.pickforge-tmp-*` entry in the same
+directory naming the same file), and refuses a hard link planted anywhere else
+without waiting. When both tools reach a fresh project directory
 simultaneously, exactly one claims it and the other reads back and validates
 the winner's marker — first use cannot leave partial ownership.
 
@@ -346,11 +361,19 @@ rather than guessing:
   different `PICKFORGE_HOME`. Nothing is written.
 - A `layout.json` that is not a Pickforge marker, or is a link rather than a
   regular file: move it aside, or use a different `PICKFORGE_HOME`.
-- An unowned entry in an unclaimed project state directory: the tool names the
+- An unowned entry in an unclaimed project state directory, an owned entry of
+  the wrong shape, or a symlinked project state directory: the tool names the
   path and a shell-quoted `mv -n -- <path> <unused>.bak` to run. It never moves
   or deletes it for you, and the suggested command never clobbers. A path whose
-  name cannot be shown as a safe shell word is described instead, without a
-  copyable command.
+  name cannot be shown as a safe shell word — a control character, a bidi
+  control, or a name that is not valid UTF-8 on disk — is described instead,
+  without a copyable command, because such a command could not address the real
+  entry.
+
+Directories both tools create in the shared state tree — the state root,
+`projects/`, `projects/<projectId>/`, and `runs/` — are owner-only (`0700`),
+and the marker is `0600`. Permissions of directories that already exist are
+never changed.
 
 A future layout version may add entries, but only under a name the table above
 does not already assign, and only with both tools able to read version 1.

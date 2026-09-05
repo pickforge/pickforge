@@ -307,6 +307,10 @@ fn resolve_project(project_dir: &Path, env: &Environment) -> Result<RecordTarget
         .ok_or(project::ProjectIdentityError::NonUtf8Path)?
         .to_owned();
     let state_dir = state::project_state_dir(&state::state_root(env)?, &id);
+    // Checked on the logical path, before the canonicalisation below would
+    // resolve it away: recording must refuse a symlinked `projects/<id>`
+    // exactly as the lab does (#104 R3).
+    state::assert_real_state_dir(&state_dir)?;
     validate_receipt(&state_dir.join("project.json"), &path, &id)?;
     let state_dir = fs::canonicalize(&state_dir)
         .map(project::normalize_windows_canonical_path)

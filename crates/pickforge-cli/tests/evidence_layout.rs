@@ -187,3 +187,57 @@ fn recording_joins_a_claimed_directory_and_writes_one_run() {
     );
     assert_eq!(entries(&state_dir.join("runs")), vec![run_id]);
 }
+
+/// Recording must refuse a symlinked `projects/<id>` for the same reason the
+/// lab does, on the logical path, before the canonicalisation that used to
+/// resolve the link away (#104 R3).
+#[cfg(unix)]
+#[test]
+fn recording_refuses_a_symlinked_project_state_directory() {
+    let (_temp, project, env, state_dir) = fixture();
+    let elsewhere = state_dir.parent().unwrap().join("elsewhere");
+    std::fs::rename(&state_dir, &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &state_dir).unwrap();
+
+    let error = record(&project, &env).unwrap_err();
+    assert!(error.contains("is not a directory"), "{error}");
+    assert!(error.contains("symbolic link"), "{error}");
+    assert!(error.contains("mv -n --"), "{error}");
+    // Nothing was written through the link: the moved directory still holds
+    // exactly what init left there.
+    assert_eq!(entries(&elsewhere), vec!["layout.json", "project.json"]);
+    assert!(std::fs::symlink_metadata(&state_dir)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+/// A FIFO planted as the marker blocked `evidence record` forever before the
+/// marker open became non-blocking (#104 R1).
+#[cfg(unix)]
+#[test]
+fn recording_refuses_a_fifo_marker_instead_of_blocking() {
+    let (_temp, project, env, state_dir) = fixture();
+    std::fs::remove_file(state_dir.join("layout.json")).unwrap();
+    let marker = state_dir.join("layout.json");
+    let name = std::ffi::CString::new(
+        <std::ffi::OsString as std::os::unix::ffi::OsStringExt>::into_vec(marker.into_os_string()),
+    )
+    .unwrap();
+    // SAFETY: `name` is a valid NUL-terminated path for the duration of the call.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let _ = sender.send(record(&project, &env));
+    });
+    let outcome = receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("evidence record blocked on a FIFO marker");
+    worker.join().unwrap();
+
+    let error = outcome.unwrap_err();
+    assert!(error.contains("is not a regular file"), "{error}");
+    assert!(error.contains("named pipe"), "{error}");
+    assert!(!state_dir.join("runs").exists());
+}

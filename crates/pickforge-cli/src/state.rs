@@ -78,9 +78,20 @@ const MAX_MARKER_BYTES: u64 = 64 * 1024;
 
 /// A marker is briefly multiply linked while its writer publishes it with
 /// `link(2)` and unlinks the staging entry. Readers wait out that window
-/// before concluding a marker is a planted hard link.
-const LINK_SETTLE_ATTEMPTS: usize = 40;
+/// before concluding a marker is a planted hard link — but only while the
+/// second name is visibly that publication (a `.pickforge-tmp-` entry in this
+/// same directory naming the same file). A marker whose extra name is anywhere
+/// else is a planted hard link and is refused without waiting at all.
+const LINK_SETTLE_BUDGET: std::time::Duration = std::time::Duration::from_millis(1_000);
 const LINK_SETTLE_PAUSE: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// How many consecutive readings must agree that a multiply linked marker has
+/// no publication in flight before it is refused as a planted hard link. The
+/// link count and the directory listing are two separate syscalls, so a
+/// publisher that unlinks its staging entry between them looks momentarily
+/// like a planted link; confirming the reading removes that race without
+/// reintroducing a fixed wait for the real thing.
+const PLANTED_LINK_CONFIRMATIONS: u32 = 3;
 
 /// Who owns one entry directly inside a project state directory. Ownership is
 /// by entry name and is exhaustive: an entry that matches no owner is
@@ -383,17 +394,27 @@ fn validate_marker(path: &Path, bytes: &[u8]) -> Result<(), LayoutError> {
 enum MarkerRead {
     Absent,
     Bytes(Vec<u8>),
-    /// Multiply linked right now; retry before refusing it.
-    MultiplyLinked,
+    /// Multiply linked right now; retry before refusing it. Carries the
+    /// identity read from the descriptor, so the extra name can be looked for.
+    MultiplyLinked(FileFacts),
 }
 
-/// Open the marker without following a link at the final component.
+/// Open the marker without following a link at the final component and without
+/// ever blocking on it.
+///
+/// `O_NOFOLLOW` refuses a symlink. `O_NONBLOCK` is what makes the *type* check
+/// below reachable at all: opening a FIFO for reading blocks until a writer
+/// arrives, and opening a device can block in its driver, so without it a
+/// planted `layout.json` of either kind hangs the CLI instead of being refused
+/// as "not a regular file". The flag is meaningless for the regular file a
+/// marker is supposed to be, and the file is never read until the descriptor's
+/// own `fstat` says it is regular.
 #[cfg(unix)]
 fn open_marker(dir: &PinnedDir) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(dir.child(LAYOUT_MARKER))
 }
 
@@ -420,32 +441,31 @@ fn read_marker_once(dir: &PinnedDir) -> Result<MarkerRead, LayoutError> {
     let mut file = match open_marker(dir) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(MarkerRead::Absent),
-        // Linux answers `O_NOFOLLOW` on a symlink with `ELOOP`, and `ENOTDIR`
-        // when the name resolved through something that is not a directory.
-        // The entry is `lstat`ed once, only here, to name what is actually
-        // there rather than guessing.
-        Err(error) if is_symlink_open_error(&error) => {
-            return Err(refused(if is_symlink(dir) {
-                "is a symbolic link where the Pickforge layout marker must be a regular file"
-            } else {
-                "is not a regular file where the Pickforge layout marker must be one"
-            }))
-        }
+        // An open can fail because of what the entry *is* rather than because
+        // of the I/O: `ELOOP` on a symlink under `O_NOFOLLOW`, `ENOTDIR` when
+        // the name resolved through a non-directory, `ENXIO` on a socket or a
+        // device with no driver. The entry is `lstat`ed once, only here, to
+        // name what is actually there rather than guessing — and anything that
+        // is not a regular file is refused as a shape, not reported as an I/O
+        // failure.
         Err(error) => {
-            return Err(LayoutError::Unreadable {
-                path: dir.marker_display().display().to_string(),
-                message: error.to_string(),
-            })
+            return match marker_entry_kind(dir) {
+                Some(kind) => Err(refused(&non_regular_reason(kind, THE_MARKER))),
+                None => Err(LayoutError::Unreadable {
+                    path: dir.marker_display().display().to_string(),
+                    message: error.to_string(),
+                }),
+            }
         }
     };
     let metadata = file.metadata().map_err(|error| LayoutError::Unreadable {
         path: dir.marker_display().display().to_string(),
         message: error.to_string(),
     })?;
-    if !metadata.is_file() {
-        return Err(refused(
-            "is not a regular file where the Pickforge layout marker must be one",
-        ));
+    // The descriptor's own type, not the pathname's: a FIFO or a device that
+    // `O_NONBLOCK` let us open never reaches the read below.
+    if let Some(kind) = entry_kind(&metadata) {
+        return Err(refused(&non_regular_reason(kind, THE_MARKER)));
     }
     if metadata.len() > MAX_MARKER_BYTES {
         return Err(refused("is too large to be a Pickforge layout marker"));
@@ -455,7 +475,7 @@ fn read_marker_once(dir: &PinnedDir) -> Result<MarkerRead, LayoutError> {
         message: error.to_string(),
     })?;
     if facts.links > 1 {
-        return Ok(MarkerRead::MultiplyLinked);
+        return Ok(MarkerRead::MultiplyLinked(facts));
     }
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
@@ -466,42 +486,145 @@ fn read_marker_once(dir: &PinnedDir) -> Result<MarkerRead, LayoutError> {
     Ok(MarkerRead::Bytes(bytes))
 }
 
-/// Whether the marker entry is a symlink right now. Only consulted on an open
-/// failure, to label it.
-fn is_symlink(dir: &PinnedDir) -> bool {
-    std::fs::symlink_metadata(dir.child(LAYOUT_MARKER))
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
+/// What an entry is, whenever that is anything other than the regular file
+/// Pickforge expects. Named precisely so a refusal tells the user what to look
+/// for; the message always also says "is not a regular file", which is the
+/// rule being enforced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryKind {
+    Symlink,
+    Directory,
+    Fifo,
+    Socket,
+    Device,
+    Other,
 }
 
-fn is_symlink_open_error(error: &io::Error) -> bool {
+/// Classify one entry's type, or `None` when it is a plain regular file.
+fn entry_kind(metadata: &std::fs::Metadata) -> Option<EntryKind> {
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Some(EntryKind::Symlink);
+    }
+    if file_type.is_dir() {
+        return Some(EntryKind::Directory);
+    }
+    if file_type.is_file() {
+        return None;
+    }
     #[cfg(unix)]
     {
-        error.raw_os_error() == Some(libc::ELOOP) || error.kind() == io::ErrorKind::NotADirectory
+        use std::os::unix::fs::FileTypeExt;
+        if file_type.is_fifo() {
+            return Some(EntryKind::Fifo);
+        }
+        if file_type.is_socket() {
+            return Some(EntryKind::Socket);
+        }
+        if file_type.is_block_device() || file_type.is_char_device() {
+            return Some(EntryKind::Device);
+        }
     }
-    #[cfg(not(unix))]
-    {
-        error.kind() == io::ErrorKind::Other
+    Some(EntryKind::Other)
+}
+
+fn describe_kind(kind: EntryKind) -> &'static str {
+    match kind {
+        EntryKind::Symlink => "a symbolic link",
+        EntryKind::Directory => "a directory",
+        EntryKind::Fifo => "a named pipe (FIFO)",
+        EntryKind::Socket => "a socket",
+        EntryKind::Device => "a device node",
+        EntryKind::Other => "not a regular file",
     }
 }
 
-/// Read the marker bytes, waiting out the brief window in which a concurrent
+/// The reason text for an entry that must be a regular file and is not.
+fn non_regular_reason(kind: EntryKind, what: &str) -> String {
+    match kind {
+        EntryKind::Other => format!("is not a regular file where {what} must be one"),
+        kind => format!(
+            "is not a regular file where {what} must be one (it is {})",
+            describe_kind(kind)
+        ),
+    }
+}
+
+/// The marker's type when the entry exists and is *not* a regular file. Only
+/// consulted on an open failure, to tell "this entry has a shape we refuse"
+/// apart from "this file could not be read".
+fn marker_entry_kind(dir: &PinnedDir) -> Option<EntryKind> {
+    entry_kind(&std::fs::symlink_metadata(dir.child(LAYOUT_MARKER)).ok()?)
+}
+
+/// What every refusal calls the marker.
+const THE_MARKER: &str = "the Pickforge layout marker";
+
+/// Whether the marker's second name is a publication still in flight: a
+/// `.pickforge-tmp-` entry *in this same directory* naming the very file the
+/// marker names. That is exactly what a writer holds between its `link(2)` and
+/// the unlink of its staging entry, and nothing else in the layout may be a
+/// second name for the marker.
+///
+/// This is what separates the two cases the link count alone conflates. A
+/// planted hard link — a second name anywhere else — is refused immediately,
+/// with no waiting at all; a real publication is waited out for as long as its
+/// staging entry is visibly there, so a publisher descheduled mid-publish can
+/// no longer make a concurrent reader refuse a perfectly good marker.
+/// `None` where file identity cannot be read from a directory listing (only
+/// Windows, where the link count is still honoured through the settle window
+/// below).
+#[cfg(unix)]
+fn publication_in_flight(dir: &PinnedDir, marker: FileFacts) -> Option<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let entries = std::fs::read_dir(&dir.base).ok()?;
+    Some(entries.flatten().any(|entry| {
+        entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| classify_entry(name) == Owner::Transient)
+            // `DirEntry::metadata` does not follow a symlink, so a planted link
+            // in the directory is compared as itself and is never opened — a
+            // planted FIFO here can no more block this check than it can block
+            // the marker read.
+            && entry.metadata().is_ok_and(|metadata| {
+                metadata.dev() == marker.volume && metadata.ino() == marker.index
+            })
+    }))
+}
+
+#[cfg(not(unix))]
+fn publication_in_flight(_dir: &PinnedDir, _marker: FileFacts) -> Option<bool> {
+    None
+}
+
+/// Read the marker bytes, waiting out the window in which a concurrent
 /// publisher still holds the staging link.
 fn read_marker(dir: &PinnedDir) -> Result<Option<Vec<u8>>, LayoutError> {
-    for _ in 0..LINK_SETTLE_ATTEMPTS {
+    let deadline = std::time::Instant::now() + LINK_SETTLE_BUDGET;
+    let mut planted = 0;
+    loop {
         match read_marker_once(dir)? {
             MarkerRead::Absent => return Ok(None),
             MarkerRead::Bytes(bytes) => return Ok(Some(bytes)),
-            MarkerRead::MultiplyLinked => std::thread::sleep(LINK_SETTLE_PAUSE),
+            MarkerRead::MultiplyLinked(facts) => {
+                planted = match publication_in_flight(dir, facts) {
+                    Some(false) => planted + 1,
+                    _ => 0,
+                };
+                if planted >= PLANTED_LINK_CONFIRMATIONS || std::time::Instant::now() >= deadline {
+                    return Err(LayoutError::Refused {
+                        action: manual_action(
+                            &dir.marker_display(),
+                            "is a hard link to another file, where the Pickforge layout marker \
+                             must be a regular file with exactly one name",
+                        ),
+                    });
+                }
+                std::thread::sleep(LINK_SETTLE_PAUSE);
+            }
         }
     }
-    Err(LayoutError::Refused {
-        action: manual_action(
-            &dir.marker_display(),
-            "is a hard link to another file, where the Pickforge layout marker must be \
-             a regular file with exactly one name",
-        ),
-    })
 }
 
 /// The validated layout version of an open state directory, or `None` when it
@@ -556,16 +679,110 @@ fn assert_adoptable(dir: &PinnedDir) -> Result<(), LayoutError> {
                 ),
             });
         };
-        if classify_entry(name) == Owner::Foreign {
-            return Err(LayoutError::Refused {
-                action: manual_action(
-                    &dir.path.join(name),
-                    "is not owned by Pickforge or the Pickforge lab",
-                ),
-            });
+        match classify_entry(name) {
+            Owner::Foreign => {
+                return Err(LayoutError::Refused {
+                    action: manual_action(
+                        &dir.path.join(name),
+                        "is not owned by Pickforge or the Pickforge lab",
+                    ),
+                })
+            }
+            // An in-flight write is inert: uniquely named, never adopted, never
+            // opened, never removed by anyone but its own writer. Judging its
+            // shape would mean touching an entry that is nobody's business.
+            Owner::Transient => {}
+            Owner::Shared | Owner::Integration => assert_owned_shape(dir, name)?,
         }
     }
     Ok(())
+}
+
+/// An entry the table assigns to an owner must already have the shape that
+/// owner writes: `runs/` a real directory, everything else a real regular
+/// file. Adopting a directory means stamping a marker that tells the other tool
+/// "this layout is sound", so a symlinked `runs` — which both tools would
+/// later refuse to write through — must stop the marker rather than be
+/// certified by it (#104 R7). An alpha.1/alpha.2 directory holds exactly a
+/// real `project.json`, real backups, and a real `runs/`, so nothing legitimate
+/// is refused here.
+fn assert_owned_shape(dir: &PinnedDir, name: &str) -> Result<(), LayoutError> {
+    let metadata = match std::fs::symlink_metadata(dir.child(name)) {
+        Ok(metadata) => metadata,
+        // The entry went away between the listing and the check: there is
+        // nothing left to refuse.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(LayoutError::Unreadable {
+                path: dir.path.join(name).display().to_string(),
+                message: error.to_string(),
+            })
+        }
+    };
+    let refused = |reason: String| {
+        Err(LayoutError::Refused {
+            action: manual_action(&dir.path.join(name), &reason),
+        })
+    };
+    if name == RUNS {
+        return match entry_kind(&metadata) {
+            Some(EntryKind::Directory) => Ok(()),
+            kind => refused(not_a_directory("the Pickforge run tree", kind)),
+        };
+    }
+    match entry_kind(&metadata) {
+        None => Ok(()),
+        Some(kind) => refused(non_regular_reason(
+            kind,
+            if name == LAYOUT_MARKER {
+                THE_MARKER
+            } else {
+                "Pickforge project state"
+            },
+        )),
+    }
+}
+
+/// The direct-entry rule as `init --dry-run` needs it: the same check the
+/// claim runs, against a directory addressed by pathname. Only meaningful for
+/// a directory with no marker — once one is there, ownership is settled.
+pub fn assert_adoptable_dir(state_dir: &Path) -> Result<(), LayoutError> {
+    match PinnedDir::open(state_dir) {
+        Ok(dir) => assert_adoptable(&dir),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(LayoutError::Unreadable {
+            path: state_dir.display().to_string(),
+            message: error.to_string(),
+        }),
+    }
+}
+
+/// Refuse a project state directory reached through a symbolic link.
+///
+/// The lab refuses one (its walk opens every component `O_NOFOLLOW`); the Rust
+/// CLI used to follow it, because the file-transaction layer and `evidence
+/// record` canonicalise the path before anything looks at it (#104 R3). Both
+/// tools now agree, and the check is on the *logical* path, before any
+/// canonicalisation. A real directory that already exists is untouched.
+pub fn assert_real_state_dir(state_dir: &Path) -> Result<(), LayoutError> {
+    let Ok(metadata) = std::fs::symlink_metadata(state_dir) else {
+        return Ok(());
+    };
+    match entry_kind(&metadata) {
+        Some(EntryKind::Directory) => Ok(()),
+        kind => Err(LayoutError::Refused {
+            action: manual_action(
+                state_dir,
+                &not_a_directory("the Pickforge project state directory", kind),
+            ),
+        }),
+    }
+}
+
+/// The reason text for something that must be a directory and is not.
+fn not_a_directory(what: &str, kind: Option<EntryKind>) -> String {
+    let found = kind.map_or("a regular file", describe_kind);
+    format!("is not a directory where {what} must be one (it is {found})")
 }
 
 // --- claiming ------------------------------------------------------------
@@ -796,6 +1013,19 @@ mod tests {
         std::fs::write(temp.path().join("notes.txt.bak"), b"x").unwrap();
         let action = manual_action(&path, "is not owned by Pickforge");
         assert!(action.contains("notes.txt.bak-2'"), "{action}");
+    }
+
+    /// The one entry type the integration tests cannot plant (creating a device
+    /// node needs privileges, and a hard link to one cannot cross filesystems),
+    /// so it is pinned where it is decided.
+    #[cfg(unix)]
+    #[test]
+    fn a_device_node_is_not_a_regular_file() {
+        let metadata = std::fs::symlink_metadata("/dev/null").unwrap();
+        assert_eq!(entry_kind(&metadata), Some(EntryKind::Device));
+        let reason = non_regular_reason(EntryKind::Device, THE_MARKER);
+        assert!(reason.contains("is not a regular file"), "{reason}");
+        assert!(reason.contains("device node"), "{reason}");
     }
 
     #[test]

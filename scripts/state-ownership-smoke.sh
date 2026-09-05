@@ -71,16 +71,34 @@ await run.finish("completed");
 console.log(run.dir);
 EOF
 
+# Every invocation is bounded. A refusal that never returns is not a refusal:
+# the marker checks below open entries a blocking `open(2)` would never come
+# back from (a FIFO, a socket, a device), so a hang has to be distinguishable
+# from a clean non-zero exit. `timeout` reports 124 for one, and the controls
+# check for it explicitly.
+STEP_TIMEOUT="${PICKFORGE_STEP_TIMEOUT:-120}"
+TIMED_OUT=124
+
 run_init() {
   home="$1"
-  env -i PATH="${STUB_BIN}:/usr/bin:/bin" HOME="${home}" \
+  timeout "${STEP_TIMEOUT}" \
+    env -i PATH="${STUB_BIN}:/usr/bin:/bin" HOME="${home}" \
     PICKFORGE_HOME="${home}/state" \
     "${CLI}" init --project-dir "${PROJECT}"
 }
 
+run_init_dry_run() {
+  home="$1"
+  timeout "${STEP_TIMEOUT}" \
+    env -i PATH="${STUB_BIN}:/usr/bin:/bin" HOME="${home}" \
+    PICKFORGE_HOME="${home}/state" \
+    "${CLI}" init --project-dir "${PROJECT}" --dry-run
+}
+
 run_evidence() {
   home="$1"
-  env -i PATH="${STUB_BIN}:/usr/bin:/bin" HOME="${home}" \
+  timeout "${STEP_TIMEOUT}" \
+    env -i PATH="${STUB_BIN}:/usr/bin:/bin" HOME="${home}" \
     PICKFORGE_HOME="${home}/state" \
     "${CLI}" evidence record --project-dir "${PROJECT}" \
     --input "${WORK}/evidence-input.json"
@@ -90,9 +108,13 @@ run_lab() {
   home="$1"
   slug="$2"
   ( cd "${REPO_ROOT}" && \
-    env -i PATH="${PATH}" HOME="${home}" PICKFORGE_HOME="${home}/state" \
+    timeout "${STEP_TIMEOUT}" \
+      env -i PATH="${PATH}" HOME="${home}" PICKFORGE_HOME="${home}/state" \
       bun "${WORK}/lab-run.mjs" "${PROJECT}" "${slug}" )
 }
+
+# Permission bits of a path, for the private-mode checks.
+mode_of() { stat -c '%a' "$1"; }
 
 state_dir() {
   home="$1"
@@ -218,15 +240,33 @@ plant_home() {
   printf '%s\n' "${dir}"
 }
 
+# Both binaries must refuse, and must refuse *promptly*: an invocation killed
+# by the timeout is a hang, not a refusal, and is reported as its own failure.
 refuses_both() {
   name="$1"
   home="${WORK}/home-${name}"
-  if run_init "${home}" >"${EVIDENCE}/${name}-init.log" 2>&1; then
-    fail "${name}: pickforge init did not fail closed"
-  fi
-  if run_lab "${home}" "${name}" >"${EVIDENCE}/${name}-lab.log" 2>&1; then
-    fail "${name}: the lab did not fail closed"
-  fi
+  status=0
+  run_init "${home}" >"${EVIDENCE}/${name}-init.log" 2>&1 || status=$?
+  [ "${status}" -ne 0 ] || fail "${name}: pickforge init did not fail closed"
+  [ "${status}" -ne "${TIMED_OUT}" ] \
+    || fail "${name}: pickforge init blocked instead of refusing"
+  status=0
+  run_lab "${home}" "${name}" >"${EVIDENCE}/${name}-lab.log" 2>&1 || status=$?
+  [ "${status}" -ne 0 ] || fail "${name}: the lab did not fail closed"
+  [ "${status}" -ne "${TIMED_OUT}" ] \
+    || fail "${name}: the lab blocked instead of refusing"
+}
+
+# The dry run must preview exactly the refusal the real run performs, and write
+# nothing while doing it.
+refuses_dry_run() {
+  name="$1"
+  home="${WORK}/home-${name}"
+  status=0
+  run_init_dry_run "${home}" >"${EVIDENCE}/${name}-dry-run.log" 2>&1 || status=$?
+  [ "${status}" -ne 0 ] || fail "${name}: init --dry-run reported a clean plan"
+  [ "${status}" -ne "${TIMED_OUT}" ] \
+    || fail "${name}: init --dry-run blocked instead of refusing"
 }
 
 log "Negative control: an unsupported layout version"
@@ -311,6 +351,181 @@ run_init "${WORK}/home-stale" >"${EVIDENCE}/stale-init.log" 2>&1 \
 [ ! -L "${DIR}/layout.json" ] || fail "stale: the marker is a symlink"
 cmp "${DIR}/layout.json" "${EVIDENCE}/layout.json" \
   || fail "stale: the marker is not the shared marker"
+
+log "Negative control: a FIFO planted as the marker"
+# A blocking `open(2)` on a FIFO never returns: before the marker open became
+# non-blocking, both tools hung here forever instead of refusing (#104 R1).
+DIR="$(plant_home fifo)"
+mkfifo -- "${DIR}/layout.json"
+refuses_both fifo
+refuses_dry_run fifo
+grep -q 'named pipe' "${EVIDENCE}/fifo-init.log" \
+  || fail "fifo: init did not name what the entry actually is"
+grep -q 'named pipe' "${EVIDENCE}/fifo-lab.log" \
+  || fail "fifo: the lab did not name what the entry actually is"
+[ -p "${DIR}/layout.json" ] || fail "fifo: the planted FIFO was replaced"
+[ "$(entries "${DIR}")" = "layout.json" ] \
+  || fail "fifo: something was written beside the FIFO"
+
+log "Negative control: a socket planted as the marker"
+DIR="$(plant_home socket)"
+python3 -c 'import socket,sys
+s = socket.socket(socket.AF_UNIX)
+s.bind(sys.argv[1])' "${DIR}/layout.json"
+refuses_both socket
+[ -S "${DIR}/layout.json" ] || fail "socket: the planted socket was replaced"
+[ "$(entries "${DIR}")" = "layout.json" ] \
+  || fail "socket: something was written beside the socket"
+
+log "Negative control: a symlinked run tree in an unclaimed directory"
+# Both tools refuse to write through a symlinked `runs`, so neither may stamp
+# the marker that tells the other the layout is sound (#104 R7).
+DIR="$(plant_home linkedruns)"
+mkdir -p "${WORK}/outside-runs"
+ln -s "${WORK}/outside-runs" "${DIR}/runs"
+refuses_both linkedruns
+refuses_dry_run linkedruns
+grep -q 'runs is not a directory' "${EVIDENCE}/linkedruns-init.log" \
+  || fail "linkedruns: init did not name the run tree"
+grep -q 'runs is not a directory' "${EVIDENCE}/linkedruns-lab.log" \
+  || fail "linkedruns: the lab did not name the run tree"
+[ ! -e "${DIR}/layout.json" ] || fail "linkedruns: a marker was stamped anyway"
+[ -z "$(ls -A "${WORK}/outside-runs")" ] \
+  || fail "linkedruns: something was written through the link"
+
+log "Negative control: a symlinked projects/<id> state directory"
+# The lab has always refused this; the Rust CLI used to follow it, because the
+# transaction layer canonicalised the path first (#104 R3).
+HOME_L="${WORK}/home-linkeddir"
+mkdir -p "${HOME_L}/state/projects" "${WORK}/outside-state"
+ln -s "${WORK}/outside-state" "${HOME_L}/state/projects/$(basename "${DIR_A}")"
+refuses_both linkeddir
+refuses_dry_run linkeddir
+for log_file in linkeddir-init linkeddir-lab; do
+  grep -qi 'symbolic link\|symlink' "${EVIDENCE}/${log_file}.log" \
+    || fail "linkeddir: ${log_file} did not name the symlink"
+done
+[ -z "$(ls -A "${WORK}/outside-state")" ] \
+  || fail "linkeddir: something was written through the link"
+# `evidence record` refuses it too, on the same logical path.
+if run_evidence "${HOME_L}" >"${EVIDENCE}/linkeddir-evidence.log" 2>&1; then
+  fail "linkeddir: evidence record did not fail closed"
+fi
+
+log "Negative control: an entry whose name is not valid UTF-8"
+# Neither tool may print a copyable command for a name it cannot render: the
+# path in the command would not address the file on disk (#104 R5).
+DIR="$(plant_home badname)"
+printf 'x\n' >"$(printf '%b' "${DIR}/bad-\xff-name")"
+refuses_both badname
+for log_file in badname-init badname-lab; do
+  grep -q 'not valid UTF-8' "${EVIDENCE}/${log_file}.log" \
+    || fail "badname: ${log_file} did not name the problem"
+  grep -q 'Move it aside yourself' "${EVIDENCE}/${log_file}.log" \
+    || fail "badname: ${log_file} did not describe the entry"
+  ! grep -q 'mv -n' "${EVIDENCE}/${log_file}.log" \
+    || fail "badname: ${log_file} offered a command for a name it cannot render"
+done
+[ ! -e "${DIR}/layout.json" ] || fail "badname: a marker was stamped anyway"
+
+log "Negative control: init --dry-run previews the refusal it will perform"
+# With a receipt present and no marker, the dry run used to report a clean plan
+# for a directory the real run then refused (#104 R2).
+HOME_D="${WORK}/home-dryrun"
+mkdir -p "${HOME_D}"
+run_init "${HOME_D}" >"${EVIDENCE}/dryrun-init.log" 2>&1 \
+  || fail "dry run control: init failed"
+DIR="$(state_dir "${HOME_D}")"
+rm -f "${DIR}/layout.json"
+printf 'not ours\n' >"${DIR}/notes.txt"
+refuses_dry_run dryrun
+grep -q 'notes.txt is not owned by Pickforge' "${EVIDENCE}/dryrun-dry-run.log" \
+  || fail "dry run control: the preview did not name the unowned entry"
+grep -q 'mv -n --' "${EVIDENCE}/dryrun-dry-run.log" \
+  || fail "dry run control: the preview did not offer the manual action"
+[ ! -e "${DIR}/layout.json" ] || fail "dry run control: the preview wrote a marker"
+# ... and the real run refuses exactly the same thing.
+if run_init "${HOME_D}" >"${EVIDENCE}/dryrun-apply.log" 2>&1; then
+  fail "dry run control: the real run did not refuse what the preview refused"
+fi
+grep -q 'notes.txt is not owned by Pickforge' "${EVIDENCE}/dryrun-apply.log" \
+  || fail "dry run control: preview and apply disagree"
+
+# --- Both tools create private directories -------------------------------
+log "Both tools create the shared state tree owner-only (0700)"
+# Whichever tool gets there first, the state root, `projects/`, the project
+# directory, and `runs/` are private; the marker and the receipt are 0600/0644
+# as their writers create them (#104 R4).
+for home in "${HOME_A}" "${HOME_B}"; do
+  dir="$(state_dir "${home}")"
+  for target in "${home}/state" "${home}/state/projects" "${dir}" "${dir}/runs"; do
+    [ "$(mode_of "${target}")" = "700" ] \
+      || fail "mode: ${target} is $(mode_of "${target}"), expected 700"
+  done
+  [ "$(mode_of "${dir}/layout.json")" = "600" ] \
+    || fail "mode: the marker is $(mode_of "${dir}/layout.json"), expected 600"
+done
+
+# --- More cross-language races -------------------------------------------
+# The race above is init against a first lab run. These two cover the other
+# real orders: both tools writing runs into a directory one of them already
+# claimed, and three writers reaching one fresh directory at once.
+log "Cross-process race: evidence record against a lab run in a claimed directory (${RACES} rounds)"
+for round in $(seq 1 "${RACES}"); do
+  HOME_S="${WORK}/home-shared-${round}"
+  mkdir -p "${HOME_S}"
+  run_init "${HOME_S}" >"${EVIDENCE}/shared-${round}-init.log" 2>&1 \
+    || fail "shared round ${round}: init failed"
+  rm -f "${WORK}/shared-lab-failed" "${WORK}/shared-evidence-failed"
+  ( run_lab "${HOME_S}" "shared-${round}" \
+      >"${EVIDENCE}/shared-${round}-lab.log" 2>&1 \
+      || echo failed >"${WORK}/shared-lab-failed" ) &
+  lab_pid=$!
+  ( run_evidence "${HOME_S}" >"${EVIDENCE}/shared-${round}-evidence.log" 2>&1 \
+      || echo failed >"${WORK}/shared-evidence-failed" ) &
+  evidence_pid=$!
+  wait "${lab_pid}" || true
+  wait "${evidence_pid}" || true
+  [ ! -f "${WORK}/shared-lab-failed" ] \
+    || fail "shared round ${round}: the lab failed (see ${EVIDENCE}/shared-${round}-lab.log)"
+  [ ! -f "${WORK}/shared-evidence-failed" ] \
+    || fail "shared round ${round}: evidence record failed (see ${EVIDENCE}/shared-${round}-evidence.log)"
+  DIR_S="$(state_dir "${HOME_S}")"
+  [ "$(entries "${DIR_S}/runs" | wc -l)" -eq 2 ] \
+    || fail "shared round ${round}: expected one lab run and one evidence run"
+  [ "$(stat -c '%h' "${DIR_S}/layout.json")" = "1" ] \
+    || fail "shared round ${round}: the marker has more than one name"
+done
+
+log "Cross-process race: init, a lab run, and evidence record on one fresh directory (${RACES} rounds)"
+# `evidence record` needs a receipt, so it can only join once init has written
+# one; it is started immediately after init and races the lab's claim.
+for round in $(seq 1 "${RACES}"); do
+  HOME_T="${WORK}/home-three-${round}"
+  mkdir -p "${HOME_T}"
+  rm -f "${WORK}/three-lab-failed" "${WORK}/three-init-failed"
+  ( run_lab "${HOME_T}" "three-${round}" \
+      >"${EVIDENCE}/three-${round}-lab.log" 2>&1 \
+      || echo failed >"${WORK}/three-lab-failed" ) &
+  lab_pid=$!
+  ( run_init "${HOME_T}" >"${EVIDENCE}/three-${round}-init.log" 2>&1 \
+      && run_evidence "${HOME_T}" >"${EVIDENCE}/three-${round}-evidence.log" 2>&1 \
+      || echo failed >"${WORK}/three-init-failed" ) &
+  init_pid=$!
+  wait "${lab_pid}" || true
+  wait "${init_pid}" || true
+  [ ! -f "${WORK}/three-lab-failed" ] \
+    || fail "three-way round ${round}: the lab failed"
+  [ ! -f "${WORK}/three-init-failed" ] \
+    || fail "three-way round ${round}: init or evidence record failed"
+  DIR_T="$(state_dir "${HOME_T}")"
+  cmp "${DIR_T}/layout.json" "${EVIDENCE}/layout.json" \
+    || fail "three-way round ${round}: the marker is not the complete shared marker"
+  [ "$(entries "${DIR_T}")" = "$(printf 'layout.json\nproject.json\nruns')" ] \
+    || fail "three-way round ${round}: unexpected contents $(entries "${DIR_T}")"
+  [ "$(entries "${DIR_T}/runs" | wc -l)" -eq 2 ] \
+    || fail "three-way round ${round}: expected one lab run and one evidence run"
+done
 
 # --- The caller's real home is untouched ---------------------------------
 log "The real home was never touched"

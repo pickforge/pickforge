@@ -255,6 +255,278 @@ describe("the marker's shape", () => {
   });
 });
 
+describe("a marker that could block a reader", () => {
+  // Every case here is about a marker a *blocking* open would never come back
+  // from, so "refused" is only half the guarantee: the other half is that the
+  // answer arrives at all. Each assertion races the call against a timeout, so
+  // a regression fails the test instead of hanging the suite.
+  // Below vitest's own 5 s test timeout, so a regression is reported as the
+  // block it is rather than as a generic slow test.
+  const CALL_TIMEOUT_MS = 3_000;
+
+  async function withinTimeout<T>(what: string, work: Promise<T>): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        work,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`${what} blocked for ${CALL_TIMEOUT_MS} ms`)),
+            CALL_TIMEOUT_MS,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  /** Create a FIFO with `mkfifo(1)`; Node has no binding for it. */
+  async function mkfifo(target: string): Promise<void> {
+    const { execFile } = await import("node:child_process");
+    await new Promise<void>((resolve, reject) => {
+      execFile("mkfifo", ["--", target], (error) =>
+        error ? reject(error) : resolve(),
+      );
+    });
+  }
+
+  it("refuses a FIFO marker instead of blocking on it", async () => {
+    const dir = await stateDirPath();
+    await fs.promises.mkdir(dir, { recursive: true });
+    await mkfifo(path.join(dir, LAYOUT_MARKER));
+
+    await expect(
+      withinTimeout(
+        "readProjectStateLayout on a FIFO marker",
+        withStateDir((handle) => readProjectStateLayout(handle)),
+      ),
+    ).rejects.toThrow(/is not a regular file.*named pipe/s);
+    await expect(
+      withinTimeout(
+        "claimProjectStateLayout on a FIFO marker",
+        withStateDir((handle) => claimProjectStateLayout(handle)),
+      ),
+    ).rejects.toThrow(StateLayoutError);
+    // The FIFO is the user's: refused, never replaced or removed.
+    expect(await entries()).toEqual([LAYOUT_MARKER]);
+  });
+
+  it("refuses a socket marker instead of blocking on it", async () => {
+    const dir = await stateDirPath();
+    await fs.promises.mkdir(dir, { recursive: true });
+    const net = await import("node:net");
+    const server = net.createServer();
+    await new Promise<void>((resolve) =>
+      server.listen(path.join(dir, LAYOUT_MARKER), resolve),
+    );
+    try {
+      await expect(
+        withinTimeout(
+          "readProjectStateLayout on a socket marker",
+          withStateDir((handle) => readProjectStateLayout(handle)),
+        ),
+      ).rejects.toThrow(/is not a regular file.*socket/s);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("refuses a FIFO run tree instead of blocking on it", async () => {
+    const dir = await stateDirPath();
+    await fs.promises.mkdir(dir, { recursive: true });
+    await mkfifo(path.join(dir, "runs"));
+
+    await expect(
+      withinTimeout(
+        "claimProjectStateLayout beside a FIFO run tree",
+        withStateDir((handle) => claimProjectStateLayout(handle)),
+      ),
+    ).rejects.toThrow(/runs is not a directory.*named pipe/s);
+    expect(fs.existsSync(path.join(dir, LAYOUT_MARKER))).toBe(false);
+  });
+});
+
+describe("the publication window", () => {
+  // A marker is multiply linked for as long as its publisher holds the staging
+  // entry. That window is waited out; a second name that is *not* a
+  // publication in flight is a planted hard link and is refused (#104 R6).
+  it("waits out a publisher that is slower than the old fixed window", async () => {
+    const dir = await stateDirPath();
+    await fs.promises.mkdir(dir, { recursive: true });
+    const staging = path.join(dir, `${TMP_PREFIX}layout-slowpublisher`);
+    await fs.promises.writeFile(staging, layoutMarkerContent());
+    await fs.promises.link(staging, path.join(dir, LAYOUT_MARKER));
+
+    // 400 ms — twice the old 40 × 5 ms window — between `link(2)` and the
+    // unlink of the staging entry.
+    const publisher = new Promise<void>((resolve) => {
+      setTimeout(() => {
+        fs.promises.unlink(staging).then(resolve, resolve);
+      }, 400);
+    });
+
+    expect(
+      await withStateDir((handle) => readProjectStateLayout(handle)),
+    ).toBe(LAYOUT_VERSION);
+    await publisher;
+  });
+
+  it("refuses a planted hard link without waiting for a publisher", async () => {
+    const dir = await stateDirPath();
+    await fs.promises.mkdir(dir, { recursive: true });
+    const marker = path.join(dir, LAYOUT_MARKER);
+    await fs.promises.writeFile(marker, layoutMarkerContent());
+    await fs.promises.link(marker, path.join(root, "elsewhere"));
+
+    const started = Date.now();
+    await expect(
+      withStateDir((handle) => readProjectStateLayout(handle)),
+    ).rejects.toThrow(/hard link/);
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+});
+
+describe("owned entries must have the shape their owner writes", () => {
+  it("refuses a symlinked run tree before the marker is stamped", async () => {
+    const dir = await stateDirPath();
+    await fs.promises.mkdir(dir, { recursive: true });
+    const outside = path.join(root, "outside-runs");
+    await fs.promises.mkdir(outside);
+    await fs.promises.symlink(outside, path.join(dir, "runs"));
+
+    await expect(
+      withStateDir((handle) => claimProjectStateLayout(handle)),
+    ).rejects.toThrow(/runs is not a directory.*symbolic link.*mv -n --/s);
+    // Nothing stamped, nothing written through the link.
+    expect(fs.existsSync(path.join(dir, LAYOUT_MARKER))).toBe(false);
+    expect(await fs.promises.readdir(outside)).toEqual([]);
+  });
+
+  // The lab's own run creation goes through the same claim, so a symlinked
+  // `runs` stops a run before any marker certifies the directory.
+  it("stops a lab run from adopting a directory with a symlinked run tree", async () => {
+    const dir = await stateDirPath();
+    await fs.promises.mkdir(dir, { recursive: true });
+    await fs.promises.symlink(root, path.join(dir, "runs"));
+
+    await expect(createRun(project, "blocked")).rejects.toThrow(
+      /runs is not a directory/,
+    );
+    expect(fs.existsSync(path.join(dir, LAYOUT_MARKER))).toBe(false);
+  });
+
+  it("refuses a symlinked receipt before the marker is stamped", async () => {
+    const dir = await stateDirPath();
+    await fs.promises.mkdir(dir, { recursive: true });
+    const outside = path.join(root, "outside.json");
+    await fs.promises.writeFile(outside, "{}\n");
+    await fs.promises.symlink(outside, path.join(dir, "project.json"));
+
+    await expect(
+      withStateDir((handle) => claimProjectStateLayout(handle)),
+    ).rejects.toThrow(/project\.json is not a regular file.*symbolic link/s);
+    expect(fs.existsSync(path.join(dir, LAYOUT_MARKER))).toBe(false);
+    expect(await fs.promises.readFile(outside, "utf8")).toBe("{}\n");
+  });
+
+  // The shape rule must not cost a legitimate upgrade: this is exactly what an
+  // alpha.1/alpha.2 directory holds.
+  it("still adopts a real legacy directory in place", async () => {
+    const dir = await stateDirPath();
+    await fs.promises.mkdir(path.join(dir, "runs", "20260101-000000-old"), {
+      recursive: true,
+    });
+    await fs.promises.writeFile(
+      path.join(dir, "project.json"),
+      '{"schemaVersion":1}\n',
+    );
+    await fs.promises.writeFile(
+      path.join(dir, "project.json.pickforge-backup-20260101"),
+      '{"schemaVersion":1}\n',
+    );
+    await fs.promises.writeFile(
+      path.join(dir, `${TMP_PREFIX}crash`),
+      "remnant\n",
+    );
+
+    expect(await withStateDir((handle) => claimProjectStateLayout(handle))).toBe(
+      true,
+    );
+    expect(fs.existsSync(path.join(dir, "runs", "20260101-000000-old"))).toBe(
+      true,
+    );
+  });
+});
+
+describe("a name that is not valid UTF-8", () => {
+  // Node decodes such a name with U+FFFD, so the string does not address the
+  // file. The lab used to print an `mv -n --` whose source path could not
+  // match the real bytes; it now describes the entry, exactly as the Rust CLI
+  // does (#104 R5).
+  it("is described, never offered as a command", async () => {
+    const dir = await stateDirPath();
+    await fs.promises.mkdir(dir, { recursive: true });
+    await fs.promises.writeFile(
+      Buffer.concat([
+        Buffer.from(`${dir}/bad-`, "utf8"),
+        Buffer.from([0xff]),
+        Buffer.from("-name", "utf8"),
+      ]),
+      "x",
+    );
+
+    const error = await withStateDir((handle) =>
+      claimProjectStateLayout(handle).then(
+        () => undefined,
+        (thrown: Error) => thrown,
+      ),
+    );
+    expect(error?.message).toMatch(/not valid UTF-8/);
+    expect(error?.message).not.toContain("mv -n");
+    expect(error?.message).toContain("Move it aside yourself");
+    expect(fs.existsSync(path.join(dir, LAYOUT_MARKER))).toBe(false);
+  });
+
+  it("never renders a replacement character as a shell command", () => {
+    const action = manualAction("/tmp/bad-\ufffd-name", "is not owned");
+    expect(action).not.toContain("mv -n");
+    expect(action).toContain("Move it aside yourself");
+  });
+});
+
+describe("the modes of directories the lab creates", () => {
+  // The Rust CLI creates every project-state directory `0700`; the lab used to
+  // create them with the process umask (#104 R4). Newly created directories
+  // only: an existing directory's permissions are never rewritten.
+  it("creates the state, projects, project, and runs directories 0700", async () => {
+    await createRun(project, "modes");
+    const dir = await stateDirPath();
+    for (const target of [
+      home,
+      path.join(home, "projects"),
+      dir,
+      path.join(dir, "runs"),
+    ]) {
+      expect((await fs.promises.stat(target)).mode & 0o777).toBe(0o700);
+    }
+  });
+
+  it("does not change the mode of a directory that already exists", async () => {
+    const dir = await stateDirPath();
+    await fs.promises.mkdir(dir, { recursive: true, mode: 0o755 });
+    await fs.promises.chmod(dir, 0o755);
+    await fs.promises.chmod(path.join(home, "projects"), 0o755);
+
+    await createRun(project, "existing");
+
+    expect((await fs.promises.stat(dir)).mode & 0o777).toBe(0o755);
+    expect(
+      (await fs.promises.stat(path.join(home, "projects"))).mode & 0o777,
+    ).toBe(0o755);
+  });
+});
+
 describe("staging entries", () => {
   // The pre-fix claim derived its temp name from the pid and a counter, so a
   // crash remnant plus pid reuse made every new process take the `EEXIST`

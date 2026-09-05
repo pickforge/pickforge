@@ -270,6 +270,11 @@ fn plan_receipt(
     project_path: &str,
     project_id: &str,
 ) -> Result<FilePlan, String> {
+    // The state directory itself must be a real directory. The transaction
+    // layer below canonicalises the receipt's path, so a symlinked
+    // `projects/<id>` would otherwise be followed here while the lab refuses
+    // it (#104 R3); the check is on the logical path, before that happens.
+    state::assert_real_state_dir(state_dir).map_err(|error| error.to_string())?;
     let (file, existing) =
         transaction::plan_file(state_dir.join("project.json"), receipt_bytes, true)
             .map_err(|error| error.to_string())?;
@@ -281,13 +286,19 @@ fn plan_receipt(
     // A layout stamped by a newer build, or a stray `layout.json`, is reported
     // before anything else: the ownership rules below are only meaningful for
     // a layout this build understands.
-    if let Err(error) = state::read_layout(physical_state_dir) {
-        return Err(error.to_string());
-    }
+    let layout = state::read_layout(physical_state_dir).map_err(|error| error.to_string())?;
     if let Some(bytes) = existing {
         validate_existing_receipt(&bytes, project_path, project_id)?;
     } else if physical_state_dir.is_dir() {
         recoverable_state_artifacts(physical_state_dir, project_path, project_id)?;
+    }
+    // A directory with no marker is about to be adopted, and adoption runs the
+    // direct-entry rule. A receipt beside a foreign entry used to skip the
+    // check above, so `--dry-run` reported a clean plan for a directory the
+    // real run then refused (#104 R2): the preview now refuses it too, and
+    // still writes nothing.
+    if layout.is_none() {
+        state::assert_adoptable_dir(physical_state_dir).map_err(|error| error.to_string())?;
     }
     Ok(file)
 }

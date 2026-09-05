@@ -93,7 +93,18 @@ interface RunWriteSpec {
    * one: `project-local` and `custom` roots are not shared with the Rust CLI.
    */
   claimLayoutAt?: number;
+  /**
+   * Mode for the components this walk *creates*. The shared project state
+   * tree is private (`0700`), exactly as the Rust CLI creates it, so a run's
+   * artifacts are not world-readable through a default-mode ancestor (#104
+   * R4). Existing directories are opened as they are: this is a creation
+   * mode, never a migration, so nobody's permissions are rewritten under them.
+   */
+  dirMode?: number;
 }
+
+/** Owner-only, the mode the Rust CLI gives every directory it creates. */
+const PRIVATE_DIR_MODE = 0o700;
 
 function writeSpecFor(
   resolved: ResolvedRunStorage,
@@ -115,6 +126,7 @@ function writeSpecFor(
       createTrusted: true,
       components: ["projects", resolved.projectId, "runs"],
       claimLayoutAt: 1,
+      dirMode: PRIVATE_DIR_MODE,
     };
   }
   return {
@@ -151,7 +163,10 @@ async function openTrustedDir(
   create: boolean,
 ): Promise<DirHandle> {
   if (spec.createTrusted && create) {
-    await fs.promises.mkdir(spec.trustedDir, { recursive: true });
+    await fs.promises.mkdir(spec.trustedDir, {
+      recursive: true,
+      mode: spec.dirMode,
+    });
   }
   try {
     return await DirHandle.open(spec.trustedDir, { followFinal: true });
@@ -196,7 +211,7 @@ async function openChain(
       let next: DirHandle;
       try {
         next = create
-          ? await current.ensureChildDir(component)
+          ? await current.ensureChildDir(component, spec.dirMode)
           : await current.openChild(component);
       } catch (error) {
         if (!create && isAbsent(error)) return undefined;
