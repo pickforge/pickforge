@@ -79,11 +79,11 @@ function targetData(target: AndroidTarget): Record<string, unknown> {
 const waitReadySecondsArg = z
   .number()
   .int()
-  .positive()
+  .nonnegative()
   .optional()
   .describe(
     "Seconds to wait until guest lowmemorykiller is quiet before this action " +
-      "(default: no wait)",
+      "(0 or omitted: no wait)",
   );
 
 async function waitReadyIfRequested(
@@ -97,6 +97,7 @@ async function waitReadyIfRequested(
     env: ctx.env,
     waitReadySeconds,
     onProgress: progressReporter(extra),
+    signal: extra.mcpReq.signal,
   });
   return guestReady === undefined ? {} : { guestReady };
 }

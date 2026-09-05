@@ -253,8 +253,24 @@ describe("android tools (fake adb)", () => {
     expect(adbLogLines(adbLog).join("\n")).not.toMatch(/install -r|am start/);
   });
 
-  it("rejects a non-positive waitReadySeconds", async () => {
-    for (const waitReadySeconds of [0, -1, 1.5]) {
+  it("treats waitReadySeconds 0 as the default no-wait", async () => {
+    overwriteReadyAdb();
+    const launched = parseToolJson(
+      await lab.client.callTool({
+        name: "android_launch_app",
+        arguments: { packageName: "com.example.app", waitReadySeconds: 0 },
+      }),
+    );
+    expect(launched.ok).toBe(true);
+    expect(launched.guestReady).toBeUndefined();
+    expect(adbLogLines(adbLog).join("\n")).not.toMatch(/date \+%s|logcat/);
+    expect(adbLogLines(adbLog).some((line) => line.includes("am start"))).toBe(
+      true,
+    );
+  });
+
+  it("rejects a negative or non-integer waitReadySeconds", async () => {
+    for (const waitReadySeconds of [-1, 1.5]) {
       const result = await lab.client.callTool({
         name: "android_launch_app",
         arguments: { packageName: "com.example.app", waitReadySeconds },
@@ -262,6 +278,33 @@ describe("android tools (fake adb)", () => {
       expect(result.isError).toBe(true);
     }
     expect(adbLogLines(adbLog)).toEqual([]);
+  });
+
+  it("honours MCP cancellation during wait-ready so launch never starts", async () => {
+    overwriteReadyAdb({
+      logcat: "999.0  1  1 I lowmemorykiller: Kill 'app' (9)",
+    });
+    const controller = new AbortController();
+    const startedAt = Date.now();
+    const pending = lab.client.callTool(
+      {
+        name: "android_launch_app",
+        arguments: { packageName: "com.example.app", waitReadySeconds: 30 },
+      },
+      { signal: controller.signal },
+    );
+    setTimeout(() => controller.abort(), 50);
+    let result: unknown;
+    try {
+      result = await pending;
+    } catch {
+      result = undefined;
+    }
+    expect(Date.now() - startedAt).toBeLessThan(2000);
+    if (result !== undefined) {
+      expect(parseToolJson(result).errors.join("\n")).toMatch(/aborted/);
+    }
+    expect(adbLogLines(adbLog).join("\n")).not.toMatch(/install -r|am start/);
   });
 
   it("returns the ui tree xml with secrets redacted", async () => {

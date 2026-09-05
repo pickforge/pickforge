@@ -466,7 +466,7 @@ function registerAndroidSessionCommands(android: Command): void {
         .argument("<apk>", "path to the APK")
         .option(
           "--wait-ready <seconds>",
-          "wait until guest lowmemorykiller is quiet before installing (default: no wait)",
+          "wait until guest lowmemorykiller is quiet before installing (0 or omitted: no wait)",
         ),
     ),
   ).action(async (apk, opts) => {
@@ -482,7 +482,7 @@ function registerAndroidSessionCommands(android: Command): void {
         .option("--activity <activity>", 'activity to start (e.g. ".MainActivity")')
         .option(
           "--wait-ready <seconds>",
-          "wait until guest lowmemorykiller is quiet before launching (default: no wait)",
+          "wait until guest lowmemorykiller is quiet before launching (0 or omitted: no wait)",
         ),
     ),
   ).action(async (packageName, opts) => {

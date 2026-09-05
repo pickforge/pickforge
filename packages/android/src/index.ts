@@ -130,6 +130,7 @@ export {
 export {
   DEFAULT_LMK_QUIET_S,
   DEFAULT_READY_POLL_MS,
+  GUEST_ABORTED,
   GUEST_NOT_READY,
   GuestReadinessError,
   isGuestReadinessError,
@@ -137,6 +138,7 @@ export {
   parseGuestNowSeconds,
   parseLmkQuietSeconds,
   waitForGuestReady,
+  type GuestReadinessKind,
   type GuestReadinessProbe,
   type WaitForGuestReadyOptions,
 } from "./guest-readiness.js";

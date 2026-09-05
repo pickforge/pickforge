@@ -77,11 +77,12 @@ export async function runAndroidInstallApk(
   opts: AndroidTargetOptions,
 ): Promise<number> {
   return runReported(opts, async () => {
+    const waitReadySeconds = waitReadySecondsOf(opts);
     const target = await resolveAndroidTarget(opts);
     const apkPath = path.resolve(apk);
     const guestReady = await maybeWaitForGuestReady({
       serial: target.serial,
-      waitReadySeconds: waitReadySecondsOf(opts),
+      waitReadySeconds,
       onProgress: progressToStderr,
     });
     await installApk({ serial: target.serial, apkPath });
@@ -105,10 +106,11 @@ export async function runAndroidLaunchApp(
   opts: AndroidLaunchAppOptions,
 ): Promise<number> {
   return runReported(opts, async () => {
+    const waitReadySeconds = waitReadySecondsOf(opts);
     const target = await resolveAndroidTarget(opts);
     const guestReady = await maybeWaitForGuestReady({
       serial: target.serial,
-      waitReadySeconds: waitReadySecondsOf(opts),
+      waitReadySeconds,
       onProgress: progressToStderr,
     });
     const launched = await launchApp({

@@ -1434,6 +1434,27 @@ describe("pickforge-lab android (fake adb)", () => {
     expect(adbLogLines(adbLog)).toEqual([]);
   });
 
+  it("validates --wait-ready before looking up the session", async () => {
+    const { env, adbLog } = fakeReadyAdbEnv();
+    const result = await runCli(
+      [
+        "android",
+        "launch-app",
+        "com.example.app",
+        "--session",
+        "no-such-session",
+        "--wait-ready",
+        "foo",
+        "--json",
+      ],
+      env,
+    );
+    expect(result.code).toBe(1);
+    expect(parseJson(result).errors.join("\n")).toContain("--wait-ready");
+    expect(parseJson(result).errors.join("\n")).not.toMatch(/session/i);
+    expect(adbLogLines(adbLog)).toEqual([]);
+  });
+
   it(
     "taps, types, and presses back/home with exact adb argv",
     async () => {
