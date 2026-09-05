@@ -77,6 +77,9 @@ pub struct InitPlanReport {
 pub struct InitPlan {
     pub report: InitPlanReport,
     files: Vec<FilePlan>,
+    /// The project state directory whose shared layout `apply` claims. `None`
+    /// when planning found a conflict there and wrote no receipt action.
+    layout_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Error)]
@@ -159,11 +162,20 @@ fn validate_existing_receipt(
     Ok(())
 }
 
+use state::manual_action;
+
+/// Inspect the entries the integration CLI owns in a state directory that has
+/// no receipt yet, deciding whether `init` may still claim it.
+///
+/// Shared entries ([`state::Owner::Shared`]) are skipped untouched: a lab run
+/// that happened before `pickforge init` is normal, not a conflict (#104), and
+/// the marker is judged by [`state::read_layout`] rather than here. Only a
+/// genuinely foreign entry, or an unreadable/oversized owned one, blocks init.
 fn recoverable_state_artifacts(
     state_dir: &Path,
     expected_path: &str,
     expected_id: &str,
-) -> Result<bool, String> {
+) -> Result<(), String> {
     let entries = std::fs::read_dir(state_dir).map_err(|error| {
         format!(
             "could not inspect state directory {}: {error}",
@@ -177,6 +189,29 @@ fn recoverable_state_artifacts(
                 state_dir.display()
             )
         })?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return Err(manual_action(
+                &entry.path(),
+                "has a name that is not valid UTF-8 and cannot be attributed to an owner",
+            ));
+        };
+        let owner = state::classify_entry(name);
+        match owner {
+            // The run tree is shared: the lab creates it and `pickforge
+            // evidence record` writes its own runs into it, each below its own
+            // run directory. Neither tool polices the other's entries there,
+            // and the marker is validated by `state::read_layout`.
+            state::Owner::Shared => continue,
+            state::Owner::Foreign => {
+                return Err(manual_action(
+                    &entry.path(),
+                    "is not owned by Pickforge or the Pickforge lab",
+                ))
+            }
+            state::Owner::Transient | state::Owner::Integration => {}
+        }
+
         let file_type = entry.file_type().map_err(|error| {
             format!(
                 "could not inspect state artifact {}: {error}",
@@ -184,7 +219,10 @@ fn recoverable_state_artifacts(
             )
         })?;
         if file_type.is_symlink() {
-            return Ok(false);
+            return Err(manual_action(
+                &entry.path(),
+                "is a symlink where Pickforge expects a regular file",
+            ));
         }
         let metadata = entry.metadata().map_err(|error| {
             format!(
@@ -192,34 +230,77 @@ fn recoverable_state_artifacts(
                 entry.path().display()
             )
         })?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            return Ok(false);
-        };
-        if name.starts_with(".pickforge-tmp-")
+        // A transient left by a crashed write is inert: bound its size and
+        // shape as a sanity check, then leave it alone.
+        if owner == state::Owner::Transient
             && metadata.is_file()
             && metadata.len() <= MAX_STATE_ARTIFACT_BYTES
         {
             continue;
         }
         if !metadata.is_file() || metadata.len() > MAX_STATE_ARTIFACT_BYTES {
-            return Ok(false);
+            return Err(manual_action(
+                &entry.path(),
+                "is not a regular file of the expected size for Pickforge state",
+            ));
         }
-        if name.starts_with("project.json.pickforge-backup-") {
-            let (_, bytes) = transaction::inspect_file(entry.path(), true).map_err(|error| {
-                format!(
-                    "could not safely read state backup {}: {error}",
-                    entry.path().display()
-                )
-            })?;
-            let bytes = bytes
-                .ok_or_else(|| format!("state backup {} disappeared", entry.path().display()))?;
-            validate_existing_receipt(&bytes, expected_path, expected_id)?;
-            continue;
-        }
-        return Ok(false);
+        let (_, bytes) = transaction::inspect_file(entry.path(), true).map_err(|error| {
+            format!(
+                "could not safely read state backup {}: {error}",
+                entry.path().display()
+            )
+        })?;
+        let bytes =
+            bytes.ok_or_else(|| format!("state backup {} disappeared", entry.path().display()))?;
+        validate_existing_receipt(&bytes, expected_path, expected_id)?;
     }
-    Ok(true)
+    Ok(())
+}
+
+/// Plan the integration receipt for `state_dir`, or describe why the CLI may
+/// not claim that directory.
+///
+/// This is the whole ownership decision for the shared project state
+/// directory: the layout version must be one this build understands, an
+/// existing receipt must be this project's, and a directory without a receipt
+/// must hold nothing but entries Pickforge or the lab owns.
+fn plan_receipt(
+    state_dir: &Path,
+    receipt_bytes: Vec<u8>,
+    project_path: &str,
+    project_id: &str,
+) -> Result<FilePlan, String> {
+    // The state directory itself must be a real directory. The transaction
+    // layer below canonicalises the receipt's path, so a symlinked
+    // `projects/<id>` would otherwise be followed here while the lab refuses
+    // it (#104 R3); the check is on the logical path, before that happens.
+    state::assert_real_state_dir(state_dir).map_err(|error| error.to_string())?;
+    let (file, existing) =
+        transaction::plan_file(state_dir.join("project.json"), receipt_bytes, true)
+            .map_err(|error| error.to_string())?;
+    let physical_state_dir = file
+        .path()
+        .parent()
+        .expect("receipt target always has a parent");
+
+    // A layout stamped by a newer build, or a stray `layout.json`, is reported
+    // before anything else: the ownership rules below are only meaningful for
+    // a layout this build understands.
+    let layout = state::read_layout(physical_state_dir).map_err(|error| error.to_string())?;
+    if let Some(bytes) = existing {
+        validate_existing_receipt(&bytes, project_path, project_id)?;
+    } else if physical_state_dir.is_dir() {
+        recoverable_state_artifacts(physical_state_dir, project_path, project_id)?;
+    }
+    // A directory with no marker is about to be adopted, and adoption runs the
+    // direct-entry rule. A receipt beside a foreign entry used to skip the
+    // check above, so `--dry-run` reported a clean plan for a directory the
+    // real run then refused (#104 R2): the preview now refuses it too, and
+    // still writes nothing.
+    if layout.is_none() {
+        state::assert_adoptable_dir(physical_state_dir).map_err(|error| error.to_string())?;
+    }
+    Ok(file)
 }
 
 fn normalized_harnesses(selected: &[Harness]) -> Vec<Harness> {
@@ -252,7 +333,17 @@ fn action(
     }
 }
 
-pub fn plan_init(request: &InitRequest, env: &Environment) -> Result<InitPlan, InitError> {
+/// Everything a plan derives from the request before any file is inspected.
+struct InitContext {
+    project_path: String,
+    project_id: String,
+    state_dir: PathBuf,
+    harnesses: Vec<Harness>,
+}
+
+/// Resolve and validate the project, its identity, and the pack, or fail
+/// before anything is planned.
+fn init_context(request: &InitRequest, env: &Environment) -> Result<InitContext, InitError> {
     let canonical = project::canonical_project_path(&request.project_dir);
     let metadata = std::fs::metadata(&canonical)
         .map_err(|_| InitError::MissingProject(canonical.to_string_lossy().into_owned()))?;
@@ -263,244 +354,368 @@ pub fn plan_init(request: &InitRequest, env: &Environment) -> Result<InitPlan, I
     }
     project::detect_flutter(&canonical)?;
     let project_id = project::derive_project_id(&canonical)?;
-    let root = state::state_root(env)?;
-    let state_dir = state::project_state_dir(&root, &project_id);
+    let state_dir = state::project_state_dir(&state::state_root(env)?, &project_id);
     request
         .pack
         .validate()
         .map_err(|error| InitError::Conflicts(error.to_string()))?;
     let harnesses = normalized_harnesses(&request.harnesses);
-    if !harnesses.is_empty() {
-        if let Some(tool) = request
-            .pack
-            .required_tools
-            .iter()
-            .find(|tool| tools::find_on_path(env, tool).is_none())
-        {
-            return Err(InitError::Conflicts(format!(
-                "{} requires {tool} on PATH; install the Dart/Flutter SDK or fix PATH, then run `pickforge doctor`",
-                request.pack.name
-            )));
+    require_pack_tools(request, env, &harnesses)?;
+    let project_path = canonical
+        .to_str()
+        .ok_or(project::ProjectIdentityError::NonUtf8Path)?
+        .to_string();
+    Ok(InitContext {
+        project_path,
+        project_id,
+        state_dir,
+        harnesses,
+    })
+}
+
+/// A pack's tools only matter when it has a harness to configure.
+fn require_pack_tools(
+    request: &InitRequest,
+    env: &Environment,
+    harnesses: &[Harness],
+) -> Result<(), InitError> {
+    if harnesses.is_empty() {
+        return Ok(());
+    }
+    let missing = request
+        .pack
+        .required_tools
+        .iter()
+        .find(|tool| tools::find_on_path(env, tool).is_none());
+    match missing {
+        None => Ok(()),
+        Some(tool) => Err(InitError::Conflicts(format!(
+            "{} requires {tool} on PATH; install the Dart/Flutter SDK or fix PATH, then run `pickforge doctor`",
+            request.pack.name
+        ))),
+    }
+}
+
+/// The planned files, the actions reported for them, and everything that
+/// blocks the plan.
+#[derive(Default)]
+struct PlanBuilder {
+    files: Vec<FilePlan>,
+    actions: Vec<InitAction>,
+    conflicts: Vec<String>,
+}
+
+impl PlanBuilder {
+    fn push(
+        &mut self,
+        file: FilePlan,
+        summary: String,
+        server_names: Vec<String>,
+        warning: Option<String>,
+    ) {
+        self.actions
+            .push(action(file.path(), &file, summary, server_names, warning));
+        self.files.push(file);
+    }
+
+    fn record(&mut self, outcome: Result<(), String>) {
+        if let Err(conflict) = outcome {
+            self.conflicts.push(conflict);
         }
     }
-    let mut files = Vec::new();
-    let mut actions = Vec::new();
-    let mut conflicts = Vec::new();
+
+    /// Turn the accumulated plan into a report, or into the conflict list that
+    /// stops it. Conflicts are de-duplicated in the order they were found.
+    fn finish(
+        mut self,
+        request: &InitRequest,
+        context: InitContext,
+        layout_dir: Option<PathBuf>,
+    ) -> Result<InitPlan, InitError> {
+        if !self.conflicts.is_empty() {
+            let mut unique = BTreeSet::new();
+            self.conflicts
+                .retain(|conflict| unique.insert(conflict.clone()));
+            return Err(InitError::Conflicts(self.conflicts.join("\n")));
+        }
+        let state_dir = layout_dir.clone().unwrap_or(context.state_dir);
+        Ok(InitPlan {
+            report: InitPlanReport {
+                schema_version: INIT_SCHEMA_VERSION,
+                project_path: context.project_path,
+                project_id: context.project_id,
+                state_dir: state_dir.to_string_lossy().into_owned(),
+                pack: PackReport {
+                    name: request.pack.name.clone(),
+                    version: request.pack.version,
+                },
+                harnesses: context.harnesses,
+                actions: self.actions,
+            },
+            files: self.files,
+            layout_dir,
+        })
+    }
+}
+
+/// Plan one harness's MCP config, or `Ok(None)` when the pack leaves it alone.
+fn plan_harness_config(
+    request: &InitRequest,
+    env: &Environment,
+    harness: Harness,
+) -> Result<Option<FilePlan>, String> {
+    let target = adapters::target_for(harness, env)?;
+    let (snapshot, existing) =
+        transaction::inspect_file(target, true).map_err(|error| error.to_string())?;
+    let text = existing
+        .as_deref()
+        .map(|bytes| std::str::from_utf8(bytes).expect("preflight validated UTF-8"));
+    let transformed = match harness {
+        Harness::ClaudeCode => {
+            adapters::json_config(text, &request.pack, harness, "Claude Code config")
+        }
+        Harness::Pi => adapters::json_config(text, &request.pack, harness, "Pi MCP config"),
+        Harness::Codex => adapters::codex_config(text, &request.pack),
+    }
+    .map_err(|error| format!("{}: {error}", snapshot.path().display()))?;
+    let Some(desired) = transformed else {
+        return Ok(None);
+    };
+    snapshot
+        .with_desired(desired)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+fn plan_harness_configs(
+    builder: &mut PlanBuilder,
+    request: &InitRequest,
+    env: &Environment,
+    harnesses: &[Harness],
+) {
+    if request.pack.mcp_servers.is_empty() {
+        return;
+    }
     let server_names = request
         .pack
         .mcp_servers
         .iter()
         .map(|server| server.name.clone())
         .collect::<Vec<_>>();
-
-    if !request.pack.mcp_servers.is_empty() {
-        for harness in Harness::ALL
-            .into_iter()
-            .filter(|harness| harnesses.contains(harness))
-        {
-            let target = match adapters::target_for(harness, env) {
-                Ok(path) => path,
-                Err(error) => {
-                    conflicts.push(error);
-                    continue;
-                }
-            };
-            let planned = transaction::inspect_file(target.clone(), true);
-            let (snapshot, existing) = match planned {
-                Ok(value) => value,
-                Err(error) => {
-                    conflicts.push(error.to_string());
-                    continue;
-                }
-            };
-            let text = existing
-                .as_deref()
-                .map(|bytes| std::str::from_utf8(bytes).expect("preflight validated UTF-8"));
-            let transformed = match harness {
-                Harness::ClaudeCode => adapters::json_config(
-                    text,
-                    &request.pack,
-                    Harness::ClaudeCode,
-                    "Claude Code config",
-                ),
-                Harness::Pi => {
-                    adapters::json_config(text, &request.pack, Harness::Pi, "Pi MCP config")
-                }
-                Harness::Codex => adapters::codex_config(text, &request.pack),
-            };
-            match transformed {
-                Ok(Some(desired)) => {
-                    let file = match snapshot.with_desired(desired) {
-                        Ok(file) => file,
-                        Err(error) => {
-                            conflicts.push(error.to_string());
-                            continue;
-                        }
-                    };
-                    let warning = (harness == Harness::Pi).then(|| {
-                        "Core Pi has no built-in MCP; this config requires pi-mcp-adapter."
-                            .to_string()
-                    });
-                    actions.push(action(
-                        file.path(),
-                        &file,
-                        format!("Configure {harness} MCP servers"),
-                        server_names.clone(),
-                        warning,
-                    ));
-                    files.push(file);
-                }
-                Ok(None) => {}
-                Err(error) => conflicts.push(format!("{}: {error}", snapshot.path().display())),
+    for harness in Harness::ALL
+        .into_iter()
+        .filter(|harness| harnesses.contains(harness))
+    {
+        let outcome = plan_harness_config(request, env, harness).map(|planned| {
+            if let Some(file) = planned {
+                let warning = (harness == Harness::Pi).then(|| {
+                    "Core Pi has no built-in MCP; this config requires pi-mcp-adapter.".to_string()
+                });
+                builder.push(
+                    file,
+                    format!("Configure {harness} MCP servers"),
+                    server_names.clone(),
+                    warning,
+                );
             }
-        }
+        });
+        builder.record(outcome);
     }
+}
 
+/// A workflow file that is not the one Pickforge manages must not be replaced.
+fn is_foreign_workflow(workflow: &adapters::WorkflowSpec, existing: Option<&[u8]>) -> bool {
+    existing.is_some_and(|content| {
+        content != workflow.content
+            && !content
+                .windows(workflow.ownership_marker.len())
+                .any(|window| window == workflow.ownership_marker.as_bytes())
+    })
+}
+
+/// Plan one workflow file, or `Ok(None)` when an identical file is already
+/// planned for the same path (the two workflow roots can resolve together).
+fn plan_workflow(
+    planned: &[FilePlan],
+    workflow: &adapters::WorkflowSpec,
+    root: WorkflowRoot,
+    env: &Environment,
+) -> Result<Option<FilePlan>, String> {
+    let target_path = adapters::workflow_target(root, &workflow.name, env)?;
+    let (file, existing) = transaction::plan_file(target_path, workflow.content.clone(), true)
+        .map_err(|error| error.to_string())?;
+    if is_foreign_workflow(workflow, existing.as_deref()) {
+        return Err(format!(
+            "{} contains a workflow not managed by Pickforge; move or remove it first",
+            file.path().display()
+        ));
+    }
+    match planned.iter().find(|prior| prior.path() == file.path()) {
+        Some(prior) if prior.desired != file.desired => Err(format!(
+            "workflow targets resolve to {} with different contents",
+            file.path().display()
+        )),
+        Some(_) => Ok(None),
+        None => Ok(Some(file)),
+    }
+}
+
+fn plan_workflows(
+    builder: &mut PlanBuilder,
+    request: &InitRequest,
+    env: &Environment,
+    harnesses: &[Harness],
+) {
     for root in [WorkflowRoot::ClaudeSkills, WorkflowRoot::SharedAgentSkills] {
         for workflow in &request.pack.workflows {
-            if !workflow
+            let wanted = workflow
                 .targets
                 .iter()
-                .any(|target| target.root == root && harnesses.contains(&target.harness))
-            {
+                .any(|target| target.root == root && harnesses.contains(&target.harness));
+            if !wanted {
                 continue;
             }
-            let target_path = match adapters::workflow_target(root, &workflow.name, env) {
-                Ok(path) => path,
-                Err(error) => {
-                    conflicts.push(error);
-                    continue;
+            let outcome = plan_workflow(&builder.files, workflow, root, env).map(|planned| {
+                if let Some(file) = planned {
+                    let summary = format!("Install {} workflow", workflow.name);
+                    builder.push(file, summary, vec![], None);
                 }
-            };
-            match transaction::plan_file(target_path, workflow.content.clone(), true) {
-                Ok((file, existing)) => {
-                    let foreign_content = existing.as_ref().is_some_and(|content| {
-                        content != &workflow.content
-                            && !content
-                                .windows(workflow.ownership_marker.len())
-                                .any(|window| window == workflow.ownership_marker.as_bytes())
-                    });
-                    if foreign_content {
-                        conflicts.push(format!(
-                            "{} contains a workflow not managed by Pickforge; move or remove it first",
-                            file.path().display()
-                        ));
-                        continue;
-                    }
-                    if let Some(planned) =
-                        files.iter().find(|planned| planned.path() == file.path())
-                    {
-                        if planned.desired != file.desired {
-                            conflicts.push(format!(
-                                "workflow targets resolve to {} with different contents",
-                                file.path().display()
-                            ));
-                        }
-                        continue;
-                    }
-                    actions.push(action(
-                        file.path(),
-                        &file,
-                        format!("Install {} workflow", workflow.name),
-                        vec![],
-                        None,
-                    ));
-                    files.push(file);
-                }
-                Err(error) => conflicts.push(error.to_string()),
-            }
+            });
+            builder.record(outcome);
         }
     }
+}
 
-    let project_path = canonical
-        .to_str()
-        .ok_or(project::ProjectIdentityError::NonUtf8Path)?
-        .to_string();
+/// The receipt bytes this run would write.
+fn receipt_bytes(request: &InitRequest, context: &InitContext) -> Vec<u8> {
     let receipt = Receipt {
         schema_version: INIT_SCHEMA_VERSION,
-        project_path: &project_path,
-        project_id: &project_id,
+        project_path: &context.project_path,
+        project_id: &context.project_id,
         pack: PackReport {
             name: request.pack.name.clone(),
             version: request.pack.version,
         },
-        harnesses: &harnesses,
+        harnesses: &context.harnesses,
     };
-    let mut receipt_bytes = serde_json::to_vec_pretty(&receipt).expect("receipt is serializable");
-    receipt_bytes.push(b'\n');
-    let receipt_path = state_dir.join("project.json");
-    let mut reported_state_dir = state_dir.clone();
-    match transaction::plan_file(receipt_path.clone(), receipt_bytes, true) {
-        Ok((file, existing)) => {
-            let physical_state_dir = file
+    let mut bytes = serde_json::to_vec_pretty(&receipt).expect("receipt is serializable");
+    bytes.push(b'\n');
+    bytes
+}
+
+/// Plan the receipt and return the state directory whose layout `apply` will
+/// claim, or `None` when planning the receipt conflicted.
+fn plan_receipt_action(
+    builder: &mut PlanBuilder,
+    request: &InitRequest,
+    context: &InitContext,
+) -> Option<PathBuf> {
+    let planned = plan_receipt(
+        &context.state_dir,
+        receipt_bytes(request, context),
+        &context.project_path,
+        &context.project_id,
+    );
+    match planned {
+        Ok(file) => {
+            let layout_dir = file
                 .path()
                 .parent()
-                .expect("receipt target always has a parent");
-            let receipt_conflict = if let Some(bytes) = existing {
-                validate_existing_receipt(&bytes, &project_path, &project_id).err()
-            } else if physical_state_dir.is_dir() {
-                match recoverable_state_artifacts(physical_state_dir, &project_path, &project_id) {
-                    Ok(false) => Some(format!(
-                        "state directory {} is non-empty but has no Pickforge project receipt",
-                        physical_state_dir.display()
-                    )),
-                    Ok(true) => None,
-                    Err(error) => Some(error),
-                }
-            } else {
-                None
-            };
-            if let Some(conflict) = receipt_conflict {
-                conflicts.push(conflict);
-            } else {
-                reported_state_dir = physical_state_dir.to_path_buf();
-                actions.push(action(
-                    file.path(),
-                    &file,
-                    "Write external project receipt".into(),
-                    vec![],
-                    None,
-                ));
-                files.push(file);
-            }
+                .expect("receipt target always has a parent")
+                .to_path_buf();
+            builder.push(file, "Write external project receipt".into(), vec![], None);
+            Some(layout_dir)
         }
-        Err(error) => conflicts.push(error.to_string()),
+        Err(conflict) => {
+            builder.conflicts.push(conflict);
+            None
+        }
     }
-    if !conflicts.is_empty() {
-        let mut unique = BTreeSet::new();
-        conflicts.retain(|conflict| unique.insert(conflict.clone()));
-        return Err(InitError::Conflicts(conflicts.join("\n")));
-    }
+}
 
-    Ok(InitPlan {
-        report: InitPlanReport {
-            schema_version: INIT_SCHEMA_VERSION,
-            project_path,
-            project_id,
-            state_dir: reported_state_dir.to_string_lossy().into_owned(),
-            pack: PackReport {
-                name: request.pack.name.clone(),
-                version: request.pack.version,
-            },
-            harnesses,
-            actions,
-        },
-        files,
-    })
+pub fn plan_init(request: &InitRequest, env: &Environment) -> Result<InitPlan, InitError> {
+    let context = init_context(request, env)?;
+    let mut builder = PlanBuilder::default();
+    plan_harness_configs(&mut builder, request, env, &context.harnesses);
+    plan_workflows(&mut builder, request, env, &context.harnesses);
+    let layout_dir = plan_receipt_action(&mut builder, request, &context);
+    builder.finish(request, context, layout_dir)
+}
+
+/// Stamp the shared layout marker before any file is written.
+///
+/// Claiming first means a state directory is either unclaimed or carries a
+/// marker this build understands for the whole of `apply`; it can never end up
+/// holding a receipt under a layout nobody agreed on. The claim is atomic and
+/// additive, so it is also how an alpha.1/alpha.2 directory is adopted: the
+/// marker appears, and nothing already there is touched.
+fn claim_layout_for(plan: &InitPlan) -> Result<bool, String> {
+    match &plan.layout_dir {
+        Some(dir) => state::claim_layout(dir).map_err(|error| error.to_string()),
+        None => Ok(false),
+    }
 }
 
 pub fn apply_init(plan: &InitPlan, backup_stamp: &str) -> ApplyReport {
+    let claimed = match claim_layout_for(plan) {
+        Ok(claimed) => claimed,
+        Err(error) => {
+            return ApplyReport {
+                schema_version: INIT_SCHEMA_VERSION,
+                outcome: ApplyState::FailedRolledBack,
+                changed: false,
+                backup_paths: vec![],
+                rollback_residuals: vec![],
+                error: Some(error),
+            }
+        }
+    };
     let changed = plan.files.iter().any(FilePlan::is_changed);
     if !changed {
         return ApplyReport {
             schema_version: INIT_SCHEMA_VERSION,
-            outcome: ApplyState::NoOp,
-            changed: false,
+            outcome: if claimed {
+                ApplyState::Success
+            } else {
+                ApplyState::NoOp
+            },
+            changed: claimed,
             backup_paths: vec![],
             rollback_residuals: vec![],
             error: None,
         };
     }
+    let report = apply_planned_files(plan, backup_stamp);
+    account_for_claim(report, plan, claimed)
+}
+
+/// A marker this run published is a real change the file transaction knows
+/// nothing about, so a failure after it cannot be reported as a clean
+/// rollback. The marker is left in place — a concurrent tool may already have
+/// joined the directory on the strength of it — and reported as a residual.
+fn account_for_claim(report: ApplyReport, plan: &InitPlan, claimed: bool) -> ApplyReport {
+    let Some(dir) = plan.layout_dir.as_ref().filter(|_| claimed) else {
+        return report;
+    };
+    if matches!(report.outcome, ApplyState::Success | ApplyState::NoOp) {
+        return report;
+    }
+    let mut residuals = report.rollback_residuals;
+    residuals.push(
+        dir.join(state::LAYOUT_MARKER)
+            .to_string_lossy()
+            .into_owned(),
+    );
+    ApplyReport {
+        outcome: ApplyState::FailedPartial,
+        changed: true,
+        rollback_residuals: residuals,
+        ..report
+    }
+}
+
+/// Apply the planned files. Only called once at least one file changed.
+fn apply_planned_files(plan: &InitPlan, backup_stamp: &str) -> ApplyReport {
     match transaction::apply_files(&plan.files, backup_stamp) {
         Ok(backups) => ApplyReport {
             schema_version: INIT_SCHEMA_VERSION,

@@ -233,15 +233,26 @@ export class DirHandle {
     );
   }
 
-  /** Create a subdirectory relative to this one. `EEXIST` propagates. */
-  async mkdirChild(name: string): Promise<void> {
-    await fs.promises.mkdir(this.resolve(name));
+  /**
+   * Create a subdirectory relative to this one. `EEXIST` propagates. `mode`
+   * applies to the directory *being created* only — an existing directory's
+   * permissions are never changed, here or anywhere else.
+   */
+  async mkdirChild(name: string, mode?: number): Promise<void> {
+    await fs.promises.mkdir(
+      this.resolve(name),
+      mode === undefined ? {} : { mode },
+    );
   }
 
-  /** Create the subdirectory if missing, then open it; a symlink is refused. */
-  async ensureChildDir(name: string): Promise<DirHandle> {
+  /**
+   * Create the subdirectory if missing, then open it; a symlink is refused.
+   * A directory that already exists is opened as it is: `mode` is a creation
+   * mode, not a migration.
+   */
+  async ensureChildDir(name: string, mode?: number): Promise<DirHandle> {
     try {
-      await this.mkdirChild(name);
+      await this.mkdirChild(name, mode);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
@@ -268,6 +279,27 @@ export class DirHandle {
     }
   }
 
+  /** Names of the entries directly inside this directory, through the pinned
+   * descriptor. */
+  readEntryNames(): Promise<string[]> {
+    return fs.promises.readdir(this.resolve());
+  }
+
+  /**
+   * The same listing as {@link readEntryNames}, but as the raw bytes the
+   * kernel returned. A runtime decodes an entry name that is not valid UTF-8
+   * with U+FFFD, which is lossy: the decoded string no longer addresses the
+   * file, so anything that has to *name* an entry back to the user (or to a
+   * shell) must compare against these bytes first.
+   *
+   * Typed as `Uint8Array` rather than `Buffer` deliberately: Node returns
+   * `Buffer`s here and Bun returns plain `Uint8Array`s, and the lab runs under
+   * both. Callers wrap each element in `Buffer.from` before decoding it.
+   */
+  readEntryNameBytes(): Promise<Uint8Array[]> {
+    return fs.promises.readdir(this.resolve(), { encoding: "buffer" });
+  }
+
   /** Read an entry of this directory, or `undefined` when it is missing. */
   async readFileIfPresent(name: string): Promise<string | undefined> {
     try {
@@ -289,6 +321,18 @@ export class DirHandle {
       if (code === "ENOENT" || code === "ENOTDIR") return false;
       throw error;
     }
+  }
+
+  /**
+   * Hard-link `from` to `to` inside this directory, through the pinned
+   * descriptor. Unlike a rename this *fails* with `EEXIST` when `to` already
+   * exists, which is what makes it a create-at-most-once publish of content
+   * that is already complete on disk.
+   */
+  async linkChild(from: string, to: string): Promise<void> {
+    assertSafeEntryName(from);
+    assertSafeEntryName(to);
+    await fs.promises.link(this.resolve(from), this.resolve(to));
   }
 
   /**

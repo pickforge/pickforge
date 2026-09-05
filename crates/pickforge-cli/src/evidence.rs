@@ -190,6 +190,8 @@ pub enum EvidenceError {
     Identity(#[from] project::ProjectIdentityError),
     #[error("state directory resolution failed: {0}")]
     State(#[from] state::StateError),
+    #[error("{0}")]
+    Layout(#[from] state::LayoutError),
     #[error("valid Pickforge project receipt required: {0}")]
     Receipt(String),
     #[error("evidence input exceeds the 1 MiB limit")]
@@ -254,28 +256,7 @@ pub fn record_at(
     if std::str::from_utf8(input).is_err() {
         return Err(EvidenceError::InputUtf8);
     }
-    let canonical = project::canonical_project_path(project_dir);
-    if !canonical.is_dir() {
-        return Err(EvidenceError::Project(
-            canonical.to_string_lossy().into_owned(),
-        ));
-    }
-    project::detect_flutter(&canonical)?;
-    let project_id = project::derive_project_id(&canonical)?;
-    let project_path = canonical
-        .to_str()
-        .ok_or(project::ProjectIdentityError::NonUtf8Path)?
-        .to_owned();
-    let root = state::state_root(env)?;
-    let project_state = state::project_state_dir(&root, &project_id);
-    validate_receipt(
-        &project_state.join("project.json"),
-        &project_path,
-        &project_id,
-    )?;
-    let project_state = fs::canonicalize(&project_state)
-        .map(project::normalize_windows_canonical_path)
-        .map_err(|error| EvidenceError::Receipt(error.to_string()))?;
+    let project = resolve_project(project_dir, env)?;
 
     let mut parsed: EvidenceInput =
         serde_json::from_slice(input).map_err(|e| EvidenceError::Input(e.to_string()))?;
@@ -296,77 +277,150 @@ pub fn record_at(
             .expect("static format"),
         )
         .expect("run id formatting");
-    let runs = project_state.join("runs");
-    create_private_dirs(&runs).map_err(|e| EvidenceError::Io(e.to_string()))?;
+    let runs = project.state_dir.join("runs");
+    state::create_private_dirs(&runs).map_err(|e| EvidenceError::Io(e.to_string()))?;
+    allocate_run(&runs, &base_id, &created_at, &project, &parsed)
+}
 
+/// The project this recording belongs to, once its identity, its receipt, and
+/// the shared layout of its state directory have all been accepted.
+struct RecordTarget {
+    id: String,
+    path: String,
+    state_dir: PathBuf,
+}
+
+/// Resolve and validate everything outside the evidence document itself: the
+/// Flutter project, its identity, its receipt, and the shared project-state
+/// layout.
+fn resolve_project(project_dir: &Path, env: &Environment) -> Result<RecordTarget, EvidenceError> {
+    let canonical = project::canonical_project_path(project_dir);
+    if !canonical.is_dir() {
+        return Err(EvidenceError::Project(
+            canonical.to_string_lossy().into_owned(),
+        ));
+    }
+    project::detect_flutter(&canonical)?;
+    let id = project::derive_project_id(&canonical)?;
+    let path = canonical
+        .to_str()
+        .ok_or(project::ProjectIdentityError::NonUtf8Path)?
+        .to_owned();
+    let state_dir = state::project_state_dir(&state::state_root(env)?, &id);
+    // Checked on the logical path, before the canonicalisation below would
+    // resolve it away: recording must refuse a symlinked `projects/<id>`
+    // exactly as the lab does (#104 R3).
+    state::assert_real_state_dir(&state_dir)?;
+    validate_receipt(&state_dir.join("project.json"), &path, &id)?;
+    let state_dir = fs::canonicalize(&state_dir)
+        .map(project::normalize_windows_canonical_path)
+        .map_err(|error| EvidenceError::Receipt(error.to_string()))?;
+    // Recording writes `runs/<run id>` into the shared project state
+    // directory, so it goes through the same claim as `pickforge init`: an
+    // unsupported layout version, a marker that is not one of ours, and a
+    // foreign entry in a directory nobody has claimed yet all fail closed
+    // before any run exists.
+    state::claim_layout(&state_dir)?;
+    Ok(RecordTarget {
+        id,
+        path,
+        state_dir,
+    })
+}
+
+/// Build the run under an unpublished private directory and publish it under
+/// the first run id nobody else holds.
+fn allocate_run(
+    runs: &Path,
+    base_id: &str,
+    created_at: &str,
+    project: &RecordTarget,
+    input: &EvidenceInput,
+) -> Result<RecordResult, EvidenceError> {
     for collision in 1..=MAX_RUN_ID_ATTEMPTS {
         let run_id = if collision == 1 {
-            base_id.clone()
+            base_id.to_owned()
         } else {
             format!("{base_id}-{collision}")
         };
-        let final_dir = runs.join(&run_id);
-        match fs::symlink_metadata(&final_dir) {
-            Ok(_) => continue,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(EvidenceError::Io(error.to_string())),
-        }
-        let temp_dir = runs.join(format!(
-            ".pickforge-evidence-{run_id}-{}",
-            std::process::id()
-        ));
-        match create_private_dir(&temp_dir) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(EvidenceError::Io(e.to_string())),
-        }
-        let result = build_run(
-            &temp_dir,
-            &run_id,
-            &project_id,
-            &project_path,
-            &created_at,
-            parsed.clone(),
-        );
-        match result {
-            Ok(()) => match fs::rename(&temp_dir, &final_dir) {
-                Ok(()) => {
-                    return Ok(RecordResult {
-                        schema_version: EVIDENCE_SCHEMA_VERSION,
-                        changed: true,
-                        run_id,
-                        evidence_path: final_dir
-                            .join("evidence.json")
-                            .to_string_lossy()
-                            .into_owned(),
-                        report_path: final_dir.join("report.md").to_string_lossy().into_owned(),
-                    })
-                }
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty
-                    ) || (e.kind() == io::ErrorKind::PermissionDenied
-                        && fs::symlink_metadata(&final_dir).is_ok()) =>
-                {
-                    let _ = fs::remove_dir_all(&temp_dir);
-                    continue;
-                }
-                Err(e) => {
-                    let _ = fs::remove_dir_all(&temp_dir);
-                    return Err(EvidenceError::Io(e.to_string()));
-                }
-            },
-            Err(error) => {
-                let _ = fs::remove_dir_all(&temp_dir);
-                return Err(error);
-            }
+        if let Some(result) = try_run_id(runs, run_id, created_at, project, input)? {
+            return Ok(result);
         }
     }
     Err(EvidenceError::Io(format!(
         "could not allocate an evidence run id after {MAX_RUN_ID_ATTEMPTS} attempts; retry with a later timestamp or inspect {}",
         runs.to_string_lossy()
     )))
+}
+
+/// One run id attempt. `Ok(None)` means the id was taken and the caller should
+/// try the next one; nothing is left behind either way.
+fn try_run_id(
+    runs: &Path,
+    run_id: String,
+    created_at: &str,
+    project: &RecordTarget,
+    input: &EvidenceInput,
+) -> Result<Option<RecordResult>, EvidenceError> {
+    let final_dir = runs.join(&run_id);
+    match fs::symlink_metadata(&final_dir) {
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(EvidenceError::Io(error.to_string())),
+    }
+    let temp_dir = runs.join(format!(
+        ".pickforge-evidence-{run_id}-{}",
+        std::process::id()
+    ));
+    match state::create_private_dir(&temp_dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(None),
+        Err(e) => return Err(EvidenceError::Io(e.to_string())),
+    }
+    let built = build_run(
+        &temp_dir,
+        &run_id,
+        &project.id,
+        &project.path,
+        created_at,
+        input.clone(),
+    )
+    .and_then(|()| publish_run(&temp_dir, &final_dir, run_id));
+    if !matches!(built, Ok(Some(_))) {
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+    built
+}
+
+/// Publish a built run directory. `Ok(None)` means another writer took the id
+/// first, which is a retry rather than a failure.
+fn publish_run(
+    temp_dir: &Path,
+    final_dir: &Path,
+    run_id: String,
+) -> Result<Option<RecordResult>, EvidenceError> {
+    match fs::rename(temp_dir, final_dir) {
+        Ok(()) => Ok(Some(RecordResult {
+            schema_version: EVIDENCE_SCHEMA_VERSION,
+            changed: true,
+            run_id,
+            evidence_path: final_dir
+                .join("evidence.json")
+                .to_string_lossy()
+                .into_owned(),
+            report_path: final_dir.join("report.md").to_string_lossy().into_owned(),
+        })),
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty
+            ) || (e.kind() == io::ErrorKind::PermissionDenied
+                && fs::symlink_metadata(final_dir).is_ok()) =>
+        {
+            Ok(None)
+        }
+        Err(e) => Err(EvidenceError::Io(e.to_string())),
+    }
 }
 
 const RECEIPT_REMEDIATION: &str = "run `pickforge init` for this project and selected harnesses";
@@ -702,7 +756,7 @@ fn build_run(
     input: EvidenceInput,
 ) -> Result<(), EvidenceError> {
     let artifacts_dir = temp.join("artifacts");
-    create_private_dir(&artifacts_dir).map_err(|e| EvidenceError::Io(e.to_string()))?;
+    state::create_private_dir(&artifacts_dir).map_err(|e| EvidenceError::Io(e.to_string()))?;
     let mut total = 0u64;
     let mut known = BTreeMap::<String, Artifact>::new();
     let before = materialize_phase(
@@ -1203,42 +1257,6 @@ fn render_list(out: &mut String, items: impl Iterator<Item = String>) {
         }
     }
 }
-fn create_private_dirs(path: &Path) -> io::Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err(io::Error::other("final state directory is a symbolic link"));
-        }
-        Ok(metadata) if metadata.is_dir() => return Ok(()),
-        Ok(_) => return Err(io::Error::other("state parent is not a directory")),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-    create_private_dirs(path.parent().ok_or_else(|| io::Error::other("no parent"))?)?;
-    match create_private_dir(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            let metadata = fs::symlink_metadata(path)?;
-            if metadata.is_dir() && !metadata.file_type().is_symlink() {
-                Ok(())
-            } else {
-                Err(io::Error::other(
-                    "concurrently created state path is not a real directory",
-                ))
-            }
-        }
-        Err(error) => Err(error),
-    }
-}
-fn create_private_dir(path: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        let mut builder = fs::DirBuilder::new();
-        builder.mode(0o700).create(path)
-    }
-    #[cfg(not(unix))]
-    fs::DirBuilder::new().create(path)
-}
 fn write_private(path: &Path, bytes: &[u8]) -> Result<(), EvidenceError> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -1314,20 +1332,5 @@ mod tests {
             Some(("image/jpeg", "jpg"))
         );
         assert_eq!(image_type(b"suffix.png"), None);
-    }
-
-    #[test]
-    fn concurrent_private_directory_creation_is_safe() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("one/two/three");
-        std::thread::scope(|scope| {
-            for _ in 0..16 {
-                let path = &path;
-                scope.spawn(move || create_private_dirs(path).unwrap());
-            }
-        });
-        let metadata = fs::symlink_metadata(path).unwrap();
-        assert!(metadata.is_dir());
-        assert!(!metadata.file_type().is_symlink());
     }
 }

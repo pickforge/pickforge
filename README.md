@@ -264,6 +264,120 @@ config, agent state, sessions, and runs under `~/.pickforge/picklab/` or
 deleted. `pickforge-lab doctor` prints the active state directory and flags a
 detected legacy home.
 
+### Project state ownership
+
+Two programs write per-project state: the Rust integration CLI (`pickforge`)
+and the TypeScript lab (`pickforge-lab`). They default to separate roots —
+`~/.pickforge/pickforge` and `~/.pickforge/lab` — but a single `PICKFORGE_HOME`
+points both at one root, which is the normal setup for CI, automation, and
+isolated smokes. Inside that shared root they share exactly one directory per
+project:
+
+```text
+<PICKFORGE_HOME>/projects/<projectId>/
+```
+
+Ownership there is by entry name, exhaustive, and non-overlapping:
+
+| entry                             | owner                             |
+| --------------------------------- | --------------------------------- |
+| `layout.json`                     | shared — the layout marker        |
+| `runs/`                           | shared — one run tree, two writers |
+| `project.json`                    | `pickforge` — integration receipt |
+| `project.json.pickforge-backup-*` | `pickforge` — receipt backups     |
+| `.pickforge-tmp-*`                | transient, either tool            |
+| anything else                     | nobody                            |
+
+`runs/` is shared because both tools write into it: the lab creates run
+directories there, and `pickforge evidence record` writes its own. Each writes
+only its own run directories and neither reads, rewrites, or deletes the
+other's. Everything else each tool writes is its own, and neither writes,
+moves, or deletes anything unowned. Above this directory the split is by name
+too: `sessions/`, `agents/`, and `config.json` at the root are the lab's, and
+`projects/` is the only shared parent.
+
+**Command order does not matter.** `pickforge init`, `pickforge evidence
+record`, and a lab run can happen in any order for the same project; whichever
+runs first claims the directory and the others join it. Every writer on both
+sides goes through the same claim, so the layout version, the marker's shape,
+and the ownership rule below are checked on one path. (Before 0.4.0-alpha.2,
+`pickforge init` refused a project whose state directory already held lab runs
+— see #104.)
+
+**Layout version.** `layout.json` records the layout version, currently `1`:
+
+```json
+{
+  "layout": "pickforge-project-state",
+  "layoutVersion": 1
+}
+```
+
+Version 1 *describes the layout alpha.1 and alpha.2 already wrote* rather than
+replacing it, so no existing state needs migrating. A directory from an earlier
+release is adopted in place the next time either tool writes to it: the marker
+appears beside what is already there and nothing else changes.
+
+**First adoption checks every entry name — and the shape of every owned
+entry.** Before either tool stamps the marker on a directory nobody has claimed
+yet, every entry directly inside it must be one the table above assigns to an
+owner, and every owned entry must already have the shape its owner writes:
+`runs/` a real directory, `project.json` and its backups real regular files. A
+single unowned entry, an entry whose name is not valid UTF-8, or a symlinked
+`runs/` stops the adoption, and nothing is written — stamping the marker beside
+a symlinked run tree would tell the other tool a layout is sound when both
+would refuse to write through it. An in-flight `.pickforge-tmp-*` entry is left
+alone: it is uniquely named, never adopted, and never opened. The project state
+directory itself must be a real directory too; both tools refuse a symlinked
+`projects/<projectId>`. `pickforge init --dry-run` previews exactly these
+refusals, and writes nothing either way. After a directory carries a marker it
+is not re-judged: ownership was settled when it was claimed, and re-policing it
+would let an entry added later break a tool that never reads it.
+
+**The marker is created at most once.** It is staged in an exclusively created,
+unpredictably named file inside the same directory, with its bytes complete and
+flushed, and published with `link(2)` — which fails rather than replacing
+anything that is already there. It is therefore never observed half-written,
+never overwrites another file, and never follows a link out of the directory.
+Cleanup removes the staging entry only when that name still resolves to the
+file this run created, so a crash remnant or a planted entry is left alone. On
+Linux every lookup resolves through the state directory's own descriptor, so an
+ancestor swapped mid-run cannot redirect any of it. A marker that is a symlink,
+a hard link to another file, or not a regular file — a directory, a named pipe,
+a socket, a device node — is refused rather than trusted, by both tools, and
+the open that classifies it never blocks, so a planted pipe or device is
+refused instead of hanging the tool. A marker is briefly multiply linked while
+its writer publishes it; a reader waits that window out only while the second
+name is visibly that publication (a `.pickforge-tmp-*` entry in the same
+directory naming the same file), and refuses a hard link planted anywhere else
+without waiting. When both tools reach a fresh project directory
+simultaneously, exactly one claims it and the other reads back and validates
+the winner's marker — first use cannot leave partial ownership.
+
+**Compatibility policy.** A tool refuses, with the exact manual action to take,
+rather than guessing:
+
+- A `layoutVersion` this build does not understand: upgrade Pickforge, or use a
+  different `PICKFORGE_HOME`. Nothing is written.
+- A `layout.json` that is not a Pickforge marker, or is a link rather than a
+  regular file: move it aside, or use a different `PICKFORGE_HOME`.
+- An unowned entry in an unclaimed project state directory, an owned entry of
+  the wrong shape, or a symlinked project state directory: the tool names the
+  path and a shell-quoted `mv -n -- <path> <unused>.bak` to run. It never moves
+  or deletes it for you, and the suggested command never clobbers. A path whose
+  name cannot be shown as a safe shell word — a control character, a bidi
+  control, or a name that is not valid UTF-8 on disk — is described instead,
+  without a copyable command, because such a command could not address the real
+  entry.
+
+Directories both tools create in the shared state tree — the state root,
+`projects/`, `projects/<projectId>/`, and `runs/` — are owner-only (`0700`),
+and the marker is `0600`. Permissions of directories that already exist are
+never changed.
+
+A future layout version may add entries, but only under a name the table above
+does not already assign, and only with both tools able to read version 1.
+
 ### Evidence recording
 
 Computer-use tools record one session-scoped evidence run by default. MCP

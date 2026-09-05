@@ -86,6 +86,19 @@ export {
 } from "./run-root.js";
 
 export {
+  claimProjectStateLayout,
+  classifyEntry,
+  layoutMarkerContent,
+  LAYOUT_KIND,
+  LAYOUT_MARKER,
+  LAYOUT_VERSION,
+  manualAction,
+  readProjectStateLayout,
+  StateLayoutError,
+  type StateEntryOwner,
+} from "./state-layout.js";
+
+export {
   listRuns,
   openRunCatalog,
   RunCatalog,

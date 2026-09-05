@@ -1,6 +1,14 @@
-//! Where Pickforge keeps its per-project state. Nothing here creates
-//! directories: `doctor` only reports paths.
+//! Where Pickforge keeps its per-project state, and who owns what inside it.
+//!
+//! Path resolution here creates nothing: `doctor` only reports paths. The one
+//! writing entry point is [`claim_layout`], which validates the directory and
+//! stamps the shared ownership marker. Every Rust writer of project state —
+//! `pickforge init` and `pickforge evidence record` — goes through it, so the
+//! layout version, the marker's shape, and the direct-entry ownership rule are
+//! enforced on exactly one path.
 
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -39,4 +47,1001 @@ pub fn state_root(env: &crate::env::Environment) -> Result<PathBuf, StateError> 
 /// `<state root>/projects/<project id>`.
 pub fn project_state_dir(root: &Path, project_id: &str) -> PathBuf {
     root.join("projects").join(project_id)
+}
+
+/// The project-state layout this build reads and writes. Version 1 is the
+/// layout alpha.1 and alpha.2 already wrote; it is described here rather than
+/// changed, so no existing state needs migrating. See `README.md`
+/// ("Project state ownership") for the ownership table.
+pub const LAYOUT_VERSION: u32 = 1;
+
+/// Discriminator for the marker, so an unrelated `layout.json` is not mistaken
+/// for ours.
+pub const LAYOUT_KIND: &str = "pickforge-project-state";
+
+/// The shared ownership marker inside a project state directory.
+pub const LAYOUT_MARKER: &str = "layout.json";
+
+/// Rust-owned entries: the integration receipt and its backups.
+const RECEIPT: &str = "project.json";
+const RECEIPT_BACKUP_PREFIX: &str = "project.json.pickforge-backup-";
+
+/// In-flight writes by either tool, always uniquely named.
+const TMP_PREFIX: &str = ".pickforge-tmp-";
+
+/// The run tree. The lab creates and manages it, and `pickforge evidence
+/// record` writes its own run directories into it, so it is shared.
+const RUNS: &str = "runs";
+
+/// A marker larger than this is not one of ours; refuse it without reading it.
+const MAX_MARKER_BYTES: u64 = 64 * 1024;
+
+/// A marker is briefly multiply linked while its writer publishes it with
+/// `link(2)` and unlinks the staging entry. Readers wait out that window
+/// before concluding a marker is a planted hard link — but only while the
+/// second name is visibly that publication (a `.pickforge-tmp-` entry in this
+/// same directory naming the same file). A marker whose extra name is anywhere
+/// else is a planted hard link and is refused without waiting at all.
+const LINK_SETTLE_BUDGET: std::time::Duration = std::time::Duration::from_millis(1_000);
+const LINK_SETTLE_PAUSE: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// How many consecutive readings must agree that a multiply linked marker has
+/// no publication in flight before it is refused as a planted hard link. The
+/// link count and the directory listing are two separate syscalls, so a
+/// publisher that unlinks its staging entry between them looks momentarily
+/// like a planted link; confirming the reading removes that race without
+/// reintroducing a fixed wait for the real thing.
+const PLANTED_LINK_CONFIRMATIONS: u32 = 3;
+
+/// Who owns one entry directly inside a project state directory. Ownership is
+/// by entry name and is exhaustive: an entry that matches no owner is
+/// [`Owner::Foreign`] and neither tool may write, move, or delete it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Owner {
+    /// Written by both tools: the layout marker, and the run tree that the lab
+    /// manages and `pickforge evidence record` also writes into. Neither tool
+    /// deletes or rewrites what the other put there.
+    Shared,
+    /// The Rust integration CLI: receipts and their backups.
+    Integration,
+    /// An in-flight write by either tool. Uniquely named, so one left behind
+    /// by a crash is inert and never adopted as another invocation's staging
+    /// entry.
+    Transient,
+    /// Nobody. Refused rather than adopted, migrated, or removed.
+    Foreign,
+}
+
+/// Classify one entry name inside `<state root>/projects/<project id>`.
+/// Must stay in sync with PickLab's TypeScript `classifyEntry`;
+/// `test/fixtures/state-layout.json` is the one table both suites check.
+pub fn classify_entry(name: &str) -> Owner {
+    if name == LAYOUT_MARKER || name == RUNS {
+        Owner::Shared
+    } else if name.starts_with(TMP_PREFIX) {
+        Owner::Transient
+    } else if name == RECEIPT || name.starts_with(RECEIPT_BACKUP_PREFIX) {
+        Owner::Integration
+    } else {
+        Owner::Foreign
+    }
+}
+
+/// The exact bytes of the marker. Both tools write this, so whichever claims a
+/// directory first leaves the same content.
+pub fn layout_marker_bytes() -> Vec<u8> {
+    format!("{{\n  \"layout\": \"{LAYOUT_KIND}\",\n  \"layoutVersion\": {LAYOUT_VERSION}\n}}\n")
+        .into_bytes()
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum LayoutError {
+    #[error(
+        "project state directory {dir} uses layout version {found}, but this \
+         Pickforge build only understands version {LAYOUT_VERSION}. \
+         Upgrade Pickforge, or run with a different PICKFORGE_HOME."
+    )]
+    UnsupportedVersion { dir: String, found: u32 },
+    #[error(
+        "{path} is not a Pickforge layout marker. Move it aside and re-run, \
+         or run with a different PICKFORGE_HOME."
+    )]
+    Unrecognized { path: String },
+    /// The marker or a directory entry exists but has a shape Pickforge will
+    /// not adopt. Carries the exact manual action.
+    #[error("{action}")]
+    Refused { action: String },
+    #[error("project state layout marker {path} could not be read: {message}")]
+    Unreadable { path: String, message: String },
+    #[error("project state layout marker {path} could not be written: {message}")]
+    Unwritable { path: String, message: String },
+}
+
+// --- the manual action ---------------------------------------------------
+
+/// Quote one argument for POSIX `sh`, or `None` when it cannot be rendered as
+/// a shell word safely (control or bidi-control characters would be mangled by
+/// the terminal-safe escaping every message goes through).
+fn shell_quote(value: &Path) -> Option<String> {
+    let text = value.to_str()?;
+    if text.chars().any(|character| {
+        character.is_control()
+            || matches!(
+                character,
+                '\u{061c}'
+                    | '\u{200e}'
+                    | '\u{200f}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2066}'..='\u{2069}'
+            )
+    }) {
+        return None;
+    }
+    Some(format!("'{}'", text.replace('\'', r"'\''")))
+}
+
+/// A `.bak` destination beside `path` that does not exist yet. `mv -n` is what
+/// actually guarantees no clobber; this only keeps the suggestion useful when
+/// an earlier `.bak` is already there.
+fn unused_backup_path(path: &Path) -> PathBuf {
+    let name = path.file_name().unwrap_or_default().to_os_string();
+    for attempt in 1..=64u32 {
+        let mut candidate = name.clone();
+        candidate.push(if attempt == 1 {
+            ".bak".to_string()
+        } else {
+            format!(".bak-{attempt}")
+        });
+        let candidate = path.with_file_name(candidate);
+        if std::fs::symlink_metadata(&candidate).is_err() {
+            return candidate;
+        }
+    }
+    let mut name = name;
+    name.push(".bak-new");
+    path.with_file_name(name)
+}
+
+/// The exact manual action offered for anything Pickforge will not adopt. The
+/// CLI never moves or deletes state it does not own, so the remedy is always
+/// the user's to take. The command is shell-quoted and never clobbers; a path
+/// that cannot be rendered as a safe shell word is described instead.
+pub fn manual_action(path: &Path, reason: &str) -> String {
+    let remedy = match (shell_quote(path), shell_quote(&unused_backup_path(path))) {
+        (Some(source), Some(destination)) => {
+            format!("Move it aside (`mv -n -- {source} {destination}`)")
+        }
+        _ => "Move it aside yourself — its name cannot be shown as a safe shell \
+              command — "
+            .to_string(),
+    };
+    format!(
+        "{} {reason}. Pickforge will not move or delete it. {remedy} and re-run \
+         `pickforge init`, or run with a different PICKFORGE_HOME.",
+        path.display()
+    )
+}
+
+// --- pinned directories --------------------------------------------------
+
+/// A project state directory pinned to the identity verified when it was
+/// opened.
+///
+/// On Linux every child lookup goes through the directory's own descriptor via
+/// a `/proc/self/fd` capability path, so swapping an ancestor — or the state
+/// directory itself — after the open cannot redirect the marker, the staging
+/// entry, or the cleanup that follows them. Elsewhere the open still refuses a
+/// symlinked or non-directory final component, and lookups fall back to the
+/// pathname.
+struct PinnedDir {
+    /// Logical path, used in messages.
+    path: PathBuf,
+    /// What child names are resolved against.
+    base: PathBuf,
+    /// Held open for as long as `base` is used; dropping it invalidates the
+    /// capability path.
+    _handle: Option<File>,
+}
+
+impl PinnedDir {
+    fn open(path: &Path) -> io::Result<Self> {
+        let handle = open_dir_nofollow(path)?;
+        let base = handle
+            .as_ref()
+            .and_then(capability_path)
+            .unwrap_or_else(|| path.to_path_buf());
+        Ok(Self {
+            path: path.to_path_buf(),
+            base,
+            _handle: handle,
+        })
+    }
+
+    fn child(&self, name: &str) -> PathBuf {
+        self.base.join(name)
+    }
+
+    /// The marker's logical path, for messages only.
+    fn marker_display(&self) -> PathBuf {
+        self.path.join(LAYOUT_MARKER)
+    }
+}
+
+#[cfg(unix)]
+fn open_dir_nofollow(path: &Path) -> io::Result<Option<File>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)
+        .map(Some)
+}
+
+#[cfg(not(unix))]
+fn open_dir_nofollow(path: &Path) -> io::Result<Option<File>> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(io::Error::other(
+            "project state directory is a symbolic link",
+        ));
+    }
+    if !metadata.is_dir() {
+        return Err(io::Error::other("project state path is not a directory"));
+    }
+    Ok(None)
+}
+
+#[cfg(target_os = "linux")]
+fn capability_path(handle: &File) -> Option<PathBuf> {
+    use std::os::unix::io::AsRawFd;
+    let path = PathBuf::from(format!("/proc/self/fd/{}", handle.as_raw_fd()));
+    path.exists().then_some(path)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn capability_path(_handle: &File) -> Option<PathBuf> {
+    None
+}
+
+/// What an *open* file is: which volume it lives on, which file it is there,
+/// and how many names it has. Every check reads this from the descriptor, so
+/// it describes the file that was actually opened rather than whatever a
+/// pathname resolves to a moment later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileFacts {
+    volume: u64,
+    index: u64,
+    links: u64,
+}
+
+#[cfg(unix)]
+fn file_facts(file: &File) -> io::Result<FileFacts> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file.metadata()?;
+    Ok(FileFacts {
+        volume: metadata.dev(),
+        index: metadata.ino(),
+        links: metadata.nlink(),
+    })
+}
+
+#[cfg(windows)]
+fn file_facts(file: &File) -> io::Result<FileFacts> {
+    use std::mem::MaybeUninit;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+    // SAFETY: the handle is owned by `file`, and Windows initializes
+    // `information` on success.
+    let succeeded =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) };
+    if succeeded == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: GetFileInformationByHandle succeeded and initialized the structure.
+    let information = unsafe { information.assume_init() };
+    Ok(FileFacts {
+        volume: u64::from(information.dwVolumeSerialNumber),
+        index: (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow),
+        links: u64::from(information.nNumberOfLinks),
+    })
+}
+
+/// Nowhere else exposes file identity or a link count, so a marker's shape is
+/// judged by the no-follow open and the regular-file check alone, and the
+/// staging entry is only removed when it is still a regular file.
+#[cfg(not(any(unix, windows)))]
+fn file_facts(_file: &File) -> io::Result<FileFacts> {
+    Ok(FileFacts {
+        volume: 0,
+        index: 0,
+        links: 1,
+    })
+}
+
+// --- reading the marker --------------------------------------------------
+
+#[derive(serde::Deserialize)]
+struct LayoutMarker {
+    layout: String,
+    #[serde(rename = "layoutVersion")]
+    layout_version: u32,
+}
+
+/// Validate an existing marker's bytes against what this build supports.
+fn validate_marker(path: &Path, bytes: &[u8]) -> Result<(), LayoutError> {
+    let marker: LayoutMarker =
+        serde_json::from_slice(bytes).map_err(|_| LayoutError::Unrecognized {
+            path: path.display().to_string(),
+        })?;
+    if marker.layout != LAYOUT_KIND {
+        return Err(LayoutError::Unrecognized {
+            path: path.display().to_string(),
+        });
+    }
+    if marker.layout_version != LAYOUT_VERSION {
+        return Err(LayoutError::UnsupportedVersion {
+            dir: path.parent().unwrap_or(path).display().to_string(),
+            found: marker.layout_version,
+        });
+    }
+    Ok(())
+}
+
+enum MarkerRead {
+    Absent,
+    Bytes(Vec<u8>),
+    /// Multiply linked right now; retry before refusing it. Carries the
+    /// identity read from the descriptor, so the extra name can be looked for.
+    MultiplyLinked(FileFacts),
+}
+
+/// Open the marker without following a link at the final component and without
+/// ever blocking on it.
+///
+/// `O_NOFOLLOW` refuses a symlink. `O_NONBLOCK` is what makes the *type* check
+/// below reachable at all: opening a FIFO for reading blocks until a writer
+/// arrives, and opening a device can block in its driver, so without it a
+/// planted `layout.json` of either kind hangs the CLI instead of being refused
+/// as "not a regular file". The flag is meaningless for the regular file a
+/// marker is supposed to be, and the file is never read until the descriptor's
+/// own `fstat` says it is regular.
+#[cfg(unix)]
+fn open_marker(dir: &PinnedDir) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(dir.child(LAYOUT_MARKER))
+}
+
+/// Without `O_NOFOLLOW` the entry's own type is checked first, and the open is
+/// limited to a regular file so a directory or device never reaches the read.
+#[cfg(not(unix))]
+fn open_marker(dir: &PinnedDir) -> io::Result<File> {
+    let path = dir.child(LAYOUT_MARKER);
+    let metadata = std::fs::symlink_metadata(&path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(io::Error::other("layout marker is a symbolic link"));
+    }
+    if !metadata.is_file() {
+        return Err(io::Error::other("layout marker is not a regular file"));
+    }
+    File::open(path)
+}
+
+/// One attempt at reading the marker as a regular, singly linked file.
+fn read_marker_once(dir: &PinnedDir) -> Result<MarkerRead, LayoutError> {
+    let refused = |reason: &str| LayoutError::Refused {
+        action: manual_action(&dir.marker_display(), reason),
+    };
+    let mut file = match open_marker(dir) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(MarkerRead::Absent),
+        // An open can fail because of what the entry *is* rather than because
+        // of the I/O: `ELOOP` on a symlink under `O_NOFOLLOW`, `ENOTDIR` when
+        // the name resolved through a non-directory, `ENXIO` on a socket or a
+        // device with no driver. The entry is `lstat`ed once, only here, to
+        // name what is actually there rather than guessing — and anything that
+        // is not a regular file is refused as a shape, not reported as an I/O
+        // failure.
+        Err(error) => {
+            return match marker_entry_kind(dir) {
+                Some(kind) => Err(refused(&non_regular_reason(kind, THE_MARKER))),
+                None => Err(LayoutError::Unreadable {
+                    path: dir.marker_display().display().to_string(),
+                    message: error.to_string(),
+                }),
+            }
+        }
+    };
+    let metadata = file.metadata().map_err(|error| LayoutError::Unreadable {
+        path: dir.marker_display().display().to_string(),
+        message: error.to_string(),
+    })?;
+    // The descriptor's own type, not the pathname's: a FIFO or a device that
+    // `O_NONBLOCK` let us open never reaches the read below.
+    if let Some(kind) = entry_kind(&metadata) {
+        return Err(refused(&non_regular_reason(kind, THE_MARKER)));
+    }
+    if metadata.len() > MAX_MARKER_BYTES {
+        return Err(refused("is too large to be a Pickforge layout marker"));
+    }
+    let facts = file_facts(&file).map_err(|error| LayoutError::Unreadable {
+        path: dir.marker_display().display().to_string(),
+        message: error.to_string(),
+    })?;
+    if facts.links > 1 {
+        return Ok(MarkerRead::MultiplyLinked(facts));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| LayoutError::Unreadable {
+            path: dir.marker_display().display().to_string(),
+            message: error.to_string(),
+        })?;
+    Ok(MarkerRead::Bytes(bytes))
+}
+
+/// What an entry is, whenever that is anything other than the regular file
+/// Pickforge expects. Named precisely so a refusal tells the user what to look
+/// for; the message always also says "is not a regular file", which is the
+/// rule being enforced.
+///
+/// The pipe, socket, and device variants exist only where such entries can:
+/// Windows has no directory entry of those kinds, so constructing them there
+/// would be dead code rather than a check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryKind {
+    Symlink,
+    Directory,
+    #[cfg(unix)]
+    Fifo,
+    #[cfg(unix)]
+    Socket,
+    #[cfg(unix)]
+    Device,
+    Other,
+}
+
+/// Classify one entry's type, or `None` when it is a plain regular file.
+fn entry_kind(metadata: &std::fs::Metadata) -> Option<EntryKind> {
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Some(EntryKind::Symlink);
+    }
+    if file_type.is_dir() {
+        return Some(EntryKind::Directory);
+    }
+    if file_type.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        if file_type.is_fifo() {
+            return Some(EntryKind::Fifo);
+        }
+        if file_type.is_socket() {
+            return Some(EntryKind::Socket);
+        }
+        if file_type.is_block_device() || file_type.is_char_device() {
+            return Some(EntryKind::Device);
+        }
+    }
+    Some(EntryKind::Other)
+}
+
+fn describe_kind(kind: EntryKind) -> &'static str {
+    match kind {
+        EntryKind::Symlink => "a symbolic link",
+        EntryKind::Directory => "a directory",
+        #[cfg(unix)]
+        EntryKind::Fifo => "a named pipe (FIFO)",
+        #[cfg(unix)]
+        EntryKind::Socket => "a socket",
+        #[cfg(unix)]
+        EntryKind::Device => "a device node",
+        EntryKind::Other => "not a regular file",
+    }
+}
+
+/// The reason text for an entry that must be a regular file and is not.
+fn non_regular_reason(kind: EntryKind, what: &str) -> String {
+    match kind {
+        EntryKind::Other => format!("is not a regular file where {what} must be one"),
+        kind => format!(
+            "is not a regular file where {what} must be one (it is {})",
+            describe_kind(kind)
+        ),
+    }
+}
+
+/// The marker's type when the entry exists and is *not* a regular file. Only
+/// consulted on an open failure, to tell "this entry has a shape we refuse"
+/// apart from "this file could not be read".
+fn marker_entry_kind(dir: &PinnedDir) -> Option<EntryKind> {
+    entry_kind(&std::fs::symlink_metadata(dir.child(LAYOUT_MARKER)).ok()?)
+}
+
+/// What every refusal calls the marker.
+const THE_MARKER: &str = "the Pickforge layout marker";
+
+/// Whether the marker's second name is a publication still in flight: a
+/// `.pickforge-tmp-` entry *in this same directory* naming the very file the
+/// marker names. That is exactly what a writer holds between its `link(2)` and
+/// the unlink of its staging entry, and nothing else in the layout may be a
+/// second name for the marker.
+///
+/// This is what separates the two cases the link count alone conflates. A
+/// planted hard link — a second name anywhere else — is refused immediately,
+/// with no waiting at all; a real publication is waited out for as long as its
+/// staging entry is visibly there, so a publisher descheduled mid-publish can
+/// no longer make a concurrent reader refuse a perfectly good marker.
+/// `None` where file identity cannot be read from a directory listing (only
+/// Windows, where the link count is still honoured through the settle window
+/// below).
+#[cfg(unix)]
+fn publication_in_flight(dir: &PinnedDir, marker: FileFacts) -> Option<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let entries = std::fs::read_dir(&dir.base).ok()?;
+    Some(entries.flatten().any(|entry| {
+        entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| classify_entry(name) == Owner::Transient)
+            // `DirEntry::metadata` does not follow a symlink, so a planted link
+            // in the directory is compared as itself and is never opened — a
+            // planted FIFO here can no more block this check than it can block
+            // the marker read.
+            && entry.metadata().is_ok_and(|metadata| {
+                metadata.dev() == marker.volume && metadata.ino() == marker.index
+            })
+    }))
+}
+
+#[cfg(not(unix))]
+fn publication_in_flight(_dir: &PinnedDir, _marker: FileFacts) -> Option<bool> {
+    None
+}
+
+/// Read the marker bytes, waiting out the window in which a concurrent
+/// publisher still holds the staging link.
+fn read_marker(dir: &PinnedDir) -> Result<Option<Vec<u8>>, LayoutError> {
+    let deadline = std::time::Instant::now() + LINK_SETTLE_BUDGET;
+    let mut planted = 0;
+    loop {
+        match read_marker_once(dir)? {
+            MarkerRead::Absent => return Ok(None),
+            MarkerRead::Bytes(bytes) => return Ok(Some(bytes)),
+            MarkerRead::MultiplyLinked(facts) => {
+                planted = match publication_in_flight(dir, facts) {
+                    Some(false) => planted + 1,
+                    _ => 0,
+                };
+                if planted >= PLANTED_LINK_CONFIRMATIONS || std::time::Instant::now() >= deadline {
+                    return Err(LayoutError::Refused {
+                        action: manual_action(
+                            &dir.marker_display(),
+                            "is a hard link to another file, where the Pickforge layout marker \
+                             must be a regular file with exactly one name",
+                        ),
+                    });
+                }
+                std::thread::sleep(LINK_SETTLE_PAUSE);
+            }
+        }
+    }
+}
+
+/// The validated layout version of an open state directory, or `None` when it
+/// has no marker.
+fn read_layout_in(dir: &PinnedDir) -> Result<Option<u32>, LayoutError> {
+    match read_marker(dir)? {
+        None => Ok(None),
+        Some(bytes) => {
+            validate_marker(&dir.marker_display(), &bytes)?;
+            Ok(Some(LAYOUT_VERSION))
+        }
+    }
+}
+
+/// Read the marker in `state_dir` when there is one. `Ok(None)` means the
+/// directory predates the marker (alpha.1/alpha.2) or does not exist yet;
+/// callers treat that as version 1 by adoption, never as a reason to rewrite.
+pub fn read_layout(state_dir: &Path) -> Result<Option<u32>, LayoutError> {
+    match PinnedDir::open(state_dir) {
+        Ok(dir) => read_layout_in(&dir),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(LayoutError::Unreadable {
+            path: state_dir.join(LAYOUT_MARKER).display().to_string(),
+            message: error.to_string(),
+        }),
+    }
+}
+
+// --- the direct-entry rule -----------------------------------------------
+
+/// The one direct-entry rule, applied before any first adoption: a directory
+/// Pickforge is about to claim may hold only entries the table assigns to an
+/// owner. A foreign entry is refused with the exact manual action, and nothing
+/// is written.
+///
+/// After a directory carries a marker this is not re-run: ownership was
+/// settled when it was claimed, and re-policing it would let an entry created
+/// later break a tool that never reads it.
+fn assert_adoptable(dir: &PinnedDir) -> Result<(), LayoutError> {
+    let unreadable = |error: io::Error| LayoutError::Unreadable {
+        path: dir.path.display().to_string(),
+        message: error.to_string(),
+    };
+    for entry in std::fs::read_dir(&dir.base).map_err(unreadable)? {
+        let entry = entry.map_err(unreadable)?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return Err(LayoutError::Refused {
+                action: manual_action(
+                    &dir.path.join(entry.file_name()),
+                    "has a name that is not valid UTF-8 and cannot be attributed to an owner",
+                ),
+            });
+        };
+        match classify_entry(name) {
+            Owner::Foreign => {
+                return Err(LayoutError::Refused {
+                    action: manual_action(
+                        &dir.path.join(name),
+                        "is not owned by Pickforge or the Pickforge lab",
+                    ),
+                })
+            }
+            // An in-flight write is inert: uniquely named, never adopted, never
+            // opened, never removed by anyone but its own writer. Judging its
+            // shape would mean touching an entry that is nobody's business.
+            Owner::Transient => {}
+            Owner::Shared | Owner::Integration => assert_owned_shape(dir, name)?,
+        }
+    }
+    Ok(())
+}
+
+/// An entry the table assigns to an owner must already have the shape that
+/// owner writes: `runs/` a real directory, everything else a real regular
+/// file. Adopting a directory means stamping a marker that tells the other tool
+/// "this layout is sound", so a symlinked `runs` — which both tools would
+/// later refuse to write through — must stop the marker rather than be
+/// certified by it (#104 R7). An alpha.1/alpha.2 directory holds exactly a
+/// real `project.json`, real backups, and a real `runs/`, so nothing legitimate
+/// is refused here.
+fn assert_owned_shape(dir: &PinnedDir, name: &str) -> Result<(), LayoutError> {
+    let metadata = match std::fs::symlink_metadata(dir.child(name)) {
+        Ok(metadata) => metadata,
+        // The entry went away between the listing and the check: there is
+        // nothing left to refuse.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(LayoutError::Unreadable {
+                path: dir.path.join(name).display().to_string(),
+                message: error.to_string(),
+            })
+        }
+    };
+    let refused = |reason: String| {
+        Err(LayoutError::Refused {
+            action: manual_action(&dir.path.join(name), &reason),
+        })
+    };
+    if name == RUNS {
+        return match entry_kind(&metadata) {
+            Some(EntryKind::Directory) => Ok(()),
+            kind => refused(not_a_directory("the Pickforge run tree", kind)),
+        };
+    }
+    match entry_kind(&metadata) {
+        None => Ok(()),
+        Some(kind) => refused(non_regular_reason(
+            kind,
+            if name == LAYOUT_MARKER {
+                THE_MARKER
+            } else {
+                "Pickforge project state"
+            },
+        )),
+    }
+}
+
+/// The direct-entry rule as `init --dry-run` needs it: the same check the
+/// claim runs, against a directory addressed by pathname. Only meaningful for
+/// a directory with no marker — once one is there, ownership is settled.
+pub fn assert_adoptable_dir(state_dir: &Path) -> Result<(), LayoutError> {
+    match PinnedDir::open(state_dir) {
+        Ok(dir) => assert_adoptable(&dir),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(LayoutError::Unreadable {
+            path: state_dir.display().to_string(),
+            message: error.to_string(),
+        }),
+    }
+}
+
+/// Refuse a project state directory reached through a symbolic link.
+///
+/// The lab refuses one (its walk opens every component `O_NOFOLLOW`); the Rust
+/// CLI used to follow it, because the file-transaction layer and `evidence
+/// record` canonicalise the path before anything looks at it (#104 R3). Both
+/// tools now agree, and the check is on the *logical* path, before any
+/// canonicalisation. A real directory that already exists is untouched.
+pub fn assert_real_state_dir(state_dir: &Path) -> Result<(), LayoutError> {
+    let Ok(metadata) = std::fs::symlink_metadata(state_dir) else {
+        return Ok(());
+    };
+    match entry_kind(&metadata) {
+        Some(EntryKind::Directory) => Ok(()),
+        kind => Err(LayoutError::Refused {
+            action: manual_action(
+                state_dir,
+                &not_a_directory("the Pickforge project state directory", kind),
+            ),
+        }),
+    }
+}
+
+/// The reason text for something that must be a directory and is not.
+fn not_a_directory(what: &str, kind: Option<EntryKind>) -> String {
+    let found = kind.map_or("a regular file", describe_kind);
+    format!("is not a directory where {what} must be one (it is {found})")
+}
+
+// --- claiming ------------------------------------------------------------
+
+/// A staging entry this invocation created, tracked by identity so cleanup can
+/// never remove a different file that took its name.
+struct Staged {
+    name: String,
+    path: PathBuf,
+    facts: FileFacts,
+}
+
+/// Create an unpredictable, exclusively created, no-follow staging file with
+/// the marker bytes already complete and flushed.
+fn stage_marker(dir: &PinnedDir) -> io::Result<Staged> {
+    let staged = tempfile::Builder::new()
+        .prefix(&format!("{TMP_PREFIX}layout-"))
+        .rand_bytes(16)
+        .make_in(&dir.base, |path| {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+            }
+            options.open(path)
+        })?;
+    let facts = file_facts(staged.as_file())?;
+    {
+        let mut file = staged.as_file();
+        file.write_all(&layout_marker_bytes())?;
+        file.sync_all()?;
+    }
+    // `keep` disables the drop-time unlink so cleanup can check identity first.
+    let (_, path) = staged.keep().map_err(|error| error.error)?;
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Ok(Staged { name, path, facts })
+}
+
+/// Remove the staging entry only when its name still resolves to the file this
+/// invocation created — checked by opening it and comparing the identity read
+/// from that descriptor, never by the name alone. A pre-existing or planted
+/// entry that took the name is left exactly where it is.
+fn discard_staged(dir: &PinnedDir, staged: &Staged) {
+    let current = File::open(dir.child(&staged.name)).and_then(|file| file_facts(&file));
+    let Ok(current) = current else {
+        return;
+    };
+    if current.volume == staged.facts.volume && current.index == staged.facts.index {
+        let _ = std::fs::remove_file(&staged.path);
+    }
+}
+
+/// Publish the staged bytes as the marker with `link(2)`, which fails with
+/// `EEXIST` rather than replacing anything, then verify what is actually
+/// there.
+fn publish_marker(dir: &PinnedDir) -> Result<bool, LayoutError> {
+    let unwritable = |error: io::Error| LayoutError::Unwritable {
+        path: dir.marker_display().display().to_string(),
+        message: error.to_string(),
+    };
+    let staged = stage_marker(dir).map_err(unwritable)?;
+    let published = std::fs::hard_link(&staged.path, dir.child(LAYOUT_MARKER));
+    discard_staged(dir, &staged);
+    match published {
+        Ok(()) => {
+            // The winner validates its own published marker: after the staging
+            // entry is gone it must be the singly linked regular file whose
+            // bytes were complete before it was ever visible.
+            require_marker(dir)?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            require_marker(dir)?;
+            Ok(false)
+        }
+        Err(error) => Err(unwritable(error)),
+    }
+}
+
+/// The marker must exist and validate; a directory that lost the race but has
+/// no marker is a state nobody may write into.
+fn require_marker(dir: &PinnedDir) -> Result<(), LayoutError> {
+    match read_layout_in(dir)? {
+        Some(_) => Ok(()),
+        None => Err(LayoutError::Unwritable {
+            path: dir.marker_display().display().to_string(),
+            message: "the layout marker disappeared while it was being claimed".to_string(),
+        }),
+    }
+}
+
+/// Claim `state_dir` for the shared layout, atomically and at most once.
+///
+/// The marker is staged in an unpredictable, exclusively created file and
+/// published with `link(2)`, which fails with `EEXIST` when a marker already
+/// exists. That gives both exclusivity *and* full content in one step: the
+/// loser of a race with the TypeScript lab always reads a complete marker,
+/// never the empty file an `O_EXCL` create would expose between creation and
+/// write. Because the marker is the only thing claimed, a crash before
+/// publication leaves at most an inert `.pickforge-tmp-` file, and the next run
+/// claims the directory. An existing marker is never rewritten, which is how an
+/// alpha.1/alpha.2 directory is adopted in place.
+///
+/// A directory without a marker is validated against the direct-entry rule
+/// first, so a first adoption never certifies a directory holding unowned
+/// entries.
+///
+/// Returns whether this call created the marker.
+pub fn claim_layout(state_dir: &Path) -> Result<bool, LayoutError> {
+    create_private_dirs(state_dir).map_err(|error| LayoutError::Unwritable {
+        path: state_dir.join(LAYOUT_MARKER).display().to_string(),
+        message: error.to_string(),
+    })?;
+    let dir = PinnedDir::open(state_dir).map_err(|error| LayoutError::Unwritable {
+        path: state_dir.join(LAYOUT_MARKER).display().to_string(),
+        message: error.to_string(),
+    })?;
+    if read_layout_in(&dir)?.is_some() {
+        return Ok(false);
+    }
+    assert_adoptable(&dir)?;
+    publish_marker(&dir)
+}
+
+// --- private directories -------------------------------------------------
+
+/// Create `path` and every missing ancestor as a private (`0700`) directory,
+/// refusing to walk through a symlink or a non-directory. Shared by the state
+/// claim and by evidence recording, so both create state with the same mode
+/// the transaction layer uses.
+pub fn create_private_dirs(path: &Path) -> io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(io::Error::other("final state directory is a symbolic link"));
+        }
+        Ok(metadata) if metadata.is_dir() => return Ok(()),
+        Ok(_) => return Err(io::Error::other("state parent is not a directory")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    create_private_dirs(path.parent().ok_or_else(|| io::Error::other("no parent"))?)?;
+    match create_private_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let metadata = std::fs::symlink_metadata(path)?;
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                Ok(())
+            } else {
+                Err(io::Error::other(
+                    "concurrently created state path is not a real directory",
+                ))
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Create one directory with private (`0700`) permissions.
+pub fn create_private_dir(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700).create(path)
+    }
+    #[cfg(not(unix))]
+    std::fs::DirBuilder::new().create(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_private_directory_creation_is_safe() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("one/two/three");
+        std::thread::scope(|scope| {
+            for _ in 0..16 {
+                let path = &path;
+                scope.spawn(move || create_private_dirs(path).unwrap());
+            }
+        });
+        let metadata = std::fs::symlink_metadata(path).unwrap();
+        assert!(metadata.is_dir());
+        assert!(!metadata.file_type().is_symlink());
+    }
+
+    #[test]
+    fn private_directories_are_created_owner_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("projects/app-0000");
+        create_private_dirs(&path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{mode:o}");
+        }
+    }
+
+    #[test]
+    fn the_manual_action_is_quoted_and_never_clobbers() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("a b").join("it's here");
+        let quoted = |value: &Path| format!("'{}'", value.to_str().unwrap().replace('\'', r"'\''"));
+        let action = manual_action(&path, "is not owned by Pickforge");
+        assert!(
+            action.contains(&format!(
+                "`mv -n -- {} {}`",
+                quoted(&path),
+                quoted(&path.with_file_name("it's here.bak"))
+            )),
+            "{action}"
+        );
+    }
+
+    #[test]
+    fn the_manual_action_skips_an_existing_backup_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("notes.txt");
+        std::fs::write(&path, b"x").unwrap();
+        std::fs::write(temp.path().join("notes.txt.bak"), b"x").unwrap();
+        let action = manual_action(&path, "is not owned by Pickforge");
+        assert!(action.contains("notes.txt.bak-2'"), "{action}");
+    }
+
+    /// The one entry type the integration tests cannot plant (creating a device
+    /// node needs privileges, and a hard link to one cannot cross filesystems),
+    /// so it is pinned where it is decided.
+    #[cfg(unix)]
+    #[test]
+    fn a_device_node_is_not_a_regular_file() {
+        let metadata = std::fs::symlink_metadata("/dev/null").unwrap();
+        assert_eq!(entry_kind(&metadata), Some(EntryKind::Device));
+        let reason = non_regular_reason(EntryKind::Device, THE_MARKER);
+        assert!(reason.contains("is not a regular file"), "{reason}");
+        assert!(reason.contains("device node"), "{reason}");
+    }
+
+    #[test]
+    fn a_path_that_cannot_be_a_safe_shell_word_gets_no_command() {
+        let action = manual_action(Path::new("/tmp/we\nird"), "is not owned by Pickforge");
+        assert!(!action.contains("mv -n"), "{action}");
+        assert!(action.contains("Move it aside yourself"), "{action}");
+    }
 }

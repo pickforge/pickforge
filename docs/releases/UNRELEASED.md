@@ -16,6 +16,97 @@ candidate artifacts that were actually executed.
 - Legacy `PICKLAB_*` environment variables keep working with a deprecation
   warning through the 0.4 release train.
 
+## Project state ownership
+
+- `pickforge init` no longer refuses a project the lab has already used. When
+  one `PICKFORGE_HOME` is shared by both tools, a lab run created
+  `projects/<id>/runs/` and the Rust CLI then read the whole directory as
+  unowned state, so `init` failed with "state directory ... is non-empty but
+  has no Pickforge project receipt". The documented order (`init` first) hid
+  it; the real Android pass for #93 hit the other one (#104).
+- Ownership of `<PICKFORGE_HOME>/projects/<projectId>/` is now written down and
+  enforced by entry name, exhaustively and without overlap: `project.json` and
+  its backups belong to the Rust CLI, `layout.json` and `runs/` are shared,
+  `.pickforge-tmp-*` is a transient of either tool, and anything else is owned
+  by nobody. `runs/` is shared because both tools write into it — the lab
+  creates run directories there and `pickforge evidence record` writes its own
+  — and each writes only its own runs. See "Project state ownership" in
+  `README.md`.
+- Every writer of project state on both sides goes through one claim:
+  `pickforge init`, `pickforge evidence record`, and the lab's run storage. A
+  layout version this build does not understand, a marker that is not one of
+  ours, and an unowned entry in a directory nobody has claimed yet all fail
+  closed on the same path, before anything is written.
+- The layout is versioned by a `layout.json` marker. Version 1 *describes the
+  layout alpha.1 and alpha.2 already wrote*, so no state is migrated: an
+  existing project directory is adopted in place, the marker appearing beside
+  what is already there. Nothing is rewritten, moved, or deleted.
+- First adoption validates every entry name and the shape of every owned
+  entry. Before either tool stamps the marker on an unclaimed directory, every
+  direct entry must be one the ownership table assigns to an owner, and every
+  owned entry must already have the shape its owner writes: `runs/` a real
+  directory, `project.json` and its backups real regular files. A single
+  unowned entry, a name that is not valid UTF-8, or a symlinked `runs/` stops
+  the adoption — a marker beside a symlinked run tree would certify a layout
+  both tools would then refuse to write through. In-flight `.pickforge-tmp-*`
+  entries are left alone. A directory that already carries a marker is not
+  re-judged.
+- Both tools refuse a symlinked `projects/<projectId>` state directory. The
+  lab always did; the Rust CLI followed one, because the file-transaction layer
+  and `evidence record` canonicalised the path before anything looked at it.
+  The check is on the logical path and leaves a real existing directory alone.
+- `pickforge init --dry-run` previews the same refusals the real run performs.
+  A directory with a receipt, no marker, and an unowned entry used to preview
+  as a clean plan and be refused only at apply time; the preview now refuses
+  it, and still writes nothing.
+- A marker that is a named pipe, a socket, or a device node is refused as "not
+  a regular file" instead of hanging the tool. Both tools opened the marker for
+  reading before checking its type, and opening a FIFO blocks until a writer
+  arrives, so a planted one made `init`, `evidence record`, and lab runs wait
+  forever. The marker is now opened non-blocking and no-follow, and nothing is
+  read until the descriptor's own type says it is a regular file.
+- A marker is briefly multiply linked while its writer publishes it. Readers
+  now wait that window out only while the second name is visibly that
+  publication — a `.pickforge-tmp-*` entry in the same directory naming the
+  same file — and refuse a hard link planted anywhere else without waiting. A
+  publisher descheduled longer than the old fixed 200 ms window no longer makes
+  a concurrent reader refuse a perfectly good marker.
+- First use is atomic and cannot be diverted. The marker is staged in an
+  exclusively created, unpredictably named file with its bytes already complete
+  and published with `link(2)`, so it is never observed half-written, never
+  overwrites an unrelated file, and never follows a link out of the directory.
+  The staging entry is removed only when its name still resolves to the file
+  the run created, so a crash remnant — or a planted entry with the name a
+  previous build would have reused after PID reuse — is left untouched. On
+  Linux every lookup resolves through the state directory's own descriptor.
+  Both tools refuse a marker that is a symlink, a hard link, or not a regular
+  file, and both read back and validate whichever marker won a race.
+- Both tools create the shared state tree with owner-only (`0700`) permissions:
+  the Rust CLI matches the transaction layer, and the lab now creates the state
+  root, `projects/`, `projects/<projectId>/`, and `runs/` the same way instead
+  of with the process umask. Only directories being created are affected;
+  existing directories are never chmod'd or migrated.
+- A `pickforge init` that fails after publishing a new marker now reports
+  `failed-partial` with `changed: true` and the marker as a residual, instead
+  of claiming a clean rollback it did not perform.
+- Refusal messages carry a shell-quoted, no-clobber command
+  (`mv -n -- <path> <unused>.bak`). A path whose name cannot be rendered as a
+  safe shell word is described instead of being offered as a copyable command;
+  that now includes a name that is not valid UTF-8 on disk, which the lab used
+  to render with replacement characters into a command that could not address
+  the real entry. Refusals also name what an entry actually is — a symbolic
+  link, a directory, a named pipe, a socket, a device node.
+- `scripts/state-ownership-smoke.sh` proves both command orders including
+  evidence recording, races the real Rust binary against the real lab on a
+  fresh project state directory, and requires both tools to fail closed on an
+  unsupported version, a stray marker, a symlinked marker, an unowned entry, a
+  FIFO or socket marker, a symlinked `runs/`, a symlinked `projects/<id>`, and
+  a name that is not valid UTF-8 — all in isolated homes. Every invocation is
+  bounded, so a tool that blocks instead of refusing fails the smoke rather
+  than hanging it, and the marker races now also cover `evidence record`
+  against a lab run in a claimed directory and all three writers on one fresh
+  directory.
+
 ## Lab isolation
 
 - Headed Chrome now reaches its session-confined temporary directory through a

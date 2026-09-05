@@ -122,22 +122,28 @@ fn nonempty_unowned_state_directory_is_refused() {
     std::fs::create_dir_all(state_dir).unwrap();
     std::fs::write(state_dir.join("foreign.txt"), "user-owned").unwrap();
     let error = plan_init(&request, &env).unwrap_err().to_string();
-    assert!(error.contains("non-empty"), "{error}");
+    assert!(
+        error.contains("foreign.txt is not owned by Pickforge"),
+        "{error}"
+    );
     assert_eq!(
         std::fs::read_to_string(state_dir.join("foreign.txt")).unwrap(),
         "user-owned"
     );
 }
 
+/// `runs/` belongs to the TypeScript lab, so a lab run that happened before
+/// `pickforge init` is normal rather than foreign state (#104). Ownership
+/// detail lives in `tests/state_layout.rs`.
 #[test]
-fn runs_directory_without_a_receipt_is_foreign() {
+fn a_lab_runs_directory_is_not_foreign_state() {
     let (_temp, project, env) = fixture();
     let request = receipt_only_request(&project);
     let initial = plan_init(&request, &env).unwrap();
     let runs = Path::new(&initial.report.state_dir).join("runs");
     std::fs::create_dir_all(&runs).unwrap();
-    let error = plan_init(&request, &env).unwrap_err().to_string();
-    assert!(error.contains("non-empty but has no Pickforge project receipt"));
+    let plan = plan_init(&request, &env).unwrap();
+    assert!(apply_init(&plan, "after-lab").changed);
     assert!(runs.is_dir());
 }
 
@@ -689,8 +695,14 @@ fn dangling_state_artifact_symlinks_are_refused_as_foreign_state() {
     std::fs::create_dir_all(state_dir).unwrap();
     symlink("missing", state_dir.join(".pickforge-tmp-dangling")).unwrap();
     let error = plan_init(&request, &env).unwrap_err().to_string();
-    assert!(error.contains("non-empty but has no Pickforge project receipt"));
-    assert!(!error.contains("could not inspect state artifact"));
+    assert!(
+        error.contains("is a symlink where Pickforge expects a regular file"),
+        "{error}"
+    );
+    assert!(
+        !error.contains("could not inspect state artifact"),
+        "{error}"
+    );
 }
 
 #[cfg(windows)]

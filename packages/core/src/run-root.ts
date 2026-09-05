@@ -7,6 +7,7 @@ import {
   withDirHandle,
 } from "./dir-handle.js";
 import { pickforgeHome, type EnvLike } from "./paths.js";
+import { claimProjectStateLayout } from "./state-layout.js";
 import { resolveRunStorage, type ResolvedRunStorage } from "./storage.js";
 
 export { RunStorageAccessError, withDirHandle } from "./dir-handle.js";
@@ -84,7 +85,26 @@ interface RunWriteSpec {
   createTrusted: boolean;
   /** Components below the ancestor that must be real, unlinked directories. */
   components: string[];
+  /**
+   * Index in {@link components} of the shared project state directory, when
+   * this layout has one. Reaching it on a creating walk claims the layout
+   * marker (#104), so the lab and the Rust integration CLI agree on ownership
+   * of that directory whichever of them gets there first. Only `home` mode has
+   * one: `project-local` and `custom` roots are not shared with the Rust CLI.
+   */
+  claimLayoutAt?: number;
+  /**
+   * Mode for the components this walk *creates*. The shared project state
+   * tree is private (`0700`), exactly as the Rust CLI creates it, so a run's
+   * artifacts are not world-readable through a default-mode ancestor (#104
+   * R4). Existing directories are opened as they are: this is a creation
+   * mode, never a migration, so nobody's permissions are rewritten under them.
+   */
+  dirMode?: number;
 }
+
+/** Owner-only, the mode the Rust CLI gives every directory it creates. */
+const PRIVATE_DIR_MODE = 0o700;
 
 function writeSpecFor(
   resolved: ResolvedRunStorage,
@@ -105,6 +125,8 @@ function writeSpecFor(
       trustedDir: pickforgeHome(env),
       createTrusted: true,
       components: ["projects", resolved.projectId, "runs"],
+      claimLayoutAt: 1,
+      dirMode: PRIVATE_DIR_MODE,
     };
   }
   return {
@@ -141,7 +163,10 @@ async function openTrustedDir(
   create: boolean,
 ): Promise<DirHandle> {
   if (spec.createTrusted && create) {
-    await fs.promises.mkdir(spec.trustedDir, { recursive: true });
+    await fs.promises.mkdir(spec.trustedDir, {
+      recursive: true,
+      mode: spec.dirMode,
+    });
   }
   try {
     return await DirHandle.open(spec.trustedDir, { followFinal: true });
@@ -181,16 +206,28 @@ async function openChain(
   let logical = spec.trustedDir;
   let handedOver = false;
   try {
-    for (const component of spec.components) {
+    for (const [index, component] of spec.components.entries()) {
       logical = path.join(logical, component);
       let next: DirHandle;
       try {
         next = create
-          ? await current.ensureChildDir(component)
+          ? await current.ensureChildDir(component, spec.dirMode)
           : await current.openChild(component);
       } catch (error) {
         if (!create && isAbsent(error)) return undefined;
         throw rewriteChildError(error, logical);
+      }
+      // Claim the shared project state directory before descending into the
+      // lab's own subtree, so ownership is settled before any run exists
+      // under it and a concurrent `pickforge init` sees a claimed directory
+      // rather than a half-populated one.
+      if (create && index === spec.claimLayoutAt) {
+        try {
+          await claimProjectStateLayout(next);
+        } catch (error) {
+          await next.close().catch(() => {});
+          throw error;
+        }
       }
       await current.close();
       current = next;
