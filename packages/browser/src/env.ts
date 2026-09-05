@@ -1,10 +1,12 @@
+import crypto from "node:crypto";
 import path from "node:path";
 import type { EnvLike } from "@pickforge/lab-core";
 
 /**
- * Filesystem layout for a browser session's isolated runtime, all confined
- * under the session directory so a single recursive delete removes every trace
- * (profile, home, caches, runtime dir) when the session is destroyed.
+ * Filesystem layout for a browser session's isolated runtime. Storage stays
+ * under the session directory. Chrome reaches the session temp directory
+ * through a short private alias because its Unix singleton socket has a fixed
+ * path-length limit. Both the storage and alias are removed on destroy.
  */
 export interface BrowserRuntimeLayout {
   /** Isolated `$HOME`; never the invoking user's real home. */
@@ -16,7 +18,16 @@ export interface BrowserRuntimeLayout {
   xdgDataHome: string;
   xdgStateHome: string;
   xdgRuntimeDir: string;
+  /** Session-confined temporary storage. */
   tmpDir: string;
+  /** Short private alias used as Chrome's TMPDIR for Unix socket limits. */
+  chromeTmpDir: string;
+}
+
+function chromeTmpAlias(sessionDir: string): string {
+  const uid = typeof process.getuid === "function" ? process.getuid() : "unknown";
+  const key = crypto.createHash("sha256").update(sessionDir).digest("hex").slice(0, 16);
+  return path.join("/tmp", `pickforge-browser-${String(uid)}`, key);
 }
 
 export function browserRuntimeLayout(sessionDir: string): BrowserRuntimeLayout {
@@ -30,6 +41,7 @@ export function browserRuntimeLayout(sessionDir: string): BrowserRuntimeLayout {
     xdgStateHome: path.join(home, ".local", "state"),
     xdgRuntimeDir: path.join(sessionDir, "xdg-runtime"),
     tmpDir: path.join(sessionDir, "tmp"),
+    chromeTmpDir: chromeTmpAlias(sessionDir),
   };
 }
 
@@ -78,7 +90,7 @@ export function buildBrowserEnv(
     XDG_DATA_HOME: layout.xdgDataHome,
     XDG_STATE_HOME: layout.xdgStateHome,
     XDG_RUNTIME_DIR: layout.xdgRuntimeDir,
-    TMPDIR: layout.tmpDir,
+    TMPDIR: layout.chromeTmpDir,
     PATH:
       source.PATH !== undefined && source.PATH !== "" ? source.PATH : DEFAULT_PATH,
     // Toolkits (Chrome/ozone, GTK) try Wayland first, which would place the

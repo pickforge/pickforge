@@ -216,6 +216,11 @@ describe.skipIf(!hasXvfb)("createBrowserSession (fake binaries)", () => {
       ]) {
         expect(fs.statSync(dir).mode & 0o777, dir).toBe(0o700);
       }
+      expect(fs.lstatSync(layout.chromeTmpDir).isSymbolicLink()).toBe(true);
+      expect(fs.realpathSync(layout.chromeTmpDir)).toBe(layout.tmpDir);
+      expect(fs.statSync(path.dirname(layout.chromeTmpDir)).mode & 0o777).toBe(
+        0o700,
+      );
     } finally {
       await destroyBrowserSession(session.id, registryEnv).catch(() => {});
     }
@@ -401,6 +406,7 @@ describe.skipIf(!hasXvfb)("destroyBrowserSession (fake binaries)", () => {
       cdpTimeoutMs: 5000,
     });
     const { browserPid, xvfbPid, profileDir, logDir } = session;
+    const layout = browserRuntimeLayout(logDir);
     const vnc = spawn(
       process.execPath,
       ["-e", "require('node:net').createServer().listen(0)"],
@@ -440,6 +446,7 @@ describe.skipIf(!hasXvfb)("destroyBrowserSession (fake binaries)", () => {
       expect(isPidAlive(xvfbPid)).toBe(false);
       expect(fs.existsSync(profileDir)).toBe(false);
       expect(fs.existsSync(logDir)).toBe(false);
+      expect(fs.existsSync(layout.chromeTmpDir)).toBe(false);
       expect(await getSession(session.id, registryEnv)).toBeUndefined();
     } finally {
       if (isPidAlive(vncPid)) {
