@@ -465,8 +465,12 @@ fn symlink(target: &Path, link: &Path) {
 /// back from, so "refused" is only half the guarantee: the other half is that
 /// the answer arrives at all. A plain assertion would hang the whole test
 /// binary instead of failing.
+/// Only the entry types Windows has no directory entry for need this guard, so
+/// the helper is compiled where its callers are.
+#[cfg(unix)]
 const LAYOUT_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+#[cfg(unix)]
 fn within_timeout<T: Send + 'static>(what: &str, body: impl FnOnce() -> T + Send + 'static) -> T {
     let (sender, receiver) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
@@ -810,6 +814,7 @@ fn a_non_utf8_entry_is_described_without_a_command() {
 }
 
 /// Sorted entry names of a directory.
+#[cfg(unix)]
 fn entry_names(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .unwrap()

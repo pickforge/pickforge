@@ -490,12 +490,19 @@ fn read_marker_once(dir: &PinnedDir) -> Result<MarkerRead, LayoutError> {
 /// Pickforge expects. Named precisely so a refusal tells the user what to look
 /// for; the message always also says "is not a regular file", which is the
 /// rule being enforced.
+///
+/// The pipe, socket, and device variants exist only where such entries can:
+/// Windows has no directory entry of those kinds, so constructing them there
+/// would be dead code rather than a check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EntryKind {
     Symlink,
     Directory,
+    #[cfg(unix)]
     Fifo,
+    #[cfg(unix)]
     Socket,
+    #[cfg(unix)]
     Device,
     Other,
 }
@@ -532,8 +539,11 @@ fn describe_kind(kind: EntryKind) -> &'static str {
     match kind {
         EntryKind::Symlink => "a symbolic link",
         EntryKind::Directory => "a directory",
+        #[cfg(unix)]
         EntryKind::Fifo => "a named pipe (FIFO)",
+        #[cfg(unix)]
         EntryKind::Socket => "a socket",
+        #[cfg(unix)]
         EntryKind::Device => "a device node",
         EntryKind::Other => "not a regular file",
     }
