@@ -173,11 +173,16 @@ candidate artifacts that were actually executed.
   throwaway one under its temp root instead of the real AVD home, optionally
   installs and launches a real APK, and proves a cold-boot session and a
   concurrent read-only session from a second home do not collide.
-- Known limit (#105): on a 2 GB Play-Store image the first launch of a freshly
+- Known limit: on a 2 GB Play-Store image the first launch of a freshly
   sideloaded APK right after a quickboot restore can be killed by the guest's
   lowmemorykiller while `am start -W` reports it drawn. Pickforge reports this
-  as a distinct launch error and does not retry; the live test waits, bounded,
-  until lowmemorykiller has been quiet for 30 s before each launch attempt.
+  as a distinct launch error and does not retry.
+- `android install-apk` / `android launch-app` and the matching MCP tools accept
+  an opt-in `--wait-ready <seconds>` / `waitReadySeconds` (default off) that
+  waits until guest lowmemorykiller has been quiet for 30 seconds, reports each
+  probe as progress, and fails with `guest-not-ready` without starting the
+  action if the bound is hit. This avoids launching into a transient storm; it
+  is not a retry, and a storm that never quiets still fails closed.
 
 ## MCP SDK v2
 

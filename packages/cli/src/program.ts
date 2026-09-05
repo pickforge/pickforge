@@ -463,7 +463,11 @@ function registerAndroidSessionCommands(android: Command): void {
       android
         .command("install-apk")
         .description("Install an APK on the device")
-        .argument("<apk>", "path to the APK"),
+        .argument("<apk>", "path to the APK")
+        .option(
+          "--wait-ready <seconds>",
+          "wait until guest lowmemorykiller is quiet before installing (default: no wait)",
+        ),
     ),
   ).action(async (apk, opts) => {
     process.exitCode = await runAndroidInstallApk(apk, opts);
@@ -475,7 +479,11 @@ function registerAndroidSessionCommands(android: Command): void {
         .command("launch-app")
         .description("Launch an app by package name")
         .argument("<package>", "application package name")
-        .option("--activity <activity>", 'activity to start (e.g. ".MainActivity")'),
+        .option("--activity <activity>", 'activity to start (e.g. ".MainActivity")')
+        .option(
+          "--wait-ready <seconds>",
+          "wait until guest lowmemorykiller is quiet before launching (default: no wait)",
+        ),
     ),
   ).action(async (packageName, opts) => {
     process.exitCode = await runAndroidLaunchApp(packageName, opts);

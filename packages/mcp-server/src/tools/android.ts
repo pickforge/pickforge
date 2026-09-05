@@ -9,6 +9,7 @@ import {
   installApk,
   launchApp,
   logcat,
+  maybeWaitForGuestReady,
   runAdb,
   screenshot,
   tap,
@@ -75,6 +76,31 @@ function targetData(target: AndroidTarget): Record<string, unknown> {
   return data;
 }
 
+const waitReadySecondsArg = z
+  .number()
+  .int()
+  .positive()
+  .optional()
+  .describe(
+    "Seconds to wait until guest lowmemorykiller is quiet before this action " +
+      "(default: no wait)",
+  );
+
+async function waitReadyIfRequested(
+  target: AndroidTarget,
+  ctx: ServerContext,
+  waitReadySeconds: number | undefined,
+  extra: Parameters<typeof progressReporter>[0],
+): Promise<Record<string, unknown>> {
+  const guestReady = await maybeWaitForGuestReady({
+    serial: target.serial,
+    env: ctx.env,
+    waitReadySeconds,
+    onProgress: progressReporter(extra),
+  });
+  return guestReady === undefined ? {} : { guestReady };
+}
+
 function registerAndroidTool1(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "android_start",
@@ -127,9 +153,10 @@ function registerAndroidTool2(server: McpServer, ctx: ServerContext): void {
       inputSchema: {
         ...targetArgs,
         apkPath: z.string().min(1).describe("Path to the APK"),
+        waitReadySeconds: waitReadySecondsArg,
       },
     },
-    (args) =>
+    (args, extra) =>
       runTool(async () => {
         const target = await resolveAndroidTarget(ctx, args);
         const apkPath = path.resolve(ctx.projectDir, args.apkPath);
@@ -141,8 +168,14 @@ function registerAndroidTool2(server: McpServer, ctx: ServerContext): void {
             target: { name: path.basename(apkPath) },
           },
           async () => {
+            const ready = await waitReadyIfRequested(
+              target,
+              ctx,
+              args.waitReadySeconds,
+              extra,
+            );
             await installApk({ serial: target.serial, apkPath, env: ctx.env });
-            return { data: { ...targetData(target), apkPath } };
+            return { data: { ...targetData(target), apkPath, ...ready } };
           },
         );
       }),
@@ -166,9 +199,10 @@ function registerAndroidTool3(server: McpServer, ctx: ServerContext): void {
           .min(1)
           .optional()
           .describe('Activity to start, e.g. ".MainActivity"'),
+        waitReadySeconds: waitReadySecondsArg,
       },
     },
-    (args) =>
+    (args, extra) =>
       runTool(async () => {
         const target = await resolveAndroidTarget(ctx, args);
         return withMcpEvidence(
@@ -179,6 +213,12 @@ function registerAndroidTool3(server: McpServer, ctx: ServerContext): void {
             target: { name: args.packageName },
           },
           async () => {
+            const ready = await waitReadyIfRequested(
+              target,
+              ctx,
+              args.waitReadySeconds,
+              extra,
+            );
             const launched = await launchApp({
               serial: target.serial,
               packageName: args.packageName,
@@ -190,6 +230,7 @@ function registerAndroidTool3(server: McpServer, ctx: ServerContext): void {
                 ...targetData(target),
                 packageName: args.packageName,
                 ...launched,
+                ...ready,
               },
             };
           },

@@ -20,6 +20,7 @@ import {
   removeLabDirs,
   writeAndroidSessionRecord,
   writeFakeAdbSdk,
+  writeScript,
   type ConnectedLab,
   type LabDirs,
 } from "./helpers.js";
@@ -44,6 +45,27 @@ afterEach(async () => {
   await lab.close();
   removeLabDirs(dirs);
 });
+
+function overwriteReadyAdb(opts: { logcat?: string } = {}): void {
+  const logcatFile = path.join(dirs.root, "ready.logcat");
+  fs.writeFileSync(logcatFile, `${opts.logcat ?? "I/App( 1): started"}\n`);
+  writeScript(
+    path.join(dirs.root, "adb-sdk", "platform-tools", "adb"),
+    [
+      'PATH="/usr/bin:/bin:$PATH"',
+      `printf '%s\\n' "$*" >> "${adbLog}"`,
+      'case "$*" in',
+      '  *"+%s"*) echo 1000 ;;',
+      `  *"logcat -d -v epoch"*) cat '${logcatFile}' ;;`,
+      '  *"install -r"*) echo Success ;;',
+      '  *resolve-activity*) echo "com.example.app/.MainActivity" ;;',
+      '  *"am start"*) echo "Status: ok"; echo "LaunchState: COLD" ;;',
+      "  *pidof*) echo 4242 ;;",
+      "esac",
+      "exit 0",
+    ].join("\n"),
+  );
+}
 
 describe("android tools (fake adb)", () => {
   it("threads the session serial through tap, type, back, and home", async () => {
@@ -164,6 +186,82 @@ describe("android tools (fake adb)", () => {
       `-s ${FAKE_SERIAL} shell am start -W -n com.example.app/.MainActivity`,
       `-s ${FAKE_SERIAL} shell pidof com.example.app`,
     ]);
+  });
+
+  it("waits for guest ready before install and launch when waitReadySeconds is set", async () => {
+    overwriteReadyAdb();
+    const apk = path.join(dirs.projectDir, "build", "app.apk");
+    fs.mkdirSync(path.dirname(apk), { recursive: true });
+    fs.writeFileSync(apk, "apk");
+    const installed = parseToolJson(
+      await lab.client.callTool({
+        name: "android_install_apk",
+        arguments: { apkPath: "build/app.apk", waitReadySeconds: 5 },
+      }),
+    );
+    expect(installed.ok).toBe(true);
+    expect(installed.guestReady).toMatchObject({
+      kind: "guest-ready",
+      serial: FAKE_SERIAL,
+      lmkQuietS: null,
+      quietNeedS: 30,
+      boundMs: 5000,
+    });
+    const launched = parseToolJson(
+      await lab.client.callTool({
+        name: "android_launch_app",
+        arguments: { packageName: "com.example.app", waitReadySeconds: 5 },
+      }),
+    );
+    expect(launched.ok).toBe(true);
+    expect(launched.guestReady.kind).toBe("guest-ready");
+    const lines = adbLogLines(adbLog);
+    expect(lines.filter((line) => line.includes("date +%s"))).toHaveLength(2);
+    expect(
+      lines.filter((line) => line.includes("logcat -d -v epoch")),
+    ).toHaveLength(2);
+    expect(lines.some((line) => line.includes("install -r"))).toBe(true);
+    expect(lines.some((line) => line.includes("am start"))).toBe(true);
+    const installAt = lines.findIndex((line) => line.includes("install -r"));
+    const startAt = lines.findIndex((line) => line.includes("am start"));
+    expect(installAt).toBeGreaterThan(1);
+    expect(startAt).toBeGreaterThan(installAt);
+  });
+
+  it("fails closed with guest-not-ready and does not install or launch", async () => {
+    overwriteReadyAdb({
+      logcat: "999.0  1  1 I lowmemorykiller: Kill 'app' (9)",
+    });
+    const installed = await lab.client.callTool({
+      name: "android_install_apk",
+      arguments: { apkPath: "build/app.apk", waitReadySeconds: 1 },
+    });
+    expect(installed.isError).toBe(true);
+    const installReport = parseToolJson(installed);
+    expect(installReport.errors.join("\n")).toContain("[guest-not-ready]");
+    expect(installReport.errors.join("\n")).toContain(
+      "this action was not started",
+    );
+    const launched = await lab.client.callTool({
+      name: "android_launch_app",
+      arguments: { packageName: "com.example.app", waitReadySeconds: 1 },
+    });
+    expect(launched.isError).toBe(true);
+    expect(parseToolJson(launched).errors.join("\n")).toContain(
+      "[guest-not-ready]",
+    );
+    expect(adbLogLines(adbLog).join("\n")).not.toMatch(/install -r|am start/);
+  });
+
+  it("rejects a non-positive waitReadySeconds", async () => {
+    for (const waitReadySeconds of [0, -1, 1.5]) {
+      const result = await lab.client.callTool({
+        name: "android_launch_app",
+        arguments: { packageName: "com.example.app", waitReadySeconds },
+      });
+      expect(result.isError).toBe(true);
+    }
+    expect(adbLogLines(adbLog)).toEqual([]);
   });
 
   it("returns the ui tree xml with secrets redacted", async () => {
