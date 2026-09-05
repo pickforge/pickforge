@@ -298,10 +298,15 @@ fn identity(metadata: &std::fs::Metadata) -> (u64, u64) {
     (metadata.dev(), metadata.ino())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn identity(metadata: &std::fs::Metadata) -> (u64, u64) {
     use std::os::windows::fs::MetadataExt;
     (metadata.creation_time(), metadata.file_size())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn identity(metadata: &std::fs::Metadata) -> (u64, u64) {
+    (0, metadata.len())
 }
 
 #[cfg(unix)]
@@ -310,6 +315,8 @@ fn link_count(metadata: &std::fs::Metadata) -> u64 {
     metadata.nlink()
 }
 
+/// Only Unix exposes a link count, so elsewhere a marker's shape is judged by
+/// the no-follow open and the regular-file check alone.
 #[cfg(not(unix))]
 fn link_count(_metadata: &std::fs::Metadata) -> u64 {
     1
@@ -379,12 +386,16 @@ fn read_marker_once(dir: &PinnedDir) -> Result<MarkerRead, LayoutError> {
     let mut file = match open_marker(dir) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(MarkerRead::Absent),
-        // Linux answers `O_NOFOLLOW` on a symlink with `ELOOP`, and reports
-        // `ENOTDIR` when a component below a non-directory was addressed.
+        // Linux answers `O_NOFOLLOW` on a symlink with `ELOOP`, and `ENOTDIR`
+        // when the name resolved through something that is not a directory.
+        // The entry is `lstat`ed once, only here, to name what is actually
+        // there rather than guessing.
         Err(error) if is_symlink_open_error(&error) => {
-            return Err(refused(
-                "is a symbolic link where the Pickforge layout marker must be a regular file",
-            ))
+            return Err(refused(if is_symlink(dir) {
+                "is a symbolic link where the Pickforge layout marker must be a regular file"
+            } else {
+                "is not a regular file where the Pickforge layout marker must be one"
+            }))
         }
         Err(error) => {
             return Err(LayoutError::Unreadable {
@@ -415,6 +426,14 @@ fn read_marker_once(dir: &PinnedDir) -> Result<MarkerRead, LayoutError> {
             message: error.to_string(),
         })?;
     Ok(MarkerRead::Bytes(bytes))
+}
+
+/// Whether the marker entry is a symlink right now. Only consulted on an open
+/// failure, to label it.
+fn is_symlink(dir: &PinnedDir) -> bool {
+    std::fs::symlink_metadata(dir.child(LAYOUT_MARKER))
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
 }
 
 fn is_symlink_open_error(error: &io::Error) -> bool {
