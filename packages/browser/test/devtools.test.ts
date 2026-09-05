@@ -1,5 +1,7 @@
+import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:http";
+import { connect } from "node:net";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,6 +12,7 @@ import {
   waitForDevToolsPort,
   probeDevToolsHttp,
 } from "../src/devtools.js";
+import { writeFakeChrome } from "./fakes.js";
 
 let tmp: string;
 
@@ -246,4 +249,76 @@ describe("probeDevToolsHttp", () => {
       await Promise.all([redirectClosed, targetClosed]);
     }
   });
+});
+
+describe("readiness probing against a real Chrome stand-in", () => {
+  /**
+   * A readiness probe that times out aborts its fetch, which resets the
+   * DevTools connection. Neither the endpoint nor the wait may treat that as a
+   * dead browser: on a loaded CI host every probe can abort, and reporting
+   * "Chrome exited during startup" from a probe the caller itself cancelled is
+   * how pickforge/pickforge#100 failed the built MCP browser lifecycle.
+   */
+  it("keeps a published endpoint alive and usable across aborted probes", async () => {
+    const binDir = path.join(tmp, "bin");
+    const profileDir = path.join(tmp, "session", "profile");
+    fs.mkdirSync(profileDir, { recursive: true });
+    writeFakeChrome(binDir, "ready");
+    const chrome = spawn(
+      process.execPath,
+      [path.join(binDir, "fake-chrome.cjs"), `--user-data-dir=${profileDir}`],
+      { stdio: ["ignore", "ignore", "pipe"] },
+    );
+    let chromeStderr = "";
+    chrome.stderr.setEncoding("utf8");
+    chrome.stderr.on("data", (chunk: string) => {
+      chromeStderr += chunk;
+    });
+    const isAlive = (): boolean =>
+      chrome.exitCode === null && chrome.signalCode === null;
+
+    try {
+      const deadline = Date.now() + 10_000;
+      let port = readDevToolsActivePort(profileDir);
+      while (port === undefined && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        port = readDevToolsActivePort(profileDir);
+      }
+      expect(port).toBeGreaterThan(0);
+
+      // Exactly what an aborted `fetch` does to the endpoint at the TCP level,
+      // plus the aborting probe itself.
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const socket = connect(port as number, "127.0.0.1");
+        try {
+          await once(socket, "connect");
+        } catch (error) {
+          socket.destroy();
+          // Let the stand-in's own diagnosis arrive before reporting.
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          throw new Error(
+            `the endpoint stopped accepting connections after ${attempt} ` +
+              `aborted probe(s): ${(error as Error).message}\n` +
+              `alive: ${String(isAlive())}\n` +
+              `stand-in stderr: ${chromeStderr || "(empty)"}`,
+          );
+        }
+        socket.resetAndDestroy();
+        // A probe budget this small normally aborts; whether this particular
+        // one beat the clock does not matter, only that the endpoint survives.
+        await probeDevToolsHttp(port as number, 1);
+      }
+
+      const ready = await waitForDevToolsPort({
+        profileDir,
+        timeoutMs: 10_000,
+        isAlive,
+      });
+      expect(ready).toMatchObject({ ok: true });
+      expect(chromeStderr).toBe("");
+      expect(isAlive()).toBe(true);
+    } finally {
+      chrome.kill("SIGKILL");
+    }
+  }, 30_000);
 });

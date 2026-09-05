@@ -121,6 +121,14 @@ release description, then reset it after that release is published.
   each message, and resume after a one-minute rate-limit window. Legacy user
   elicitation keeps its previous 60-second response window.
 
+## Browser readiness probing
+
+- The DevTools readiness probe now gets a one-second budget (bounded by the
+  time the overall wait has left) instead of the 100 ms poll interval. A cold
+  endpoint on a loaded host no longer looks unready on every poll, and the
+  browser wait no longer resets the DevTools connection several times a second
+  while Chrome is coming up.
+
 ## Validation
 
 - Updated during release preparation.

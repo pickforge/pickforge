@@ -97,6 +97,55 @@ function parseMcpText(result: unknown): unknown {
   return JSON.parse(parsed.content[0].text) as unknown;
 }
 
+/**
+ * Collect an MCP server's stderr so a failing tool call can report what the
+ * server actually said. A bare Zod message ("expected true") hides the tool's
+ * own `errors` array and every diagnostic the server printed, which makes a CI
+ * failure here unactionable.
+ */
+function collectStderr(transport: StdioClientTransport): () => string {
+  const chunks: string[] = [];
+  transport.stderr?.on("data", (chunk: Buffer | string) => {
+    chunks.push(chunk.toString());
+  });
+  return () => chunks.join("");
+}
+
+/**
+ * Parse a tool result against `schema`, but fail with the raw MCP payload,
+ * `isError`, and the server's stderr instead of a schema-only error.
+ */
+function parseToolPayload<T>(
+  schema: z.ZodType<T>,
+  tool: string,
+  result: unknown,
+  stderr: () => string,
+): T {
+  let payload: unknown;
+  try {
+    payload = parseMcpText(result);
+  } catch (error) {
+    throw new Error(
+      `${tool} did not return a JSON text payload ` +
+        `(${(error as Error).message})\n` +
+        `raw result: ${JSON.stringify(result, null, 2)}\n` +
+        `server stderr: ${stderr() || "(empty)"}`,
+    );
+  }
+  const parsed = schema.safeParse(payload);
+  if (parsed.success) {
+    return parsed.data;
+  }
+  const isError = (result as { isError?: unknown } | null)?.isError;
+  throw new Error(
+    `${tool} returned an unexpected payload\n` +
+      `issues: ${JSON.stringify(parsed.error.issues, null, 2)}\n` +
+      `isError: ${String(isError)}\n` +
+      `payload: ${JSON.stringify(payload, null, 2)}\n` +
+      `server stderr: ${stderr() || "(empty)"}`,
+  );
+}
+
 describe.skipIf(!hasXvfb)("built CLI browser lifecycle", () => {
   it(
     "creates, reports, lists, and destroys a browser session from the bundled CLI",
@@ -313,14 +362,15 @@ describe.skipIf(!hasXvfb)("built MCP browser lifecycle", () => {
         name: "pickforge-lab-built-browser-test",
         version: "0.0.0",
       });
+      const stderr = collectStderr(transport);
       await client.connect(transport);
       try {
         const createdResult = await client.callTool({
           name: "session_create",
           arguments: { type: "browser", width: 920, height: 620 },
         });
-        const created = z
-          .object({
+        const created = parseToolPayload(
+          z.object({
             ok: z.literal(true),
             sessions: z
               .array(
@@ -332,16 +382,19 @@ describe.skipIf(!hasXvfb)("built MCP browser lifecycle", () => {
                 }),
               )
               .min(1),
-          })
-          .parse(parseMcpText(createdResult));
+          }),
+          "session_create",
+          createdResult,
+          stderr,
+        );
         const session = created.sessions[0];
 
         const statusResult = await client.callTool({
           name: "session_status",
           arguments: { sessionId: session.id },
         });
-        const status = z
-          .object({
+        const status = parseToolPayload(
+          z.object({
             sessions: z
               .array(
                 z.object({
@@ -353,8 +406,11 @@ describe.skipIf(!hasXvfb)("built MCP browser lifecycle", () => {
                 }),
               )
               .min(1),
-          })
-          .parse(parseMcpText(statusResult)).sessions[0];
+          }),
+          "session_status",
+          statusResult,
+          stderr,
+        ).sessions[0];
         expect(status.status).toBe("running");
         expect(status.browser.browserAlive).toBe(true);
         expect(status.browser.cdpPort).toBe(session.cdpPort);
@@ -363,12 +419,15 @@ describe.skipIf(!hasXvfb)("built MCP browser lifecycle", () => {
           name: "session_destroy",
           arguments: { all: true },
         });
-        const destroyed = z
-          .object({
+        const destroyed = parseToolPayload(
+          z.object({
             ok: z.literal(true),
             destroyed: z.array(z.string()),
-          })
-          .parse(parseMcpText(destroyedResult));
+          }),
+          "session_destroy",
+          destroyedResult,
+          stderr,
+        );
         expect(destroyed.destroyed).toEqual([session.id]);
         expect(fs.existsSync(session.profileDir)).toBe(false);
       } finally {
