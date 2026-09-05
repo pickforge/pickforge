@@ -5,7 +5,6 @@ import {
   createSession,
   destroySessionRecord,
   getSession,
-  isDisplaySocketAlive,
   isPidAlive,
   isProfileConfined,
   processIdentityMatches,
@@ -27,6 +26,7 @@ import {
 } from "@pickforge/lab-core";
 import {
   XvfbStartError,
+  isDisplayAlive,
   startXvfb,
   stopOwnedSessionVnc,
   withSessionVncLock,
@@ -550,8 +550,7 @@ export async function getBrowserSessionStatus(
       pid: desktop.xvfbPid,
       startTicks: desktop.xvfbStartTimeTicks,
     });
-  const displayAlive =
-    desktop !== undefined && isDisplaySocketAlive(desktop.display);
+  const displayAlive = desktop !== undefined && isDisplayAlive(desktop.display);
   const browserAlive =
     browser !== undefined &&
     processIdentityMatches({
