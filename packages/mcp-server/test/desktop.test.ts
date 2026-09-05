@@ -189,7 +189,7 @@ describe.skipIf(!hasDesktopStack)("desktop flow (real Xvfb)", () => {
           arguments: { sessionId: session.id },
         }),
       );
-      expect(destroyed.ok).toBe(true);
+      expect(destroyed.ok, JSON.stringify(destroyed.errors)).toBe(true);
       expect(destroyed.destroyed).toEqual([session.id]);
       expect(await listSessions(registryEnv)).toEqual([]);
       const [manifest] = await listRuns(dirs.projectDir);

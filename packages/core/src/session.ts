@@ -12,12 +12,17 @@ import {
   type EnvLike,
 } from "./paths.js";
 import { isPidAlive, processIdentityMatches } from "./proc.js";
+import type { ContainmentScope } from "./containment.js";
 
 export type SessionType = "desktop" | "android" | "desktop+android" | "browser";
 export type SessionStatus = "starting" | "running" | "stopped" | "error";
 
 export interface DesktopSessionInfo {
   display: string;
+  /** Per-session `XDG_RUNTIME_DIR` root and D-Bus endpoints (#86). */
+  runtimeDir?: string;
+  /** Scope holding every app the session launched, including escapees (#85). */
+  containment?: ContainmentScope;
   xvfbPid?: number;
   xvfbStartTimeTicks?: number;
   vncPid?: number;

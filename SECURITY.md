@@ -120,6 +120,73 @@ filesystem and network access. Pickforge provisions a dedicated locked
 yet run under that user — uid isolation is planned. Until then, launch only apps
 you trust, and prefer a throwaway user or VM for untrusted binaries.
 
+## Desktop session containment and runtime isolation
+
+A desktop session owns everything it starts, and cleanup is confirmed rather
+than assumed:
+
+- **Containment scope.** Each session gets a cgroup v2 directory inside the
+  delegated cgroup Pickforge already runs in, or, where no delegation exists, a
+  256-bit random token exported as `PICKFORGE_CONTAINMENT_TOKEN`. Apps are
+  started through a supervisor that joins the scope *before* spawning them, so
+  a double-fork or `setsid` descendant cannot be created outside it. The
+  supervisor does not trust a successful `cgroup.procs` write: it reads its
+  membership back from `/proc/self/cgroup` and exits with status 126 without
+  spawning the app if the kernel does not confirm the join. Neither mechanism
+  needs `sudo`; MCP never calls it.
+- **Nothing unrelated is ever signalled.** Cleanup selects targets by cgroup
+  membership or by an exact token match read from `/proc/<pid>/environ`,
+  re-checked immediately before each signal together with the process start
+  time recorded by the scan, never by a remembered PID alone. A PID that exited
+  between the scan and the re-check is treated as gone; a PID whose start time
+  changed belongs to an unrelated process and is refused instead of killed; the
+  same process whose token is momentarily unreadable (dying, mid-exec) is
+  neither killed nor refused but decided on a later pass. A
+  recorded cgroup path is only used when it is a `pickforge-*` directory on
+  the cgroup v2 filesystem, so a tampered session record cannot aim
+  `cgroup.kill` at the lab's own cgroup or at any other directory.
+- **The caller is never killed.** The process performing the cleanup and its
+  ancestors are excluded from every signal. When `session destroy` runs from
+  inside a contained shell (for example one started with `desktop exec xterm`),
+  that chain is a member of the session cgroup; cleanup first moves it into the
+  parent cgroup, confirms from `cgroup.procs` that it is no longer a member,
+  and only then writes `cgroup.kill`. If the chain cannot be moved out, cleanup
+  refuses with a reason that says to run the command from outside the session,
+  rather than terminating the caller.
+- **Confirmed cleanup.** `session destroy` reports success only once the scope
+  is empty. Otherwise it fails with the surviving or refused PIDs, leaves the
+  session in `error` with a reaper retry marker, and does not delete session
+  state that a live process could still be writing to: the runtime directory
+  is removed only after contained apps, x11vnc and Xvfb are all confirmed
+  gone.
+- **Per-session runtime and D-Bus.** Each session gets its own
+  `XDG_RUNTIME_DIR` (mode `0700`, inside the session directory) and its own
+  `DBUS_SESSION_BUS_ADDRESS`/`DBUS_SYSTEM_BUS_ADDRESS`, pointing at socket paths
+  that are never created, so toolkits and portals fail closed instead of
+  reaching the real user session. Related `DBUS_*` variables are dropped from
+  the child environment. Every x11vnc start (session create, `desktop watch`,
+  human takeover and its revert) goes through one helper that attaches this
+  runtime, so a server started after create never keeps the caller's bus.
+  Removal is refused for any runtime path that is not confined to the session
+  directory, including through a symlink.
+- **No code injection into the supervisor.** `NODE_OPTIONS`, `NODE_PATH`,
+  `NODE_REPL_EXTERNAL_MODULE` and `BUN_OPTIONS` are stripped from the desktop
+  environment, so a hostile caller environment cannot run code inside the Node
+  supervisor before it joins the scope. Contained apps do not receive them
+  either; `desktop env` lists them under `unset`.
+- **Xvfb teardown** uses the same group-signal-and-confirm discipline as the
+  browser supervisor: an exited daemon is not reported gone while a member of
+  its process group is still alive.
+
+Limits to account for: containment holds processes that are descendants of a
+Pickforge launch. It does not sandbox them — see SEC-02 — and it cannot recover
+a descendant that erases its own environment block, or execs a setuid image,
+on a host without cgroup delegation. On the marker path there is an irreducible
+window between the last token re-read and `kill(2)`; the cgroup path has no
+such window. `PICKFORGE_CONTAINMENT=marker` forces the marker mechanism on a
+host that would get a cgroup; it exists to exercise the fallback path in tests
+and is reported as `marker` like any other degraded scope.
+
 ## Browser sessions run as you (SEC-03 — known limitation)
 
 Browser sessions launch real headed Chrome/Chromium inside a private Xvfb

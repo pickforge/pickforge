@@ -5,6 +5,7 @@ import {
   desktopSessionLogDir,
   doubleClick,
   drag,
+  ensureDesktopSessionIsolation,
   execApp,
   launchApp,
   MAX_DOUBLE_CLICK_INTERVAL_MS,
@@ -58,6 +59,7 @@ export async function runDesktopLaunch(
     // A newly launched client on the shared display can grab input focus —
     // gated the same as direct input, so it can never land while a human
     // holds the takeover lease (pickforge/pickforge#21 P1-E).
+    const isolation = await ensureDesktopSessionIsolation(id);
     const app = await withAgentPermit(id, process.env, () =>
       launchApp({
         display,
@@ -65,6 +67,7 @@ export async function runDesktopLaunch(
         args,
         logDir: desktopSessionLogDir(id),
         cwd: opts.cwd,
+        ...isolation,
       }),
     );
     const data: Record<string, unknown> = {
@@ -72,9 +75,11 @@ export async function runDesktopLaunch(
       display,
       pid: app.pid,
       logPath: app.logPath,
+      containment: app.containment,
     };
     const lines = [
       `launched ${command} (pid ${app.pid}) on ${display}`,
+      `containment: ${app.containment}`,
       `log: ${app.logPath}`,
     ];
     if (opts.waitWindow !== undefined) {
@@ -103,6 +108,7 @@ export async function runDesktopExec(
       "--window-timeout",
       MAX_EXEC_WINDOW_TIMEOUT_MS,
     );
+    const isolation = await ensureDesktopSessionIsolation(id);
     const app = await withAgentPermit(id, process.env, () =>
       execApp({
         display,
@@ -111,6 +117,7 @@ export async function runDesktopExec(
         logDir: desktopSessionLogDir(id),
         cwd: opts.cwd,
         windowTimeoutMs,
+        ...isolation,
       }),
     );
     return {
@@ -119,12 +126,14 @@ export async function runDesktopExec(
         display,
         pid: app.pid,
         processGroupId: app.processGroupId,
+        containment: app.containment,
         logPath: app.logPath,
         windowCount: app.windows.length,
         windows: app.windows,
       },
       lines: [
         `started ${command} (process group ${app.processGroupId}) on ${display}`,
+        `containment: ${app.containment}`,
         `client windows: ${app.windows.length}`,
         `log: ${app.logPath}`,
       ],
@@ -137,7 +146,8 @@ export async function runDesktopEnv(
 ): Promise<number> {
   return runReported(opts, async () => {
     const { id, display } = await resolveDesktop(opts);
-    const recipe = desktopEnvironmentRecipe(display, process.env);
+    const isolation = await ensureDesktopSessionIsolation(id);
+    const recipe = desktopEnvironmentRecipe(display, process.env, isolation);
     return {
       data: {
         sessionId: id,

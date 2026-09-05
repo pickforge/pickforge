@@ -5,10 +5,11 @@ import {
   processIdentityMatches,
   readProcessIdentity,
   startDaemon,
-  stopPid,
+  stopOwnedDaemonGroup,
   stopProcessGroupVerified,
   type EnvLike,
   type OwnedDaemonHandle,
+  type ProcessIdentity,
 } from "@pickforge/lab-core";
 import { sleep } from "./util.js";
 
@@ -182,38 +183,19 @@ function childHasExited(daemon: OwnedDaemonHandle): boolean {
   return daemon.child.exitCode !== null || daemon.child.signalCode !== null;
 }
 
-function waitForOwnedExit(
-  daemon: OwnedDaemonHandle,
-  timeoutMs?: number,
-): Promise<boolean> {
-  if (childHasExited(daemon)) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    let timer: NodeJS.Timeout | undefined;
-    const finish = (exited: boolean): void => {
-      clearTimeout(timer);
-      daemon.child.off("close", onClose);
-      resolve(exited);
-    };
-    const onClose = (): void => finish(true);
-    daemon.child.once("close", onClose);
-    if (timeoutMs !== undefined) {
-      timer = setTimeout(() => finish(childHasExited(daemon)), timeoutMs);
-    }
-  });
-}
-
-async function stopOwnedDaemon(daemon: OwnedDaemonHandle): Promise<void> {
-  try {
-    if (!childHasExited(daemon)) {
-      daemon.child.kill("SIGTERM");
-      if (!(await waitForOwnedExit(daemon, 2_000))) {
-        daemon.child.kill("SIGKILL");
-        await waitForOwnedExit(daemon);
-      }
-    }
-  } finally {
-    daemon.release();
-  }
+/**
+ * Stop an Xvfb we started but have not yet verified an identity for. Xvfb does
+ * not fork a child tree, so an individual kill nearly always suffices — but
+ * "nearly always" is not a cleanup guarantee, and reporting a display as gone
+ * while a group member survives is exactly the failure #29 fixed for the
+ * browser supervisor. This applies the same discipline: signal the group by
+ * pgid and confirm no member remains (pickforge/pickforge#57).
+ *
+ * Returns whether the group is confirmed empty. The caller must treat false as
+ * unconfirmed cleanup, not as success.
+ */
+async function stopOwnedDaemon(daemon: OwnedDaemonHandle): Promise<boolean> {
+  return stopOwnedDaemonGroup(daemon);
 }
 
 async function waitForOwnedIdentity(
@@ -244,8 +226,7 @@ async function cleanupPartialStart(
     cleanupConfirmed = false;
   }
   if (!cleanupConfirmed) {
-    await stopOwnedDaemon(daemon);
-    cleanupConfirmed = true;
+    cleanupConfirmed = await stopOwnedDaemon(daemon);
   } else {
     daemon.release();
   }
@@ -318,13 +299,18 @@ async function failedAttempt(
   };
 }
 
-// eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/pickforge#60
-async function attemptStartXvfb(
+interface XvfbSpawn {
+  daemon: OwnedDaemonHandle;
+  identity: ProcessIdentity;
+  partial: XvfbPartialStart;
+}
+
+/** Spawn Xvfb and capture the identity every later signal is verified against. */
+async function spawnXvfb(
   display: string,
   opts: StartXvfbOptions,
-): Promise<XvfbAttempt> {
-  if (isAborted(opts.signal)) throw abortedBeforeSpawn();
-  const displayNumber = parseDisplayNumber(display);
+  timeoutMs: number,
+): Promise<XvfbSpawn | XvfbAttempt> {
   const width = opts.width ?? DEFAULT_WIDTH;
   const height = opts.height ?? DEFAULT_HEIGHT;
   const args = buildXvfbArgs({
@@ -340,9 +326,8 @@ async function attemptStartXvfb(
     owned: true,
   });
   const identity = await waitForOwnedIdentity(daemon);
-  const timeoutMs = opts.waitTimeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
   if (identity === undefined) {
-    await stopOwnedDaemon(daemon);
+    const cleanupConfirmed = await stopOwnedDaemon(daemon);
     return {
       outcome: "failed",
       error: new XvfbStartError(
@@ -352,20 +337,78 @@ async function attemptStartXvfb(
           display,
           daemon.logPath,
           timeoutMs,
-          true,
+          cleanupConfirmed,
         ),
       ),
     };
   }
-  const partial: XvfbPartialStart = {
-    display,
-    pid: daemon.pid,
-    startTimeTicks: identity.startTicks,
-    logPath: daemon.logPath,
-    width,
-    height,
-    cleanupConfirmed: false,
+  return {
+    daemon,
+    identity,
+    partial: {
+      display,
+      pid: daemon.pid,
+      startTimeTicks: identity.startTicks,
+      logPath: daemon.logPath,
+      width,
+      height,
+      cleanupConfirmed: false,
+    },
   };
+}
+
+type DisplayClaim = "ready" | "lost-race" | "pending";
+
+/**
+ * Decide who owns the display socket: us, a foreign X server that won the
+ * race, or nobody yet.
+ */
+function readDisplayClaim(displayNumber: number, ownPid: number): DisplayClaim {
+  if (!fs.existsSync(displaySocketPath(displayNumber))) return "pending";
+  const lockPid = readLockPid(displayNumber);
+  if (lockPid !== null && lockPid !== ownPid && isPidAlive(lockPid)) {
+    return "lost-race";
+  }
+  return lockPid === null || lockPid === ownPid ? "ready" : "pending";
+}
+
+/** Poll until the display is claimed, Xvfb dies, or the deadline passes. */
+async function waitForDisplayClaim(
+  displayNumber: number,
+  spawn: XvfbSpawn,
+  opts: StartXvfbOptions,
+  timeoutMs: number,
+): Promise<XvfbStartFailureReason | "ready"> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const alive = processIdentityMatches(spawn.identity);
+    const claim = readDisplayClaim(displayNumber, spawn.daemon.pid);
+    if (claim === "lost-race") return "lost-race";
+    if (claim === "ready" && alive) {
+      return isAborted(opts.signal) ? "aborted" : "ready";
+    }
+    if (!alive) return "exited";
+    try {
+      await sleep(SOCKET_POLL_INTERVAL_MS, opts.signal);
+    } catch (error) {
+      if (isAborted(opts.signal)) return "aborted";
+      throw error;
+    }
+  }
+  return "timeout";
+}
+
+async function attemptStartXvfb(
+  display: string,
+  opts: StartXvfbOptions,
+): Promise<XvfbAttempt> {
+  if (isAborted(opts.signal)) throw abortedBeforeSpawn();
+  const displayNumber = parseDisplayNumber(display);
+  const timeoutMs = opts.waitTimeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
+  const spawned = await spawnXvfb(display, opts, timeoutMs);
+  if ("outcome" in spawned) return spawned;
+  const { daemon, identity, partial } = spawned;
+
   try {
     await opts.onSpawn?.(partial);
   } catch (error) {
@@ -376,53 +419,26 @@ async function attemptStartXvfb(
     return failedAttempt("aborted", partial, daemon, timeoutMs);
   }
 
+  let reason: XvfbStartFailureReason | "ready";
   try {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      const alive = processIdentityMatches(identity);
-      if (fs.existsSync(displaySocketPath(displayNumber))) {
-        const lockPid = readLockPid(displayNumber);
-        if (
-          lockPid !== null &&
-          lockPid !== daemon.pid &&
-          isPidAlive(lockPid)
-        ) {
-          return failedAttempt("lost-race", partial, daemon, timeoutMs);
-        }
-        if (alive && (lockPid === null || lockPid === daemon.pid)) {
-          // eslint-disable-next-line max-depth -- Legacy gate debt: pickforge/pickforge#60
-          if (isAborted(opts.signal)) {
-            return failedAttempt("aborted", partial, daemon, timeoutMs);
-          }
-          return {
-            outcome: "ready",
-            handle: {
-              display,
-              pid: daemon.pid,
-              startTimeTicks: identity.startTicks,
-              logPath: daemon.logPath,
-              width,
-              height,
-            },
-          };
-        }
-      }
-      if (!alive) {
-        return failedAttempt("exited", partial, daemon, timeoutMs);
-      }
-      try {
-        await sleep(SOCKET_POLL_INTERVAL_MS, opts.signal);
-      } catch (error) {
-        if (isAborted(opts.signal)) {
-          return failedAttempt("aborted", partial, daemon, timeoutMs);
-        }
-        throw error;
-      }
-    }
-    return failedAttempt("timeout", partial, daemon, timeoutMs);
+    reason = await waitForDisplayClaim(displayNumber, spawned, opts, timeoutMs);
   } catch (error) {
     return failedAttempt("startup", partial, daemon, timeoutMs, error);
   }
+  if (reason !== "ready") {
+    return failedAttempt(reason, partial, daemon, timeoutMs);
+  }
+  return {
+    outcome: "ready",
+    handle: {
+      display,
+      pid: daemon.pid,
+      startTimeTicks: identity.startTicks,
+      logPath: daemon.logPath,
+      width: partial.width,
+      height: partial.height,
+    },
+  };
 }
 
 export async function startXvfb(opts: StartXvfbOptions): Promise<XvfbHandle> {
@@ -459,6 +475,23 @@ export async function startXvfb(opts: StartXvfbOptions): Promise<XvfbHandle> {
   );
 }
 
-export async function stopXvfb(pid: number): Promise<boolean> {
-  return stopPid(pid);
+/**
+ * Stop an Xvfb by pid, with the group discipline of #57: the recorded process
+ * must still be the leader of its own group with its recorded start identity,
+ * or the signal is refused rather than aimed at a recycled pid.
+ *
+ * `startTicks` is what makes that guarantee possible, so without it a *live*
+ * pid is refused (returns false) instead of being verified against a snapshot
+ * taken now — which would prove nothing about the Xvfb the caller meant and
+ * would happily kill whatever unrelated process-group leader inherited the
+ * number. A pid that is already gone still reports success: there is nothing
+ * left to confuse it with. Session teardown passes the recorded ticks.
+ */
+export async function stopXvfb(
+  pid: number,
+  startTicks?: number,
+): Promise<boolean> {
+  if (startTicks === undefined) return !isPidAlive(pid);
+  const result = await stopProcessGroupVerified({ pid, startTicks });
+  return result.outcome === "terminated" || result.outcome === "already-dead";
 }
