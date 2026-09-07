@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Experimental Pickforge CLI: project readiness diagnostics"
+description = "Flutter integration CLI for Linux x86_64 and macOS arm64"
 
 [[bin]]
 name = "pickforge"
