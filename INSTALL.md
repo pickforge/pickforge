@@ -31,12 +31,12 @@ The npm-only alternatives, `npm install -g pickforge@next` and
 `bun add -g pickforge@next`, do not install the Rust binary. Never install with
 sudo.
 
-Verify all three commands:
+Verify all three commands and their versions:
 
 ```sh
 command -v pickforge && pickforge --version
 command -v pickforge-lab && pickforge-lab --version
-command -v pickforge-mcp
+command -v pickforge-mcp && pickforge-mcp --version
 ```
 
 If they are not on PATH, the global bin dir (`npm prefix -g`/bin or
