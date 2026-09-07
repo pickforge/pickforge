@@ -8,6 +8,11 @@ import {
   renderTomlSnippet,
   wantsBrowserEntry,
 } from "./snippet.js";
+import {
+  atTomlTopLevel,
+  initialTomlScanState,
+  scanTomlLine,
+} from "./tomlScan.js";
 import type { ChangeResult, LinkOptions, McpServerEntry } from "./types.js";
 
 export const TOML_MARKER_BEGIN = "# >>> pickforge-lab >>>";
@@ -96,10 +101,14 @@ function browserSectionInBlock(block: string): string | undefined {
   const lines = endIndex === -1 ? body : body.slice(0, endIndex);
   const kept: string[] = [];
   let inBrowser = false;
+  let scan = initialTomlScanState();
   for (const line of lines) {
-    if (SECTION_HEADER.test(line)) {
+    // A bracket-leading line is only a header when it starts outside any
+    // multiline string or multi-line value; otherwise it is string content.
+    if (atTomlTopLevel(scan) && SECTION_HEADER.test(line)) {
       inBrowser = BROWSER_SECTION_HEADER.test(line);
     }
+    scan = scanTomlLine(line, scan);
     if (inBrowser) {
       kept.push(line);
     }

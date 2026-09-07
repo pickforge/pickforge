@@ -144,6 +144,47 @@ describe("upsertTomlMarkerBlock", () => {
     expect(fs.readFileSync(file, "utf8")).toBe(expected);
   });
 
+  it("retains multiline string values containing bracket-leading lines unchanged", async () => {
+    const customized =
+      '[mcp_servers."pickforge-lab-browser"]\n' +
+      'command = "custom-browser"\n' +
+      'args = [\n  "browser",\n  "custom",\n]\n' +
+      '[mcp_servers."pickforge-lab-browser".env]\n' +
+      'CONFIG = """\n[profile]\nvalue = "a \\"quoted\\" # not a comment"\n' +
+      '[mcp_servers."pickforge-lab"]\n""" # trailing comment\n' +
+      "SCRIPT = '''\n[section]\nkey = \"v\"\n'''\n" +
+      'ONE_LINE = """[inline] value"""\n' +
+      'TABLE = { a = [\n  "[not a header]",\n], b = 1 }\n';
+    fs.writeFileSync(
+      file,
+      `${TOML_MARKER_BEGIN}\n${customized}${CORE_SECTION}${TOML_MARKER_END}\n`,
+    );
+    const result = await upsertTomlMarkerBlock(file);
+    expect(result.changed).toBe(true);
+    expect(result.retainedEntries).toEqual(["pickforge-lab-browser"]);
+    const expected = `${TOML_MARKER_BEGIN}\n${CORE_SECTION}${customized}${TOML_MARKER_END}\n`;
+    expect(fs.readFileSync(file, "utf8")).toBe(expected);
+
+    const again = await upsertTomlMarkerBlock(file);
+    expect(again.changed).toBe(false);
+    expect(again.retainedEntries).toEqual(["pickforge-lab-browser"]);
+    expect(fs.readFileSync(file, "utf8")).toBe(expected);
+  });
+
+  it("does not retain multiline string content of a non-browser table as a browser section", async () => {
+    const otherTable =
+      "[mcp_servers.other]\n" +
+      'NOTE = """\n[mcp_servers."pickforge-lab-browser"]\ncommand = "fake"\n"""\n';
+    fs.writeFileSync(
+      file,
+      `${TOML_MARKER_BEGIN}\n${otherTable}${CORE_SECTION}${TOML_MARKER_END}\n`,
+    );
+    const result = await upsertTomlMarkerBlock(file);
+    expect(result.changed).toBe(true);
+    expect(result.retainedEntries).toBeUndefined();
+    expect(fs.readFileSync(file, "utf8")).toBe(EXPECTED_BLOCK);
+  });
+
   it("retains a browser subtable that sits after the core section", async () => {
     const browserEnv =
       '[mcp_servers."pickforge-lab-browser".env]\nCHROME_PATH = "/opt/chrome"\n';
