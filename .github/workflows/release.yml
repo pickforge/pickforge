@@ -12,7 +12,7 @@ on:
       confirm:
         description: >-
           Leave empty for a dry run. To publish, type the exact release tag,
-          for example v0.4.0-alpha.2.
+          for example v0.4.0-beta.1.
         required: false
         default: ""
         type: string
