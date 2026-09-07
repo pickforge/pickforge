@@ -165,7 +165,7 @@ export async function runDoctor(
     }
   }
 
-  let exitCode = 0;
+  let exitCode = report.ok ? 0 : 1;
   if (opts.fix === true) {
     const sections = await buildFixPlan(snapshot, opts);
     const log =
