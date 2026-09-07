@@ -476,7 +476,10 @@ pickforge-lab agents list
 pickforge-lab agents doctor
 ```
 
-Pi uses `~/.config/mcp/mcp.json`; core Pi needs `pi-mcp-adapter` to load it.
+Pi uses `$HOME/.config/mcp/mcp.json`; core Pi needs `pi-mcp-adapter` to load it.
+The adapter's shared global config path is fixed and ignores `XDG_CONFIG_HOME`.
+Both `pickforge init --harness pi` and `pickforge-lab agents install pi` keep
+this location so the adapter can discover the generated config.
 
 For any other agent, add the stdio server yourself:
 
