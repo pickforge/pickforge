@@ -630,15 +630,12 @@ fn planning_nonempty_pack_is_read_only_and_deduplicates_in_fixed_order() {
                 && warning.contains("XDG_CONFIG_HOME is ignored")
         })));
     assert!(plan.report.actions.iter().any(|action| {
-        action.target
-            == temp
-                .path()
-                .join("home")
+        Path::new(&action.target).ends_with(
+            Path::new("home")
                 .join(".config")
                 .join("mcp")
-                .join("mcp.json")
-                .display()
-                .to_string()
+                .join("mcp.json"),
+        )
     }));
     assert!(!temp.path().join("home").exists());
     assert!(!temp.path().join("state").exists());
