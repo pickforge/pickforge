@@ -67,7 +67,8 @@ npm uninstall -g @pickforge/picklab
 ## Quickstart
 
 This Flutter desktop loop targets Linux x86_64 with Flutter and Dart on PATH.
-Start in a Flutter project and run the Rust readiness and integration steps first:
+Start in a Flutter project. Run this walkthrough line by line so the coordinate
+prompt reads your input, not the next command:
 
 ```sh
 pickforge doctor                  # Run from your Flutter project
@@ -91,7 +92,9 @@ pickforge-lab session destroy --all
 ```
 
 For source changes, the published desktop pass verified hot reload through
-`flutter run` input (`r`), not a Dart MCP hot-reload call. Use
+a separate `flutter run` process with driver-held stdin (`r`), not a Dart MCP
+hot-reload call. The `desktop exec` walkthrough above does not provide that
+interactive stdin path. Use
 `pickforge evidence record` to record observations and checks you actually
 verified; do not prefill a passing result from an example.
 
@@ -548,7 +551,7 @@ Unlisted host/target combinations are unverified and unsupported.
 | --- | --- | --- |
 | Flutter deep integration | Linux x86_64 → Flutter Linux desktop | Verified Rust `pickforge doctor/init/evidence` and generated official Dart MCP configuration. The desktop fixture separately proved counter interaction and state-preserving hot reload through `flutter run`, not a Dart MCP reload call. Flutter and Dart must be installed. |
 | Flutter integration CLI | macOS arm64 → Flutter macOS fixture | Verified Rust `doctor/init/evidence` and generated Dart MCP. The fixture GUI was driven by an external sandboxed driver, not the Pickforge lab. No macOS lab support. |
-| Desktop lab | Linux x86_64 → isolated X11/Xvfb desktop | Verified Flutter fixture screenshots, clicks, hot reload and teardown. Requires Xvfb, xdotool and screenshot tooling; x11vnc is needed for VNC observation. This is not native Wayland or arbitrary desktop-app certification. |
+| Desktop lab | Linux x86_64 → isolated X11/Xvfb desktop | Verified Flutter fixture screenshots, clicks and teardown. Flutter hot reload was driven separately, not by the lab. Requires Xvfb, xdotool and screenshot tooling; x11vnc is needed for VNC observation. This is not native Wayland or arbitrary desktop-app certification. |
 | Headed browser lab | Linux → isolated headed Chrome/Chromium | Available lab surface, but no successful browser journey is proved by these packets. Unverified for stable support. Requires desktop dependencies, Chrome/Chromium and a live browser session before the DevTools relay starts. |
 | Android APK/emulator lab | Linux x86_64 → API 37 x86_64 emulator | Verified Flutter release APK install, launch, taps, screenshots, UI tree, logcat and background/hot resume. Requires Android SDK command-line tools, platform-tools/ADB, emulator, system image, a dedicated AVD and working KVM for the tested setup. Use 3072 MiB guest RAM to reproduce the passing beta.1 setup: 2 GB failed twice, with one confirmed low-memory kill. The beta.1 3 GB result is one run, not a portable minimum or automatic default. No Android hot-reload proof. |
 | Agent harnesses | Linux x86_64 → generated Dart MCP and Pickforge MCP | Claude Code, Codex and Pi verified with actual model-driven tool calls. Pi requires `pi-mcp-adapter` and passed on retry. This does not certify browser use or every tool in every harness. |

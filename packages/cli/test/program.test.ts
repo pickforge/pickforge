@@ -14,7 +14,7 @@ describe("pickforge", () => {
     program.configureOutput({ writeOut: (text) => { help += text; } });
     program.outputHelp();
     expect(help).toContain("Linux-only Xvfb desktop");
-    expect(help).toContain("3072 MiB guest RAM passed once; 2 GB failed twice");
+    expect(help).toContain("Beta.1: 3072 MiB guest RAM passed once; 2 GB failed twice");
     expect(help).toContain("public browser journey unverified");
     expect(help).toContain("macOS arm64: Rust pickforge doctor/init/evidence only, no lab");
     expect(help).toContain("Claude Code, Codex, Pi (requires pi-mcp-adapter)");

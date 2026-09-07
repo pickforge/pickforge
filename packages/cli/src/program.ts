@@ -762,7 +762,7 @@ export function buildProgram(): Command {
     .addHelpText("after", `
 Support: verified Linux x86_64 desktop and API 37 x86_64 Android emulator journeys.
 Android: SDK, ADB, emulator, system image, dedicated AVD and working KVM required
-for the tested setup. 3072 MiB guest RAM passed once; 2 GB failed twice.
+for the tested setup. Beta.1: 3072 MiB guest RAM passed once; 2 GB failed twice.
 3 GB is not a portable minimum or automatic default.
 Headed Chrome/Chromium lab: available, but public browser journey unverified.
 macOS arm64: Rust pickforge doctor/init/evidence only, no lab.
