@@ -483,7 +483,9 @@ DevTools relay (`pickforge-lab-browser`) fails to start until a browser session
 exists, so it is opt-in: pass `--browser` to register it as well. Without the
 flag an existing `pickforge-lab-browser` entry is left exactly as it is, even
 if its command differs, and the command reports it as retained (JSON:
-`retainedEntries`). `agents unlink` removes both entries.
+`retainedEntries`). Upgrading a legacy `picklab-browser` registration keeps a
+browser entry without the flag, because that install already had one.
+`agents unlink` removes both entries.
 
 ```sh
 pickforge-lab agents install claude-code --browser
