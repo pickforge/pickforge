@@ -742,7 +742,17 @@ export function buildProgram(): Command {
     .description(
       "Native app and Android emulator automation for AI coding agents",
     )
-    .version(version);
+    .version(version)
+    .addHelpText("after", `
+Fatal-error telemetry (CLI and MCP server): disabled by default, with no Sentry
+initialization or telemetry network traffic. Only PICKFORGE_TELEMETRY=1, true,
+or on enables it (case-insensitive; surrounding whitespace ignored). Any other
+value or unset disables it. Enabled reports send redacted error messages and
+stack traces (which may include command output), plus OS, Node.js, and app
+versions to Sentry. No product analytics, breadcrumbs, or performance tracing.
+For 0.4, PICKLAB_TELEMETRY is a fallback only when PICKFORGE_TELEMETRY is unset,
+with the same values and one deprecation warning per process.
+`);
 
   registerProvisioningCommands(program);
   registerSessionCommands(program);

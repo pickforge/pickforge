@@ -10,18 +10,17 @@ import {
 const DSN =
   "https://25cc6307aeca0d1d454e0af21bee5498@o4511699702317056.ingest.us.sentry.io/4511699813990400";
 
-const DISABLE_VALUES = new Set(["0", "false", "off"]);
+const ENABLE_VALUES = new Set(["1", "true", "on"]);
+let enabled = false;
 
 export function telemetryEnabled(env: EnvLike = process.env): boolean {
-  const value = readPickforgeEnv(env, "TELEMETRY")?.trim();
-  if (value === undefined || value === "") {
-    return true;
-  }
-  return !DISABLE_VALUES.has(value.toLowerCase());
+  const value = readPickforgeEnv(env, "TELEMETRY")?.trim().toLowerCase();
+  return ENABLE_VALUES.has(value ?? "");
 }
 
 export function initTelemetry(env: EnvLike = process.env): void {
-  if (!telemetryEnabled(env)) {
+  enabled = telemetryEnabled(env);
+  if (!enabled) {
     return;
   }
   const require = createRequire(import.meta.url);
@@ -71,6 +70,9 @@ export function scrubEvent(event: ErrorEvent): ErrorEvent {
 }
 
 export async function captureFatal(err: unknown): Promise<void> {
+  if (!enabled) {
+    return;
+  }
   Sentry.captureException(err);
   await Sentry.flush(2000);
 }

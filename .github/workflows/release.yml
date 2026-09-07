@@ -211,19 +211,20 @@ jobs:
       - name: Upload the candidate tarball's sourcemaps to Sentry
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          SENTRY_ORG: pickforge
-          SENTRY_PROJECT: pickforge-lab
+          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
         run: |
           set -eu
-          if [ -z "${SENTRY_AUTH_TOKEN:-}" ]; then
-            echo "SENTRY_AUTH_TOKEN not set; skipping"
+          if [ -z "${SENTRY_AUTH_TOKEN:-}" ] || [ -z "${SENTRY_ORG:-}" ] || [ -z "${SENTRY_PROJECT:-}" ]; then
+            echo "Skipping Sentry sourcemap upload: SENTRY_AUTH_TOKEN secret and SENTRY_ORG/SENTRY_PROJECT repository variables must all be set."
             exit 0
           fi
           rm -rf sentry-sourcemaps
           mkdir -p sentry-sourcemaps
           tar -xzf "$TARBALL" -C sentry-sourcemaps
           test -d sentry-sourcemaps/package/dist
-          if ! npx --yes @sentry/cli sourcemaps upload \
+          if ! npx --yes @sentry/cli --auth-token "$SENTRY_AUTH_TOKEN" sourcemaps upload \
+            --org "$SENTRY_ORG" --project "$SENTRY_PROJECT" \
             --release "pickforge@$RELEASE_VERSION" sentry-sourcemaps/package/dist; then
             echo "::warning::Sentry sourcemap upload failed; continuing release"
           fi
