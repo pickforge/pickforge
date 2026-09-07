@@ -7,7 +7,7 @@
 # the caller's real home or the project tree.
 #
 # Contract (environment):
-#   PICKFORGE_SMOKE_VERSION       required  expected version, e.g. 0.4.0-alpha.2
+#   PICKFORGE_SMOKE_VERSION       required  expected version, e.g. 0.4.0-beta.1
 #   PICKFORGE_SMOKE_ASSET_DIR     required  directory holding the Rust asset and its .sha256
 #   PICKFORGE_SMOKE_ASSET         optional  exact asset name (default: derived from uname)
 #   PICKFORGE_SMOKE_TARBALL       optional  npm candidate tarball; installs the lab too
