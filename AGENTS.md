@@ -1,21 +1,9 @@
-# Pickforge
+Linux-only desktop, Android and browser automation. Keep coverage thresholds intact.
 
-TypeScript monorepo behind `pickforge`: a CLI and MCP server that drives Xvfb desktop sessions, Android emulators and headed Chrome for coding agents. Linux only.
+Desktop and browser tests need Xvfb, xdotool, ImageMagick, x11vnc, xterm and Chrome or Chromium on PATH. Missing dependencies can silently skip browser tests; set `PICKFORGE_REQUIRE_BROWSER=1` when validating browser support. `PICKFORGE_CHROME_NO_SANDBOX=1` is a CI-only concession, not a local default. Live Android tests need a real emulator. The Rust CLI live Flutter test requires Flutter and Dart: `PICKFORGE_LIVE_FLUTTER=1 cargo test -p pickforge-cli --test live_flutter -- --nocapture`; it skips without the opt-in flag or tools.
 
-```
-bun install --frozen-lockfile
-bun run typecheck
-bun run lint                 # eslint gates complexity 15, depth 4, 100-line functions
-bun run test                 # add a path to run one file
-bun run test:coverage        # thresholds are a gate, don't lower them
-bun run test:live:android    # needs a real emulator
-bun run build
-```
+CLI tests build into `packages/cli/dist` and spawn with fake adb and SDK scripts. A stale build can masquerade as a runtime failure.
 
-Things you wouldn't guess:
+`test/security` protects argv arrays rather than shell strings, redaction before storage or return, no sudo from MCP, and loopback-only, read-only VNC. MCP screenshot `out` stays inside the project directory; CLI `--out` is deliberately unrestricted.
 
-- Desktop and browser tests need Xvfb, xdotool, ImageMagick, x11vnc, xterm and a Chrome or Chromium on PATH. Missing ones make browser tests skip quietly. CI sets `PICKFORGE_REQUIRE_BROWSER=1` so they fail instead, plus `PICKFORGE_CHROME_NO_SANDBOX=1`, which is a CI-only concession.
-- CLI tests build the CLI once into `packages/cli/dist` and spawn it with fake `adb` and SDK scripts on PATH, so a stale build looks like a strange test failure.
-- The Rust `pickforge` CLI has an opt-in live test that builds a real Flutter project and runs the doctor/init/evidence flow and a Dart MCP handshake against it: `PICKFORGE_LIVE_FLUTTER=1 cargo test -p pickforge-cli --test live_flutter -- --nocapture`. Without the env var, and without `flutter`/`dart` on PATH, it skips.
-- `test/security` pins the guarantees we advertise: argv arrays instead of shell strings, secrets redacted before anything is stored or returned, MCP never calls sudo, VNC loopback-only and read-only. MCP screenshot `out` stays under the project dir; the CLI's `--out` is deliberately unrestricted.
-- Releasing: bump every `packages/*/package.json`, `Cargo.toml`, and `bun.lock` together; `node scripts/check-release-versions.mjs [tag]` is the gate, and only `packages/cli` is published. Publishing waits on two smokes that install and execute the exact candidate artifacts (`scripts/candidate-smoke.sh`, in a clean Flutter container and on Apple silicon), and a workflow dispatch publishes only when `confirm` is exactly the release tag on `main`.
+Releases bump all `packages/*/package.json`, `Cargo.toml` and `bun.lock` together. `node scripts/check-release-versions.mjs [tag]` is the gate; only `packages/cli` is published. Publishing waits for `scripts/candidate-smoke.sh` to install and execute the exact artifacts in a clean Flutter container and on Apple silicon. Workflow dispatch publishes only when `confirm` exactly matches the release tag on `main`.
