@@ -223,7 +223,7 @@ jobs:
           mkdir -p sentry-sourcemaps
           tar -xzf "$TARBALL" -C sentry-sourcemaps
           test -d sentry-sourcemaps/package/dist
-          if ! npx --yes @sentry/cli --auth-token "$SENTRY_AUTH_TOKEN" sourcemaps upload \
+          if ! npx --yes @sentry/cli sourcemaps upload \
             --org "$SENTRY_ORG" --project "$SENTRY_PROJECT" \
             --release "pickforge@$RELEASE_VERSION" sentry-sourcemaps/package/dist; then
             echo "::warning::Sentry sourcemap upload failed; continuing release"
