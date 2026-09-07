@@ -211,7 +211,10 @@ project — a default screenshot or run never shows up in `git status`:
 path: the same project always resolves to the same id, and different projects
 never collide. Use the platform home-directory equivalent on non-Linux systems.
 `PICKFORGE_HOME` overrides the Pickforge home root (default `~/.pickforge/lab`);
-`pickforge-lab doctor` reports the resolved path.
+`pickforge-lab doctor` reports the resolved path. In text and `--json` modes,
+it exits 1 when any required check is `missing` (`ok: false`) or `--fix`
+fails, and 0 otherwise. Warnings alone do not fail. Checks describe the state
+before repairs; rerun doctor after `--fix` to verify readiness.
 
 Two other modes are available via `storage` in the **global** config or the
 `PICKFORGE_STORAGE_MODE` / `PICKFORGE_STORAGE_PATH` environment overrides for

@@ -160,12 +160,13 @@ describe("pickforge-lab doctor", () => {
     const env = makeEnv(tmpDir);
     const result = await runCli(["doctor"], env, tmpDir);
     expect(result.stdout).toContain(`State directory: ${env.PICKFORGE_HOME}`);
+    expect(result.code).toBe(1);
   });
 
-  it("exits 0 with findings on a bare machine", async () => {
+  it("exits 1 with missing required checks on a bare machine", async () => {
     const env = makeEnv(tmpDir);
     const result = await runCli(["doctor", "--json"], env, tmpDir);
-    expect(result.code).toBe(0);
+    expect(result.code).toBe(1);
     const report = parseJson(result);
     expect(report.ok).toBe(false);
     expect(report.stateDir).toBe(env.PICKFORGE_HOME);
@@ -196,7 +197,7 @@ describe("pickforge-lab doctor", () => {
 
     const result = await runCli(["doctor", "--json"], env, tmpDir);
 
-    expect(result.code).toBe(0);
+    expect(result.code).toBe(1);
     const report = parseJson(result);
     const warnings = (
       report.checks as Array<{ id: string; status: string; detail: string }>
@@ -209,18 +210,22 @@ describe("pickforge-lab doctor", () => {
     expect(warnings.every((check) => check.status === "warn")).toBe(true);
   });
 
-  it("exits 0 when the only non-ok finding is the optional lab user", async () => {
+  it.each(["ok", "warn-only", "fix-failure"])("pins text and JSON exit codes for %s", async (scenario) => {
+    const labUserExists = scenario === "ok";
     const sdk = makeFakeSdk(path.join(tmpDir, "sdk"), {
       images: [IMAGE],
       avdNames: ["pickforge-avd"],
     });
     const env = makeEnv(tmpDir, {
       sdk,
+      graphicalSudo: true,
       bins: {
+        sudo: "exit 1",
         Xvfb: "exit 0",
         xdotool: "exit 0",
         import: "exit 0",
         x11vnc: "exit 0",
+        getent: labUserExists ? "echo 'pickforge-lab:x:1000:1000::/tmp:/bin/sh'" : "exit 1",
       },
     });
     fs.mkdirSync(env.PICKFORGE_HOME!, { recursive: true });
@@ -228,22 +233,30 @@ describe("pickforge-lab doctor", () => {
     fs.writeFileSync(kvmPath, "", { mode: 0o660 });
     env.PICKFORGE_KVM_PATH = kvmPath;
 
-    const result = await runCli(["doctor", "--json"], env, tmpDir);
-    expect(result.code).toBe(0);
+    const args = scenario === "fix-failure" ? ["--fix", "--yes"] : [];
+    const expectedCode = scenario === "fix-failure" ? 1 : 0;
+    const result = await runCli(["doctor", "--json", ...args], env, tmpDir);
+    expect(result.code).toBe(expectedCode);
     const report = parseJson(result);
     expect(report.ok).toBe(true);
+    if (scenario === "fix-failure") {
+      expect(report.fix.status).toBe("failed");
+      expect(report.errors.length).toBeGreaterThan(0);
+    }
     const nonOk = (
       report.checks as Array<{ id: string; status: string }>
     )
       .filter((check) => check.status !== "ok")
       .map((check) => ({ id: check.id, status: check.status }));
-    expect(nonOk).toEqual([{ id: "lab-user", status: "warn" }]);
+    expect(nonOk).toEqual(labUserExists ? [] : [{ id: "lab-user", status: "warn" }]);
+    const text = await runCli(["doctor", ...args], env, tmpDir);
+    expect(text.code).toBe(expectedCode);
   });
 
   it("creates the pickforge-lab home with --fix and skips privileged repairs", async () => {
     const env = makeEnv(tmpDir);
     const result = await runCli(["doctor", "--json", "--fix"], env, tmpDir);
-    expect(result.code).toBe(0);
+    expect(result.code).toBe(1);
     const report = parseJson(result);
     expect(report.fix.status).toBe("completed");
     expect(fs.statSync(env.PICKFORGE_HOME!).isDirectory()).toBe(true);
@@ -270,7 +283,7 @@ describe("pickforge-lab doctor", () => {
     // failure mode).
     const env = makeEnv(tmpDir, { bins: { sudo: "exit 0" } });
     const result = await runCli(["doctor", "--json", "--fix"], env, tmpDir);
-    expect(result.code).toBe(0);
+    expect(result.code).toBe(1);
     const report = parseJson(result);
     expect(report.fix.status).toBe("completed");
     const skipped = (report.fix.skipped as string[]).join("\n");
@@ -284,7 +297,7 @@ describe("pickforge-lab doctor", () => {
     const sdk = makeFakeSdk(path.join(tmpDir, "sdk"), { images: [IMAGE] });
     const env = makeEnv(tmpDir, { sdk });
     const result = await runCli(["doctor", "--json", "--fix"], env, tmpDir);
-    expect(result.code).toBe(0);
+    expect(result.code).toBe(1);
     const report = parseJson(result);
     expect(fs.existsSync(path.join(sdk, "avdmanager.log"))).toBe(false);
     expect(fs.statSync(env.PICKFORGE_HOME!).isDirectory()).toBe(true);
@@ -306,7 +319,7 @@ describe("pickforge-lab doctor", () => {
       env,
       tmpDir,
     );
-    expect(result.code).toBe(0);
+    expect(result.code).toBe(1);
     const report = parseJson(result);
     const log = fs.readFileSync(path.join(sdk, "avdmanager.log"), "utf8");
     expect(log.trim()).toBe(`create avd -n pickforge-avd -k ${IMAGE}`);
@@ -320,7 +333,7 @@ describe("pickforge-lab doctor", () => {
       env,
       tmpDir,
     );
-    expect(result.code).toBe(0);
+    expect(result.code).toBe(1);
     const report = parseJson(result);
     expect(report.fix.dryRun).toBe(true);
     expect(
