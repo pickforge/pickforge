@@ -633,7 +633,10 @@ fn planning_nonempty_pack_is_read_only_and_deduplicates_in_fixed_order() {
         action.target
             == temp
                 .path()
-                .join("home/.config/mcp/mcp.json")
+                .join("home")
+                .join(".config")
+                .join("mcp")
+                .join("mcp.json")
                 .display()
                 .to_string()
     }));
