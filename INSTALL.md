@@ -31,12 +31,12 @@ The npm-only alternatives, `npm install -g pickforge@next` and
 `bun add -g pickforge@next`, do not install the Rust binary. Never install with
 sudo.
 
-Verify all three commands:
+Verify all three commands and their versions:
 
 ```sh
 command -v pickforge && pickforge --version
 command -v pickforge-lab && pickforge-lab --version
-command -v pickforge-mcp
+command -v pickforge-mcp && pickforge-mcp --version
 ```
 
 If they are not on PATH, the global bin dir (`npm prefix -g`/bin or
@@ -137,6 +137,11 @@ Pickforge can provision two lab resources:
 
 - **Lab user** (`pickforge-lab`, desktop profiles) — optional, created with sudo after explicit user approval. It will isolate desktop sessions once run-as-lab-user isolation ships; sessions currently run as the invoking user. If the user wants it: `pickforge-lab setup lab-user`
 - **AVD** (`pickforge-avd`, Android profiles) — dedicated emulator image, no sudo: `pickforge-lab setup android --create-avd`. Pickforge auto-allocates emulator ports from 5556, so the user's own emulator on 5554 is untouched.
+
+In text and `--json` modes, `pickforge-lab doctor` exits 1 when any required
+check is `missing` (`ok: false`) or `--fix` fails, and 0 otherwise. Warnings
+alone do not fail. Checks describe the state before repairs; rerun doctor
+after `--fix` to verify readiness.
 
 `pickforge-lab init` plans the AVD automatically for Android profiles and the lab user only with `--create-lab-user`; `pickforge-lab doctor --fix` offers both.
 

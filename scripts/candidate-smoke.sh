@@ -196,9 +196,12 @@ assert_versions() {
   [ "${actual}" = "${expected}" ] \
     || fail "pickforge-lab reported \"${actual}\", expected \"${expected}\""
   printf 'pickforge-lab: %s\n' "${actual}" | tee -a "${EVIDENCE}/facts.txt"
-  # pickforge-mcp is a stdio server with no --version flag, so its version comes
-  # from a real MCP handshake with the installed binary.
   [ -x "${PREFIX}/bin/pickforge-mcp" ] || fail "pickforge-mcp was not installed"
+  actual="$("${PREFIX}/bin/pickforge-mcp" --version)"
+  [ "${actual}" = "${expected}" ] \
+    || fail "pickforge-mcp reported \"${actual}\", expected \"${expected}\""
+  printf 'pickforge-mcp: %s\n' "${actual}" | tee -a "${EVIDENCE}/facts.txt"
+  # Also verify the version through a real MCP handshake with the installed binary.
   env HOME="${SMOKE_HOME}" PICKFORGE_HOME="${STATE}" \
     node "${SMOKE_HELPERS}/mcp-handshake.mjs" \
       --command "${PREFIX}/bin/pickforge-mcp" \

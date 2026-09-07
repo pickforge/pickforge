@@ -102,7 +102,11 @@ const collectConfigPath = (value: string, previous: string[]): string[] => [
 function registerProvisioningCommands(program: Command): void {
   program
     .command("doctor")
-    .description("Check dependencies and dedicated lab resources")
+    .description(
+      "Check dependencies and dedicated lab resources. In text and JSON modes, " +
+        "exit 1 if any required check is missing or --fix fails; otherwise exit 0. " +
+        "Warnings alone do not fail. Checks describe the state before repairs.",
+    )
     .option("--json", "machine-readable output")
     .option("--fix", "apply repairs (privileged ones need --yes or a prompt)")
     .option("--yes", "consent to privileged repairs without prompting")

@@ -4,7 +4,7 @@
 
 ## Changes
 
-- <User-visible change, in the language of someone using Pickforge.>
+- `pickforge-lab doctor` now exits 1 when required checks are missing, in text and JSON modes. Warnings alone still exit 0, and failed repairs still exit 1. Checks reflect the state before `--fix`; rerun doctor after repairs. The Rust `pickforge doctor` is unchanged.
 
 ## Validation
 
