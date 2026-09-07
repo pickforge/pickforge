@@ -3,6 +3,7 @@ import path from "node:path";
 import { runCommand, type EnvLike } from "@pickforge/lab-core";
 import {
   jsonFileMcpServerState,
+  jsonFileRetainedMcpServerNames,
   mergeMcpServerIntoJsonFile,
   ownedLegacyMcpServerNamesInJsonFile,
   removeMcpServerFromJsonFile,
@@ -13,13 +14,26 @@ import {
   MCP_SERVER_NAME,
   browserMcpServerEntry,
   mcpServerEntry,
+  wantsBrowserEntry,
 } from "../snippet.js";
-import type { ChangeResult, RegistrationState } from "../types.js";
+import type {
+  ChangeResult,
+  LinkOptions,
+  McpServerEntry,
+  RegistrationState,
+} from "../types.js";
 import { homeDir } from "./home.js";
 
 export const CLAUDE_CODE_MANUAL_COMMAND =
-  "claude mcp add --scope user pickforge-lab -- pickforge-lab mcp serve && " +
+  "claude mcp add --scope user pickforge-lab -- pickforge-lab mcp serve";
+export const CLAUDE_CODE_BROWSER_MANUAL_COMMAND =
   "claude mcp add --scope user pickforge-lab-browser -- pickforge-lab browser devtools-mcp";
+
+function manualCommand(browser: boolean): string {
+  return browser
+    ? `${CLAUDE_CODE_MANUAL_COMMAND} && ${CLAUDE_CODE_BROWSER_MANUAL_COMMAND}`
+    : CLAUDE_CODE_MANUAL_COMMAND;
+}
 
 const DIRECT_EDIT_WARNING =
   "the claude binary was not found on PATH, so the config file was edited " +
@@ -81,10 +95,21 @@ function isNotFoundRemoveFailure(result: {
   return output.includes("not found") || output.includes("no mcp server");
 }
 
-const CLAUDE_SERVERS = [
+interface ClaudeServer {
+  name: string;
+  entry: McpServerEntry;
+}
+
+const CLAUDE_SERVERS: readonly ClaudeServer[] = [
   { name: MCP_SERVER_NAME, entry: mcpServerEntry() },
   { name: BROWSER_MCP_SERVER_NAME, entry: browserMcpServerEntry() },
-] as const;
+];
+
+function claudeServers(browser: boolean): readonly ClaudeServer[] {
+  return browser
+    ? CLAUDE_SERVERS
+    : CLAUDE_SERVERS.filter((server) => server.name === MCP_SERVER_NAME);
+}
 
 async function removeClaudeMcpServer(
   claudeBin: string,
@@ -109,7 +134,7 @@ async function addClaudeMcpServerOrRepair(
   claudeBin: string,
   configPath: string,
   env: EnvLike,
-  server: (typeof CLAUDE_SERVERS)[number],
+  server: ClaudeServer,
 ): Promise<boolean> {
   const add = async () =>
     runCommand(
@@ -165,24 +190,50 @@ export async function claudeCodeIsRegistered(
   return jsonFileMcpServerState(configPath);
 }
 
+async function allClaudeServersRegistered(
+  configPath: string,
+  servers: readonly ClaudeServer[],
+): Promise<boolean> {
+  for (const server of servers) {
+    const state = await jsonFileMcpServerState(configPath, {
+      expected: server.entry,
+      serverName: server.name,
+    });
+    if (state !== true) {
+      return false;
+    }
+  }
+  return true;
+}
+
 async function linkClaudeCodeWithBinary(
   claudeBin: string,
   configPath: string,
   env: EnvLike,
+  opts: LinkOptions,
 ): Promise<ChangeResult> {
   const migratedLegacyEntries =
     await ownedLegacyMcpServerNamesInJsonFile(configPath);
+  const currentBrowserEntries = await jsonFileRetainedMcpServerNames(configPath);
+  const browser = wantsBrowserEntry(
+    opts,
+    migratedLegacyEntries,
+    currentBrowserEntries.length > 0,
+  );
+  const servers = claudeServers(browser);
+  const retainedEntries = browser ? [] : currentBrowserEntries;
+  const retained = retainedEntries.length === 0 ? {} : { retainedEntries };
   if (
     migratedLegacyEntries.length === 0 &&
-    (await claudeCodeIsRegistered(configPath)) === true
+    (await allClaudeServersRegistered(configPath, servers))
   ) {
-    return { configPath, changed: false };
+    return { configPath, changed: false, ...retained };
   }
   let changed = false;
   for (const name of migratedLegacyEntries) {
     changed = (await removeClaudeMcpServer(claudeBin, env, name)) || changed;
   }
-  for (const server of CLAUDE_SERVERS) {
+  for (const server of servers) {
     changed =
       (await addClaudeMcpServerOrRepair(claudeBin, configPath, env, server)) ||
       changed;
@@ -191,18 +242,23 @@ async function linkClaudeCodeWithBinary(
     configPath,
     changed,
     ...(migratedLegacyEntries.length === 0 ? {} : { migratedLegacyEntries }),
+    ...retained,
   };
 }
 
 export async function linkClaudeCode(
   configPath: string,
   env: EnvLike = process.env,
+  opts: LinkOptions = {},
 ): Promise<ChangeResult> {
   const claudeBin = findClaudeBinary(env);
   if (claudeBin !== undefined) {
-    return linkClaudeCodeWithBinary(claudeBin, configPath, env);
+    return linkClaudeCodeWithBinary(claudeBin, configPath, env, opts);
   }
-  const migration = await replaceOwnedLegacyMcpServersInJsonFile(configPath);
+  const migration = await replaceOwnedLegacyMcpServersInJsonFile(
+    configPath,
+    opts,
+  );
   if (migration.changed) {
     return { ...migration, warning: DIRECT_EDIT_WARNING };
   }
@@ -219,11 +275,12 @@ export async function linkClaudeCode(
       changed: false,
       instructions:
         `Claude Code config not found at ${configPath}; register manually ` +
-        `with: ${CLAUDE_CODE_MANUAL_COMMAND}`,
+        `with: ${manualCommand(opts.browser === true)}`,
     };
   }
   const result = await mergeMcpServerIntoJsonFile(configPath, {
     createIfMissing: false,
+    browser: opts.browser,
   });
   return result.changed ? { ...result, warning: DIRECT_EDIT_WARNING } : result;
 }

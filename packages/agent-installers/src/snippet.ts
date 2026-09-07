@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { agentsDir, ensureDir, type EnvLike } from "@pickforge/lab-core";
-import type { McpServerEntry } from "./types.js";
+import type { LinkOptions, McpServerEntry } from "./types.js";
 
 export const MCP_SERVER_NAME = "pickforge-lab";
 export const BROWSER_MCP_SERVER_NAME = "pickforge-lab-browser";
@@ -25,11 +25,43 @@ export function browserMcpServerEntry(): McpServerEntry {
   return { command: "pickforge-lab", args: ["browser", "devtools-mcp"] };
 }
 
-export function pickforgeLabMcpServerEntries(): Record<string, McpServerEntry> {
+export function pickforgeLabMcpServerEntries(
+  opts: LinkOptions = {},
+): Record<string, McpServerEntry> {
   return {
     [MCP_SERVER_NAME]: mcpServerEntry(),
-    [BROWSER_MCP_SERVER_NAME]: browserMcpServerEntry(),
+    ...(opts.browser === true
+      ? { [BROWSER_MCP_SERVER_NAME]: browserMcpServerEntry() }
+      : {}),
   };
+}
+
+/**
+ * Browser is written when requested, or when an owned legacy browser entry is
+ * migrated and no current browser entry exists yet. An existing current entry
+ * is never overwritten without the explicit flag.
+ */
+export function wantsBrowserEntry(
+  opts: LinkOptions,
+  migratedLegacyEntries: string[],
+  hasCurrentBrowserEntry: boolean,
+): boolean {
+  if (opts.browser === true) {
+    return true;
+  }
+  return (
+    !hasCurrentBrowserEntry &&
+    migratedLegacyEntries.includes(LEGACY_BROWSER_MCP_SERVER_NAME)
+  );
+}
+
+function snippetEntries(
+  entry: McpServerEntry | undefined,
+  opts: LinkOptions,
+): Record<string, McpServerEntry> {
+  return entry === undefined
+    ? pickforgeLabMcpServerEntries(opts)
+    : { [MCP_SERVER_NAME]: entry };
 }
 
 export function legacyMcpServerEntries(): Record<string, McpServerEntry> {
@@ -45,19 +77,19 @@ export function legacyMcpServerEntries(): Record<string, McpServerEntry> {
   };
 }
 
-export function renderJsonSnippet(entry?: McpServerEntry): string {
-  const entries =
-    entry === undefined
-      ? pickforgeLabMcpServerEntries()
-      : { [MCP_SERVER_NAME]: entry };
+export function renderJsonSnippet(
+  entry?: McpServerEntry,
+  opts: LinkOptions = {},
+): string {
+  const entries = snippetEntries(entry, opts);
   return `${JSON.stringify({ mcpServers: entries }, null, 2)}\n`;
 }
 
-export function renderTomlSnippet(entry?: McpServerEntry): string {
-  const entries =
-    entry === undefined
-      ? pickforgeLabMcpServerEntries()
-      : { [MCP_SERVER_NAME]: entry };
+export function renderTomlSnippet(
+  entry?: McpServerEntry,
+  opts: LinkOptions = {},
+): string {
+  const entries = snippetEntries(entry, opts);
   return Object.entries(entries)
     .map(([name, server]) => {
       const args = server.args.map((arg) => JSON.stringify(arg)).join(", ");

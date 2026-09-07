@@ -5,6 +5,7 @@ export {
   type AgentKind,
   type AgentStatus,
   type ChangeResult,
+  type LinkOptions,
   type McpServerEntry,
   type RegistrationState,
 } from "./types.js";
@@ -39,6 +40,7 @@ export { backupFile, isBackupPath, BACKUP_PATTERN } from "./backup.js";
 export {
   jsonFileHasMcpServer,
   jsonFileMcpServerState,
+  jsonFileRetainedMcpServerNames,
   mergeMcpServerIntoJsonFile,
   removeMcpServerFromJsonFile,
   replaceOwnedLegacyMcpServersInJsonFile,
@@ -72,6 +74,7 @@ export {
 } from "./agents/codex.js";
 
 export {
+  CLAUDE_CODE_BROWSER_MANUAL_COMMAND,
   CLAUDE_CODE_MANUAL_COMMAND,
   claudeCodeConfigPath,
   claudeCodeIsRegistered,

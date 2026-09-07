@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  CLAUDE_CODE_BROWSER_MANUAL_COMMAND,
   CLAUDE_CODE_MANUAL_COMMAND,
   claudeCodeConfigPath,
   claudeCodeIsRegistered,
@@ -51,6 +52,29 @@ function recordedArgs(env: Record<string, string>): string[] {
 
 const RECORDING_CLAUDE = '#!/bin/sh\nprintf \'%s\\n\' "$@" >> "${CLAUDE_ARGS_FILE}"\n';
 
+const ADD_CORE_ARGS = [
+  "mcp",
+  "add",
+  "--scope",
+  "user",
+  "pickforge-lab",
+  "--",
+  "pickforge-lab",
+  "mcp",
+  "serve",
+];
+const ADD_BROWSER_ARGS = [
+  "mcp",
+  "add",
+  "--scope",
+  "user",
+  "pickforge-lab-browser",
+  "--",
+  "pickforge-lab",
+  "browser",
+  "devtools-mcp",
+];
+
 describe("default config paths", () => {
   it("derive from HOME", () => {
     const env = { HOME: home };
@@ -89,7 +113,15 @@ describe("linkClaudeCode without the claude binary", () => {
     const result = await linkClaudeCode(configPath, cleanEnv);
     expect(result.changed).toBe(false);
     expect(result.instructions).toContain(CLAUDE_CODE_MANUAL_COMMAND);
+    expect(result.instructions).not.toContain("pickforge-lab-browser");
     expect(fs.existsSync(configPath)).toBe(false);
+
+    const withBrowser = await linkClaudeCode(configPath, cleanEnv, {
+      browser: true,
+    });
+    expect(withBrowser.instructions).toContain(
+      `${CLAUDE_CODE_MANUAL_COMMAND} && ${CLAUDE_CODE_BROWSER_MANUAL_COMMAND}`,
+    );
   });
 
   it("merges into an existing parseable ~/.claude.json with a backup and warns", async () => {
@@ -108,16 +140,55 @@ describe("linkClaudeCode without the claude binary", () => {
       command: "pickforge-lab",
       args: ["mcp", "serve"],
     });
-    expect(config.mcpServers["pickforge-lab-browser"]).toEqual({
-      command: "pickforge-lab",
-      args: ["browser", "devtools-mcp"],
-    });
+    expect(config.mcpServers["pickforge-lab-browser"]).toBeUndefined();
     expect(await claudeCodeIsRegistered(configPath)).toBe(true);
 
     const removed = await unlinkClaudeCode(configPath, cleanEnv);
     expect(removed.changed).toBe(true);
     expect(removed.warning).toContain("close Claude Code");
     expect(await claudeCodeIsRegistered(configPath)).toBe(false);
+  });
+
+  it("adds the browser relay only when opted in and unlinks both", async () => {
+    const configPath = path.join(home, ".claude.json");
+    fs.writeFileSync(configPath, JSON.stringify({ mcpServers: {} }));
+    const result = await linkClaudeCode(configPath, cleanEnv, { browser: true });
+    expect(result.changed).toBe(true);
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    expect(config.mcpServers["pickforge-lab-browser"]).toEqual({
+      command: "pickforge-lab",
+      args: ["browser", "devtools-mcp"],
+    });
+    const removed = await unlinkClaudeCode(configPath, cleanEnv);
+    expect(removed.changed).toBe(true);
+    expect(
+      JSON.parse(fs.readFileSync(configPath, "utf8")).mcpServers,
+    ).toBeUndefined();
+  });
+
+  it("keeps a customized current browser entry when a legacy browser entry migrates by direct edit", async () => {
+    const configPath = path.join(home, ".claude.json");
+    const customized = { command: "custom-browser", args: ["x"] };
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        mcpServers: {
+          "picklab-browser": {
+            command: "picklab",
+            args: ["browser", "devtools-mcp"],
+          },
+          "pickforge-lab-browser": customized,
+        },
+      }),
+    );
+    const result = await linkClaudeCode(configPath, cleanEnv);
+    expect(result.changed).toBe(true);
+    expect(result.migratedLegacyEntries).toEqual(["picklab-browser"]);
+    expect(result.retainedEntries).toEqual(["pickforge-lab-browser"]);
+    expect(JSON.parse(fs.readFileSync(configPath, "utf8")).mcpServers).toEqual({
+      "pickforge-lab-browser": customized,
+      "pickforge-lab": { command: "pickforge-lab", args: ["mcp", "serve"] },
+    });
   });
 
   it("rejects an unparseable ~/.claude.json without touching it", async () => {
@@ -137,27 +208,80 @@ describe("linkClaudeCode with the claude binary on PATH", () => {
     const result = await linkClaudeCode(configPath, env);
     expect(result.changed).toBe(true);
     expect(result.instructions).toBeUndefined();
+    expect(recordedArgs(env)).toEqual(ADD_CORE_ARGS);
+    expect(fs.existsSync(configPath)).toBe(false);
+  });
+
+  it("adds the browser relay through claude mcp add when opted in", async () => {
+    const env = installFakeClaude(RECORDING_CLAUDE);
+    const result = await linkClaudeCode(path.join(home, ".claude.json"), env, {
+      browser: true,
+    });
+    expect(result).toEqual({
+      configPath: path.join(home, ".claude.json"),
+      changed: true,
+    });
+    expect(recordedArgs(env)).toEqual([...ADD_CORE_ARGS, ...ADD_BROWSER_ARGS]);
+  });
+
+  it("retains a mismatching browser entry without touching it unless opted in", async () => {
+    const env = installFakeClaude(RECORDING_CLAUDE);
+    const configPath = path.join(home, ".claude.json");
+    const original = JSON.stringify({
+      mcpServers: {
+        "pickforge-lab": { command: "pickforge-lab", args: ["mcp", "serve"] },
+        "pickforge-lab-browser": { command: "stale", args: ["x"] },
+      },
+    });
+    fs.writeFileSync(configPath, original);
+
+    const result = await linkClaudeCode(configPath, env);
+
+    expect(result).toEqual({
+      configPath,
+      changed: false,
+      retainedEntries: ["pickforge-lab-browser"],
+    });
+    expect(fs.readFileSync(configPath, "utf8")).toBe(original);
+    expect(fs.existsSync(env.CLAUDE_ARGS_FILE)).toBe(false);
+  });
+
+  it("repairs a mismatching browser entry when opted in", async () => {
+    const env = installFakeClaude(
+      [
+        "#!/bin/sh",
+        'printf \'%s\\n\' "$@" >> "${CLAUDE_ARGS_FILE}"',
+        'if [ "${2:-}" = "add" ] && [ "${5:-}" = "pickforge-lab-browser" ] && [ ! -f "${HOME}/.removed" ]; then',
+        '  echo "MCP server pickforge-lab-browser already exists in user config." >&2',
+        "  exit 1",
+        "fi",
+        'if [ "${2:-}" = "remove" ]; then : > "${HOME}/.removed"; fi',
+      ].join("\n"),
+    );
+    const configPath = path.join(home, ".claude.json");
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        mcpServers: {
+          "pickforge-lab": { command: "pickforge-lab", args: ["mcp", "serve"] },
+          "pickforge-lab-browser": { command: "stale", args: ["x"] },
+        },
+      }),
+    );
+
+    const result = await linkClaudeCode(configPath, env, { browser: true });
+
+    expect(result).toEqual({ configPath, changed: true });
     expect(recordedArgs(env)).toEqual([
+      ...ADD_CORE_ARGS,
+      ...ADD_BROWSER_ARGS,
       "mcp",
-      "add",
-      "--scope",
-      "user",
-      "pickforge-lab",
-      "--",
-      "pickforge-lab",
-      "mcp",
-      "serve",
-      "mcp",
-      "add",
+      "remove",
       "--scope",
       "user",
       "pickforge-lab-browser",
-      "--",
-      "pickforge-lab",
-      "browser",
-      "devtools-mcp",
+      ...ADD_BROWSER_ARGS,
     ]);
-    expect(fs.existsSync(configPath)).toBe(false);
   });
 
   it("does not shell out when ~/.claude.json already has pickforge-lab registered", async () => {
@@ -179,8 +303,16 @@ describe("linkClaudeCode with the claude binary on PATH", () => {
 
     const result = await linkClaudeCode(configPath, env);
 
-    expect(result).toEqual({ configPath, changed: false });
+    expect(result).toEqual({
+      configPath,
+      changed: false,
+      retainedEntries: ["pickforge-lab-browser"],
+    });
     expect(fs.readFileSync(configPath, "utf8")).toBe(original);
+    expect(fs.existsSync(env.CLAUDE_ARGS_FILE)).toBe(false);
+
+    const withBrowser = await linkClaudeCode(configPath, env, { browser: true });
+    expect(withBrowser).toEqual({ configPath, changed: false });
     expect(fs.existsSync(env.CLAUDE_ARGS_FILE)).toBe(false);
   });
 
@@ -216,29 +348,52 @@ describe("linkClaudeCode with the claude binary on PATH", () => {
       "--scope",
       "user",
       "picklab-browser",
-      "mcp",
-      "add",
-      "--scope",
-      "user",
-      "pickforge-lab",
-      "--",
-      "pickforge-lab",
-      "mcp",
-      "serve",
-      "mcp",
-      "add",
-      "--scope",
-      "user",
-      "pickforge-lab-browser",
-      "--",
-      "pickforge-lab",
-      "browser",
-      "devtools-mcp",
+      ...ADD_CORE_ARGS,
+      ...ADD_BROWSER_ARGS,
     ]);
     expect(fs.readFileSync(configPath, "utf8")).toBe(original);
   });
 
-  it("updates a stale ~/.claude.json while adding both servers", async () => {
+  it("keeps a customized current browser entry when a legacy browser entry migrates through the binary", async () => {
+    const env = installFakeClaude(RECORDING_CLAUDE);
+    const configPath = path.join(home, ".claude.json");
+    const original = JSON.stringify({
+      mcpServers: {
+        picklab: { command: "picklab", args: ["mcp", "serve"] },
+        "picklab-browser": {
+          command: "picklab",
+          args: ["browser", "devtools-mcp"],
+        },
+        "pickforge-lab-browser": { command: "custom-browser", args: ["x"] },
+      },
+    });
+    fs.writeFileSync(configPath, original);
+
+    const result = await linkClaudeCode(configPath, env);
+
+    expect(result).toEqual({
+      configPath,
+      changed: true,
+      migratedLegacyEntries: ["picklab", "picklab-browser"],
+      retainedEntries: ["pickforge-lab-browser"],
+    });
+    expect(recordedArgs(env)).toEqual([
+      "mcp",
+      "remove",
+      "--scope",
+      "user",
+      "picklab",
+      "mcp",
+      "remove",
+      "--scope",
+      "user",
+      "picklab-browser",
+      ...ADD_CORE_ARGS,
+    ]);
+    expect(fs.readFileSync(configPath, "utf8")).toBe(original);
+  });
+
+  it("updates a stale ~/.claude.json entry", async () => {
     const env = installFakeClaude(
       [
         "#!/bin/sh",
@@ -262,26 +417,7 @@ describe("linkClaudeCode with the claude binary on PATH", () => {
 
     expect(result).toEqual({ configPath, changed: true });
     expect(await claudeCodeIsRegistered(configPath)).toBe(true);
-    expect(recordedArgs(env)).toEqual([
-      "mcp",
-      "add",
-      "--scope",
-      "user",
-      "pickforge-lab",
-      "--",
-      "pickforge-lab",
-      "mcp",
-      "serve",
-      "mcp",
-      "add",
-      "--scope",
-      "user",
-      "pickforge-lab-browser",
-      "--",
-      "pickforge-lab",
-      "browser",
-      "devtools-mcp",
-    ]);
+    expect(recordedArgs(env)).toEqual(ADD_CORE_ARGS);
   });
 
   it("shells out to claude mcp remove on unlink", async () => {

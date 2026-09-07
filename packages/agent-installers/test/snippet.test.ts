@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   browserMcpServerEntry,
   mcpServerEntry,
+  pickforgeLabMcpServerEntries,
   renderJsonSnippet,
   renderTomlSnippet,
   writeSharedSnippets,
@@ -35,23 +36,41 @@ describe("mcpServerEntry", () => {
   });
 });
 
+describe("pickforgeLabMcpServerEntries", () => {
+  it("includes the browser relay only when opted in", () => {
+    expect(Object.keys(pickforgeLabMcpServerEntries())).toEqual(["pickforge-lab"]);
+    expect(Object.keys(pickforgeLabMcpServerEntries({ browser: true }))).toEqual([
+      "pickforge-lab",
+      "pickforge-lab-browser",
+    ]);
+  });
+});
+
 describe("renderJsonSnippet", () => {
-  it("renders the exact JSON snippet", () => {
+  it("renders the exact JSON snippet without the browser relay by default", () => {
     expect(renderJsonSnippet()).toBe(
       `${JSON.stringify(
         {
           mcpServers: {
             "pickforge-lab": { command: "pickforge-lab", args: ["mcp", "serve"] },
-            "pickforge-lab-browser": {
-              command: "pickforge-lab",
-              args: ["browser", "devtools-mcp"],
-            },
           },
         },
         null,
         2,
       )}\n`,
     );
+  });
+
+  it("renders the browser relay when opted in", () => {
+    expect(JSON.parse(renderJsonSnippet(undefined, { browser: true }))).toEqual({
+      mcpServers: {
+        "pickforge-lab": { command: "pickforge-lab", args: ["mcp", "serve"] },
+        "pickforge-lab-browser": {
+          command: "pickforge-lab",
+          args: ["browser", "devtools-mcp"],
+        },
+      },
+    });
   });
 
   it("renders custom entries", () => {
@@ -63,8 +82,14 @@ describe("renderJsonSnippet", () => {
 });
 
 describe("renderTomlSnippet", () => {
-  it("renders the exact TOML snippet", () => {
+  it("renders the exact TOML snippet without the browser relay by default", () => {
     expect(renderTomlSnippet()).toBe(
+      '[mcp_servers."pickforge-lab"]\ncommand = "pickforge-lab"\nargs = ["mcp", "serve"]\n',
+    );
+  });
+
+  it("renders the browser relay when opted in", () => {
+    expect(renderTomlSnippet(undefined, { browser: true })).toBe(
       '[mcp_servers."pickforge-lab"]\ncommand = "pickforge-lab"\nargs = ["mcp", "serve"]\n' +
         '[mcp_servers."pickforge-lab-browser"]\ncommand = "pickforge-lab"\n' +
         'args = ["browser", "devtools-mcp"]\n',

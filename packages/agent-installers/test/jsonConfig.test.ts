@@ -5,9 +5,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   jsonFileHasMcpServer,
   jsonFileMcpServerState,
+  jsonFileRetainedMcpServerNames,
   mergeMcpServerIntoJsonFile,
   pickforgeLabMcpServerEntries,
   removeMcpServerFromJsonFile,
+  replaceOwnedLegacyMcpServersInJsonFile,
 } from "../src/index.js";
 
 let tmpDir: string;
@@ -72,11 +74,126 @@ describe("mergeMcpServerIntoJsonFile", () => {
       mcpServers: {
         other: { command: "other-mcp", args: [] },
         "pickforge-lab": { command: "pickforge-lab", args: ["mcp", "serve"] },
+      },
+    });
+    expect(result.retainedEntries).toBeUndefined();
+  });
+
+  it("adds the browser relay only when opted in", async () => {
+    const result = await mergeMcpServerIntoJsonFile(file, {
+      createIfMissing: true,
+      browser: true,
+    });
+    expect(result.changed).toBe(true);
+    expect(readJson(file)).toEqual({
+      mcpServers: {
+        "pickforge-lab": { command: "pickforge-lab", args: ["mcp", "serve"] },
         "pickforge-lab-browser": {
           command: "pickforge-lab",
           args: ["browser", "devtools-mcp"],
         },
       },
+    });
+    const again = await mergeMcpServerIntoJsonFile(file, {
+      createIfMissing: false,
+      browser: true,
+    });
+    expect(again.changed).toBe(false);
+    expect(again.retainedEntries).toBeUndefined();
+  });
+
+  it("retains a mismatching browser entry untouched unless opted in", async () => {
+    const stale = { command: "old-pickforge-lab", args: ["browser", "old"] };
+    fs.writeFileSync(
+      file,
+      JSON.stringify({ mcpServers: { "pickforge-lab-browser": stale } }),
+    );
+    const result = await mergeMcpServerIntoJsonFile(file, {
+      createIfMissing: false,
+    });
+    expect(result.changed).toBe(true);
+    expect(result.retainedEntries).toEqual(["pickforge-lab-browser"]);
+    expect(readJson(file).mcpServers["pickforge-lab-browser"]).toEqual(stale);
+
+    const again = await mergeMcpServerIntoJsonFile(file, {
+      createIfMissing: false,
+    });
+    expect(again.changed).toBe(false);
+    expect(again.retainedEntries).toEqual(["pickforge-lab-browser"]);
+    expect(readJson(file).mcpServers["pickforge-lab-browser"]).toEqual(stale);
+
+    const repaired = await mergeMcpServerIntoJsonFile(file, {
+      createIfMissing: false,
+      browser: true,
+    });
+    expect(repaired.changed).toBe(true);
+    expect(repaired.retainedEntries).toBeUndefined();
+    expect(readJson(file).mcpServers["pickforge-lab-browser"]).toEqual({
+      command: "pickforge-lab",
+      args: ["browser", "devtools-mcp"],
+    });
+  });
+
+  it("migrates an owned legacy browser entry to the current browser entry", async () => {
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        mcpServers: {
+          picklab: { command: "picklab", args: ["mcp", "serve"] },
+          "picklab-browser": {
+            command: "picklab",
+            args: ["browser", "devtools-mcp"],
+          },
+        },
+      }),
+    );
+    const result = await mergeMcpServerIntoJsonFile(file, {
+      createIfMissing: false,
+    });
+    expect(result.migratedLegacyEntries).toEqual(["picklab", "picklab-browser"]);
+    expect(readJson(file)).toEqual({
+      mcpServers: pickforgeLabMcpServerEntries({ browser: true }),
+    });
+  });
+
+  it("keeps a customized current browser entry when a legacy browser entry migrates without --browser", async () => {
+    const customized = { command: "custom-browser", args: ["browser", "custom"] };
+    const original = {
+      mcpServers: {
+        picklab: { command: "picklab", args: ["mcp", "serve"] },
+        "picklab-browser": {
+          command: "picklab",
+          args: ["browser", "devtools-mcp"],
+        },
+        "pickforge-lab-browser": customized,
+      },
+    };
+    fs.writeFileSync(file, JSON.stringify(original));
+    const result = await mergeMcpServerIntoJsonFile(file, {
+      createIfMissing: false,
+    });
+    expect(result.migratedLegacyEntries).toEqual(["picklab", "picklab-browser"]);
+    expect(result.retainedEntries).toEqual(["pickforge-lab-browser"]);
+    expect(readJson(file)).toEqual({
+      mcpServers: {
+        "pickforge-lab-browser": customized,
+        "pickforge-lab": { command: "pickforge-lab", args: ["mcp", "serve"] },
+      },
+    });
+
+    fs.writeFileSync(file, JSON.stringify(original));
+    const legacyOnly = await replaceOwnedLegacyMcpServersInJsonFile(file);
+    expect(legacyOnly.migratedLegacyEntries).toEqual(["picklab", "picklab-browser"]);
+    expect(legacyOnly.retainedEntries).toEqual(["pickforge-lab-browser"]);
+    expect(readJson(file).mcpServers["pickforge-lab-browser"]).toEqual(customized);
+
+    fs.writeFileSync(file, JSON.stringify(original));
+    const repaired = await replaceOwnedLegacyMcpServersInJsonFile(file, {
+      browser: true,
+    });
+    expect(repaired.retainedEntries).toBeUndefined();
+    expect(readJson(file)).toEqual({
+      mcpServers: pickforgeLabMcpServerEntries({ browser: true }),
     });
   });
 
@@ -101,10 +218,6 @@ describe("mergeMcpServerIntoJsonFile", () => {
       mcpServers: {
         "picklab-browser": { command: "foreign", args: [] },
         "pickforge-lab": { command: "pickforge-lab", args: ["mcp", "serve"] },
-        "pickforge-lab-browser": {
-          command: "pickforge-lab",
-          args: ["browser", "devtools-mcp"],
-        },
       },
     });
   });
@@ -215,6 +328,25 @@ describe("jsonFileHasMcpServer / jsonFileMcpServerState", () => {
     await mergeMcpServerIntoJsonFile(file, { createIfMissing: true });
     expect(await jsonFileHasMcpServer(file)).toBe(true);
     expect(await jsonFileMcpServerState(file)).toBe(true);
+  });
+
+  it("does not require the browser relay for a registered state", async () => {
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        mcpServers: {
+          "pickforge-lab": { command: "pickforge-lab", args: ["mcp", "serve"] },
+          "pickforge-lab-browser": { command: "stale", args: [] },
+        },
+      }),
+    );
+    expect(await jsonFileMcpServerState(file)).toBe(true);
+    expect(await jsonFileRetainedMcpServerNames(file)).toEqual([
+      "pickforge-lab-browser",
+    ]);
+    expect(await jsonFileRetainedMcpServerNames(file, { browser: true })).toEqual(
+      [],
+    );
   });
 
   it("can require the pickforge-lab entry to match the expected command", async () => {

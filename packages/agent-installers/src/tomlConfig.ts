@@ -2,11 +2,13 @@ import fs from "node:fs";
 import { writeFileAtomic } from "@pickforge/lab-core";
 import { backupFile } from "./backup.js";
 import {
+  BROWSER_MCP_SERVER_NAME,
   LEGACY_BROWSER_MCP_SERVER_NAME,
   LEGACY_MCP_SERVER_NAME,
   renderTomlSnippet,
+  wantsBrowserEntry,
 } from "./snippet.js";
-import type { ChangeResult, McpServerEntry } from "./types.js";
+import type { ChangeResult, LinkOptions, McpServerEntry } from "./types.js";
 
 export const TOML_MARKER_BEGIN = "# >>> pickforge-lab >>>";
 export const TOML_MARKER_END = "# <<< pickforge-lab <<<";
@@ -63,8 +65,46 @@ async function readTextIfExists(filePath: string): Promise<string | undefined> {
   }
 }
 
-function markerBlock(entry?: McpServerEntry): string {
-  return `${TOML_MARKER_BEGIN}\n${renderTomlSnippet(entry)}${TOML_MARKER_END}\n`;
+function markerBlock(
+  entry?: McpServerEntry,
+  opts: LinkOptions = {},
+  retained = "",
+): string {
+  return (
+    `${TOML_MARKER_BEGIN}\n${renderTomlSnippet(entry, opts)}${retained}` +
+    `${TOML_MARKER_END}\n`
+  );
+}
+
+/**
+ * Table header for `pickforge-lab-browser` or any of its subtables
+ * (`[mcp_servers."pickforge-lab-browser".env]`), accepting bare, double- and
+ * single-quoted names, whitespace inside the brackets and a trailing comment.
+ */
+const BROWSER_SECTION_HEADER =
+  /^[ \t]*\[[ \t]*mcp_servers[ \t]*\.[ \t]*(?:pickforge-lab-browser|"pickforge-lab-browser"|'pickforge-lab-browser')[ \t]*(?:\.[^\]\r\n]*)?\][ \t]*(?:#.*)?\r?$/;
+const SECTION_HEADER = /^[ \t]*\[/;
+
+/**
+ * Verbatim `pickforge-lab-browser` tables inside a managed block, if any,
+ * including their subtables even when other tables sit between them.
+ */
+function browserSectionInBlock(block: string): string | undefined {
+  const endMarker = new RegExp(`^${escapeRegExp(TOML_MARKER_END)}[ \\t]*\\r?$`);
+  const body = block.split("\n").slice(1);
+  const endIndex = body.findIndex((line) => endMarker.test(line));
+  const lines = endIndex === -1 ? body : body.slice(0, endIndex);
+  const kept: string[] = [];
+  let inBrowser = false;
+  for (const line of lines) {
+    if (SECTION_HEADER.test(line)) {
+      inBrowser = BROWSER_SECTION_HEADER.test(line);
+    }
+    if (inBrowser) {
+      kept.push(line);
+    }
+  }
+  return kept.length === 0 ? undefined : `${kept.join("\n")}\n`;
 }
 
 interface MarkerSplit {
@@ -164,17 +204,47 @@ function upsertPreparedContent(
   return appendMarkerBlock(prepared.content, desired);
 }
 
+function desiredMarkerBlock(
+  prepared: PreparedContent,
+  filePath: string,
+  entry: McpServerEntry | undefined,
+  opts: LinkOptions,
+): { desired: string; retainedEntries: string[] } {
+  const current = splitMarkers(prepared.content, filePath, CURRENT_MARKERS);
+  const existing =
+    current.block === undefined
+      ? undefined
+      : browserSectionInBlock(current.block);
+  const browser = wantsBrowserEntry(
+    opts,
+    prepared.migratedLegacyEntries,
+    existing !== undefined,
+  );
+  const retained = browser ? undefined : existing;
+  return {
+    desired: markerBlock(entry, { browser }, retained),
+    retainedEntries: retained === undefined ? [] : [BROWSER_MCP_SERVER_NAME],
+  };
+}
+
 export async function upsertTomlMarkerBlock(
   filePath: string,
   entry?: McpServerEntry,
+  opts: LinkOptions = {},
 ): Promise<ChangeResult> {
   const existing = await readTextIfExists(filePath);
   const content = existing ?? "";
   const prepared = prepareLegacyBlock(content, filePath);
-  const desired = markerBlock(entry);
+  const { desired, retainedEntries } = desiredMarkerBlock(
+    prepared,
+    filePath,
+    entry,
+    opts,
+  );
   const next = upsertPreparedContent(prepared, desired, filePath);
+  const retained = retainedEntries.length === 0 ? {} : { retainedEntries };
   if (next === content) {
-    return { configPath: filePath, changed: false };
+    return { configPath: filePath, changed: false, ...retained };
   }
   const backupPath =
     existing === undefined ? undefined : await backupFile(filePath);
@@ -184,6 +254,7 @@ export async function upsertTomlMarkerBlock(
     changed: true,
     backupPath,
     migratedLegacyEntries: prepared.migratedLegacyEntries,
+    ...retained,
   };
 }
 
@@ -257,7 +328,7 @@ export async function inspectTomlFile(
     return {
       exists: true,
       markersPresent: split.block !== undefined,
-      markersHaveSection: split.block === markerBlock(),
+      markersHaveSection: split.block?.includes(renderTomlSnippet()) === true,
       legacyMarkersPresent: prepared.legacyBlockPresent,
       foreignSection:
         SECTION_PATTERN.test(split.before) || SECTION_PATTERN.test(split.after),

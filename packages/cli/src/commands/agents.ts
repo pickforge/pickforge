@@ -23,6 +23,10 @@ export interface AgentsTargetOptions extends AgentsCliOptions {
   configPath?: string;
 }
 
+export interface AgentsLinkOptions extends AgentsTargetOptions {
+  browser?: boolean;
+}
+
 export interface AgentsInspectOptions extends AgentsCliOptions {
   configPath?: string[];
 }
@@ -129,19 +133,27 @@ async function unknownAgentError(
   return { errors: [`Unknown agent "${name}" (known agents: ${known})`] };
 }
 
+function registeredServersLabel(browser: boolean): string {
+  return browser
+    ? "the pickforge-lab and pickforge-lab-browser MCP servers"
+    : "the pickforge-lab MCP server";
+}
+
 function changeLines(
   name: string,
   result: ChangeResult,
   verb: "registered" | "removed",
+  browser = false,
 ): string[] {
   const lines: string[] = [];
   const migratedLegacyEntries = result.migratedLegacyEntries ?? [];
+  const retainedEntries = result.retainedEntries ?? [];
   if (result.instructions !== undefined) {
     lines.push(result.instructions);
   } else if (result.changed) {
     lines.push(
       verb === "registered"
-        ? `Registered the pickforge-lab MCP server for ${name} in ${result.configPath}`
+        ? `Registered ${registeredServersLabel(browser)} for ${name} in ${result.configPath}`
         : `Removed the pickforge-lab MCP server entry for ${name} from ${result.configPath}`,
     );
   } else {
@@ -157,6 +169,13 @@ function changeLines(
         "MCP entries with pickforge-lab in the same config update",
     );
   }
+  if (retainedEntries.length > 0) {
+    lines.push(
+      `Left the existing ${retainedEntries.join(", ")} MCP ` +
+        `${retainedEntries.length === 1 ? "entry" : "entries"} in ` +
+        `${result.configPath} untouched (re-run with --browser to manage it)`,
+    );
+  }
   if (result.backupPath !== undefined) {
     lines.push(`Backed up the previous config to ${result.backupPath}`);
   }
@@ -168,7 +187,7 @@ function changeLines(
 
 export async function runAgentsLink(
   name: string,
-  opts: AgentsTargetOptions,
+  opts: AgentsLinkOptions,
   env: EnvLike = process.env,
 ): Promise<number> {
   return runReported(opts, async () => {
@@ -188,7 +207,8 @@ export async function runAgentsLink(
     }
     const snippets = await writeSharedSnippets(env);
     const configPath = opts.configPath ?? agent.defaultConfigPath(env);
-    const result = await agent.link(configPath, env);
+    const browser = opts.browser === true;
+    const result = await agent.link(configPath, env, { browser });
     const registered = await agent.isRegistered(configPath);
     if (result.instructions === undefined) {
       await recordAgentState(name, { registered: true, configPath }, env);
@@ -198,14 +218,16 @@ export async function runAgentsLink(
         agent: name,
         configPath,
         registered,
+        browser,
         changed: result.changed,
         backupPath: result.backupPath ?? null,
         migratedLegacyEntries: result.migratedLegacyEntries ?? [],
+        retainedEntries: result.retainedEntries ?? [],
         instructions: result.instructions ?? null,
         warning: result.warning ?? null,
         snippets,
       },
-      lines: changeLines(name, result, "registered"),
+      lines: changeLines(name, result, "registered", browser),
     };
   });
 }
