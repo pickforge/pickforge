@@ -77,7 +77,18 @@ export function buildChromeArgs(opts: BuildChromeArgsOptions): string[] {
     "--disable-backgrounding-occluded-windows",
     "--disable-renderer-backgrounding",
     "--disable-sync",
-    "--disable-features=Translate,MediaRouter",
+    "--disable-notifications",
+    // Internal policy invalidations start GCM even with sync and Web Push off.
+    // Chromium has no GCM kill switch; sink all three transports on loopback.
+    "--gcm-checkin-url=https://127.0.0.1:0",
+    "--gcm-registration-url=https://127.0.0.1:0",
+    "--gcm-mcs-endpoint=https://127.0.0.1:0",
+    "--disable-component-update",
+    "--disable-domain-reliability",
+    "--disable-client-side-phishing-detection",
+    // Background networking is not a firewall. Disable independent vendor services
+    // explicitly; see README's browser lab section for Chromium switch sources.
+    "--disable-features=Translate,MediaRouter,AutofillServerCommunication,OptimizationHints,OptimizationTargetPrediction,OptimizationGuideModelExecution",
     "--disable-gpu",
     "--disable-dev-shm-usage",
     "--password-store=basic",
