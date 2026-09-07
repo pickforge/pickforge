@@ -90,7 +90,10 @@ pickforge-lab agents install pi             # ~/.config/mcp/mcp.json
 ```
 
 Core Pi has no built-in MCP support, so its config requires
-`pi-mcp-adapter`.
+`pi-mcp-adapter`. The adapter reads shared global config from the fixed path
+`$HOME/.config/mcp/mcp.json`, ignoring `XDG_CONFIG_HOME`. Both
+`pickforge init --harness pi` and `pickforge-lab agents install pi` write there
+so the adapter can discover the generated config.
 
 Any other agent gets a stdio server with `command: pickforge-lab`, `args: ["mcp", "serve"]`:
 
