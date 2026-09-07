@@ -464,7 +464,9 @@ Each session gets its own isolated display or emulator, so several agents and pr
 
 ## Telemetry
 
-When the `pickforge-lab` CLI or `pickforge-mcp` server hits a fatal error, it reports the error message and stack trace — the message can reference the failing command and its output, with secrets redacted — plus OS, Node.js, and app versions to Sentry so we can fix it. Nothing else is collected. Disable with `PICKFORGE_TELEMETRY=0`.
+Fatal-error telemetry in the `pickforge-lab` CLI and `pickforge-mcp` server is disabled by default: Sentry is not initialized and no telemetry is sent. Set `PICKFORGE_TELEMETRY=1` (also `true` or `on`, case-insensitive, with surrounding whitespace ignored) to enable reporting to Sentry. Any other value or unset disables it. Enabled reports contain the error message and stack trace, which can reference the failing command and its output, with secrets redacted, plus OS, Node.js, and app versions. This is fatal-error reporting, not product analytics; breadcrumbs and performance tracing are disabled.
+
+For the 0.4 train, `PICKLAB_TELEMETRY` is accepted only when `PICKFORGE_TELEMETRY` is unset, with the same values and one deprecation warning per process. The current name takes precedence, including when empty.
 
 ## MCP setup for agents
 

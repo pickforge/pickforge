@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as Sentry from "@sentry/node";
 import type { ErrorEvent } from "@sentry/node";
 import {
@@ -9,41 +9,89 @@ import {
   telemetryEnabled,
 } from "../src/telemetry.js";
 
-describe("telemetryEnabled", () => {
-  it("defaults to on when unset", () => {
-    expect(telemetryEnabled({})).toBe(true);
-  });
+vi.mock("@sentry/node", async (importOriginal) => ({
+  ...await importOriginal<typeof Sentry>(),
+  init: vi.fn(),
+  captureException: vi.fn(),
+  flush: vi.fn().mockResolvedValue(true),
+}));
 
-  it("defaults to on when trimmed-empty", () => {
-    expect(telemetryEnabled({ PICKFORGE_TELEMETRY: "  " })).toBe(true);
-  });
-
-  it("defaults to on for unrelated values", () => {
-    expect(telemetryEnabled({ PICKFORGE_TELEMETRY: "yes" })).toBe(true);
-  });
-
-  it("is off for '0'", () => {
-    expect(telemetryEnabled({ PICKFORGE_TELEMETRY: "0" })).toBe(false);
-  });
-
-  it("is off for 'false'", () => {
-    expect(telemetryEnabled({ PICKFORGE_TELEMETRY: "false" })).toBe(false);
-  });
-
-  it("is off for 'OFF' case-insensitively", () => {
-    expect(telemetryEnabled({ PICKFORGE_TELEMETRY: "OFF" })).toBe(false);
-  });
-
-  it("is off for ' off ' with surrounding whitespace", () => {
-    expect(telemetryEnabled({ PICKFORGE_TELEMETRY: " off " })).toBe(false);
-  });
+beforeEach(() => {
+  vi.clearAllMocks();
+  initTelemetry({});
 });
 
-describe("initTelemetry", () => {
-  it("does not initialize Sentry when opted out", () => {
-    initTelemetry({ PICKFORGE_TELEMETRY: "0" });
-    expect(Sentry.isInitialized()).toBe(false);
+describe("telemetry opt-in", () => {
+  it.each([undefined, "", "  ", "0", "false", "off", "OFF", " off ", "yes", "2", "enabled"])(
+    "does not initialize or report for %s", async (value) => {
+      const env = { PICKFORGE_TELEMETRY: value };
+      expect(telemetryEnabled(env)).toBe(false);
+      initTelemetry(env);
+      await captureFatal(new Error("boom"));
+      expect(Sentry.init).not.toHaveBeenCalled();
+      expect(Sentry.isInitialized()).toBe(false);
+      expect(Sentry.captureException).not.toHaveBeenCalled();
+      expect(Sentry.flush).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["1", "true", "on", " TRUE ", " On "])(
+    "initializes redacted fatal reporting for %s", async (value) => {
+      const env = { PICKFORGE_TELEMETRY: value };
+      expect(telemetryEnabled(env)).toBe(true);
+      initTelemetry(env);
+      expect(Sentry.init).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        tracesSampleRate: 0,
+        defaultIntegrations: false,
+        beforeBreadcrumb: dropBreadcrumb,
+        beforeSend: scrubEvent,
+      }));
+      const options = vi.mocked(Sentry.init).mock.calls[0][0]!;
+      const event: ErrorEvent = {
+        type: undefined,
+        message: "API_KEY=super-secret-value",
+        exception: { values: [{ value: "token=ghp_0123456789012345678901234567890abcde" }] },
+      };
+      const scrubbed = await options.beforeSend!(event, {});
+      expect(scrubbed?.message).toBe("API_KEY=[REDACTED]");
+      expect(scrubbed?.exception?.values?.[0].value).not.toContain("ghp_");
+      const error = new Error("boom");
+      await captureFatal(error);
+      expect(Sentry.captureException).toHaveBeenCalledExactlyOnceWith(error);
+      expect(Sentry.flush).toHaveBeenCalledExactlyOnceWith(2000);
+    },
+  );
+
+  it("honors the legacy name with one warning per process", () => {
+    const warning = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      for (const value of ["1", "true", "on"]) {
+        initTelemetry({ PICKLAB_TELEMETRY: value });
+      }
+      expect(Sentry.init).toHaveBeenCalledTimes(3);
+      for (const value of ["0", "false", "off", "yes", ""]) {
+        expect(telemetryEnabled({ PICKLAB_TELEMETRY: value })).toBe(false);
+      }
+      expect(warning).toHaveBeenCalledExactlyOnceWith(
+        "warning: PICKLAB_TELEMETRY is deprecated; use PICKFORGE_TELEMETRY instead",
+      );
+    } finally {
+      warning.mockRestore();
+    }
   });
+
+  it.each(["", "0", "false", "off", "yes"])(
+    "prefers the current name %s over legacy opt-in", (value) => {
+      const warning = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        initTelemetry({ PICKFORGE_TELEMETRY: value, PICKLAB_TELEMETRY: "1" });
+        expect(Sentry.init).not.toHaveBeenCalled();
+        expect(warning).not.toHaveBeenCalled();
+      } finally {
+        warning.mockRestore();
+      }
+    },
+  );
 });
 
 describe("scrubEvent", () => {
