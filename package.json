@@ -2,6 +2,24 @@
   "name": "pickforge-monorepo",
   "version": "0.4.0-beta.1",
   "private": true,
+  "description": "Flutter integration CLI for Linux x86_64 and macOS arm64, with a Linux-only desktop and Android emulator lab",
+  "homepage": "https://github.com/pickforge/pickforge#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pickforge/pickforge.git"
+  },
+  "keywords": [
+    "flutter",
+    "mcp",
+    "linux",
+    "xvfb",
+    "android",
+    "emulator",
+    "automation",
+    "claude-code",
+    "codex",
+    "pi"
+  ],
   "type": "module",
   "workspaces": [
     "packages/*"

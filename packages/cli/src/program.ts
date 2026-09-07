@@ -756,10 +756,19 @@ export function buildProgram(): Command {
   const program = new Command()
     .name("pickforge-lab")
     .description(
-      "Native app and Android emulator automation for AI coding agents",
+      "Linux-only Xvfb desktop and Android APK/emulator lab for coding agents",
     )
     .version(version)
     .addHelpText("after", `
+Support: verified Linux x86_64 desktop and API 37 x86_64 Android emulator journeys.
+Android: SDK, ADB, emulator, system image, dedicated AVD and working KVM required
+for the tested setup. 3072 MiB guest RAM passed once; 2 GB failed twice.
+3 GB is not a portable minimum or automatic default.
+Headed Chrome/Chromium lab: available, but public browser journey unverified.
+macOS arm64: Rust pickforge doctor/init/evidence only, no lab.
+Verified harnesses: Claude Code, Codex, Pi (requires pi-mcp-adapter).
+React Native, native iOS, Windows lab and unlisted combinations: unsupported
+by the published evidence. See https://github.com/pickforge/pickforge#support-matrix
 Fatal-error telemetry (CLI and MCP server): disabled by default, with no Sentry
 initialization or telemetry network traffic. Only PICKFORGE_TELEMETRY=1, true,
 or on enables it (case-insensitive; surrounding whitespace ignored). Any other

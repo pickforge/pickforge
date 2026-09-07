@@ -14,7 +14,8 @@ use serde::Serialize;
 #[derive(Parser)]
 #[command(
     name = "pickforge",
-    about = "Experimental Pickforge CLI",
+    about = "Flutter integration CLI for Linux x86_64 and macOS arm64",
+    after_help = "Verified: doctor/init/evidence and generated Dart MCP configuration.\nRuntime targets: Flutter Linux desktop and a Flutter macOS fixture.\nHarnesses: Claude Code, Codex and Pi (pi-mcp-adapter required).\nThe separate pickforge-lab is Linux-only; macOS has no lab support.\nReact Native, native iOS, Windows lab and unlisted combinations are unsupported\nby the published evidence. See https://github.com/pickforge/pickforge#support-matrix",
     version,
     disable_help_subcommand = true
 )]

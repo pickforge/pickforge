@@ -1,7 +1,7 @@
 {
   "name": "pickforge",
   "version": "0.4.0-beta.1",
-  "description": "Native app and Android emulator automation for AI coding agents",
+  "description": "Linux-only Xvfb desktop and Android APK/emulator lab with CLI and MCP for coding agents",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -22,7 +22,7 @@
     "ai-agents",
     "claude-code",
     "codex",
-    "cursor",
+    "pi",
     "flutter"
   ],
   "engines": {
