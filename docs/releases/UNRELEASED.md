@@ -4,7 +4,7 @@ Pickforge 0.4.0 is the first stable release of the renamed project: a Flutter-fi
 
 ## Changes
 
-- Stable install path. `npm install -g pickforge` and `curl -fsSL https://pickforge.dev/install.sh | sh` install the stable release; prereleases stay on the `next` dist-tag. The README, INSTALL guide, and CLI help carry the evidence-based support matrix: Flutter deep integration on Linux x86_64 and macOS arm64, Linux Xvfb desktop and headed browser lab, Android APK and emulator automation (a 3 GB guest is the tested memory floor), and Claude Code, Codex, and Pi as verified harnesses. React Native, native iOS, and a Windows lab are unsupported.
+- Stable install path. `npm install -g pickforge` and `curl -fsSL https://pickforge.dev/install.sh | sh` install the stable release; prereleases stay on the `next` dist-tag. The README, INSTALL guide, and CLI help carry the evidence-based support matrix: Flutter deep integration on Linux x86_64 and macOS arm64, Linux Xvfb desktop lab (the headed browser lab is available but unverified), Android APK and emulator automation (a 3 GB guest is the tested size), and Claude Code, Codex, and Pi as verified harnesses. React Native, native iOS, and a Windows lab are unsupported.
 - Fatal-error telemetry is disabled by default in the TypeScript CLI and MCP server, with no Sentry initialization or traffic. Opt in with `PICKFORGE_TELEMETRY=1`, `true`, or `on`; any other value or unset disables it. Enabled reports send redacted error messages and stacks plus OS, Node.js, and app versions, not product analytics. Legacy `PICKLAB_TELEMETRY` remains a fallback for the 0.4 train with one deprecation warning.
 - `pickforge-mcp --version` and `--help` print and exit instead of starting the stdio server.
 - `pickforge-lab agents install` and `agents link` register only the `pickforge-lab` MCP server by default; pass `--browser` to also register the browser DevTools relay, which cannot start until a browser session exists. Existing browser entries, including migrated legacy `picklab-browser` registrations, are retained and reported.
@@ -18,7 +18,7 @@ Pickforge 0.4.0 is the first stable release of the renamed project: a Flutter-fi
 ## Validation
 
 - Release CI runs the clean Linux container and Apple silicon candidate smokes on the exact published artifacts before publishing.
-- The stable candidate passed the Linux desktop, Android emulator, macOS, and Claude Code, Codex, and Pi device and harness gates with independent visual review; evidence is recorded under `~/Projects/Boards/pickforge/0.4-release/stable-candidate/` and linked from #89.
+- The stable candidate passed the Linux desktop, Android emulator, and macOS device gates with independent visual review, and the Claude Code, Codex, and Pi harness gate; evidence is recorded under `~/Projects/Boards/pickforge/0.4-release/stable-candidate/` and linked from #89.
 
 ## Known limits
 
