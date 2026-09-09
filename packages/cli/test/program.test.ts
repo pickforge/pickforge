@@ -8,6 +8,24 @@ describe("pickforge", () => {
     expect(program.version()).toBe("0.4.0-beta.1");
   });
 
+  it("prints the stable support boundaries in help", () => {
+    let help = "";
+    const program = buildProgram();
+    program.configureOutput({ writeOut: (text) => { help += text; } });
+    program.outputHelp();
+    expect(help).toContain("Linux-only Xvfb desktop");
+    expect(help).toContain("Beta.1: 3072 MiB guest RAM passed once; 2 GB failed twice");
+    expect(help).toContain("public browser journey unverified");
+    expect(help).toContain("macOS arm64: Rust pickforge doctor/init/evidence only, no lab");
+    expect(help).toContain("Claude Code, Codex, Pi (requires pi-mcp-adapter)");
+    expect(help).toContain("React Native, native iOS, Windows lab");
+    expect(help).toContain(
+      "Fatal-error telemetry (CLI and MCP server): disabled by default",
+    );
+    expect(help).toContain("Only PICKFORGE_TELEMETRY=1, true,");
+    expect(help).not.toMatch(/experimental|for the alpha|alpha installer/i);
+  });
+
   it("exposes desktop exec as a separate window-wait command", () => {
     const program = buildProgram();
     const desktop = program.commands.find((command) => command.name() === "desktop");

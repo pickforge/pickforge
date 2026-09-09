@@ -4,39 +4,15 @@
 
 # Pickforge
 
-Playwright for native apps and Android emulators. Pickforge gives AI coding agents eyes, hands, and a reproducible lab: desktop sessions on Xvfb, Android emulators on a dedicated AVD, screenshots, input, logs, and run artifacts — over a CLI and an MCP server.
+A Playwright-style lab for Flutter Linux desktop and Android APKs. Pickforge connects coding agents to Flutter through a Rust integration CLI and generated Dart MCP configuration, with a Linux-only lab CLI and MCP server for Xvfb desktop sessions and Android emulators. macOS arm64 supports the Rust integration CLI only, not the lab; see the [support matrix](#support-matrix) for verified boundaries.
 
 Pickforge lets agents see, run, and test the app. PickArena measures the results.
 
 Local-first. Open source. Built for people who ship.
 
-## PickLab is now Pickforge
-
-The npm package is now `pickforge`. The TypeScript CLI is `pickforge-lab`, and
-the MCP stdio binary is `pickforge-mcp`. Agent config uses the
-`pickforge-lab` MCP server name. Run `pickforge-lab agents link <agent>` to
-replace owned legacy `picklab` entries. `pickforge-lab init` does not change
-Claude Code, Codex, Cursor, or Pi configuration.
-
-All `PICKFORGE_*` environment variables fall back to their matching
-`PICKLAB_*` name for one release. Using an old name prints one deprecation
-warning to stderr per process.
-
-New TypeScript state is written under `~/.pickforge/lab/`, or the directory
-set by `PICKFORGE_HOME`. Existing state under `~/.pickforge/picklab/` and
-`~/.picklab/` is still read in place. Nothing is silently migrated or deleted.
-The project-local `.picklab/` layout remains supported.
-
-Remove the old package after installing the new one:
-
-```sh
-npm uninstall -g @pickforge/picklab
-# or: bun remove -g @pickforge/picklab
-```
-
 ## Install
 
-Let your coding agent do the whole setup — paste this into its prompt:
+Let your coding agent do the setup. Paste this into its prompt:
 
 ```text
 Install and configure Pickforge by following https://raw.githubusercontent.com/pickforge/pickforge/main/INSTALL.md
@@ -48,15 +24,15 @@ Or install by hand:
 curl -fsSL https://pickforge.dev/install.sh | sh
 ```
 
-For the alpha, the npm-only forms use the `next` dist-tag and install the
-TypeScript commands without the Rust CLI:
+The stable npm package installs the TypeScript lab commands without the Rust CLI:
 
 ```sh
-npx --yes --package pickforge@next pickforge-lab doctor
-bunx --package pickforge@next pickforge-lab doctor
-npm install -g pickforge@next
-bun add -g pickforge@next
+npm install -g pickforge
 ```
+
+Use the installer above for the Rust CLI as well. It installs the release
+channel that matches this version of the docs and downloads the matching Rust
+release.
 
 The installer adds three commands side by side: `pickforge` (Rust),
 `pickforge-lab` (TypeScript lab CLI), and `pickforge-mcp` (MCP stdio server).
@@ -65,68 +41,63 @@ Linux-only; the Rust CLI also ships for Apple silicon macOS.
 
 The Chrome DevTools relay requires Node.js `^20.19.0`, `^22.12.0`, or `>=23.0.0`.
 
-## Quickstart
+### Prereleases
 
-This is the Flutter loop proven for the alpha. Start in a Flutter project and
-run the Rust readiness and integration steps first:
+To opt into the prerelease channel for the TypeScript commands, use
+`npm install -g pickforge@next`. `@next` is not the stable default.
+
+### PickLab is now Pickforge
+
+The npm package is now `pickforge`. The TypeScript CLI is `pickforge-lab`, and
+the MCP stdio binary is `pickforge-mcp`. Run `pickforge-lab agents link <agent>`
+to replace owned legacy `picklab` entries. `pickforge-lab init` does not change
+agent configuration.
+
+For one release, old `PICKLAB_*` environment names remain compatibility
+fallbacks with a deprecation warning. New TypeScript state goes under
+`~/.pickforge/lab/` (override with `PICKFORGE_HOME`); legacy
+`~/.pickforge/picklab/`, `~/.picklab/` and project-local `.picklab/` state
+remain readable in place. Nothing is silently migrated or deleted.
+
+After installing the new package, remove the old one if no longer needed:
 
 ```sh
-cd your-flutter-app
-pickforge doctor
-pickforge init
+npm uninstall -g @pickforge/picklab
 ```
 
-`init` configures the Flutter integration: the official Dart/Flutter MCP
-server and the `pickforge-flutter` workflow for Claude Code, Codex, and Pi.
-`init --dry-run` previews every change first. Register the lab
-MCP with the agent you use, initialize a Linux desktop profile, and start the
-app inside an isolated lab session:
+## Quickstart
+
+This Flutter desktop loop targets Linux x86_64 with Flutter and Dart on PATH.
+Start in a Flutter project. Run this walkthrough line by line so the coordinate
+prompt reads your input, not the next command:
 
 ```sh
+pickforge doctor                  # Run from your Flutter project
+pickforge init --dry-run           # Preview generated Dart MCP and workflow setup
+pickforge init                    # Apply for Claude Code, Codex and Pi
 pickforge-lab agents install codex   # use claude-code or pi when appropriate
 pickforge-lab init --profile flutter-desktop --yes
 pickforge-lab session create --type desktop
 pickforge-lab desktop exec -- flutter run -d linux
-```
-
-`desktop exec` starts the command in an isolated process group and waits for a
-client window on the lab display. If none appears before the timeout, it stops
-the group and reports a possible escape. Restart the coding agent if it did not
-already have the Pickforge MCP servers loaded.
-
-Now inspect the running widget tree and runtime with the official Dart/Flutter
-MCP tools. Capture the initial screen, inspect the image, and click the target
-coordinate you found:
-
-```sh
+# Restart the agent to load the generated MCP servers.
+# Use the generated Dart MCP for analysis, then inspect this screenshot.
 before_png="${TMPDIR:-/tmp}/pickforge-before.png"
 pickforge-lab desktop screenshot --out "$before_png"
-pickforge-lab desktop click 760 520
-```
-
-Edit the relevant Dart source, run a scoped analysis or test, then use the
-official Dart/Flutter MCP hot-reload tool. Repeat the same scenario and inspect
-the new screenshot. Do not claim success until the runtime state and pixels
-match the intended change.
-
-```sh
-flutter analyze lib/main.dart
+printf 'Target coordinates from the screenshot (x y): '
+read -r x y
+pickforge-lab desktop click "$x" "$y"   # Interact with the target you inspected
 after_png="${TMPDIR:-/tmp}/pickforge-after.png"
 pickforge-lab desktop screenshot --out "$after_png"
-```
-
-Record the verified before/after result outside the project. Adjust the
-scenario, observations, source file, and checks to match the work you actually
-did:
-
-```sh
-evidence_input="${TMPDIR:-/tmp}/pickforge-evidence.json"
-cat >"$evidence_input" <<JSON
-{"schemaVersion":1,"scenario":"Counter updates after hot reload","outcome":"passed","before":{"summary":"Counter showed zero.","observations":[{"label":"Counter","value":"0"}],"artifacts":[{"kind":"screenshot","label":"Before","source":"$before_png"}]},"after":{"summary":"Counter showed one.","observations":[{"label":"Counter","value":"1"}],"artifacts":[{"kind":"screenshot","label":"After","source":"$after_png"}]},"sourceChanges":["lib/main.dart"],"checks":[{"name":"flutter analyze lib/main.dart","status":"passed","summary":"No issues found."}],"limitations":[]}
-JSON
-pickforge evidence record --project-dir "$PWD" --input "$evidence_input"
+# Inspect both images. Do not infer a pass from command exit status alone.
 pickforge-lab session destroy --all
 ```
+
+For source changes, the published desktop pass verified hot reload through
+a separate `flutter run` process with driver-held stdin (`r`), not a Dart MCP
+hot-reload call. The `desktop exec` walkthrough above does not provide that
+interactive stdin path. Use
+`pickforge evidence record` to record observations and checks you actually
+verified; do not prefill a passing result from an example.
 
 Every screenshot, log, and action lands in a run directory with a manifest, so
 a run is inspectable and reproducible after the fact. By default that run
@@ -572,12 +543,29 @@ Fatal-error telemetry in the `pickforge-lab` CLI and `pickforge-mcp` server is d
 
 For the 0.4 train, `PICKLAB_TELEMETRY` is accepted only when `PICKFORGE_TELEMETRY` is unset, with the same values and one deprecation warning per process. The current name takes precedence, including when empty.
 
+## Support matrix
+
+These boundaries come from the published 0.4.0-beta.1 and 0.4.0-alpha.2
+release packets. They are not evidence of a completed stable-artifact pass.
+Unlisted host/target combinations are unverified and unsupported.
+
+| Surface | Host → target | Support and limits |
+| --- | --- | --- |
+| Flutter deep integration | Linux x86_64 → Flutter Linux desktop | Verified Rust `pickforge doctor/init/evidence` and generated official Dart MCP configuration. The desktop fixture separately proved counter interaction and state-preserving hot reload through `flutter run`, not a Dart MCP reload call. Flutter and Dart must be installed. |
+| Flutter integration CLI | macOS arm64 → Flutter macOS fixture | Verified Rust `doctor/init/evidence` and generated Dart MCP. The fixture GUI was driven by an external sandboxed driver, not the Pickforge lab. No macOS lab support. |
+| Desktop lab | Linux x86_64 → isolated X11/Xvfb desktop | Verified Flutter fixture screenshots, clicks and teardown. Flutter hot reload was driven separately, not by the lab. Requires Xvfb, xdotool and screenshot tooling; x11vnc is needed for VNC observation. This is not native Wayland or arbitrary desktop-app certification. |
+| Headed browser lab | Linux → isolated headed Chrome/Chromium | Available lab surface, but no successful browser journey is proved by these packets. Unverified for stable support. Requires desktop dependencies, Chrome/Chromium and a live browser session before the DevTools relay starts. |
+| Android APK/emulator lab | Linux x86_64 → API 37 x86_64 emulator | Verified Flutter release APK install, launch, taps, screenshots, UI tree, logcat and background/hot resume. Requires Android SDK command-line tools, platform-tools/ADB, emulator, system image, a dedicated AVD and working KVM for the tested setup. Use 3072 MiB guest RAM to reproduce the passing beta.1 setup: 2 GB failed twice, with one confirmed low-memory kill. The beta.1 3 GB result is one run, not a portable minimum or automatic default. No Android hot-reload proof. |
+| Agent harnesses | Linux x86_64 → generated Dart MCP and Pickforge MCP | Claude Code, Codex and Pi verified with actual model-driven tool calls. Pi requires `pi-mcp-adapter` and passed on retry. This does not certify browser use or every tool in every harness. |
+| Other frameworks and targets | React Native, native iOS, Flutter iOS/web, physical Android devices, ARM Android guests | Unsupported by this evidence; no deep integration or runtime acceptance claim. APK automation is not React Native integration. |
+| Other hosts and harnesses | Windows lab, macOS lab, Linux arm64, Intel macOS, Cursor and other agents | Unsupported or unverified. Registration code or a downloadable package does not establish runtime support. |
+
 ## MCP setup for agents
 
 Register the MCP server with your coding agent:
 
 ```sh
-pickforge-lab agents install claude-code   # also: codex, cursor, pi
+pickforge-lab agents install claude-code   # verified also: codex, pi
 pickforge-lab agents list
 pickforge-lab agents doctor
 ```
@@ -600,7 +588,7 @@ The adapter's shared global config path is fixed and ignores `XDG_CONFIG_HOME`.
 Both `pickforge init --harness pi` and `pickforge-lab agents install pi` keep
 this location so the adapter can discover the generated config.
 
-For any other agent, add the stdio server yourself:
+Other agents are unverified. For a manual stdio registration:
 
 ```json
 {
@@ -626,7 +614,7 @@ Add the browser relay only when the agent should drive lab browser sessions:
 }
 ```
 
-`pickforge-lab-browser` is static. Each invocation discovers the one live browser session for the agent's project and derives its loopback CDP URL in memory, so recreating a session never requires an agent config edit. The relay runs the bundled, exact `chrome-devtools-mcp@1.5.0`; it does not use `npx` or connect to a personal browser.
+`pickforge-lab-browser` is static. Each invocation discovers the one live browser session for the agent's project and derives its loopback CDP URL in memory, so recreating a session never requires an agent config edit. The relay runs the bundled, exact `chrome-devtools-mcp@1.5.0`; it does not use `npx` or connect to a personal browser. The published soak found that this server fails to initialize without a live browser session; browser journey acceptance remains unverified.
 
 Custom agents can be stored under the Pickforge home's `agents/` dir (default
 `~/.pickforge/lab/agents`, override via `PICKFORGE_HOME`):
@@ -719,10 +707,12 @@ Prompts: `test-flutter-desktop-visually`, `debug-android-apk`, `run-visual-regre
 
 ## Architecture
 
-A TypeScript monorepo. `pickforge` is the published package; the rest are internal and bundled into it.
+A Rust integration CLI and TypeScript lab monorepo. The npm package `pickforge`
+bundles the TypeScript packages; the installer adds the separate Rust binary.
 
 | Package | Role |
 | --- | --- |
+| `crates/pickforge-cli` | Rust Flutter diagnostics, integration setup and evidence recording |
 | `packages/core` | Config, sessions, artifacts, manifests, process supervision |
 | `packages/desktop-linux` | Xvfb, VNC, window, input, and screenshot automation |
 | `packages/android` | AVD, emulator, ADB, UIAutomator, and logcat orchestration |

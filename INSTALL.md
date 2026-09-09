@@ -1,6 +1,8 @@
 # Pickforge agent install guide
 
-You are an AI coding agent, and your user asked you to install and configure Pickforge: a Rust CLI plus a TypeScript lab CLI and MCP server. The lab gives you reproducible native desktop sessions (Xvfb) and Android emulators with screenshots, input, logs, and run artifacts. The lab is Linux-only; the Rust CLI also supports Apple silicon macOS.
+You are an AI coding agent, and your user asked you to install and configure Pickforge: a Rust Flutter integration CLI plus a Linux-only lab CLI and MCP server. Linux x86_64 is verified for Xvfb desktop and Android emulator journeys. macOS arm64 supports the Rust integration CLI only, not the lab.
+
+Read the [support matrix](README.md#support-matrix) before setup. Headed browser journeys, React Native, native iOS, Windows lab and unlisted combinations are not verified by the published release evidence.
 
 Follow the steps in order. Verify each one before moving on. Rules:
 
@@ -14,22 +16,31 @@ Follow the steps in order. Verify each one before moving on. Rules:
 curl -fsSL https://pickforge.dev/install.sh | sh
 ```
 
-The alpha installer resolves `pickforge@next`, then downloads the matching
-Rust binary from the same `v<version>` GitHub release and verifies its SHA-256
-file. It supports Linux x86_64 and Apple silicon macOS. On another target it
-leaves the TypeScript commands installed, clearly reports that they still
-work, and refuses to install an unsupported Rust binary.
+The installer installs the release channel that matches this version of the
+docs, then downloads the matching Rust binary from the same `v<version>` GitHub
+release and verifies its SHA-256 file. It supports Linux x86_64 and Apple silicon macOS. Other hosts are
+unsupported by the published evidence. An installed TypeScript package does not
+imply a working lab on that host.
 
 On macOS the Rust binary is ad-hoc signed and not notarized. Installed through
 this script it runs normally, because a `curl`/`wget` download carries no
 quarantine attribute. If the user downloads the asset with a browser instead,
 Gatekeeper blocks the first run: verify the `.sha256` file, then clear the
-attribute with `xattr -d com.apple.quarantine ./pickforge-macos-arm64`. The
-policy is in `docs/releases/SIGNING.md`.
+attribute with `xattr -d com.apple.quarantine ./pickforge-macos-arm64`. See the [signing policy](docs/releases/SIGNING.md).
 
-The npm-only alternatives, `npm install -g pickforge@next` and
-`bun add -g pickforge@next`, do not install the Rust binary. Never install with
-sudo.
+For the TypeScript lab commands only:
+
+```sh
+npm install -g pickforge
+```
+
+This does not install the Rust binary. Never install with sudo.
+
+### Prereleases
+
+Use `npm install -g pickforge@next` to opt into the TypeScript prerelease
+channel. `@next` is not the stable default. Use the installer above for the
+matching Rust and TypeScript release.
 
 Verify all three commands and their versions:
 
@@ -76,16 +87,21 @@ pickforge init
 `init --dry-run` previews every change. `init` configures the official
 Dart/Flutter MCP server and the portable Flutter workflow for Claude Code,
 Codex, and Pi. It needs `dart` on PATH and refuses to run otherwise; there is no
-opt-in flag.
+opt-in flag. Flutter must also be installed. The verified runtime targets are
+Flutter Linux desktop on Linux x86_64 and a Flutter macOS fixture on macOS arm64.
+Android APK automation is a separate lab surface, not proof of Android Dart MCP
+hot reload. Flutter iOS/web, React Native and native iOS are not certified.
+
+On macOS, stop after verifying the Rust integration. Steps 3–7 are Linux lab
+setup, not macOS lab instructions.
 
 ## 3. Register the lab MCP server with the agent the user uses
 
-That is probably you. Built-in support:
+Verified harnesses on Linux x86_64:
 
 ```sh
 pickforge-lab agents install codex          # ~/.codex/config.toml
 pickforge-lab agents install claude-code    # Claude Code
-pickforge-lab agents install cursor         # Cursor
 pickforge-lab agents install pi             # ~/.config/mcp/mcp.json
 ```
 
@@ -102,13 +118,16 @@ Core Pi has no built-in MCP support, so its config requires
 `pickforge init --harness pi` and `pickforge-lab agents install pi` write there
 so the adapter can discover the generated config.
 
-Any other agent gets a stdio server with `command: pickforge-lab`, `args: ["mcp", "serve"]`:
+Cursor and other agents remain unverified. A manual stdio registration uses `command: pickforge-lab`, `args: ["mcp", "serve"]`:
 
 ```json
 { "mcpServers": { "pickforge-lab": { "command": "pickforge-lab", "args": ["mcp", "serve"] } } }
 ```
 
-Verify with `pickforge-lab agents list` — the agent must show `registered`.
+Verify with `pickforge-lab agents list`. The agent must show `registered`.
+Registration is not a successful tool call. The generated browser relay needs
+a live browser session; the published soak recorded startup failures without
+one. No headed-browser journey is certified by these packets.
 
 Important: a running agent session only picks up new MCP servers after a restart. Tell the user the `pickforge-lab` tools appear in the *next* session; don't report failure when they are absent from the current one.
 
@@ -128,7 +147,18 @@ For desktop sessions Pickforge needs `Xvfb`, `xdotool`, and one screenshot path:
 | Arch | `sudo pacman -S --needed xorg-server-xvfb xdotool imagemagick x11vnc` |
 | Fedora | `sudo dnf install xorg-x11-server-Xvfb xdotool ImageMagick x11vnc` |
 
-For Android profiles the user needs an Android SDK with `cmdline-tools`, `platform-tools`, `emulator`, and a system image. `pickforge-lab doctor` prints exact `sdkmanager` commands for missing SDK pieces, and exact `export` commands when the SDK root is unset.
+For headed browser sessions, also install Chrome or Chromium. This lab surface
+is unverified for stable support in the published packets.
+
+For Android profiles the user needs an Android SDK with `cmdline-tools`,
+`platform-tools` (ADB), `emulator`, a system image and a dedicated AVD.
+`pickforge-lab doctor` prints SDK and environment setup guidance. The passing
+beta.1 setup used Linux x86_64, working KVM and an API 37 x86_64 guest with
+3072 MiB RAM. Provision that guest RAM to reproduce the tested setup: the 2 GB
+guest failed twice, including a confirmed lowmemorykiller kill in the background.
+The beta.1 3 GB success is one run, not a portable minimum, host RAM floor or automatic
+Pickforge default. `--wait-ready` did not prevent the 2 GB failures. Physical
+devices, ARM guests and macOS Android hosting are unverified.
 
 ## 5. Initialize the lab project
 
@@ -160,7 +190,8 @@ after `--fix` to verify readiness.
 pickforge-lab doctor
 ```
 
-Checks required by the chosen profile must be `[ok]`. `[warn]` entries are acceptable for optional items like x11vnc, KVM, and the lab user. Then smoke-test a session:
+Checks required by the chosen profile must be `[ok]`. Review `[warn]` entries against the chosen surface: x11vnc is needed for VNC,
+and the verified Android setup requires working KVM. The lab user is optional. Then smoke-test a session:
 
 ```sh
 pickforge-lab session create --type desktop   # or android / desktop+android
@@ -188,9 +219,8 @@ the command is alive, it stops the process group and reports a possible
 real-desktop escape. Increase `--window-timeout` for a slow first build. Desktop
 screenshots also report the client-window count and warn when it is zero. If
 `xdotool` is missing, capture still succeeds and warns that the count is
-unavailable instead of reporting a possible escape. XDG runtime and D-Bus
-isolation for desktop sessions is tracked in
-[#86](https://github.com/pickforge/pickforge/issues/86).
+unavailable instead of reporting a possible escape. See the [desktop session guidance](README.md#running-development-commands-in-a-desktop-session)
+for the session environment and isolation limits.
 
 Finally, remind the user to restart the agent so the `pickforge-lab` MCP tools load, and that `session_status` over MCP is the quickest end-to-end check.
 
