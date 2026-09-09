@@ -100,6 +100,8 @@ describe("createAndroidSession", () => {
         });
         expect(session.bootMode).toBe("unknown");
         expect(session.readOnly).toBe(false);
+        fs.mkdirSync(path.join(session.logDir, "permits"));
+        fs.writeFileSync(path.join(session.logDir, "permits", "old.json"), "{}");
 
         const status = await getAndroidSessionStatus(session.id, registryEnv, {
           sdk,
@@ -116,6 +118,8 @@ describe("createAndroidSession", () => {
       }
       expect(isPidAlive(session.emulatorPid)).toBe(false);
       expect(await getSession(session.id, registryEnv)).toBeUndefined();
+      expect(fs.readdirSync(session.logDir).sort()).toEqual(["emulator.log", "stopped.json"]);
+      expect(fs.existsSync(consolePortLockPath(5554, registryEnv))).toBe(false);
     },
     20_000,
   );
@@ -144,7 +148,7 @@ describe("createAndroidSession", () => {
     const record = await getSession(id, isolatedEnv);
     expect(record?.status).toBe("error");
     expect(record?.android?.avdName).toBe("pickforge-avd");
-    // The diagnosis survives in the registry after the process and log are gone.
+    // Both the failure record and log survive the failed start.
     const failure = record?.meta?.[ANDROID_START_FAILURE_META_KEY] as Record<
       string,
       unknown
@@ -160,6 +164,9 @@ describe("createAndroidSession", () => {
       path.join(androidSessionLogDir(id, isolatedEnv), "emulator.log"),
     );
     expect(Array.isArray(failure.logTail)).toBe(true);
+    expect(fs.existsSync(failure.logPath as string)).toBe(true);
+    expect(fs.existsSync(consolePortLockPath(5556, isolatedEnv))).toBe(false);
+    expect(fs.existsSync(path.join(androidSessionLogDir(id, isolatedEnv), "permits"))).toBe(false);
     expect(record?.meta?.[REAPER_CLEANUP_PENDING_META_KEY]).toBeUndefined();
   });
 

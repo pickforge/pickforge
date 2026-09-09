@@ -40,6 +40,7 @@ import {
   REAPER_CLEANUP_PENDING_META_KEY,
   createSession,
   getSession,
+  sessionDataDir,
   reapDeadRunningSessions,
   stopPid,
   stopProcessGroupVerified,
@@ -152,7 +153,19 @@ describe("destroyDesktopSession exception safety", () => {
 
   it("removes the record directly when all stops succeed", async () => {
     const id = await makeDesktopRecord(888_888, 999_999);
+    const dir = sessionDataDir(id, registryEnv);
+    const record = await getSession(id, registryEnv);
+    await updateSession(id, { desktop: { ...record!.desktop!, runtimeDir: path.join(dir, "runtime") } }, registryEnv);
+    fs.mkdirSync(path.join(dir, "runtime"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "permits"));
+    fs.writeFileSync(path.join(dir, "runtime", "bus"), "runtime socket placeholder");
+    fs.writeFileSync(path.join(dir, "permits", "old.json"), "{}");
+    fs.writeFileSync(path.join(dir, "human.lease.json"), "{}");
+    fs.writeFileSync(path.join(dir, "xvfb.log"), "diagnostic");
     await destroyDesktopSession(id, registryEnv);
     expect(await getSession(id, registryEnv)).toBeUndefined();
+    expect(fs.readdirSync(dir).sort()).toEqual(["stopped.json", "xvfb.log"]);
+    expect(fs.readFileSync(path.join(dir, "xvfb.log"), "utf8")).toBe("diagnostic");
+    expect(fs.readdirSync(path.dirname(dir)).some((name) => name.includes(".lock"))).toBe(false);
   });
 });

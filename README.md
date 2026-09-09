@@ -197,6 +197,12 @@ screenshots report the visible client-window count and warn when it is zero.
 If `xdotool` is missing, capture still succeeds and warns that the count is
 unavailable instead of reporting a possible escape.
 
+### Session logs
+
+Desktop, browser and Android logs stay in the session directory after teardown. Runtime sockets, locks, permits, profiles and temporary data are removed once processes are confirmed stopped. Failed starts keep their logs and error record; cleanup failures keep runtime data needed for retry.
+
+Logs are never pruned automatically. Run `pickforge-lab session prune --older-than 7d` or `pickforge-lab session prune --all-stopped` to remove retained logs. Age starts at successful teardown (`stopped.json`), not session creation. Destroy failed sessions explicitly before pruning; their failure record is retained in `stopped.json`. Pruning skips directories with registry records, teardown locks, unknown data or symlinks, and older directories without retention metadata.
+
 ### Run storage
 
 By default, run artifacts (screenshots, logs, manifests, evidence journals)
@@ -610,7 +616,7 @@ pickforge-lab agents add --name my-agent --mcp-command "pickforge-lab mcp serve"
 | Group | Commands |
 | --- | --- |
 | Setup | `doctor`, `init`, `setup lab-user`, `setup android` |
-| Sessions | `session create`, `session status [id]`, `session destroy <id\|--all>` |
+| Sessions | `session create`, `session status [id]`, `session destroy <id\|--all>`, `session prune --older-than <duration>\|--all-stopped` |
 | Watch | `watch [--session <id>] [--control]` |
 | Takeover | `takeover status [--session <id>]` |
 | Desktop | `desktop launch <cmd>`, `desktop exec <cmd>`, `desktop env`, `desktop screenshot`, `desktop click <x> <y>`, `desktop move <x> <y>`, `desktop scroll <deltaX> <deltaY>`, `desktop drag <fromX> <fromY> <toX> <toY>`, `desktop double-click <x> <y>`, `desktop type <text>`, `desktop key <keys>` |
