@@ -225,6 +225,30 @@ describe("writeEvidenceReport", () => {
     ).toBe(false);
   });
 
+  it("keeps an existing artifact whose name contains a space", async () => {
+    const run = await createRun(projectDir, "spaced", { evidence: true });
+    const relative = "spaced name.log";
+    fs.writeFileSync(path.join(run.dir, relative), "log-body");
+    const onDisk = JSON.parse(
+      fs.readFileSync(path.join(run.dir, "manifest.json"), "utf8"),
+    ) as RunManifest;
+    onDisk.artifacts.push({
+      type: "log",
+      name: relative,
+      path: relative,
+      createdAt: onDisk.createdAt,
+    });
+    fs.writeFileSync(
+      path.join(run.dir, "manifest.json"),
+      `${JSON.stringify(onDisk, null, 2)}\n`,
+    );
+    await writeEvidenceReport(run);
+    const written = JSON.parse(
+      fs.readFileSync(path.join(run.dir, "manifest.json"), "utf8"),
+    ) as RunManifest;
+    expect(written.artifacts.map((artifact) => artifact.path)).toContain(relative);
+  });
+
   it("reconciles truncation and preserves the final lifecycle-record refresh", async () => {
     const run = await createRun(projectDir, "truncated", { evidence: true });
     await appendAction(run, action(), { maxBytes: 1 });

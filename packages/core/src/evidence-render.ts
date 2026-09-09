@@ -1,5 +1,5 @@
 import path from "node:path";
-import { RunStorageAccessError, type DirHandle } from "./dir-handle.js";
+import { assertSafeEntryName, RunStorageAccessError, type DirHandle } from "./dir-handle.js";
 import { redactSecrets } from "./redact.js";
 import {
   EVIDENCE_ACTION_LOG,
@@ -28,7 +28,7 @@ export function renderEvidenceSessionIndex(
 ): string {
   const rows = runs
     .map((run) =>
-      `<li><a href="${escapeHtml(run.runId)}/${EVIDENCE_REPORT}">${escapeHtml(run.runId)}</a>: ${escapeHtml(run.status)}, ${run.actions} records, journal ${escapeHtml(run.journal)}</li>`,
+      `<li><a href="${escapeHtml(run.runId)}/${EVIDENCE_REPORT}">${escapeHtml(run.runId)}</a>: ${escapeHtml(run.status)}, ${run.actions} records, journal ${escapeHtml(run.journal)}${run.warning === undefined ? "" : `, ${escapeHtml(run.warning)}`}</li>`,
     )
     .join("\n");
   return `<!doctype html>
@@ -121,7 +121,7 @@ export function renderRunReport(
 
   if (!isEvidenceRun(manifest)) return lines;
 
-  const warning = recoveryWarning(manifest);
+  const warning = recoveryWarning(manifest, records);
   if (warning !== "") lines.push("", warning);
   const ordered = sortEvidenceRecords(records);
   lines.push("", `## Actions (${ordered.length})`, "");
@@ -169,12 +169,18 @@ export function renderRunReport(
   return lines;
 }
 
-function recoveryWarning(manifest: RunManifest): string {
-  if (
-    manifest.evidenceRecovery === "corrupt" ||
-    manifest.evidenceRecovery === "missing"
-  ) {
+function recoveryWarning(
+  manifest: RunManifest,
+  records: readonly EvidenceRecord[] = [],
+): string {
+  if (manifest.evidenceRecovery === "missing") {
     return "Journal is corrupt or missing. Timeline unavailable; original evidence was not changed.";
+  }
+  if (manifest.evidenceRecovery === "corrupt") {
+    if (records.length === 0) {
+      return "Journal is corrupt or missing. Timeline unavailable; original evidence was not changed.";
+    }
+    return `journal corrupt after record ${records.length}`;
   }
   if (manifest.evidenceRecovery === "torn-tail") {
     return "Interrupted final journal line omitted from this report, preserved in actions.jsonl.";
@@ -273,7 +279,7 @@ export function renderEvidenceHtml(
 <section class="summary">
 <h1>Pickforge run ${escapeHtml(manifest.runId)}</h1>
 <dl>${renderMetadata("Slug", manifest.slug)}${renderMetadata("Status", manifest.status)}${renderMetadata("Created", manifest.createdAt)}${manifest.sessionId === undefined ? "" : renderMetadata("Session", manifest.sessionId)}</dl>
-<p>${escapeHtml(recoveryWarning(manifest))}</p>
+<p>${escapeHtml(recoveryWarning(manifest, records))}</p>
 </section>
 <section aria-label="Action timeline">
 ${steps === "" ? '<p class="empty">No recorded actions.</p>' : steps}
@@ -321,17 +327,23 @@ async function collectSafeScreenshots(
   return safe;
 }
 
+function artifactPathParts(relative: string): string[] | undefined {
+  const parts = relative.split("/");
+  if (parts.length === 0 || parts.length > 2) return undefined;
+  try {
+    for (const part of parts) assertSafeEntryName(part, "artifact name");
+  } catch {
+    return undefined;
+  }
+  return parts;
+}
+
 async function regularArtifact(
   runDir: DirHandle,
   relative: string,
 ): Promise<boolean> {
-  if (
-    !/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)?$/.test(relative) ||
-    relative.includes("..")
-  ) {
-    return false;
-  }
-  const parts = relative.split("/");
+  const parts = artifactPathParts(relative);
+  if (parts === undefined) return false;
   let dir = runDir;
   try {
     if (parts.length === 2) {

@@ -5,7 +5,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { isEvidenceEnabled, loadConfig } from "./config.js";
 import { appendAction, beginEvidenceRun } from "./evidence.js";
 import { ensureDir, writeFileAtomic, type EnvLike } from "./paths.js";
-import { isPidAlive, processIdentityMatches, readProcessStartTicks } from "./proc.js";
+import { identityIsAlive, readProcessStartTicks } from "./proc.js";
 import { sessionDataDir } from "./session.js";
 
 /**
@@ -52,14 +52,6 @@ function assertSafeSessionId(sessionId: string): void {
         `and contain only letters, digits, ".", "_", or "-"`,
     );
   }
-}
-
-/** A process's liveness, verified by `/proc` start ticks when available. */
-function identityIsAlive(pid: number, startTicks?: number): boolean {
-  if (startTicks !== undefined) {
-    return processIdentityMatches({ pid, startTicks });
-  }
-  return isPidAlive(pid);
 }
 
 function humanLeasePath(sessionId: string, env: EnvLike): string {

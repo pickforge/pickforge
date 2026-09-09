@@ -17,4 +17,6 @@
 
 ## Known limits
 
-- <What this release does not do, and what is not proven yet.>
+- Pointers and locks do not record a hostname, so pid probes on shared storage are meaningless (pre-existing).
+- Orphaned runs are never pruned by retention.
+- Session index links can dangle after retention.

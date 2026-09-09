@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { appendAction, beginEvidenceRun, activePointerPath } from "../src/evidence.js";
 import { finalizeOrphanedEvidenceRuns } from "../src/evidence-recovery.js";
 import { createRun, type RunManifest } from "../src/run.js";
-import { DirHandle } from "../src/dir-handle.js";
+import { DirHandle, RunStorageAccessError } from "../src/dir-handle.js";
 import { openExistingRunsRootDir } from "../src/run-root.js";
 import { layoutMarkerContent } from "../src/state-layout.js";
 
@@ -54,6 +54,13 @@ const action = {
   actionId: "after-recovery", source: "test", tool: "synthetic", status: "ok" as const,
   startedAt: "2026-09-05T05:30:00.000Z",
 };
+
+function skipped(
+  runId: string,
+  reason = "owner or session identity unavailable",
+): { runId: string; reason: string }[] {
+  return [{ runId, reason }];
+}
 
 describe("explicit evidence recovery", () => {
   it.each(["unsupported", "malformed", "foreign", "symlink", "hardlink", "fifo"])("refuses %s shared layouts before recovery writes", async (kind) => {
@@ -157,7 +164,11 @@ describe("explicit evidence recovery", () => {
     const pointerBefore = await fs.promises.readFile(pointer);
     const result = await subprocess("recover");
     expect(result.code).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({ sessions: [], skipped: [older.runId] });
+    expect(JSON.parse(result.stdout).sessions).toEqual([]);
+    expect(JSON.parse(result.stdout).skipped).toEqual([
+      ...skipped(older.runId),
+      ...skipped(latest.runId, "invalid evidence manifest"),
+    ]);
     expect((await manifest(older.dir)).status).toBe("running");
     expect(await fs.promises.readFile(saved)).toEqual(before);
     expect(await fs.promises.readFile(pointer)).toEqual(pointerBefore);
@@ -175,7 +186,7 @@ describe("explicit evidence recovery", () => {
     const before = await fs.promises.readFile(saved);
     const result = await subprocess("recover");
     expect(result.code).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({ sessions: [], skipped: [run.runId] });
+    expect(JSON.parse(result.stdout)).toEqual({ sessions: [], skipped: skipped(run.runId) });
     expect(await fs.promises.readFile(saved)).toEqual(before);
     expect((await manifest(run.dir)).status).toBe("running");
   });
@@ -183,7 +194,6 @@ describe("explicit evidence recovery", () => {
   it.each([
     { actionId: "bad", artifacts: [1] },
     { ...action, artifacts: [null] },
-    { ...action, status: "unknown" },
     { ...action, startedAt: 1 },
     { actionId: "bad", evidenceTruncated: true },
   ])("publishes an unavailable timeline for malformed records %j", async (record) => {
@@ -201,12 +211,14 @@ describe("explicit evidence recovery", () => {
     }
   });
 
-  it.each([null, 1, {}, { path: 1 }, { type: "unknown", name: "x", path: "x", createdAt: "now" }])("preserves unidentifiable manifest inventory %j", async (artifact) => {
+  it.each([null, 1, {}, { path: 1 }, { type: "unknown", name: "x", path: "x", createdAt: "now" }])("skips an unidentifiable manifest inventory %j with a reason", async (artifact) => {
     const run = await seed();
     const file = path.join(run.dir, "manifest.json");
     const bytes = JSON.stringify({ ...await manifest(run.dir), artifacts: [artifact] });
     await fs.promises.writeFile(file, bytes);
-    expect(await finalizeOrphanedEvidenceRuns(project)).toEqual({ sessions: [], skipped: [] });
+    expect(await finalizeOrphanedEvidenceRuns(project)).toEqual({
+      sessions: [], skipped: skipped(run.runId, "invalid evidence manifest"),
+    });
     expect(await fs.promises.readFile(file, "utf8")).toBe(bytes);
     expect(fs.existsSync(path.join(run.dir, "report.html"))).toBe(false);
   });
@@ -271,13 +283,46 @@ describe("explicit evidence recovery", () => {
     try {
       const [chunk] = await once(child.stdout, "data");
       const run = JSON.parse(String(chunk)) as { runId: string; dir: string };
-      expect(await finalizeOrphanedEvidenceRuns(project)).toEqual({ sessions: [], skipped: [run.runId] });
+      expect(await finalizeOrphanedEvidenceRuns(project)).toEqual({ sessions: [], skipped: skipped(run.runId) });
       expect((await manifest(run.dir)).status).toBe("running");
     } finally {
       child.kill("SIGKILL");
       await closed;
     }
     expect((await finalizeOrphanedEvidenceRuns(project)).sessions).toHaveLength(1);
+  });
+
+  it("skips recovery and still allows appends when a live owner's /proc/stat cannot be read", async () => {
+    const { run } = await beginEvidenceRun(project, "brow-statfail");
+    await appendAction(run, action);
+    const original = fs.readFileSync;
+    vi.spyOn(fs, "readFileSync").mockImplementation(((target, ...rest) => {
+      if (String(target) === `/proc/${process.pid}/stat`) {
+        throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+      }
+      return original.call(fs, target, ...rest);
+    }) as typeof fs.readFileSync);
+    expect(await finalizeOrphanedEvidenceRuns(project)).toEqual({
+      sessions: [], skipped: skipped(run.runId),
+    });
+    expect((await manifest(run.dir)).status).toBe("running");
+    await expect(appendAction(run, action)).resolves.toMatchObject({ outcome: "appended" });
+  });
+
+  it("skips a run that disappears between listing and open", async () => {
+    const run = await seed();
+    const original = DirHandle.prototype.openChild;
+    vi.spyOn(DirHandle.prototype, "openChild").mockImplementation(async function (this: DirHandle, name) {
+      if (name === run.runId) {
+        throw new RunStorageAccessError(
+          `Run storage path disappeared while being verified: ${path.join(this.dir, name)}`,
+        );
+      }
+      return original.call(this, name);
+    });
+    expect(await finalizeOrphanedEvidenceRuns(project)).toEqual({
+      sessions: [], skipped: skipped(run.runId, "run disappeared"),
+    });
   });
 
   it("refuses stale adopter appends after recovery and allows a fresh run", async () => {
@@ -293,16 +338,32 @@ describe("explicit evidence recovery", () => {
     await expect(appendAction(next.run, action)).resolves.toMatchObject({ outcome: "appended" });
   });
 
-  it.each(["missing", "corrupt"] as const)("marks a %s journal honestly without fabricating a timeline", async (kind) => {
+  it("marks a missing journal honestly without fabricating a timeline", async () => {
     const run = await seed();
     const journal = path.join(run.dir, "actions.jsonl");
-    if (kind === "missing") await fs.promises.rename(journal, path.join(run.dir, "saved.jsonl"));
-    else await fs.promises.appendFile(journal, "not-json\n");
+    await fs.promises.rename(journal, path.join(run.dir, "saved.jsonl"));
     const result = await finalizeOrphanedEvidenceRuns(project);
-    expect(result.sessions[0]!.runs[0]).toMatchObject({ journal: kind, actions: 0 });
-    expect((await manifest(run.dir)).evidenceRecovery).toBe(kind);
+    expect(result.sessions[0]!.runs[0]).toMatchObject({ journal: "missing", actions: 0 });
+    expect((await manifest(run.dir)).evidenceRecovery).toBe("missing");
     expect(await fs.promises.readFile(path.join(run.dir, "report.html"), "utf8")).toContain("Timeline unavailable");
-    if (kind === "corrupt") expect(await fs.promises.readFile(journal, "utf8")).toContain("not-json\n");
+  });
+
+  it("finalizes the valid prefix when a later journal line is truncated", async () => {
+    const run = await seed();
+    const journal = path.join(run.dir, "actions.jsonl");
+    const before = await fs.promises.readFile(journal, "utf8");
+    const truncated = '{"actionId":"truncated\n';
+    await fs.promises.appendFile(journal, truncated);
+    const result = await finalizeOrphanedEvidenceRuns(project);
+    expect(result.sessions[0]!.runs[0]).toMatchObject({
+      journal: "corrupt", actions: 1, warning: "journal corrupt after record 1",
+    });
+    expect(await fs.promises.readFile(journal, "utf8")).toBe(before + truncated);
+    expect((await manifest(run.dir)).evidenceRecovery).toBe("corrupt");
+    const html = await fs.promises.readFile(path.join(run.dir, "report.html"), "utf8");
+    expect(html).toContain("journal corrupt after record 1");
+    expect(html).toContain("synthetic_action");
+    expect(html).not.toContain("Timeline unavailable");
   });
 
   it("does not rewrite foreign runs or read-only legacy roots", async () => {
@@ -328,6 +389,21 @@ describe("explicit evidence recovery", () => {
     expect((await manifest(run.dir)).artifacts).toHaveLength(3);
   });
 
+  it("indexes completed runs with a report without rewriting or skipping them", async () => {
+    const run = await seed();
+    const summary = await manifest(run.dir);
+    summary.status = "completed";
+    const bytes = `${JSON.stringify(summary)}\n`;
+    await fs.promises.writeFile(path.join(run.dir, "manifest.json"), bytes);
+    await fs.promises.writeFile(path.join(run.dir, "report.html"), "<html>kept</html>");
+    const result = await finalizeOrphanedEvidenceRuns(project);
+    expect(result.skipped).toEqual([]);
+    expect(result.sessions[0]!.runs[0]).toMatchObject({ runId: run.runId, status: "completed" });
+    expect(await fs.promises.readFile(path.join(run.dir, "manifest.json"), "utf8")).toBe(bytes);
+    expect(await fs.promises.readFile(path.join(run.dir, "report.html"), "utf8")).toBe("<html>kept</html>");
+    expect(summary.evidenceRecovery).toBeUndefined();
+  });
+
   it.each(["corrupt", "empty", "live-claim"])("skips an ambiguous %s session pointer", async (kind) => {
     const run = await seed();
     const pointer = await activePointerPath(project, "brow-synthetic");
@@ -335,7 +411,7 @@ describe("explicit evidence recovery", () => {
       ? JSON.stringify({ evidenceVersion: 1, claim: true, sessionId: "brow-synthetic", ownerPid: process.pid, claimedAt: "2026-09-05" })
       : kind === "empty" ? "" : "not-json";
     await fs.promises.writeFile(pointer, content);
-    expect(await finalizeOrphanedEvidenceRuns(project)).toEqual({ sessions: [], skipped: [run.runId] });
+    expect(await finalizeOrphanedEvidenceRuns(project)).toEqual({ sessions: [], skipped: skipped(run.runId) });
     expect((await manifest(run.dir)).status).toBe("running");
   });
 

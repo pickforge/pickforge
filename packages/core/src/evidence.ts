@@ -16,11 +16,7 @@ import {
   type RunDirBinding,
 } from "./run-root.js";
 import { resolveRunStorage } from "./storage.js";
-import {
-  isPidAlive,
-  processIdentityMatches,
-  readProcessStartTicks,
-} from "./proc.js";
+import { identityIsAlive, readProcessStartTicks } from "./proc.js";
 import {
   EVIDENCE_ACTION_LOG,
   EVIDENCE_VERSION,
@@ -30,6 +26,8 @@ import {
   type RunManifest,
   type RunStatus,
 } from "./run.js";
+
+export { identityIsAlive };
 
 /**
  * Dormant evidence storage foundation.
@@ -327,21 +325,6 @@ function parseClaim(raw: string): ActiveEvidenceClaim | undefined {
     claim.ownerStartTicks = candidate.ownerStartTicks;
   }
   return claim;
-}
-
-/**
- * Whether the process behind a recorded owner identity is still the same live
- * process. When a `/proc` start time was recorded, it must match (this rejects a
- * later, unrelated process that reused the PID); otherwise we fall back to a
- * plain liveness probe. A dead or reused owner is never treated as alive, so its
- * claim or run is safe to reclaim.
- * @internal Shared owner-identity check for explicit recovery.
- */
-export function identityIsAlive(pid: number, startTicks?: number): boolean {
-  if (startTicks !== undefined) {
-    return processIdentityMatches({ pid, startTicks });
-  }
-  return isPidAlive(pid);
 }
 
 /**
@@ -1871,11 +1854,17 @@ async function readRecoveryFileIn(dir: DirHandle, name: string): Promise<string 
   }
   try {
     const stat = await handle.stat();
-    if (!stat.isFile() || stat.nlink !== 1) throw new RunStorageAccessError(`Unsafe recovery file in ${dir.dir}: ${name}`);
+    if (!isSingletonRegularFile(stat)) {
+      throw new RunStorageAccessError(`Unsafe recovery file in ${dir.dir}: ${name}`);
+    }
     return await handle.readFile("utf8");
   } finally {
     await handle.close();
   }
+}
+
+function isSingletonRegularFile(stat: { isFile(): boolean; nlink: number }): boolean {
+  return stat.isFile() && stat.nlink === 1;
 }
 
 function validManifestArtifact(value: unknown): boolean {
@@ -1885,35 +1874,82 @@ function validManifestArtifact(value: unknown): boolean {
     [artifact.name, artifact.path, artifact.createdAt].every((field) => typeof field === "string");
 }
 
-function validEvidenceManifest(manifest: RunManifest): boolean {
+function validEvidenceManifestFields(manifest: RunManifest): boolean {
   if (!Array.isArray(manifest.artifacts) || !manifest.artifacts.every(validManifestArtifact)) return false;
   if (![manifest.slug, manifest.createdAt].every((field) => typeof field === "string")) return false;
-  return ["running", "completed", "failed", "orphaned"].includes(manifest.status) && isEvidenceRun(manifest);
+  return ["running", "completed", "failed", "orphaned"].includes(manifest.status);
 }
 
-/** @internal Read summary data without following links or blocking on special files. */
-export async function readEvidenceManifestIn(
-  dir: DirHandle,
-): Promise<RunManifest> {
+function validEvidenceManifest(manifest: RunManifest): boolean {
+  return validEvidenceManifestFields(manifest) && isEvidenceRun(manifest);
+}
+
+async function parseEvidenceManifestFile(dir: DirHandle): Promise<RunManifest> {
   const handle = await dir.openFile(
     "manifest.json",
     fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
   );
   try {
     const stat = await handle.stat();
-    if (!stat.isFile() || stat.nlink !== 1) {
+    if (!isSingletonRegularFile(stat)) {
       throw new RunStorageAccessError(`Unsafe evidence manifest in ${dir.dir}`);
     }
-    const manifest = JSON.parse(await handle.readFile("utf8")) as RunManifest;
-    if (
-      manifest?.runId !== path.basename(dir.dir) ||
-      !validEvidenceManifest(manifest)
-    ) {
-      throw new RunStorageAccessError(`Invalid evidence manifest in ${dir.dir}`);
-    }
-    return manifest;
+    return JSON.parse(await handle.readFile("utf8")) as RunManifest;
   } finally {
     await handle.close();
+  }
+}
+
+function manifestMatchesRunDir(manifest: RunManifest, dir: DirHandle): boolean {
+  return manifest?.runId === path.basename(dir.dir);
+}
+
+/** @internal Read summary data without following links or blocking on special files. */
+export async function readEvidenceManifestIn(
+  dir: DirHandle,
+): Promise<RunManifest> {
+  const manifest = await parseEvidenceManifestFile(dir);
+  if (!manifestMatchesRunDir(manifest, dir) || !validEvidenceManifest(manifest)) {
+    throw new RunStorageAccessError(`Invalid evidence manifest in ${dir.dir}`);
+  }
+  return manifest;
+}
+
+export type InspectedEvidenceManifest =
+  | { kind: "usable"; manifest: RunManifest }
+  | { kind: "foreign" }
+  | { kind: "invalid" };
+
+function classifyParsedManifest(
+  manifest: RunManifest,
+  dir: DirHandle,
+): InspectedEvidenceManifest {
+  if (!manifestMatchesRunDir(manifest, dir) || !validEvidenceManifestFields(manifest)) {
+    return { kind: "invalid" };
+  }
+  if (!isEvidenceRun(manifest)) return { kind: "foreign" };
+  return { kind: "usable", manifest };
+}
+
+function classifyManifestError(error: unknown): InspectedEvidenceManifest | undefined {
+  if (error instanceof SyntaxError) return { kind: "invalid" };
+  if (error instanceof RunStorageAccessError) return { kind: "invalid" };
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === "ENOENT") return { kind: "foreign" };
+  if (["ELOOP", "ENXIO", "ENODEV"].includes(code ?? "")) return { kind: "invalid" };
+  return undefined;
+}
+
+/** @internal Classify a run directory without treating foreign runs as skipped. */
+export async function inspectEvidenceManifestIn(
+  dir: DirHandle,
+): Promise<InspectedEvidenceManifest> {
+  try {
+    return classifyParsedManifest(await parseEvidenceManifestFile(dir), dir);
+  } catch (error) {
+    const classified = classifyManifestError(error);
+    if (classified !== undefined) return classified;
+    throw error;
   }
 }
 
@@ -1928,13 +1964,64 @@ function validEvidenceRecord(value: unknown): value is EvidenceRecord {
   return validActionFields(record);
 }
 
+function validStringList(value: unknown): boolean {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
 function validActionFields(record: Record<string, unknown>): boolean {
   const strings = [record.source, record.tool, record.startedAt];
   if (!strings.every((field) => typeof field === "string")) return false;
-  if (typeof record.status !== "string" || !["ok", "error", "cancelled", "timeout"].includes(record.status)) return false;
-  if (record.artifacts !== undefined && (!Array.isArray(record.artifacts) || !record.artifacts.every((item) => typeof item === "string"))) return false;
+  // Ordinary reads keep unknown status strings so future producers do not break reports.
+  if (typeof record.status !== "string") return false;
+  if (record.artifacts !== undefined && !validStringList(record.artifacts)) return false;
   if (record.durationMs !== undefined && (typeof record.durationMs !== "number" || !Number.isFinite(record.durationMs))) return false;
   return [record.sessionId, record.error].every((field) => field === undefined || typeof field === "string");
+}
+
+type JournalSegment =
+  | { ok: true; record: EvidenceRecord }
+  | { ok: false; reason: string; blank: boolean };
+
+function parseJournalSegment(segment: string, line: number): JournalSegment {
+  if (segment === "") {
+    return { ok: false, reason: `blank record at line ${line}`, blank: true };
+  }
+  try {
+    const parsed: unknown = JSON.parse(segment);
+    if (!validEvidenceRecord(parsed)) {
+      return { ok: false, reason: "record is not a valid evidence record", blank: false };
+    }
+    return { ok: true, record: parsed };
+  } catch (error) {
+    return { ok: false, reason: (error as Error).message, blank: false };
+  }
+}
+
+function scanActionsJournal(raw: string): {
+  records: EvidenceRecord[];
+  torn: boolean;
+  corrupt?: { line: number; reason: string; blank: boolean };
+} {
+  if (raw === "") return { records: [], torn: false };
+  const torn = !raw.endsWith("\n");
+  const segments = raw.split("\n");
+  segments.pop();
+  const records: EvidenceRecord[] = [];
+  for (let index = 0; index < segments.length; index += 1) {
+    const parsed = parseJournalSegment(segments[index]!, index + 1);
+    if (!parsed.ok) {
+      return { records, torn: false, corrupt: { line: index + 1, reason: parsed.reason, blank: parsed.blank } };
+    }
+    records.push(parsed.record);
+  }
+  return { records, torn };
+}
+
+function journalCorruptError(journalLabel: string, line: number, reason: string, blank: boolean): Error {
+  if (blank) {
+    return new Error(`Corrupt evidence journal in ${journalLabel}: ${reason}`);
+  }
+  return new Error(`Corrupt evidence journal in ${journalLabel} at line ${line}: ${reason}`);
 }
 
 /** Parse an action journal using the same torn-tail and corruption rules as reads. */
@@ -1942,39 +2029,30 @@ export function parseActionsJournal(
   raw: string,
   journalLabel: string,
 ): EvidenceRecord[] {
-  if (raw === "") return [];
-
-  const segments = raw.split("\n");
-  // A trailing "\n" leaves a final "" segment (a clean terminator); no trailing
-  // "\n" means the final segment is a torn line. Either way, drop the last.
-  segments.pop();
-
-  const records: EvidenceRecord[] = [];
-  for (let index = 0; index < segments.length; index += 1) {
-    const segment = segments[index]!;
-    if (segment === "") {
-      throw new Error(
-        `Corrupt evidence journal in ${journalLabel}: blank record at line ${index + 1}`,
-      );
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(segment);
-    } catch (error) {
-      throw new Error(
-        `Corrupt evidence journal in ${journalLabel} at line ${index + 1}: ` +
-          `${(error as Error).message}`,
-      );
-    }
-    if (!validEvidenceRecord(parsed)) {
-      throw new Error(
-        `Corrupt evidence journal in ${journalLabel} at line ${index + 1}: ` +
-          `record is not a valid evidence record`,
-      );
-    }
-    records.push(parsed as EvidenceRecord);
+  const scan = scanActionsJournal(raw);
+  if (scan.corrupt !== undefined) {
+    throw journalCorruptError(journalLabel, scan.corrupt.line, scan.corrupt.reason, scan.corrupt.blank);
   }
-  return records;
+  return scan.records;
+}
+
+export interface RecoverableJournal {
+  records: EvidenceRecord[];
+  journal: NonNullable<RunManifest["evidenceRecovery"]>;
+  warning?: string;
+}
+
+/** Valid prefix of a journal; stop at the first invalid line without rewriting it. */
+export function parseRecoverableActionsJournal(raw: string): RecoverableJournal {
+  const scan = scanActionsJournal(raw);
+  if (scan.corrupt !== undefined) {
+    return {
+      records: scan.records,
+      journal: "corrupt",
+      warning: `journal corrupt after record ${scan.records.length}`,
+    };
+  }
+  return { records: scan.records, journal: scan.torn ? "torn-tail" : "complete" };
 }
 
 async function readActionsFromHandle(

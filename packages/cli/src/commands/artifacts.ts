@@ -7,6 +7,7 @@ import {
   parseActionsJournal,
   renderRunReport,
   resolveRunStorage,
+  type EvidenceRecoveryResult,
   type RunCatalog,
   type RunCatalogEntry,
 } from "@pickforge/lab-core";
@@ -98,6 +99,16 @@ export async function runArtifactsOpen(
   });
 }
 
+function recoveryReportLines(recovery: EvidenceRecoveryResult): string[] {
+  return [
+    ...recovery.sessions.map((session) => `Session index: ${session.index}`),
+    ...recovery.skipped.map((item) => `Recovery skipped (${item.reason}): ${item.runId}`),
+    ...recovery.sessions.flatMap((session) => session.runs)
+      .filter((run) => run.warning !== undefined)
+      .map((run) => `${run.runId}: ${run.warning}`),
+  ];
+}
+
 export async function runArtifactsReport(
   runId: string | undefined,
   opts: BaseCliOptions & { finalizeOrphans?: boolean },
@@ -114,8 +125,7 @@ export async function runArtifactsReport(
       data: { runId: manifest.runId, dir, manifest, ...(recovery === undefined ? {} : { recovery }) },
       lines: [
         ...renderRunReport(manifest, dir, records),
-        ...(recovery?.sessions.map((session) => `Session index: ${session.index}`) ?? []),
-        ...(recovery?.skipped.map((id) => `Recovery skipped (owner or session identity unavailable): ${id}`) ?? []),
+        ...(recovery === undefined ? [] : recoveryReportLines(recovery)),
       ],
     };
   });
