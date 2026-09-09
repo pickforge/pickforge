@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import {
   EVIDENCE_ACTION_LOG,
   EVIDENCE_REPORT,
-  isOutcomeRecord,
+  latestOutcome,
   recordEvidenceOutcome,
   type EvidenceOutcomeInput,
   listArtifactRuns,
@@ -40,7 +40,7 @@ export async function runArtifactsList(opts: BaseCliOptions): Promise<number> {
             ]
           : runs.map(
               (run) =>
-                `${run.runId}  ${run.source}  ${run.status}  ${run.artifacts} artifact(s)  outcome: ${run.outcome ?? "unknown"}`,
+                `${run.runId}  ${run.source}  ${run.status}  ${run.artifacts} artifact(s)  outcome: ${run.outcome ?? "none"}`,
             ),
     };
   });
@@ -159,8 +159,8 @@ async function labReport(
   const { catalog, entry } = await findRun(projectDir, runId, opened);
   const { manifest, dir } = entry;
   const records = await readCatalogActions(catalog, entry);
-  const latest = records.filter(isOutcomeRecord).at(-1);
-  const outcome = latest === undefined ? null : { status: latest.status, scenario: latest.scenario };
+  const latest = latestOutcome(records);
+  const outcome = latest === null ? null : { status: latest.status, scenario: latest.scenario };
   const reportPath = await catalog.hasRootFile(entry, EVIDENCE_REPORT)
     ? path.join(dir, EVIDENCE_REPORT) : null;
   const listing = runId === undefined;

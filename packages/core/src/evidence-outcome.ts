@@ -153,13 +153,18 @@ export async function recordEvidenceOutcome(projectDir: string, runId: string, i
   return record;
 }
 
+/** Latest outcome record among already-parsed journal records, or null. */
+export function latestOutcome(records: readonly EvidenceRecord[]): EvidenceOutcomeRecord | null {
+  return records.filter(isOutcomeRecord).at(-1) ?? null;
+}
+
 /** Latest recorded outcome status for a catalog entry, or null when absent or unreadable. */
 export async function latestOutcomeStatus(catalog: RunCatalog, entry: RunCatalogEntry): Promise<EvidenceOutcomeRecord["status"] | null> {
   if (!isEvidenceRun(entry.manifest) || entry.manifest.evidenceRecovery === "corrupt") return null;
   try {
     const raw = await catalog.readRootTextIfPresent(entry, EVIDENCE_ACTION_LOG);
     if (raw === undefined) return null;
-    return parseActionsJournal(raw, entry.dir).filter(isOutcomeRecord).at(-1)?.status ?? null;
+    return latestOutcome(parseActionsJournal(raw, entry.dir))?.status ?? null;
   } catch {
     return null;
   }

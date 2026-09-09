@@ -184,11 +184,15 @@ function compareRuns(left: { createdAt: string; runId: string }, right: { create
 
 export async function listArtifactRuns(catalog: RunCatalog) {
   const entries = await catalog.list();
-  const lab = await Promise.all(entries.map(async (entry) => ({
-    source: "lab" as const, runId: text(entry.manifest.runId), slug: text(entry.manifest.slug),
-    createdAt: text(entry.manifest.createdAt), status: text(entry.manifest.status),
-    artifacts: entry.manifest.artifacts.length, outcome: await latestOutcomeStatus(catalog, entry),
-  })));
+  // Journals are read one at a time so a listing never buffers more than one run's journal.
+  const lab = [];
+  for (const entry of entries) {
+    lab.push({
+      source: "lab" as const, runId: text(entry.manifest.runId), slug: text(entry.manifest.slug),
+      createdAt: text(entry.manifest.createdAt), status: text(entry.manifest.status),
+      artifacts: entry.manifest.artifacts.length, outcome: await latestOutcomeStatus(catalog, entry),
+    });
+  }
   const rust = (await listRustEvidenceRuns(catalog, entries)).map(run => ({
     source: run.source, runId: run.runId, slug: run.scenario, createdAt: run.createdAt,
     status: run.outcome, artifacts: run.screenshots.length, outcome: null,

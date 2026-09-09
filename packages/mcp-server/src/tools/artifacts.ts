@@ -4,7 +4,7 @@ import { z } from "zod";
 import {
   EVIDENCE_ACTION_LOG,
   EVIDENCE_REPORT,
-  isOutcomeRecord,
+  latestOutcome,
   recordEvidenceOutcome,
   listArtifactRuns,
   listRustEvidenceRuns,
@@ -138,8 +138,8 @@ export function registerArtifactTools(
         );
         const { manifest, dir } = entry;
         const records = await readCatalogActions(catalog, entry);
-        const latest = records.filter(isOutcomeRecord).at(-1);
-        const outcome = latest === undefined ? null : { status: latest.status, scenario: latest.scenario };
+        const latest = latestOutcome(records);
+        const outcome = latest === null ? null : { status: latest.status, scenario: latest.scenario };
         const reportPath = await catalog.hasRootFile(entry, EVIDENCE_REPORT)
           ? path.join(dir, EVIDENCE_REPORT) : null;
         return {

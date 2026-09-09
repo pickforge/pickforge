@@ -601,4 +601,8 @@ it("exposes report availability and journal acceptance through existing surfaces
   expect((await report()).reportPath).toBeNull();
   fs.appendFileSync(path.join(run.dir, "actions.jsonl"), "corrupt\n");
   expect((await runs()).find((item: { runId: string }) => item.runId === run.runId).outcome).toBeNull();
+  const bare = await createRun(dirs.projectDir, "bare", { evidence: true }, env);
+  await bare.finish();
+  const bareReport = parseToolJson(await lab.client.callTool({ name: "artifact_report", arguments: { runId: bare.runId } }));
+  expect(bareReport).toMatchObject({ device: null, reportPath: null, outcome: null });
 });

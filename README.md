@@ -376,7 +376,9 @@ Artifact reports expose the existing absolute HTML report path (or null), latest
 acceptance outcome (status and scenario, or null), and device metadata (or null)
 as `reportPath`, `outcome`, and `device` in CLI JSON and MCP `artifact_report`.
 Text reports end with the path, or `Report: not finalized yet` for running runs
-without a report; run lists include the latest outcome status or null.
+without a report; run lists include the latest outcome status or null. `outcome`
+reflects only the lab journal's acceptance record; Rust evidence runs carry their
+result in `status` and always list `outcome` as null.
 
 Recovery marks interrupted runs `orphaned`, not successfully completed, and
 rebuilds artifact inventories from existing files and the journal. Completed and

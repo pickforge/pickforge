@@ -1951,6 +1951,11 @@ describe("pickforge-lab artifacts", () => {
     expect(parseJson(await runCli([...args, "--json"], env)).reportPath).toBeNull();
     fs.appendFileSync(path.join(run.dir, "actions.jsonl"), "corrupt\n");
     expect(parseJson(await runCli(listArgs, env)).runs[0].outcome).toBeNull();
+    const bare = await createRun(projectDir, "bare", { evidence: true }, env);
+    await bare.finish();
+    const bareArgs = ["artifacts", "report", bare.runId, "--project-dir", projectDir];
+    expect((await runCli(bareArgs, env)).stdout).not.toContain("Report:");
+    expect(JSON.parse((await runCli([...bareArgs, "--json"], env)).stdout)).toMatchObject({ device: null, reportPath: null, outcome: null });
   });
 
 
