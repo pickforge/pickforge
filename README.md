@@ -30,8 +30,9 @@ The stable npm package installs the TypeScript lab commands without the Rust CLI
 npm install -g pickforge
 ```
 
-Use the installer above for the Rust CLI as well. It resolves the stable package
-and downloads the matching Rust release.
+Use the installer above for the Rust CLI as well. It installs the release
+channel that matches this version of the docs and downloads the matching Rust
+release.
 
 The installer adds three commands side by side: `pickforge` (Rust),
 `pickforge-lab` (TypeScript lab CLI), and `pickforge-mcp` (MCP stdio server).
@@ -541,6 +542,7 @@ not a unit-test assertion.
 Fatal-error telemetry in the `pickforge-lab` CLI and `pickforge-mcp` server is disabled by default: Sentry is not initialized and no telemetry is sent. Set `PICKFORGE_TELEMETRY=1` (also `true` or `on`, case-insensitive, with surrounding whitespace ignored) to enable reporting to Sentry. Any other value or unset disables it. Enabled reports contain the error message and stack trace, which can reference the failing command and its output, with secrets redacted, plus OS, Node.js, and app versions. This is fatal-error reporting, not product analytics; breadcrumbs and performance tracing are disabled.
 
 For the 0.4 train, `PICKLAB_TELEMETRY` is accepted only when `PICKFORGE_TELEMETRY` is unset, with the same values and one deprecation warning per process. The current name takes precedence, including when empty.
+
 ## Support matrix
 
 These boundaries come from the published 0.4.0-beta.1 and 0.4.0-alpha.2
