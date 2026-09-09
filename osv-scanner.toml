@@ -1,7 +1,5 @@
-[[IgnoredVulns]]
-id = "GHSA-frvp-7c67-39w9"
-reason = "Below the high/critical gate; the fixed @hono/node-server release requires an upstream major-version update. Tracked in pickforge/pickforge#60."
+# No vulnerability exceptions. Scan all dependency findings.
 
 [[IgnoredVulns]]
-id = "GHSA-g7r4-m6w7-qqqr"
-reason = "Below the high/critical gate; the fixed esbuild release is outside current direct dependency ranges. Tracked in pickforge/pickforge#60."
+id = "GHSA-82fw-gwwq-j7x9"
+reason = "Medium (CVSS 5.9) in the vitest test runner, a root devDependency that is not shipped; the fix is the vitest 4 major upgrade tracked in pickforge/pickforge#132."
