@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import {
   EVIDENCE_ACTION_LOG,
+  recordEvidenceOutcome,
   listArtifactRuns,
   listRustEvidenceRuns,
   renderRustEvidenceReport,
@@ -51,6 +52,27 @@ export function registerArtifactTools(
   server: McpServer,
   ctx: ServerContext,
 ): void {
+  server.registerTool(
+    "evidence_outcome",
+    {
+      title: "Record acceptance outcome",
+      description: "Append an explicit acceptance outcome. Recording alone does not establish acceptance. A run id is required because this server has no current session.",
+      inputSchema: {
+        runId: z.string().min(1),
+        scenario: z.string().min(1),
+        status: z.enum(["pass", "fail", "partial", "blocked"]),
+        inspectedScreenshots: z.array(z.string()).max(64),
+        revision: z.string().optional(),
+        steps: z.array(z.string()).max(32).optional(),
+        limitations: z.array(z.string()).max(32).optional(),
+        notes: z.string().optional(),
+      },
+    },
+    (args) => runTool(async () => ({
+      data: { runId: args.runId, outcome: await recordEvidenceOutcome(ctx.projectDir, args.runId, args, ctx.env) },
+    })),
+  );
+
   server.registerTool(
     "artifact_list",
     {
