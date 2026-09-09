@@ -49,8 +49,9 @@ same way.
 `actions.jsonl` is the authoritative sanitized timeline; finalization
 produces an escaped `report.html` with a restrictive content security policy
 and no external requests. Its policy allows exactly one inline script, pinned
-by the sha256 of the emitted text; the report is fully usable, filters and
-capture inspection included, with scripts blocked.
+by the sha256 of the emitted text. Filters, capture inspection, and the
+navigation links remain usable with scripts blocked; only text search and
+arrow-key browsing depend on that script.
 
 The recorder persists only allowlisted metadata. Typed and filled text becomes
 length plus input type. Failed network records keep method, URL origin/path

@@ -266,7 +266,9 @@ const TRUNCATED_RUN =
 
 /**
  * The one pinned script. Kept literal so its sha256 is stable, and limited to
- * text search plus arrow-key browsing; every control also works without it.
+ * text search plus arrow-key browsing. Filters, capture inspection, and the
+ * navigation links keep working without it; only search and the arrow keys
+ * need it, and the live "shown" count is hidden while it is blocked.
  */
 const REPORT_SCRIPT = `(() => {
 const doc = document;
@@ -275,18 +277,42 @@ const box = doc.getElementById("search");
 const cards = Array.prototype.slice.call(doc.querySelectorAll("[data-search]"));
 const shown = doc.getElementById("match-count");
 const none = doc.getElementById("no-match");
+const radios = Array.prototype.slice.call(doc.querySelectorAll(".lens-input, .scn-input"));
+const chosen = (selector, cut) => {
+  const on = doc.querySelector(selector);
+  return on ? on.id.slice(cut) : "all";
+};
+const passes = (card, attribute, value) => {
+  const own = card.getAttribute(attribute);
+  if (value === "all" || own === null) return true;
+  return own.split(" ").indexOf(value) >= 0;
+};
 const apply = () => {
   const query = box.value.toLowerCase().trim();
-  let hits = 0;
+  const lens = chosen(".lens-input:checked", 5);
+  const scenario = chosen(".scn-input:checked", 4);
+  let captures = 0;
+  let steps = 0;
   cards.forEach((card) => {
     const hit = query === "" || card.getAttribute("data-search").indexOf(query) >= 0;
     card.hidden = !hit;
-    if (hit && card.classList.contains("cap")) hits += 1;
+    if (!hit) return;
+    if (!passes(card, "data-lens", lens)) return;
+    if (!passes(card, "data-scenario", scenario)) return;
+    if (card.classList.contains("cap")) captures += 1;
+    else steps += 1;
   });
-  shown.textContent = String(hits);
-  none.hidden = hits > 0;
+  shown.textContent = String(captures);
+  const narrowed = query !== "" || lens !== "all" || scenario !== "all";
+  none.hidden = captures > 0 || !narrowed;
+  none.textContent =
+    steps === 0
+      ? "Nothing matches the current search and filters."
+      : "No captures match. " + String(steps) + " timeline step(s) still match.";
 };
 box.addEventListener("input", apply);
+radios.forEach((radio) => radio.addEventListener("change", apply));
+apply();
 doc.addEventListener("keydown", (event) => {
   if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
   const active = doc.activeElement;
@@ -336,7 +362,7 @@ dd{margin:0;overflow-wrap:anywhere;font-size:13px}
 .warn{border:1px solid var(--partial);border-radius:10px;padding:12px 16px;margin:0 0 12px;color:var(--partial);font-size:13px}
 .toolbar{display:flex;align-items:center;justify-content:space-between;gap:14px;margin:26px 0 14px}
 .search-wrap{display:flex;align-items:center;gap:8px}
-body:not(.js) .search-wrap{display:none}
+body:not(.js) .search-wrap,body:not(.js) .js-only{display:none}
 #search{background:var(--p1);border:1px solid var(--line2);border-radius:8px;padding:9px 12px;color:var(--text);font:inherit;font-size:12px;width:220px;max-width:100%}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px}
 .cap{margin:0;border:1px solid var(--line);border-radius:12px;background:var(--p1);overflow:hidden}
@@ -366,6 +392,8 @@ footer{margin-top:36px;padding-top:16px;border-top:1px solid var(--line);color:v
 .btn:hover{border-color:var(--ember)}
 .btn[aria-disabled="true"]{color:var(--muted);border-color:var(--line);cursor:default}
 .inspect-bar .grow{margin-left:auto}
+.zoom:focus-visible~.inspect-bar label{outline:2px solid var(--ember);outline-offset:2px}
+.zoom:checked~.inspect-bar label{border-color:var(--ember);color:var(--ember)}
 .inspect-stage{flex:1;min-height:0;overflow:auto;padding:16px;display:flex;justify-content:center;align-items:flex-start;background:var(--bg)}
 .inspect-stage img{max-width:100%;max-height:100%;object-fit:contain}
 .zoom:checked~.inspect-stage{display:block}
@@ -414,11 +442,9 @@ function sortOutcomes(outcomes: readonly ReportOutcome[]): ReportOutcome[] {
 }
 
 function deviceLens(device: ReportDevice | undefined): Lens {
-  if (device?.kind === "emulator") return "android";
-  if (device?.kind === "mobile-emulation" || device?.kind === "physical") {
-    return "mobile";
-  }
-  return "desktop";
+  const kind = deviceKind(device?.kind);
+  if (kind === "emulator") return "android";
+  return kind === "mobile-emulation" || kind === "physical" ? "mobile" : "desktop";
 }
 
 function actionLens(action: EvidenceAction, fallback: Lens): Lens {
@@ -432,25 +458,68 @@ function shortText(value: string, limit = 120): string {
   return value.length <= limit ? value : `${value.slice(0, limit)}…`;
 }
 
+/**
+ * The search index is matched case-insensitively, so it must be redacted
+ * before it is lowercased: several credential patterns are case-sensitive and
+ * would survive a lowercase-first pass.
+ */
 function searchAttribute(parts: readonly string[]): string {
-  return escapeHtml(parts.join(" ").toLowerCase());
+  return escapeHtml(parts.map(safeText).join(" ").toLowerCase());
+}
+
+const DEVICE_KINDS: ReadonlySet<string> = new Set([
+  "desktop",
+  "mobile-emulation",
+  "physical",
+  "emulator",
+  "unknown",
+]);
+
+/**
+ * Device metadata arrives from a journal on disk, so every field is validated
+ * at runtime. Anything malformed renders as "unknown" rather than crashing the
+ * finalizer or printing a half-value.
+ */
+function deviceKind(value: unknown): string {
+  return typeof value === "string" && DEVICE_KINDS.has(value) ? value : "unknown";
+}
+
+function positiveInteger(value: unknown): boolean {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
+function viewportText(value: unknown): string {
+  if (typeof value !== "object" || value === null) return "unknown";
+  const { width, height } = value as { width?: unknown; height?: unknown };
+  return positiveInteger(width) && positiveInteger(height)
+    ? `${String(width)}x${String(height)}`
+    : "unknown";
+}
+
+function numberText(value: unknown): string {
+  return typeof value === "number" && Number.isFinite(value)
+    ? String(value)
+    : "unknown";
+}
+
+function booleanText(value: unknown): string {
+  if (value === true) return "yes";
+  return value === false ? "no" : "unknown";
+}
+
+function stringText(value: unknown): string {
+  return typeof value === "string" && value.trim() !== "" ? value : "unknown";
 }
 
 function deviceRows(device: ReportDevice | undefined): string {
-  const viewport =
-    device?.viewport === undefined
-      ? "unknown"
-      : `${device.viewport.width}x${device.viewport.height}`;
+  const fields = (device ?? {}) as Record<string, unknown>;
   return [
-    renderMetadata("Device", device?.kind ?? "unknown"),
-    renderMetadata("Viewport", viewport),
-    renderMetadata("Scale", device?.scale ?? "unknown"),
-    renderMetadata(
-      "Touch",
-      device?.touch === undefined ? "unknown" : device.touch ? "yes" : "no",
-    ),
-    renderMetadata("Browser", device?.browser ?? "unknown"),
-    renderMetadata("Platform", device?.platform ?? "unknown"),
+    renderMetadata("Device", deviceKind(fields.kind)),
+    renderMetadata("Viewport", viewportText(fields.viewport)),
+    renderMetadata("Scale", numberText(fields.scale)),
+    renderMetadata("Touch", booleanText(fields.touch)),
+    renderMetadata("Browser", stringText(fields.browser)),
+    renderMetadata("Platform", stringText(fields.platform)),
   ].join("");
 }
 
@@ -460,7 +529,7 @@ function renderSummary(
 ): string {
   return `<section class="panel" aria-label="Run summary">
 <h1>Run ${escapeHtml(manifest.runId)}</h1>
-<dl>${renderMetadata("Project", manifest.slug)}${renderMetadata("Status", manifest.status)}${renderMetadata("Created", manifest.createdAt)}${renderMetadata("Session", manifest.sessionId ?? "unknown")}${deviceRows(manifest.device)}${renderMetadata("Revision", latest?.revision ?? "unknown")}${renderMetadata("Scenario", latest?.scenario ?? "unknown")}</dl>
+<dl>${renderMetadata("Project", manifest.slug)}${renderMetadata("Status", manifest.status)}${renderMetadata("Created", manifest.createdAt)}${renderMetadata("Session", manifest.sessionId ?? "unknown")}${deviceRows(manifest.device)}${renderMetadata("Revision", stringText(latest?.revision))}${renderMetadata("Scenario", stringText(latest?.scenario))}</dl>
 </section>`;
 }
 
@@ -471,7 +540,7 @@ function renderOutcome(outcome: ReportOutcome, index: number): string {
   const inspected = textList(outcome.inspectedScreenshots).length;
   const detail = [
     renderMetadata("Recorded", outcome.recordedAt),
-    renderMetadata("Revision", outcome.revision ?? "unknown"),
+    renderMetadata("Revision", stringText(outcome.revision)),
     renderMetadata("Inspected captures", inspected),
   ].join("");
   const notes =
@@ -581,12 +650,13 @@ function collectCaptures(
   return captures;
 }
 
+/**
+ * `data-scenario` is always emitted, empty included: the scenario rules hide
+ * everything carrying the attribute without the selected index, so an omitted
+ * attribute would leave unassigned captures visible under every scenario.
+ */
 function filterAttributes(lens: Lens, scenarios: readonly number[]): string {
-  const scenarioAttribute =
-    scenarios.length === 0
-      ? ""
-      : ` data-scenario="${escapeHtml(scenarios.join(" "))}"`;
-  return ` data-lens="${lens}"${scenarioAttribute}`;
+  return ` data-lens="${lens}" data-scenario="${escapeHtml(scenarios.join(" "))}"`;
 }
 
 function renderCapture(capture: Capture): string {
@@ -803,10 +873,10 @@ ${lensButtons(captures)}${scenarioButtons(outcomes, captures)}
 ${renderSummary(manifest, outcomes.at(-1))}
 ${renderOutcomes(outcomes)}
 ${renderWarnings(manifest, ordered)}
-<div class="toolbar"><h2 id="captures">Captures <span class="count"><span id="match-count">${captures.length}</span> shown</span></h2>
+<div class="toolbar"><h2 id="captures">Captures <span class="count js-only"><span id="match-count">${captures.length}</span> shown</span></h2>
 <span class="search-wrap"><label class="eyebrow" for="search">Search</label><input id="search" type="search" placeholder="Filter captures and steps"></span></div>
 ${gallery}
-<p class="empty" id="no-match" role="status" hidden>Nothing matches this search.</p>
+<p class="empty js-only" id="no-match" role="status" hidden>Nothing matches the current search and filters.</p>
 <div class="toolbar"><h2 id="timeline">Timeline</h2></div>
 <section aria-label="Action timeline">
 ${steps === "" ? `<p class="empty">No actions recorded.</p>` : steps}

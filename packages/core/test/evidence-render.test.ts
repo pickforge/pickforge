@@ -707,3 +707,177 @@ describe("evidence report escaping, redaction, and determinism", () => {
     expect(html).not.toContain("logs/other.txt");
   });
 });
+
+describe("evidence report filtering and index hardening", () => {
+  const AWS_KEY = `AKIA${"IOSFODNN7EXAMP"}LE`;
+
+  it("redacts case-sensitive credentials before lowercasing the search index", () => {
+    const html = renderEvidenceHtml(
+      evidenceManifest(),
+      [
+        action({
+          artifacts: [`screenshots/${AWS_KEY}.png`],
+          target: { bucket: `key ${AWS_KEY}` },
+          error: `denied for ${AWS_KEY}`,
+        }),
+      ],
+      new Set([`screenshots/${AWS_KEY}.png`]),
+    );
+
+    expect(html).not.toContain(AWS_KEY);
+    expect(html).not.toContain(AWS_KEY.toLowerCase());
+    expect(html).toContain("[redacted]");
+  });
+
+  it("keeps a redacted outcome scenario out of the lowercased index", () => {
+    const html = renderEvidenceHtml(evidenceManifest(), [
+      action(),
+      outcome({
+        scenario: `Checkout with ${AWS_KEY}`,
+        steps: [`Paste ${AWS_KEY}`],
+        limitations: [`Sandbox key ${AWS_KEY}`],
+      }),
+    ]);
+
+    expect(html).not.toContain(AWS_KEY);
+    expect(html).not.toContain(AWS_KEY.toLowerCase());
+  });
+
+  it.each([
+    ["a null viewport", { viewport: null }, "<dt>Viewport</dt><dd>unknown</dd>"],
+    ["an empty viewport", { viewport: {} }, "<dt>Viewport</dt><dd>unknown</dd>"],
+    [
+      "a partial viewport",
+      { viewport: { width: 390 } },
+      "<dt>Viewport</dt><dd>unknown</dd>",
+    ],
+    [
+      "a non-integer viewport",
+      { viewport: { width: 39.5, height: 844 } },
+      "<dt>Viewport</dt><dd>unknown</dd>",
+    ],
+    [
+      "a zero viewport",
+      { viewport: { width: 0, height: 0 } },
+      "<dt>Viewport</dt><dd>unknown</dd>",
+    ],
+    ["a string touch", { touch: "false" }, "<dt>Touch</dt><dd>unknown</dd>"],
+    ["a numeric touch", { touch: 1 }, "<dt>Touch</dt><dd>unknown</dd>"],
+    ["a string scale", { scale: "3" }, "<dt>Scale</dt><dd>unknown</dd>"],
+    ["a NaN scale", { scale: Number.NaN }, "<dt>Scale</dt><dd>unknown</dd>"],
+    [
+      "an infinite scale",
+      { scale: Number.POSITIVE_INFINITY },
+      "<dt>Scale</dt><dd>unknown</dd>",
+    ],
+    ["a blank browser", { browser: "   " }, "<dt>Browser</dt><dd>unknown</dd>"],
+    ["a numeric platform", { platform: 7 }, "<dt>Platform</dt><dd>unknown</dd>"],
+    ["an unlisted kind", { kind: "toaster" }, "<dt>Device</dt><dd>unknown</dd>"],
+    ["a null kind", { kind: null }, "<dt>Device</dt><dd>unknown</dd>"],
+  ])("renders unknown for %s", (_name, device, expected) => {
+    const html = renderEvidenceHtml(
+      evidenceManifest({ device: device as never }),
+      [action()],
+    );
+
+    expect(html).toContain(expected);
+    expect(html).not.toContain("undefinedxundefined");
+    expect(html).not.toContain("NaN");
+  });
+
+  it("treats an unlisted device kind as the desktop lens", () => {
+    const html = renderEvidenceHtml(
+      evidenceManifest({ device: { kind: "toaster" } as never }),
+      [action({ tool: "browser_click", artifacts: ["screenshots/good.png"] })],
+      new Set(["screenshots/good.png"]),
+    );
+
+    expect(html).toContain('data-lens="desktop"');
+    expect(html).toContain('Desktop<span class="count">1</span>');
+  });
+
+  it("marks unassigned captures with an empty scenario so filters exclude them", () => {
+    const html = renderEvidenceHtml(
+      evidenceManifest(),
+      [
+        action({ artifacts: ["screenshots/good.png"] }),
+        action({
+          actionId: "loose",
+          startedAt: "2026-07-13T12:00:02.000Z",
+          artifacts: ["screenshots/loose.png"],
+        }),
+        outcome(),
+        outcome({
+          scenario: "Refund",
+          recordedAt: "2026-07-13T12:06:00.000Z",
+          inspectedScreenshots: ["screenshots/good.png"],
+        }),
+      ],
+      new Set(["screenshots/good.png", "screenshots/loose.png"]),
+    );
+
+    // The unassigned capture keeps the attribute, so every scenario rule hides it.
+    expect(html).toContain('data-lens="desktop" data-scenario=""');
+    expect(html).toContain('data-scenario="0 1"');
+    expect(html).toContain('Refund<span class="count">1</span>');
+  });
+});
+
+describe("evidence report pinned script behaviour", () => {
+  function scriptSource(): string {
+    return scriptOf(renderEvidenceHtml(evidenceManifest(), []));
+  }
+
+  it("reads the checked filter radios when it counts matches", () => {
+    const script = scriptSource();
+
+    expect(script).toContain('.lens-input:checked');
+    expect(script).toContain('.scn-input:checked');
+    expect(script).toContain('passes(card, "data-lens", lens)');
+    expect(script).toContain('passes(card, "data-scenario", scenario)');
+  });
+
+  it("recounts when a filter changes and distinguishes timeline matches", () => {
+    const script = scriptSource();
+
+    expect(script).toContain('radio.addEventListener("change", apply)');
+    expect(script).toContain("timeline step(s) still match.");
+    expect(script).toContain("Nothing matches the current search and filters.");
+    // An untouched search with no filter applied is not a "no match" state.
+    expect(script).toContain(
+      'const narrowed = query !== "" || lens !== "all" || scenario !== "all";',
+    );
+    expect(script).toContain("none.hidden = captures > 0 || !narrowed;");
+  });
+
+  it("hides the live count and the empty state while scripts are blocked", () => {
+    const html = renderEvidenceHtml(
+      evidenceManifest(),
+      [action({ artifacts: ["screenshots/good.png"] })],
+      new Set(["screenshots/good.png"]),
+    );
+
+    expect(html).toContain(
+      "body:not(.js) .search-wrap,body:not(.js) .js-only{display:none}",
+    );
+    expect(html).toContain('<span class="count js-only"><span id="match-count">');
+    expect(html).toContain('class="empty js-only" id="no-match"');
+    // The per-lens counts stay server-rendered, so they survive without scripts.
+    expect(html).toContain('Desktop<span class="count">1</span>');
+  });
+
+  it("gives the actual-size checkbox a visible focus and checked state", () => {
+    const html = renderEvidenceHtml(
+      evidenceManifest(),
+      [action({ artifacts: ["screenshots/good.png"] })],
+      new Set(["screenshots/good.png"]),
+    );
+
+    expect(html).toContain(
+      ".zoom:focus-visible~.inspect-bar label{outline:2px solid var(--ember);outline-offset:2px}",
+    );
+    expect(html).toContain(
+      ".zoom:checked~.inspect-bar label{border-color:var(--ember);color:var(--ember)}",
+    );
+  });
+});

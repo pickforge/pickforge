@@ -7,8 +7,9 @@
 - The finalized evidence `report.html` is now a viewer: run and device summary,
   an acceptance outcome banner that says plainly when nothing was recorded,
   device and scenario filters, a full-size capture inspection view, and text
-  search. Filters and inspection work with scripts blocked; the one inline
-  script (search and arrow-key browsing) is pinned in the report CSP by hash.
+  search. Filters, inspection and navigation work with scripts blocked;
+  text search and arrow-key browsing come from one inline script, pinned in
+  the report CSP by hash.
 
 ## Validation
 
