@@ -81,3 +81,26 @@ it("rejects linked artifact directories and invalid identity fields", async () =
     expect(await read()).toMatchObject({ state: "corrupt" });
   }
 });
+
+it("skips dot-prefixed staging directories left by the Rust writer", async () => {
+  const { rustDir } = await mixedRuns(project);
+  const staging = path.join(path.dirname(rustDir), `.pickforge-evidence-${rustId}-4242`);
+  fs.mkdirSync(staging);
+  fs.writeFileSync(path.join(staging, "evidence.json"), JSON.stringify(rustDocument()));
+  const runs = await listRustEvidenceRuns(await openRunCatalog(project, env));
+  expect(runs.map(run => run.runId)).not.toContain(path.basename(staging));
+});
+
+it("omits the report path when report.md is absent and keeps keyword-like check names intact", async () => {
+  const { rustDir } = await mixedRuns(project);
+  fs.rmSync(path.join(rustDir, "report.md"));
+  const doc = rustDocument();
+  doc.checks.push({ name: "Login session", status: "passed", summary: "Visible", step: "login" });
+  fs.writeFileSync(path.join(rustDir, "evidence.json"), JSON.stringify(doc));
+  const run = await readRustEvidenceRun(rustDir);
+  expect(run?.reportPath).toBe("");
+  const report = renderRustEvidenceReport(run!).join("\n");
+  expect(report).not.toContain("Report:");
+  expect(report).toContain("- Login session: passed Visible");
+  expect(report).not.toContain(plantedSecret);
+});

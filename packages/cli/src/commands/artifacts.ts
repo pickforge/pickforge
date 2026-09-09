@@ -44,8 +44,9 @@ export async function runArtifactsList(opts: BaseCliOptions): Promise<number> {
 async function findRun(
   projectDir: string,
   runId: string | undefined,
+  catalog?: RunCatalog,
 ): Promise<{ catalog: RunCatalog; entry: RunCatalogEntry }> {
-  const catalog = await openRunCatalog(projectDir);
+  catalog ??= await openRunCatalog(projectDir);
   const entry = await catalog.find(runId);
   if (entry === undefined) {
     if (runId === undefined) {
@@ -114,7 +115,9 @@ export async function runArtifactsReport(
     const recovery = opts.finalizeOrphans === true
       ? await finalizeOrphanedEvidenceRuns(projectDir)
       : undefined;
-    const rustRuns = await listRustEvidenceRuns(await openRunCatalog(projectDir));
+    const opened = await openRunCatalog(projectDir);
+    const entries = await opened.list();
+    const rustRuns = await listRustEvidenceRuns(opened, entries);
     const rust = rustRuns.find(run => run.runId === runId);
     const rustLines = rustRuns.map(run => `${run.runId}  rust  ${run.outcome}`);
     if (rust !== undefined) {
@@ -124,11 +127,10 @@ export async function runArtifactsReport(
         lines: [...lines, ...(recovery === undefined ? [] : recoveryReportLines(recovery))],
       };
     }
-    if (runId === undefined && rustRuns.length > 0 &&
-        await (await openRunCatalog(projectDir)).find() === undefined) {
+    if (runId === undefined && rustRuns.length > 0 && entries.length === 0) {
       return { data: { rustRuns, ...(recovery === undefined ? {} : { recovery }) }, lines: rustLines };
     }
-    const { catalog, entry } = await findRun(projectDir, runId);
+    const { catalog, entry } = await findRun(projectDir, runId, opened);
     const { manifest, dir } = entry;
     const records = await readCatalogActions(catalog, entry);
     return {

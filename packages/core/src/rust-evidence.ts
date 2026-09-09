@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import { DirHandle, withDirHandle } from "./dir-handle.js";
-import { openRunDirIn, verifyExistingRoot } from "./run-root.js";
+import { DirHandle, RunStorageAccessError, withDirHandle } from "./dir-handle.js";
+import { isMissing, openRunDirIn, verifyExistingRoot } from "./run-root.js";
 import { redactSecrets } from "./redact.js";
-import type { RunCatalog, RunCatalogRoot } from "./run-catalog.js";
+import type { RunCatalog, RunCatalogEntry, RunCatalogRoot } from "./run-catalog.js";
 
 const MAX_EVIDENCE_BYTES = 1024 * 1024;
 const SAFE_NAME = /^[A-Za-z0-9._-]+$/;
@@ -104,10 +104,12 @@ async function readEvidenceIn(dir: DirHandle): Promise<RustEvidenceRun | undefin
   if (await dir.lstatChild("manifest.json") !== undefined) return undefined;
   if (await dir.lstatChild("evidence.json") === undefined) return undefined;
   const runId = path.basename(dir.dir);
+  const report = await dir.lstatChild("report.md");
   const result: RustEvidenceRun = {
     source: "rust", state: "corrupt", runId: text(runId), projectId: "", createdAt: "",
     scenario: "", outcome: "corrupt", stepCount: 0, checks: [], limitations: [],
-    screenshots: [], dir: text(dir.dir), reportPath: text(path.join(dir.dir, "report.md")),
+    screenshots: [], dir: text(dir.dir),
+    reportPath: report?.isFile() === true && !report.isSymbolicLink() ? text(path.join(dir.dir, "report.md")) : "",
   };
   try {
     const doc = object(await readDocument(dir));
@@ -148,7 +150,7 @@ async function readRoot(root: RunCatalogRoot): Promise<RustEvidenceRun[]> {
     }), async parent => {
       const runs: RustEvidenceRun[] = [];
       for (const name of (await parent.readEntryNames()).sort()) {
-        if (!safeName(name)) continue;
+        if (!safeName(name) || name.startsWith(".")) continue;
         try {
           const run = await withDirHandle(openRunDirIn(parent, name), readRustEvidenceRun);
           if (run !== undefined) runs.push(run);
@@ -156,14 +158,16 @@ async function readRoot(root: RunCatalogRoot): Promise<RustEvidenceRun[]> {
       }
       return runs;
     });
-  } catch {
-    return [];
+  } catch (error) {
+    if (error instanceof RunStorageAccessError || isMissing(error)) return [];
+    throw error;
   }
 }
 
-export async function listRustEvidenceRuns(catalog: RunCatalog): Promise<RustEvidenceRun[]> {
+/** Pass the catalog's current entries to avoid a second manifest walk. */
+export async function listRustEvidenceRuns(catalog: RunCatalog, entries?: RunCatalogEntry[]): Promise<RustEvidenceRun[]> {
   const runs = new Map<string, RustEvidenceRun>();
-  const labIds = new Set((await catalog.list()).map(entry => entry.manifest.runId));
+  const labIds = new Set((entries ?? await catalog.list()).map(entry => entry.manifest.runId));
   for (const root of catalog.roots) {
     for (const run of await readRoot(root)) {
       if (!runs.has(run.runId) && !labIds.has(run.runId)) runs.set(run.runId, run);
@@ -178,11 +182,12 @@ function compareRuns(left: { createdAt: string; runId: string }, right: { create
 }
 
 export async function listArtifactRuns(catalog: RunCatalog) {
-  const lab = (await catalog.list()).map(({ manifest }) => ({
+  const entries = await catalog.list();
+  const lab = entries.map(({ manifest }) => ({
     source: "lab" as const, runId: text(manifest.runId), slug: text(manifest.slug),
     createdAt: text(manifest.createdAt), status: text(manifest.status), artifacts: manifest.artifacts.length,
   }));
-  const rust = (await listRustEvidenceRuns(catalog)).map(run => ({
+  const rust = (await listRustEvidenceRuns(catalog, entries)).map(run => ({
     source: run.source, runId: run.runId, slug: run.scenario, createdAt: run.createdAt,
     status: run.outcome, artifacts: run.screenshots.length,
   }));
@@ -195,6 +200,7 @@ export function renderRustEvidenceReport(run: RustEvidenceRun): string[] {
     `Steps: ${run.stepCount}`, "Checks:",
     ...run.checks.map(check => `- ${check.name}: ${check.status} ${check.summary}`),
     "Limitations:", ...run.limitations.map(item => `- ${item}`),
-    `Report: ${run.reportPath}`, "Screenshots:", ...run.screenshots.map(name => `- ${name}`),
-  ].map(redactSecrets);
+    ...(run.reportPath === "" ? [] : [`Report: ${run.reportPath}`]),
+    "Screenshots:", ...run.screenshots.map(name => `- ${name}`),
+  ];
 }

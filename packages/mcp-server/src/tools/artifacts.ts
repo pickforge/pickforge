@@ -21,8 +21,9 @@ export async function findRun(
   projectDir: string,
   runId: string | undefined,
   env: EnvLike = process.env,
+  catalog?: RunCatalog,
 ): Promise<{ catalog: RunCatalog; entry: RunCatalogEntry }> {
-  const catalog = await openRunCatalog(projectDir, env);
+  catalog ??= await openRunCatalog(projectDir, env);
   const entry = await catalog.find(runId);
   if (entry === undefined) {
     if (runId === undefined) {
@@ -87,15 +88,16 @@ export function registerArtifactTools(
         const recovery = args.finalizeOrphans === true
           ? await finalizeOrphanedEvidenceRuns(ctx.projectDir, ctx.env)
           : undefined;
-        const rustRuns = await listRustEvidenceRuns(await openRunCatalog(ctx.projectDir, ctx.env));
+        const opened = await openRunCatalog(ctx.projectDir, ctx.env);
+        const entries = await opened.list();
+        const rustRuns = await listRustEvidenceRuns(opened, entries);
         const rust = rustRuns.find(run => run.runId === args.runId);
         if (rust !== undefined) {
           return { data: { ...rust, report: renderRustEvidenceReport(rust).join("\n"),
             ...(recovery === undefined ? {} : { recovery }) } };
         }
         const rustLines = rustRuns.map(run => `${run.runId}  rust  ${run.outcome}`);
-        if (args.runId === undefined && rustRuns.length > 0 &&
-            await (await openRunCatalog(ctx.projectDir, ctx.env)).find() === undefined) {
+        if (args.runId === undefined && rustRuns.length > 0 && entries.length === 0) {
           return { data: { rustRuns, report: rustLines.join("\n"),
             ...(recovery === undefined ? {} : { recovery }) } };
         }
@@ -103,6 +105,7 @@ export function registerArtifactTools(
           ctx.projectDir,
           args.runId,
           ctx.env,
+          opened,
         );
         const { manifest, dir } = entry;
         const records = await readCatalogActions(catalog, entry);
