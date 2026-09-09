@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { agentsDir, ensureDir, type EnvLike } from "@pickforge/lab-core";
+import { agentsDir, DEVICE_PASS_WORKFLOW, ensureDir, type EnvLike } from "@pickforge/lab-core";
 import type { LinkOptions, McpServerEntry } from "./types.js";
 
 export const MCP_SERVER_NAME = "pickforge-lab";
@@ -11,6 +11,7 @@ export const LEGACY_BROWSER_MCP_SERVER_NAME = "picklab-browser";
 export const SHARED_SNIPPET_BASENAMES = [
   "pickforge-mcp.json",
   "pickforge-mcp.toml",
+  "device-pass.md",
 ] as const;
 export const LEGACY_SHARED_SNIPPET_BASENAMES = [
   "picklab-mcp.json",
@@ -105,6 +106,7 @@ export function renderTomlSnippet(
 export interface SharedSnippets {
   jsonPath: string;
   tomlPath: string;
+  devicePassPath: string;
 }
 
 export async function writeSharedSnippets(
@@ -115,5 +117,10 @@ export async function writeSharedSnippets(
   const tomlPath = path.join(dir, SHARED_SNIPPET_BASENAMES[1]);
   await fs.promises.writeFile(jsonPath, renderJsonSnippet(), "utf8");
   await fs.promises.writeFile(tomlPath, renderTomlSnippet(), "utf8");
-  return { jsonPath, tomlPath };
+  const devicePassPath = path.join(dir, SHARED_SNIPPET_BASENAMES[2]);
+  await fs.promises.writeFile(devicePassPath, DEVICE_PASS_WORKFLOW, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  return { jsonPath, tomlPath, devicePassPath };
 }

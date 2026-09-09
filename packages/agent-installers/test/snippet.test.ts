@@ -98,9 +98,16 @@ describe("renderTomlSnippet", () => {
 });
 
 describe("writeSharedSnippets", () => {
-  it("writes both snippet files into the agents dir", async () => {
+  it("writes shared snippets and the acceptance workflow into the agents dir", async () => {
     const env = { PICKFORGE_HOME: path.join(tmpDir, "state") };
     const snippets = await writeSharedSnippets(env);
+    expect(snippets.devicePassPath).toBe(
+      path.join(tmpDir, "state", "agents", "device-pass.md"),
+    );
+    expect(fs.statSync(snippets.devicePassPath).mode & 0o777).toBe(0o600);
+    const workflow = fs.readFileSync(snippets.devicePassPath, "utf8");
+    expect(workflow).toContain("Pass is refused without a successful interaction and an inspected screenshot.");
+    expect(workflow).toMatchSnapshot();
     expect(snippets.jsonPath).toBe(
       path.join(tmpDir, "state", "agents", "pickforge-mcp.json"),
     );

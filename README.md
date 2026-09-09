@@ -357,6 +357,17 @@ never changed.
 A future layout version may add entries, but only under a name the table above
 does not already assign, and only with both tools able to read version 1.
 
+### Acceptance workflow
+
+Claude Code, Codex, and Pi receive the acceptance workflow through the MCP
+server instructions and the `device_pass` prompt (required `scenario`, optional
+`revision` and `device`). `pickforge-lab agents install <agent>` and `agents link
+<agent>` also write `device-pass.md` under the Pickforge agents directory and
+print its path. The workflow requires visible interaction, inspection of saved
+screenshots, and an explicit `evidence_outcome`; recording alone does not establish
+acceptance. Evidence stays outside application repositories. No harness skills
+are automatically registered, and a device pass does not approve a merge.
+
 ### Evidence recording
 
 Computer-use tools share an evidence run while its creating process is alive.
