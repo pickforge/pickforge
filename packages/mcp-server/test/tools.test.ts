@@ -565,3 +565,18 @@ it("records acceptance outcomes through MCP with redaction and typed validation 
   expect(fs.readFileSync(path.join(run.dir, "actions.jsonl"), "utf8")).not.toContain(PLANTED_TOKEN);
   expect(fs.readFileSync(path.join(run.dir, "report.html"), "utf8")).toContain("Outcome: pass");
 });
+
+it("rejects oversize outcome lists at the schema instead of truncating them", async () => {
+  const run = await createRun(dirs.projectDir, "acceptance", { evidence: true }, { PICKFORGE_HOME: dirs.home, PICKFORGE_STORAGE_MODE: "project-local" });
+  const base = { runId: run.runId, scenario: "Checkout", status: "blocked", inspectedScreenshots: [] };
+  for (const oversize of [
+    { steps: Array(33).fill("step") },
+    { limitations: Array(33).fill("limitation") },
+    { inspectedScreenshots: Array(65).fill("screenshots/a.png") },
+  ]) {
+    const result = await lab.client.callTool({ name: "evidence_outcome", arguments: { ...base, ...oversize } });
+    expect(result.isError).toBe(true);
+  }
+  const missingList = await lab.client.callTool({ name: "evidence_outcome", arguments: { runId: run.runId, scenario: "Checkout", status: "blocked" } });
+  expect(missingList.isError).toBe(true);
+});

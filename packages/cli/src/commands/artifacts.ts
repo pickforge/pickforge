@@ -133,11 +133,21 @@ export async function runArtifactsReport(
   });
 }
 
+/** Oversize repeated options are refused outright; the core never silently truncates them. */
+function limitRepeated(flag: string, values: string[] | undefined, max: number): void {
+  if (values !== undefined && values.length > max) {
+    throw new Error(`At most ${max} --${flag} options are allowed (got ${values.length})`);
+  }
+}
+
 export async function runArtifactsOutcome(
   runId: string,
   opts: BaseCliOptions & Omit<EvidenceOutcomeInput, "inspectedScreenshots"> & { inspected?: string[]; step?: string[]; limitation?: string[] },
 ): Promise<number> {
   return runReported(opts, async () => {
+    limitRepeated("step", opts.step, 32);
+    limitRepeated("limitation", opts.limitation, 32);
+    limitRepeated("inspected", opts.inspected, 64);
     const outcome = await recordEvidenceOutcome(resolveProjectDir(opts), runId, {
       scenario: opts.scenario, status: opts.status, revision: opts.revision,
       steps: opts.step, limitations: opts.limitation, notes: opts.notes,

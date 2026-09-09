@@ -851,10 +851,14 @@ async function publishPointer(
   }
 }
 
+/** Device metadata is advisory: an unreadable session leaves it unknown rather than failing run creation. */
 async function sessionDevice(sessionId: string, env: EnvLike): Promise<RunManifest["device"]> {
-  const session = await getSession(sessionId, env);
+  const session = await getSession(sessionId, env).catch(() => undefined);
   if (session === undefined) return undefined;
   if (session.type === "android") return { kind: "emulator" };
+  // Mixed sessions (desktop+android) have no single device; only pure desktop
+  // and browser sessions carry desktop geometry.
+  if (session.type !== "desktop" && session.type !== "browser") return { kind: "unknown" };
   const device: NonNullable<RunManifest["device"]> = { kind: "desktop" };
   const { width, height } = session.desktop ?? {};
   if (width !== undefined && height !== undefined) device.viewport = { width, height };
@@ -2002,8 +2006,15 @@ function validActionFields(record: Record<string, unknown>): boolean {
 }
 
 type JournalSegment =
-  | { ok: true; record?: EvidenceRecord }
+  | { ok: true; record?: EvidenceRecord; skipped?: true }
   | { ok: false; reason: string; blank: boolean };
+
+/** A record of a future kind, recognizable only by a string `kind` and no action payload. */
+function futureKind(parsed: unknown): boolean {
+  if (typeof parsed !== "object" || parsed === null) return false;
+  const record = parsed as Record<string, unknown>;
+  return typeof record.kind === "string" && record.kind !== "outcome" && record.actionId === undefined;
+}
 
 function parseJournalSegment(segment: string, line: number): JournalSegment {
   if (segment === "") {
@@ -2011,7 +2022,7 @@ function parseJournalSegment(segment: string, line: number): JournalSegment {
   }
   try {
     const parsed: unknown = JSON.parse(segment);
-    if (typeof parsed === "object" && parsed !== null && "kind" in parsed && parsed.kind !== "outcome") return { ok: true };
+    if (futureKind(parsed)) return { ok: true, skipped: true };
     if (!validEvidenceRecord(parsed)) {
       return { ok: false, reason: "record is not a valid evidence record", blank: false };
     }
@@ -2024,21 +2035,24 @@ function parseJournalSegment(segment: string, line: number): JournalSegment {
 function scanActionsJournal(raw: string): {
   records: EvidenceRecord[];
   torn: boolean;
+  skipped: number;
   corrupt?: { line: number; reason: string; blank: boolean };
 } {
-  if (raw === "") return { records: [], torn: false };
+  if (raw === "") return { records: [], torn: false, skipped: 0 };
   const torn = !raw.endsWith("\n");
   const segments = raw.split("\n");
   segments.pop();
   const records: EvidenceRecord[] = [];
+  let skipped = 0;
   for (let index = 0; index < segments.length; index += 1) {
     const parsed = parseJournalSegment(segments[index]!, index + 1);
     if (!parsed.ok) {
-      return { records, torn: false, corrupt: { line: index + 1, reason: parsed.reason, blank: parsed.blank } };
+      return { records, torn: false, skipped, corrupt: { line: index + 1, reason: parsed.reason, blank: parsed.blank } };
     }
+    if (parsed.skipped === true) skipped += 1;
     if (parsed.record !== undefined) records.push(parsed.record);
   }
-  return { records, torn };
+  return { records, torn, skipped };
 }
 
 function journalCorruptError(journalLabel: string, line: number, reason: string, blank: boolean): Error {
@@ -2069,14 +2083,18 @@ export interface RecoverableJournal {
 /** Valid prefix of a journal; stop at the first invalid line without rewriting it. */
 export function parseRecoverableActionsJournal(raw: string): RecoverableJournal {
   const scan = scanActionsJournal(raw);
+  // Records of an unknown kind are hidden from the report; say so rather than losing them silently.
+  const skipped = scan.skipped === 0 ? undefined : `${scan.skipped} record(s) of an unknown kind skipped`;
   if (scan.corrupt !== undefined) {
+    const corrupt = `journal corrupt after record ${scan.records.length}`;
     return {
       records: scan.records,
       journal: "corrupt",
-      warning: `journal corrupt after record ${scan.records.length}`,
+      warning: skipped === undefined ? corrupt : `${corrupt}; ${skipped}`,
     };
   }
-  return { records: scan.records, journal: scan.torn ? "torn-tail" : "complete" };
+  const journal = scan.torn ? "torn-tail" : "complete";
+  return { records: scan.records, journal, ...(skipped === undefined ? {} : { warning: skipped }) };
 }
 
 async function readActionsFromHandle(

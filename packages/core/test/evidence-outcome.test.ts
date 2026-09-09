@@ -44,7 +44,7 @@ it("round trips device schema and derives only known session geometry", async ()
 it("sanitizes every text field and caps lists before persistence", async () => {
   const outcome = await recordEvidenceOutcome(project, run.runId, {
     ...input, status: "blocked", scenario: `token=${secret}`, notes: `token=${secret}`,
-    revision: "r".repeat(300), steps: Array(40).fill("s".repeat(700)), limitations: Array(40).fill("l".repeat(700)),
+    revision: "r".repeat(300), steps: Array(32).fill("s".repeat(700)), limitations: Array(32).fill("l".repeat(700)),
   });
   expect(outcome.scenario).not.toContain(secret);
   expect(outcome.notes).not.toContain(secret);
@@ -61,7 +61,7 @@ it("sanitizes every text field and caps lists before persistence", async () => {
   expect(parseRecoverableActionsJournal(raw).records).toEqual([outcome]);
 });
 
-it.each(["desktop_screenshot", "desktop_launch", "session_list", "evaluate_script"])("refuses pass from recording alone: %s", async (tool) => {
+it.each(["desktop_screenshot", "desktop_launch", "session_list", "evaluate_script", "desktop_move"])("refuses pass from recording alone: %s", async (tool) => {
   await interaction(tool);
   await expect(recordEvidenceOutcome(project, run.runId, input)).rejects.toThrow(/Recording alone/);
 });
@@ -71,7 +71,7 @@ it("refuses failed interactions and missing inspected screenshots", async () => 
   await interaction();
   await expect(recordEvidenceOutcome(project, run.runId, { ...input, inspectedScreenshots: [] })).rejects.toThrow(/Recording alone/);
 });
-it.each(["desktop_click", "android_tap", "chrome_devtools/fill", "chrome_devtools/press_key"])("accepts pass with %s and an inspected screenshot", async (tool) => {
+it.each(["desktop_click", "android_tap", "android_back", "chrome_devtools/fill", "chrome_devtools/press_key"])("accepts pass with %s and an inspected screenshot", async (tool) => {
   await interaction(tool);
   expect((await recordEvidenceOutcome(project, run.runId, input)).status).toBe("pass");
 });
@@ -90,9 +90,13 @@ it("rejects missing, traversal, symlink, directory and hardlink screenshots with
   await expect(recordEvidenceOutcome(project, run.runId, { ...input, status: "blocked", inspectedScreenshots: names })).rejects.toMatchObject({ name: "EvidenceOutcomeError", missingScreenshots: names });
   expect(await readActions(run.dir)).toEqual([]);
 });
-it("rejects invalid schemas and excessive screenshot lists", () => {
+it("rejects invalid schemas, timestamps and oversize lists instead of truncating", () => {
   expect(() => sanitizeOutcome({ ...input, status: "invalid" as "pass" })).toThrow(EvidenceOutcomeError);
   expect(() => sanitizeOutcome({ ...input, inspectedScreenshots: Array(65).fill("screenshots/a.png") })).toThrow(/64/);
+  expect(() => sanitizeOutcome({ ...input, steps: Array(33).fill("step") })).toThrow(/32 steps/);
+  expect(() => sanitizeOutcome({ ...input, limitations: Array(33).fill("limit") })).toThrow(/32 limitations/);
+  expect(() => sanitizeOutcome(input, "not-a-timestamp")).toThrow(/timestamp/);
+  expect(() => sanitizeOutcome(input, `${new Date().toISOString()}${"0".repeat(40)}`)).toThrow(/timestamp/);
 });
 it("keeps legacy journals readable and skips future record kinds", async () => {
   await interaction();
@@ -100,7 +104,13 @@ it("keeps legacy journals readable and skips future record kinds", async () => {
   expect(parseActionsJournal(raw, run.dir)).toHaveLength(1);
   const future = `${raw}{"kind":"future","payload":true}\n`;
   expect(parseActionsJournal(future, run.dir)).toEqual(parseActionsJournal(raw, run.dir));
-  expect(parseRecoverableActionsJournal(future).records).toEqual(parseActionsJournal(raw, run.dir));
+  const recovered = parseRecoverableActionsJournal(future);
+  expect(recovered.records).toEqual(parseActionsJournal(raw, run.dir));
+  expect(recovered.warning).toMatch(/1 record\(s\) of an unknown kind skipped/);
+  // A non-string kind is corrupt, and an action keeps its payload even with a kind.
+  expect(() => parseActionsJournal(`${raw}{"kind":5}\n`, run.dir)).toThrow(/Corrupt evidence journal/);
+  const kinded = JSON.stringify({ ...JSON.parse(raw.trim()), kind: "action" });
+  expect(parseActionsJournal(`${kinded}\n`, run.dir)).toEqual(parseActionsJournal(raw, run.dir).map((record) => ({ ...record, kind: "action" })));
   const legacy = await createRun(project, "legacy");
   await expect(recordEvidenceOutcome(project, legacy.runId, input)).rejects.toThrow(/Evidence run not found/);
 });
@@ -123,7 +133,22 @@ it("permits explicit outcomes on orphaned runs while refusing stale actions", as
   await expect(interaction()).rejects.toThrow(/orphaned/);
   const outcome = await recordEvidenceOutcome(project, run.runId, { ...input, status: "blocked", inspectedScreenshots: [] });
   expect(outcome.status).toBe("blocked");
+  await expect(recordEvidenceOutcome(project, run.runId, input)).rejects.toThrow(/pass is not allowed on an orphaned or failed run/);
   expect((await run.readManifest()).status).toBe("orphaned");
+});
+it("marks mixed sessions unknown and survives an unreadable session record", async () => {
+  const sessionFile = async (): Promise<string> => {
+    const session = await createSession({ type: "desktop", projectDir: project, desktop: { display: ":99", width: 1280, height: 720 } });
+    return path.join(project, "home", "sessions", `${session.id}.json`);
+  };
+  const mixed = await sessionFile();
+  const record = JSON.parse(await fs.promises.readFile(mixed, "utf8")) as { id: string; type: string };
+  await fs.promises.writeFile(mixed, JSON.stringify({ ...record, type: "desktop+android" }));
+  expect((await (await beginEvidenceRun(project, record.id)).run.readManifest()).device).toEqual({ kind: "unknown" });
+  const broken = await sessionFile();
+  const brokenId = (JSON.parse(await fs.promises.readFile(broken, "utf8")) as { id: string }).id;
+  await fs.promises.writeFile(broken, "{ not json");
+  expect((await (await beginEvidenceRun(project, brokenId)).run.readManifest()).device).toBeUndefined();
 });
 it("refuses a legacy fallback without materializing another store", async () => {
   const home = path.join(project, "other-home");

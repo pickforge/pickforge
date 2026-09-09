@@ -35,3 +35,17 @@ it("parses repeated outcome options and reports acceptance errors and success", 
     status: "pass", steps: ["Click submit", "Inspect result"], limitations: ["Desktop only"], revision: "abc123",
   });
 });
+
+it.each([
+  ["step", 33, "--step"],
+  ["limitation", 33, "--limitation"],
+  ["inspected", 65, "--inspected"],
+])("rejects more than the allowed number of --%s options", async (_flag, count, option) => {
+  const run = await createRun(project, "acceptance", { evidence: true });
+  const output = vi.spyOn(console, "log").mockImplementation(() => {});
+  const repeated = Array.from({ length: count }, () => [option, "screenshots/a.png"]).flat();
+  await buildProgram().parseAsync(["node", "pickforge-lab", "artifacts", "outcome", run.runId,
+    "--scenario", "Checkout", "--status", "blocked", ...repeated, "--json", "--project-dir", project]);
+  expect(process.exitCode).toBe(1);
+  expect(JSON.parse(output.mock.calls.at(-1)![0]).errors.join(" ")).toMatch(new RegExp(`At most \\d+ ${option} options are allowed`));
+});

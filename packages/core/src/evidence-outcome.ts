@@ -1,6 +1,6 @@
 import type { DirHandle } from "./dir-handle.js";
-import { appendAction, isEvidenceRun, isTruncationRecord, readActionsIn, type EvidenceRecord } from "./evidence.js";
-import { sanitizeErrorText } from "./evidence-sanitize.js";
+import { appendAction, isEvidenceRun, isTruncationRecord, readActionsIn, readEvidenceManifestIn, type EvidenceRecord } from "./evidence.js";
+import { redactSecrets } from "./redact.js";
 import { writeEvidenceReport } from "./evidence-render.js";
 import { adoptRunIn } from "./run.js";
 import { withExistingRunsRootDir } from "./run-root.js";
@@ -47,12 +47,25 @@ export function validOutcomeFields(record: Record<string, unknown>): boolean {
 }
 
 function cappedText(text: string, cap: number): string {
-  return sanitizeErrorText(text, cap).slice(0, cap);
+  return redactSecrets(text).slice(0, cap);
+}
+
+/** Callers may supply `recordedAt`; only a short, well-formed ISO timestamp is persisted. */
+const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/** Oversize lists are refused rather than truncated, so a caller never believes a trimmed record. */
+function assertOutcomeLimits(input: EvidenceOutcomeInput, recordedAt: string): void {
+  if (!validOutcomeFields({ ...input, recordedAt })) throw new EvidenceOutcomeError("Invalid evidence outcome fields");
+  if (recordedAt.length > 40 || !ISO_TIMESTAMP.test(recordedAt) || Number.isNaN(Date.parse(recordedAt))) {
+    throw new EvidenceOutcomeError("Invalid evidence outcome timestamp");
+  }
+  if (input.inspectedScreenshots.length > 64) throw new EvidenceOutcomeError("At most 64 inspected screenshots are allowed");
+  if ((input.steps?.length ?? 0) > 32) throw new EvidenceOutcomeError("At most 32 steps are allowed");
+  if ((input.limitations?.length ?? 0) > 32) throw new EvidenceOutcomeError("At most 32 limitations are allowed");
 }
 
 export function sanitizeOutcome(input: EvidenceOutcomeInput, recordedAt = new Date().toISOString()): EvidenceOutcomeRecord {
-  if (!validOutcomeFields({ ...input, recordedAt })) throw new EvidenceOutcomeError("Invalid evidence outcome fields");
-  if (input.inspectedScreenshots.length > 64) throw new EvidenceOutcomeError("At most 64 inspected screenshots are allowed");
+  assertOutcomeLimits(input, recordedAt);
   const record: EvidenceOutcomeRecord = {
     kind: "outcome", recordedAt,
     scenario: cappedText(input.scenario, 200), status: input.status,
@@ -60,15 +73,25 @@ export function sanitizeOutcome(input: EvidenceOutcomeInput, recordedAt = new Da
   };
   if (input.revision !== undefined) record.revision = cappedText(input.revision, 128);
   if (input.notes !== undefined) record.notes = cappedText(input.notes, 512);
-  if (input.steps !== undefined) record.steps = input.steps.slice(0, 32).map((text) => cappedText(text, 512));
-  if (input.limitations !== undefined) record.limitations = input.limitations.slice(0, 32).map((text) => cappedText(text, 512));
+  if (input.steps !== undefined) record.steps = input.steps.map((text) => cappedText(text, 512));
+  if (input.limitations !== undefined) record.limitations = input.limitations.map((text) => cappedText(text, 512));
   return record;
 }
 
-const INTERACTION = /^(?:(?:desktop|android|browser)[_. ]|chrome_devtools\/)?(?:click|tap|type|key|scroll|drag|double_click|move|click_at|fill|fill_form|press_key|hover|type_text)$/;
+/**
+ * Tool names producers actually persist for input that changes the app under
+ * test. Pointer moves and pure observation (screenshots, UI trees, logcat,
+ * launch, exec, listings) are deliberately absent.
+ */
+const INTERACTION_TOOLS: ReadonlySet<string> = new Set([
+  "desktop_click", "desktop_double_click", "desktop_drag", "desktop_scroll", "desktop_type", "desktop_key",
+  "android_tap", "android_type", "android_back", "android_home",
+  ...["click", "click_at", "drag", "fill", "fill_form", "handle_dialog", "hover", "navigate_page", "press_key", "type_text", "upload_file"]
+    .map((name) => `chrome_devtools/${name}`),
+]);
 
 function successfulInteraction(record: EvidenceRecord): boolean {
-  return !isOutcomeRecord(record) && !isTruncationRecord(record) && record.status === "ok" && INTERACTION.test(record.tool);
+  return !isOutcomeRecord(record) && !isTruncationRecord(record) && record.status === "ok" && INTERACTION_TOOLS.has(record.tool);
 }
 
 async function missingScreenshots(dir: DirHandle, names: string[]): Promise<string[]> {
@@ -100,6 +123,12 @@ export async function validateOutcomeIn(dir: DirHandle, record: EvidenceOutcomeR
   }
   const inspected = record.inspectedScreenshots.length > 0;
   if (record.status === "partial" && !inspected) throw new EvidenceOutcomeError("A partial outcome requires an inspected screenshot");
+  if (record.status === "pass") {
+    const status = (await readEvidenceManifestIn(dir)).status;
+    if (status !== "running" && status !== "completed") {
+      throw new EvidenceOutcomeError("pass is not allowed on an orphaned or failed run");
+    }
+  }
   if (record.status === "pass" && (!inspected || !(await readActionsIn(dir)).some(successfulInteraction))) {
     throw new EvidenceOutcomeError("Recording alone does not establish acceptance: pass requires a successful interaction and an inspected screenshot");
   }
@@ -108,7 +137,7 @@ export async function validateOutcomeIn(dir: DirHandle, record: EvidenceOutcomeR
 export async function recordEvidenceOutcome(projectDir: string, runId: string, input: EvidenceOutcomeInput, env: EnvLike = process.env): Promise<EvidenceOutcomeRecord> {
   const catalog = await openRunCatalog(projectDir, env);
   const entry = await catalog.find(runId);
-  if (entry === undefined || !isEvidenceRun(entry.manifest)) throw new EvidenceOutcomeError(`Evidence run not found: ${runId}`);
+  if (entry === undefined || !isEvidenceRun(entry.manifest)) throw new EvidenceOutcomeError(`Evidence run not found: ${cappedText(runId, 128)}`);
   // Adoption must use the selected writable root, never a legacy catalog fallback.
   const run = await withExistingRunsRootDir(projectDir, env, async (root) => {
     if (root === undefined || root.dir !== entry.rootDir) {

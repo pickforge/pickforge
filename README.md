@@ -406,11 +406,13 @@ pickforge-lab artifacts outcome <runId> --scenario "Checkout" --status pass --in
 
 MCP `evidence_outcome` accepts a required `runId`, `scenario`, `status`, and
 `inspectedScreenshots`, plus optional `steps`, `limitations`, `revision`, and
-`notes`. Pass requires a successful interaction and an inspected screenshot;
-partial requires an inspected screenshot. Fail and blocked can record missing
-evidence. Screenshot paths must name safe regular files in that run. Text is
-redacted and capped. Recording alone does not establish acceptance. Appending
-to a finalized run refreshes its report.
+`notes`. Pass requires a successful interaction and an inspected screenshot,
+and is refused on an orphaned or failed run; partial requires an inspected
+screenshot. Fail and blocked can record missing evidence. Screenshot paths
+must name safe regular files in that run. At most 32 steps, 32 limitations and
+64 inspected screenshots are accepted; longer lists are rejected, never
+truncated. Text is redacted and capped. Recording alone does not establish
+acceptance. Appending to a finalized run refreshes its report.
 
 Typed values are stored only as length and input type. Network failures keep
 only allowlisted method, URL origin/path without its query, status, resource
