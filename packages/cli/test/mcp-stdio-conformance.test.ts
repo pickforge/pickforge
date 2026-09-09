@@ -362,6 +362,7 @@ describe("raw MCP stdio wire", () => {
     expect(resourceTemplates?.map(({ uriTemplate }) => uriTemplate)).toHaveLength(6);
     expect(promptsList?.map(({ name }) => name).sort()).toEqual([
       "debug-android-apk",
+      "device_pass",
       "run-visual-regression-check",
       "test-flutter-desktop-visually",
     ]);
@@ -466,7 +467,7 @@ describe("isolated-home real CLI contract", () => {
     );
 
     expect(toolNames(tools)).toEqual(EXPECTED_TOOLS);
-    expect(prompts.result?.prompts).toHaveLength(3);
+    expect(prompts.result?.prompts).toHaveLength(4);
     expect(resources.result?.resources).toHaveLength(1);
     expect(JSON.stringify(artifact.result)).toContain(wire.projectDir);
     expect(wire.projectDir).toBe(path.join(wire.root, "project"));

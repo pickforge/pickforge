@@ -23,9 +23,10 @@ const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const RESERVED_NAMES = new Set<string>([
   ...AGENT_KINDS,
   "state",
-  ...[...SHARED_SNIPPET_BASENAMES, ...LEGACY_SHARED_SNIPPET_BASENAMES].map(
-    (basename) => basename.replace(/\.[^.]+$/, ""),
-  ),
+  // Only the JSON snippets collide with `<name>.json` custom agent configs.
+  ...[...SHARED_SNIPPET_BASENAMES, ...LEGACY_SHARED_SNIPPET_BASENAMES]
+    .filter((basename) => basename.endsWith(".json"))
+    .map((basename) => basename.slice(0, -".json".length)),
 ]);
 
 export interface CustomAgent {

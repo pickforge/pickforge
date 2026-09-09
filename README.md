@@ -358,6 +358,18 @@ never changed.
 A future layout version may add entries, but only under a name the table above
 does not already assign, and only with both tools able to read version 1.
 
+### Acceptance workflow
+
+The server offers a short summary of the workflow as MCP instructions, which
+each client decides whether to surface. The paths every agent gets are the
+`device_pass` prompt (required `scenario`, optional `revision` and `device`) and
+`device-pass.md`, which `pickforge-lab agents install <agent>` and `agents link
+<agent>` write under the Pickforge agents directory, printing its path. Both
+carry the full workflow: visible interaction, inspection of saved screenshots,
+and an explicit `evidence_outcome`. Recording alone does not establish
+acceptance. Evidence stays outside application repositories. No harness skills
+are automatically registered, and a device pass does not approve a merge.
+
 ### Evidence recording
 
 Computer-use tools share an evidence run while its creating process is alive.
