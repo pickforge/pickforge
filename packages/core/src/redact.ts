@@ -142,14 +142,6 @@ function isEmbeddingBoundary(text: string, index: number): boolean {
   return ch === undefined || /[\s,}\]>\/]/.test(ch);
 }
 
-/**
- * Walk the remainder of a Cookie/Set-Cookie header from `start`, redacting
- * each pair's value while preserving structure. Handles balanced quoted
- * values (`sid="abc; def"`, including `\"`-escaped quotes inside JSON
- * strings), apostrophes inside legal unquoted values (`name=o'brien`), and
- * XML/JSON embedding: a quote that does not open a value ends the header so
- * the surrounding document's delimiters survive.
- */
 function cookieQuoteTokenAt(text: string, i: number): string | undefined {
   if (text[i] === '"' || text[i] === "'") {
     return text[i];
@@ -256,6 +248,14 @@ function readCookiePairName(
   return { name: text.slice(start, i), next: i };
 }
 
+/**
+ * Walk the remainder of a Cookie/Set-Cookie header from `start`, redacting
+ * each pair's value while preserving structure. Handles balanced quoted
+ * values (`sid="abc; def"`, including `\"`-escaped quotes inside JSON
+ * strings), apostrophes inside legal unquoted values (`name=o'brien`), and
+ * XML/JSON embedding: a quote that does not open a value ends the header so
+ * the surrounding document's delimiters survive.
+ */
 function redactCookiePairs(
   text: string,
   start: number,

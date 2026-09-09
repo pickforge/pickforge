@@ -108,34 +108,6 @@ function isSameOrDescendant(ancestor: string, descendant: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-/**
- * Resolve where new run artifacts should be written for a project.
- *
- * Reads `storage` from two config layers plus an environment override, in
- * increasing precedence: global config (`<PICKFORGE_HOME>/config.json`),
- * project config (`.picklab/config.json`), then `PICKFORGE_STORAGE_MODE` /
- * `PICKFORGE_STORAGE_PATH` for automation and tests. **`custom` mode is an
- * exception to that precedence**: only the global-config layer or the env
- * override may select it (and supply its path) — project config is
- * repo-committed and travels with `git clone`, so honoring a `custom`
- * selection from it would let a cloned repository silently redirect
- * artifact writes (screenshots, which may carry secrets) to any absolute
- * path with no prompt. A project config requesting `custom` is treated as
- * absent and the resolver falls through to global config, then `home`; see
- * `rejectedProjectCustom` on the result. Project config may still select
- * `project-local` (blast radius already scoped to the project itself) or
- * `home`.
- *
- * - `home` (default): `<pickforgeHome>/projects/<projectId>/runs`, isolated per
- *   project and outside every target repository.
- * - `project-local`: the pre-#34 `<project>/.picklab/runs` layout.
- * - `custom`: `<storage.path>/runs` under an explicit absolute path outside
- *   the project directory (rejected if it equals or is nested inside it —
- *   that would just reintroduce project pollution, un-namespaced).
- *
- * This is the single resolver every run-creation and artifact-lookup path
- * (core, CLI, MCP) goes through, so they always agree on where runs live.
- */
 interface StorageSelection {
   mode: StorageMode;
   customPath: string | undefined;
@@ -208,6 +180,34 @@ function resolveCustomRunStorage(
   );
 }
 
+/**
+ * Resolve where new run artifacts should be written for a project.
+ *
+ * Reads `storage` from two config layers plus an environment override, in
+ * increasing precedence: global config (`<PICKFORGE_HOME>/config.json`),
+ * project config (`.picklab/config.json`), then `PICKFORGE_STORAGE_MODE` /
+ * `PICKFORGE_STORAGE_PATH` for automation and tests. **`custom` mode is an
+ * exception to that precedence**: only the global-config layer or the env
+ * override may select it (and supply its path) — project config is
+ * repo-committed and travels with `git clone`, so honoring a `custom`
+ * selection from it would let a cloned repository silently redirect
+ * artifact writes (screenshots, which may carry secrets) to any absolute
+ * path with no prompt. A project config requesting `custom` is treated as
+ * absent and the resolver falls through to global config, then `home`; see
+ * `rejectedProjectCustom` on the result. Project config may still select
+ * `project-local` (blast radius already scoped to the project itself) or
+ * `home`.
+ *
+ * - `home` (default): `<pickforgeHome>/projects/<projectId>/runs`, isolated per
+ *   project and outside every target repository.
+ * - `project-local`: the pre-#34 `<project>/.picklab/runs` layout.
+ * - `custom`: `<storage.path>/runs` under an explicit absolute path outside
+ *   the project directory (rejected if it equals or is nested inside it —
+ *   that would just reintroduce project pollution, un-namespaced).
+ *
+ * This is the single resolver every run-creation and artifact-lookup path
+ * (core, CLI, MCP) goes through, so they always agree on where runs live.
+ */
 export async function resolveRunStorage(
   projectDir: string,
   env: EnvLike = process.env,

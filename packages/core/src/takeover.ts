@@ -317,19 +317,6 @@ export interface AcquireHumanLeaseOptions {
   _afterCreate?: () => void | Promise<void>;
 }
 
-/**
- * Acquire exclusive human control of a session: atomically (`wx`) create the
- * lease file, then wait for every agent permit that existed at that instant
- * to drain (finish, or be recognized as owned by a dead process and swept).
- *
- * A second acquisition attempt while the lease is live throws
- * `HumanLeaseHeldError` immediately — this is a single-winner primitive, not
- * a queue. An existing lease whose owner is dead or whose TTL elapsed throws
- * `StaleHumanLeaseError` so the caller can recover it (see
- * `clearStaleHumanLease`) and retry. If permits fail to drain in time, the
- * lease this call just created is released and `HumanLeaseDrainTimeoutError`
- * is thrown — "timeout aborts cleanly."
- */
 function buildHumanLease(
   sessionId: string,
   now: Date,
@@ -387,6 +374,19 @@ async function createExclusiveHumanLeaseFile(
   }
 }
 
+/**
+ * Acquire exclusive human control of a session: atomically (`wx`) create the
+ * lease file, then wait for every agent permit that existed at that instant
+ * to drain (finish, or be recognized as owned by a dead process and swept).
+ *
+ * A second acquisition attempt while the lease is live throws
+ * `HumanLeaseHeldError` immediately — this is a single-winner primitive, not
+ * a queue. An existing lease whose owner is dead or whose TTL elapsed throws
+ * `StaleHumanLeaseError` so the caller can recover it (see
+ * `clearStaleHumanLease`) and retry. If permits fail to drain in time, the
+ * lease this call just created is released and `HumanLeaseDrainTimeoutError`
+ * is thrown — "timeout aborts cleanly."
+ */
 export async function acquireHumanLease(
   sessionId: string,
   env: EnvLike = process.env,

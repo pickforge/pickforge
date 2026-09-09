@@ -670,18 +670,6 @@ function signalGroup(pid: number, signal: NodeJS.Signals): void {
   }
 }
 
-/**
- * Terminate a whole process group, identified by its group-leader identity,
- * with SIGTERM then SIGKILL escalation. Before the first signal, the recorded
- * process must still exist with its recorded start identity and lead the
- * recorded group. This remains verifiable while the leader is a zombie.
- * After that verified group receives SIGTERM, a missing leader does not make
- * its surviving same-pgid members unsafe: the pgid cannot be reused while they
- * remain, so SIGKILL escalation is valid. A reused live leader is still refused.
- *
- * The leader must have been spawned as a process-group leader (e.g. `spawn`
- * with `detached: true`), so its PID doubles as the group id.
- */
 function leaderGroupMismatch(leader: ProcStat, identity: ProcessIdentity): boolean {
   return leader.startTicks !== identity.startTicks || leader.pgrp !== identity.pid;
 }
@@ -729,6 +717,18 @@ function classifyAfterTerm(identity: ProcessIdentity): StopProcessGroupResult | 
   return undefined;
 }
 
+/**
+ * Terminate a whole process group, identified by its group-leader identity,
+ * with SIGTERM then SIGKILL escalation. Before the first signal, the recorded
+ * process must still exist with its recorded start identity and lead the
+ * recorded group. This remains verifiable while the leader is a zombie.
+ * After that verified group receives SIGTERM, a missing leader does not make
+ * its surviving same-pgid members unsafe: the pgid cannot be reused while they
+ * remain, so SIGKILL escalation is valid. A reused live leader is still refused.
+ *
+ * The leader must have been spawned as a process-group leader (e.g. `spawn`
+ * with `detached: true`), so its PID doubles as the group id.
+ */
 export async function stopProcessGroupVerified(
   identity: ProcessIdentity,
   opts: { timeoutMs?: number } = {},
