@@ -572,6 +572,7 @@ function readProcStat(pid: number): ProcStat | undefined {
   try {
     content = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
   } catch {
+    // Unreadable is not proof of death: EPERM still has a live process.
     return undefined;
   }
   return parseProcStat(content);
@@ -609,6 +610,19 @@ export function readProcessGroupLeaderIdentity(
 export function processIdentityMatches(identity: ProcessIdentity): boolean {
   const startTicks = readProcessStartTicks(identity.pid);
   return startTicks !== undefined && startTicks === identity.startTicks;
+}
+
+/**
+ * Whether a recorded owner is still the same live process. A readable start-time
+ * mismatch is PID reuse, and a readable zombie is dead even when its start time
+ * still matches. If `/proc/<pid>/stat` cannot be read, fall back to
+ * {@link isPidAlive}: only ESRCH is dead, EPERM stays alive.
+ */
+export function identityIsAlive(pid: number, startTicks?: number): boolean {
+  if (startTicks === undefined) return isPidAlive(pid);
+  const stat = readProcStat(pid);
+  if (stat === undefined) return isPidAlive(pid);
+  return stat.state !== "Z" && stat.startTicks === startTicks;
 }
 
 /**

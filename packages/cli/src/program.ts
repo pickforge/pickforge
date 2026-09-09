@@ -636,7 +636,8 @@ function registerArtifactCommands(program: Command): void {
       artifacts
         .command("report")
         .description("Render a report for a run (default: latest)")
-        .argument("[runId]", "run id"),
+        .argument("[runId]", "run id")
+        .option("--finalize-orphans", "Recover orphaned evidence and session indexes in the configured storage root; stop producers first"),
     ),
   ).action(async (runId, opts) => {
     process.exitCode = await runArtifactsReport(runId, opts);

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { isProcessGroupAlive } from "@pickforge/lab-core";
+import { appendAction, createRun, isProcessGroupAlive } from "@pickforge/lab-core";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { imageContent } from "../src/context.js";
 import { createMcpServer } from "../src/index.js";
@@ -266,6 +266,26 @@ describe("artifact report", () => {
     );
     expect(report).toContain("[REDACTED]");
     expect(report).not.toContain(PLANTED_TOKEN);
+  });
+
+  it("recovers orphan evidence through artifact_report in the configured write root", async () => {
+    const run = await createRun(dirs.projectDir, "orphan", {
+      evidence: true, sessionId: "brow-orphan",
+    }, { PICKFORGE_HOME: dirs.home, PICKFORGE_STORAGE_MODE: "project-local" });
+    await appendAction(run, {
+      actionId: "mcp", source: "mcp", tool: "synthetic", status: "ok", startedAt: "2026-06-09T12:00:00.000Z",
+    });
+    const before = fs.readFileSync(path.join(run.dir, "actions.jsonl"));
+    const result = await lab.client.callTool({
+      name: "artifact_report", arguments: { runId: run.runId, finalizeOrphans: true },
+    });
+    expect(result.isError).toBeFalsy();
+    const report = parseToolJson(result);
+    expect(report.manifest.status).toBe("orphaned");
+    expect(report.report).toContain("mcp / synthetic");
+    expect(report.recovery.sessions[0].sessionId).toBe("brow-orphan");
+    expect(fs.readFileSync(report.recovery.sessions[0].index, "utf8")).toContain(`${run.runId}/report.html`);
+    expect(fs.readFileSync(path.join(run.dir, "actions.jsonl"))).toEqual(before);
   });
 
   it("fails closed for an unsafe evidence journal", async () => {

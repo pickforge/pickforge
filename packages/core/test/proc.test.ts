@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  identityIsAlive,
   isPidAlive,
   isProcessGroupAlive,
   listProcessGroupMembers,
@@ -320,6 +321,49 @@ describe("process identity and group termination", () => {
         startTicks: identity.startTicks + 1,
       }),
     ).toBe(false);
+  });
+
+  it("treats an unreadable /proc/stat as live when kill(0) is not ESRCH", () => {
+    const self = readProcessIdentity(process.pid);
+    expect(self).toBeDefined();
+    const identity = self as ProcessIdentity;
+    const original = fs.readFileSync;
+    const read = vi.spyOn(fs, "readFileSync").mockImplementation(((target, ...rest) => {
+      if (String(target) === `/proc/${process.pid}/stat`) {
+        throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+      }
+      return original.call(fs, target, ...rest);
+    }) as typeof fs.readFileSync);
+    try {
+      expect(identityIsAlive(identity.pid, identity.startTicks)).toBe(true);
+      expect(identityIsAlive(identity.pid, identity.startTicks + 1)).toBe(true);
+      expect(processIdentityMatches(identity)).toBe(false);
+    } finally {
+      read.mockRestore();
+    }
+  });
+
+  it("treats a readable zombie owner as dead even when start ticks match", () => {
+    const pid = 1_234_568;
+    const startTicks = 789;
+    const read = vi
+      .spyOn(fs, "readFileSync")
+      .mockReturnValue(procStat(pid, "Z", pid, startTicks));
+    const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+    try {
+      expect(identityIsAlive(pid, startTicks)).toBe(false);
+    } finally {
+      kill.mockRestore();
+      read.mockRestore();
+    }
+  });
+
+  it("treats a readable start-time mismatch as PID reuse", () => {
+    const self = readProcessIdentity(process.pid);
+    expect(self).toBeDefined();
+    const identity = self as ProcessIdentity;
+    expect(identityIsAlive(identity.pid, identity.startTicks)).toBe(true);
+    expect(identityIsAlive(identity.pid, identity.startTicks + 1)).toBe(false);
   });
 
   it("refuses to signal a live pid whose start identity no longer matches", async () => {
