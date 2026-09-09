@@ -1942,6 +1942,7 @@ describe("pickforge-lab artifacts", () => {
     const report = parseJson(result);
     expect(report.runs).toEqual([
       {
+        source: "lab",
         runId: "20260609-120000-synthetic",
         slug: "synthetic",
         createdAt: "2026-06-09T12:00:00.000Z",
@@ -1949,6 +1950,7 @@ describe("pickforge-lab artifacts", () => {
         artifacts: 1,
       },
       {
+        source: "lab",
         runId: "20260609-110000-synthetic",
         slug: "synthetic",
         createdAt: "2026-06-09T11:00:00.000Z",

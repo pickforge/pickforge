@@ -299,3 +299,10 @@ export { recordEvidenceOutcome, isOutcomeRecord, EvidenceOutcomeError, type Evid
 export type { EvidenceDevice } from "./run.js";
 
 export { DEVICE_PASS_WORKFLOW } from "./acceptance-workflow.js";
+export {
+  readRustEvidenceRun,
+  listRustEvidenceRuns,
+  listArtifactRuns,
+  renderRustEvidenceReport,
+  type RustEvidenceRun,
+} from "./rust-evidence.js";
