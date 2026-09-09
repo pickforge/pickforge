@@ -478,6 +478,19 @@ pickforge-lab agents list
 pickforge-lab agents doctor
 ```
 
+`agents install` registers only the `pickforge-lab` server. The browser
+DevTools relay (`pickforge-lab-browser`) fails to start until a browser session
+exists, so it is opt-in: pass `--browser` to register it as well. Without the
+flag an existing `pickforge-lab-browser` entry is left exactly as it is, even
+if its command differs, and the command reports it as retained (JSON:
+`retainedEntries`). Upgrading a legacy `picklab-browser` registration keeps a
+browser entry without the flag, because that install already had one.
+`agents unlink` removes both entries.
+
+```sh
+pickforge-lab agents install claude-code --browser
+```
+
 Pi uses `$HOME/.config/mcp/mcp.json`; core Pi needs `pi-mcp-adapter` to load it.
 The adapter's shared global config path is fixed and ignores `XDG_CONFIG_HOME`.
 Both `pickforge init --harness pi` and `pickforge-lab agents install pi` keep
@@ -491,7 +504,16 @@ For any other agent, add the stdio server yourself:
     "pickforge-lab": {
       "command": "pickforge-lab",
       "args": ["mcp", "serve"]
-    },
+    }
+  }
+}
+```
+
+Add the browser relay only when the agent should drive lab browser sessions:
+
+```json
+{
+  "mcpServers": {
     "pickforge-lab-browser": {
       "command": "pickforge-lab",
       "args": ["browser", "devtools-mcp"]
@@ -520,7 +542,7 @@ pickforge-lab agents add --name my-agent --mcp-command "pickforge-lab mcp serve"
 | Desktop | `desktop launch <cmd>`, `desktop exec <cmd>`, `desktop env`, `desktop screenshot`, `desktop click <x> <y>`, `desktop move <x> <y>`, `desktop scroll <deltaX> <deltaY>`, `desktop drag <fromX> <fromY> <toX> <toY>`, `desktop double-click <x> <y>`, `desktop type <text>`, `desktop key <keys>` |
 | Android | `android start`, `android install-apk <apk> [--wait-ready <s>]`, `android launch-app <pkg> [--wait-ready <s>]`, `android screenshot`, `android tap <x> <y>`, `android type <text>`, `android back`, `android home`, `android ui-tree`, `android logcat`, `android adb [args...]` |
 | Artifacts | `artifacts list`, `artifacts open <runId>`, `artifacts report [runId]` |
-| Agents | `agents list`, `agents install <agent>`, `agents link <agent>`, `agents unlink <agent>`, `agents doctor`, `agents add` |
+| Agents | `agents list`, `agents install <agent> [--browser]`, `agents link <agent> [--browser]`, `agents unlink <agent>`, `agents doctor`, `agents add` |
 | Browser | `browser devtools-mcp` |
 | MCP | `mcp serve` |
 

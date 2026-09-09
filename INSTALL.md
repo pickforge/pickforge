@@ -89,6 +89,13 @@ pickforge-lab agents install cursor         # Cursor
 pickforge-lab agents install pi             # ~/.config/mcp/mcp.json
 ```
 
+This registers only the `pickforge-lab` server. Add `--browser` to also
+register the `pickforge-lab-browser` DevTools relay; it fails to start until a
+browser session exists, so only register it when the user wants browser
+automation. Without `--browser`, an existing `pickforge-lab-browser` entry is
+left untouched and reported as retained. A migrated legacy `picklab-browser`
+registration keeps its browser entry without the flag.
+
 Core Pi has no built-in MCP support, so its config requires
 `pi-mcp-adapter`. The adapter reads shared global config from the fixed path
 `$HOME/.config/mcp/mcp.json`, ignoring `XDG_CONFIG_HOME`. Both

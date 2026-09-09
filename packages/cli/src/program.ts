@@ -662,6 +662,11 @@ function registerAgentLinkCommands(agents: Command): void {
         .option(
           "--config-path <path>",
           "agent config file (overrides the default location)",
+        )
+        .option(
+          "--browser",
+          "also register the pickforge-lab-browser DevTools MCP server " +
+            "(it needs a live browser session; existing entries are kept as-is without this flag)",
         ),
     ).action(async (agent, opts) => {
       process.exitCode = await runAgentsLink(agent, opts);

@@ -6,9 +6,11 @@ import {
   MCP_SERVER_NAME,
   legacyMcpServerEntries,
   pickforgeLabMcpServerEntries,
+  wantsBrowserEntry,
 } from "./snippet.js";
 import type {
   ChangeResult,
+  LinkOptions,
   McpServerEntry,
   RegistrationState,
 } from "./types.js";
@@ -92,6 +94,34 @@ export async function ownedLegacyMcpServerNamesInJsonFile(
     : [];
 }
 
+function retainedEntryNames(servers: JsonObject, browser: boolean): string[] {
+  return !browser && BROWSER_MCP_SERVER_NAME in servers
+    ? [BROWSER_MCP_SERVER_NAME]
+    : [];
+}
+
+function withRetained<T extends ChangeResult>(
+  result: T,
+  retainedEntries: string[],
+): T {
+  return retainedEntries.length === 0 ? result : { ...result, retainedEntries };
+}
+
+export async function jsonFileRetainedMcpServerNames(
+  filePath: string,
+  opts: LinkOptions = {},
+): Promise<string[]> {
+  let config: JsonObject | undefined;
+  try {
+    config = await readJsonObject(filePath);
+  } catch {
+    return [];
+  }
+  return config !== undefined && isPlainObject(config.mcpServers)
+    ? retainedEntryNames(config.mcpServers, opts.browser === true)
+    : [];
+}
+
 function normalizedEntry(entry: McpServerEntry): McpServerEntry {
   return { command: entry.command, args: entry.args };
 }
@@ -115,7 +145,7 @@ function withServers(config: JsonObject, servers: JsonObject): JsonObject {
   return { ...config, mcpServers: servers };
 }
 
-export interface JsonMergeOptions {
+export interface JsonMergeOptions extends LinkOptions {
   createIfMissing: boolean;
   entry?: McpServerEntry;
 }
@@ -124,10 +154,6 @@ export async function mergeMcpServerIntoJsonFile(
   filePath: string,
   opts: JsonMergeOptions,
 ): Promise<ChangeResult> {
-  const entries =
-    opts.entry === undefined
-      ? pickforgeLabMcpServerEntries()
-      : { [MCP_SERVER_NAME]: opts.entry };
   const existing = await readJsonObject(filePath);
   if (existing === undefined && !opts.createIfMissing) {
     throw new Error(`Config file not found: ${filePath}`);
@@ -135,27 +161,36 @@ export async function mergeMcpServerIntoJsonFile(
   const config = existing ?? {};
   const servers = isPlainObject(config.mcpServers) ? config.mcpServers : {};
   const migratedLegacyEntries = ownedLegacyEntryNames(servers);
+  const browser = wantsBrowserEntry(
+    opts,
+    migratedLegacyEntries,
+    BROWSER_MCP_SERVER_NAME in servers,
+  );
+  const entries =
+    opts.entry === undefined
+      ? pickforgeLabMcpServerEntries({ browser })
+      : { [MCP_SERVER_NAME]: opts.entry };
+  const retainedEntries = retainedEntryNames(servers, browser);
   const alreadyCurrent = Object.entries(entries).every(([name, entry]) =>
     entryMatches(servers[name], entry),
   );
   if (alreadyCurrent && migratedLegacyEntries.length === 0) {
-    return { configPath: filePath, changed: false };
+    return withRetained({ configPath: filePath, changed: false }, retainedEntries);
   }
   const backupPath =
     existing === undefined ? undefined : await backupFile(filePath);
   const nextServers = mergedServers(servers, entries, migratedLegacyEntries);
   await writeJsonObject(filePath, withServers(config, nextServers));
-  return {
-    configPath: filePath,
-    changed: true,
-    backupPath,
-    migratedLegacyEntries,
-  };
+  return withRetained(
+    { configPath: filePath, changed: true, backupPath, migratedLegacyEntries },
+    retainedEntries,
+  );
 }
 
 /** Replace only owned legacy entries, without creating or otherwise editing a config. */
 export async function replaceOwnedLegacyMcpServersInJsonFile(
   filePath: string,
+  opts: LinkOptions = {},
 ): Promise<ChangeResult> {
   let config: JsonObject | undefined;
   try {
@@ -170,19 +205,22 @@ export async function replaceOwnedLegacyMcpServersInJsonFile(
   if (migratedLegacyEntries.length === 0) {
     return { configPath: filePath, changed: false };
   }
+  const browser = wantsBrowserEntry(
+    opts,
+    migratedLegacyEntries,
+    BROWSER_MCP_SERVER_NAME in config.mcpServers,
+  );
   const backupPath = await backupFile(filePath);
   const nextServers = mergedServers(
     config.mcpServers,
-    pickforgeLabMcpServerEntries(),
+    pickforgeLabMcpServerEntries({ browser }),
     migratedLegacyEntries,
   );
   await writeJsonObject(filePath, withServers(config, nextServers));
-  return {
-    configPath: filePath,
-    changed: true,
-    backupPath,
-    migratedLegacyEntries,
-  };
+  return withRetained(
+    { configPath: filePath, changed: true, backupPath, migratedLegacyEntries },
+    retainedEntryNames(config.mcpServers, browser),
+  );
 }
 
 export async function removeMcpServerFromJsonFile(

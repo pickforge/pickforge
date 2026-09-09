@@ -199,6 +199,102 @@ describe("pickforge-lab agents link cursor", () => {
     expect(backupsIn(tmpDir)).toHaveLength(1);
   });
 
+  it("registers only the core server by default and the browser relay with --browser", async () => {
+    const configPath = path.join(tmpDir, "cursor-mcp.json");
+    const linked = parseJson(
+      await runCli(
+        ["agents", "install", "cursor", "--config-path", configPath, "--json"],
+        env,
+      ),
+    );
+    expect(linked.browser).toBe(false);
+    expect(linked.retainedEntries).toEqual([]);
+    expect(Object.keys(JSON.parse(fs.readFileSync(configPath, "utf8")).mcpServers)).toEqual([
+      "pickforge-lab",
+    ]);
+
+    const withBrowser = await runCli(
+      [
+        "agents",
+        "install",
+        "cursor",
+        "--config-path",
+        configPath,
+        "--browser",
+        "--json",
+      ],
+      env,
+    );
+    expect(withBrowser.code).toBe(0);
+    const report = parseJson(withBrowser);
+    expect(report.browser).toBe(true);
+    expect(report.changed).toBe(true);
+    expect(report.retainedEntries).toEqual([]);
+    expect(
+      JSON.parse(fs.readFileSync(configPath, "utf8")).mcpServers[
+        "pickforge-lab-browser"
+      ],
+    ).toEqual({ command: "pickforge-lab", args: ["browser", "devtools-mcp"] });
+
+    const again = parseJson(
+      await runCli(
+        [
+          "agents",
+          "install",
+          "cursor",
+          "--config-path",
+          configPath,
+          "--browser",
+          "--json",
+        ],
+        env,
+      ),
+    );
+    expect(again.changed).toBe(false);
+  });
+
+  it("retains a mismatching browser entry and reports it in JSON and human output", async () => {
+    const configPath = path.join(tmpDir, "cursor-mcp.json");
+    const stale = { command: "old-pickforge-lab", args: ["browser", "old"] };
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({ mcpServers: { "pickforge-lab-browser": stale } }),
+    );
+
+    const linked = await runCli(
+      ["agents", "install", "cursor", "--config-path", configPath, "--json"],
+      env,
+    );
+    expect(linked.code).toBe(0);
+    const report = parseJson(linked);
+    expect(report.changed).toBe(true);
+    expect(report.registered).toBe(true);
+    expect(report.browser).toBe(false);
+    expect(report.retainedEntries).toEqual(["pickforge-lab-browser"]);
+    expect(
+      JSON.parse(fs.readFileSync(configPath, "utf8")).mcpServers[
+        "pickforge-lab-browser"
+      ],
+    ).toEqual(stale);
+
+    const again = await runCli(
+      ["agents", "install", "cursor", "--config-path", configPath],
+      env,
+    );
+    expect(again.code).toBe(0);
+    expect(again.stdout).toContain(
+      `cursor is already registered in ${configPath} (no changes made)`,
+    );
+    expect(again.stdout).toContain(
+      `Left the existing pickforge-lab-browser MCP entry in ${configPath} untouched (re-run with --browser to manage it)`,
+    );
+    expect(
+      JSON.parse(fs.readFileSync(configPath, "utf8")).mcpServers[
+        "pickforge-lab-browser"
+      ],
+    ).toEqual(stale);
+  });
+
   it("creates a missing cursor config at the default path and unlinks it", async () => {
     const linked = await runCli(["agents", "link", "cursor", "--json"], env);
     expect(linked.code).toBe(0);
@@ -243,7 +339,27 @@ describe("pickforge-lab agents link pi", () => {
     const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
     expect(config.mcpServers.picklab).toBeUndefined();
     expect(config.mcpServers["pickforge-lab"]).toBeDefined();
+    expect(config.mcpServers["pickforge-lab-browser"]).toBeUndefined();
     expect(backupsIn(path.dirname(configPath))).toHaveLength(1);
+  });
+
+  it("adds the browser relay with --browser and reports both servers", async () => {
+    const configPath = path.join(tmpDir, "pi-mcp.json");
+    const result = await runCli(
+      ["agents", "link", "pi", "--config-path", configPath, "--browser"],
+      env,
+    );
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain(
+      `Registered the pickforge-lab and pickforge-lab-browser MCP servers for pi in ${configPath}`,
+    );
+    expect(JSON.parse(fs.readFileSync(configPath, "utf8")).mcpServers).toEqual({
+      "pickforge-lab": { command: "pickforge-lab", args: ["mcp", "serve"] },
+      "pickforge-lab-browser": {
+        command: "pickforge-lab",
+        args: ["browser", "devtools-mcp"],
+      },
+    });
   });
 });
 
@@ -262,6 +378,7 @@ describe("pickforge-lab agents link codex", () => {
     expect(content).toContain('model = "gpt-5"');
     expect(content).toContain("# >>> pickforge-lab >>>");
     expect(content).toContain('[mcp_servers."pickforge-lab"]');
+    expect(content).not.toContain("pickforge-lab-browser");
     expect(content).toContain("# <<< pickforge-lab <<<");
 
     const unlinked = await runCli(
@@ -298,6 +415,34 @@ describe("pickforge-lab agents link codex", () => {
     expect(backupsIn(tmpDir)).toHaveLength(1);
   });
 
+  it("adds the browser section with --browser and retains it verbatim afterwards", async () => {
+    const configPath = path.join(tmpDir, "codex-config.toml");
+    const linked = await runCli(
+      ["agents", "link", "codex", "--config-path", configPath, "--browser", "--json"],
+      env,
+    );
+    expect(linked.code).toBe(0);
+    expect(parseJson(linked).browser).toBe(true);
+    expect(fs.readFileSync(configPath, "utf8")).toContain(
+      '[mcp_servers."pickforge-lab-browser"]\ncommand = "pickforge-lab"\nargs = ["browser", "devtools-mcp"]\n',
+    );
+
+    const stale = fs
+      .readFileSync(configPath, "utf8")
+      .replace('args = ["browser", "devtools-mcp"]', 'args = ["browser", "old"]');
+    fs.writeFileSync(configPath, stale);
+    const again = await runCli(
+      ["agents", "link", "codex", "--config-path", configPath, "--json"],
+      env,
+    );
+    expect(again.code).toBe(0);
+    const report = parseJson(again);
+    expect(report.changed).toBe(false);
+    expect(report.registered).toBe(true);
+    expect(report.retainedEntries).toEqual(["pickforge-lab-browser"]);
+    expect(fs.readFileSync(configPath, "utf8")).toBe(stale);
+  });
+
   it("refuses a foreign [mcp_servers.picklab] section before backing up", async () => {
     const configPath = path.join(tmpDir, "codex-config.toml");
     const original = '[mcp_servers.picklab]\ncommand = "something-else"\n';
@@ -326,7 +471,15 @@ describe("pickforge-lab agents link claude-code (claude binary absent)", () => {
     expect(report.instructions).toContain(
       "claude mcp add --scope user pickforge-lab -- pickforge-lab mcp serve",
     );
+    expect(report.instructions).not.toContain("pickforge-lab-browser");
     expect(fs.existsSync(path.join(home, ".claude.json"))).toBe(false);
+
+    const withBrowser = parseJson(
+      await runCli(["agents", "link", "claude-code", "--browser", "--json"], env),
+    );
+    expect(withBrowser.instructions).toContain(
+      "claude mcp add --scope user pickforge-lab-browser -- pickforge-lab browser devtools-mcp",
+    );
   });
 
   it("registers into an existing ~/.claude.json with a warning", async () => {
@@ -343,10 +496,7 @@ describe("pickforge-lab agents link claude-code (claude binary absent)", () => {
       command: "pickforge-lab",
       args: ["mcp", "serve"],
     });
-    expect(config.mcpServers["pickforge-lab-browser"]).toEqual({
-      command: "pickforge-lab",
-      args: ["browser", "devtools-mcp"],
-    });
+    expect(config.mcpServers["pickforge-lab-browser"]).toBeUndefined();
     expect(backupsIn(home)).toHaveLength(1);
   });
 
@@ -404,6 +554,29 @@ describe("pickforge-lab agents link claude-code (claude binary on PATH)", () => 
     const report = parseJson(result);
     expect(report.ok).toBe(true);
     expect(report.changed).toBe(true);
+    expect(report.browser).toBe(false);
+    expect(recordedArgs(argsFile)).toEqual([
+      "mcp",
+      "add",
+      "--scope",
+      "user",
+      "pickforge-lab",
+      "--",
+      "pickforge-lab",
+      "mcp",
+      "serve",
+    ]);
+    expect(fs.existsSync(path.join(home, ".claude.json"))).toBe(false);
+  });
+
+  it("adds the browser relay through claude mcp add with --browser", async () => {
+    const { binDir, argsFile } = installFakeClaude();
+    const result = await runCli(
+      ["agents", "install", "claude-code", "--browser", "--json"],
+      { ...env, PATH: binDir, CLAUDE_ARGS_FILE: argsFile },
+    );
+    expect(result.code).toBe(0);
+    expect(parseJson(result).browser).toBe(true);
     expect(recordedArgs(argsFile)).toEqual([
       "mcp",
       "add",
@@ -424,7 +597,6 @@ describe("pickforge-lab agents link claude-code (claude binary on PATH)", () => 
       "browser",
       "devtools-mcp",
     ]);
-    expect(fs.existsSync(path.join(home, ".claude.json"))).toBe(false);
   });
 
   it("reports install as already registered without invoking claude again", async () => {
@@ -452,13 +624,15 @@ describe("pickforge-lab agents link claude-code (claude binary on PATH)", () => 
     expect(result.code).toBe(0);
     expect(result.stderr).toBe("");
     expect(result.stdout.trim()).toBe(
-      `claude-code is already registered in ${configPath} (no changes made)`,
+      `claude-code is already registered in ${configPath} (no changes made)\n` +
+        `Left the existing pickforge-lab-browser MCP entry in ${configPath} ` +
+        "untouched (re-run with --browser to manage it)",
     );
     expect(fs.readFileSync(configPath, "utf8")).toBe(original);
     expect(fs.existsSync(argsFile)).toBe(false);
   });
 
-  it("updates a stale install while adding both servers", async () => {
+  it("updates a stale install", async () => {
     const { binDir, argsFile } = installFakeClaude(
       [
         "#!/bin/sh",
@@ -507,15 +681,6 @@ describe("pickforge-lab agents link claude-code (claude binary on PATH)", () => 
       "pickforge-lab",
       "mcp",
       "serve",
-      "mcp",
-      "add",
-      "--scope",
-      "user",
-      "pickforge-lab-browser",
-      "--",
-      "pickforge-lab",
-      "browser",
-      "devtools-mcp",
     ]);
   });
 

@@ -5,7 +5,7 @@ import {
   tomlFileHasMcpServer,
   upsertTomlMarkerBlock,
 } from "../tomlConfig.js";
-import type { ChangeResult } from "../types.js";
+import type { ChangeResult, LinkOptions } from "../types.js";
 import { homeDir } from "./home.js";
 
 export function codexConfigPath(env: EnvLike = process.env): string {
@@ -20,8 +20,12 @@ export async function codexIsRegistered(configPath: string): Promise<boolean> {
   return tomlFileHasMcpServer(configPath);
 }
 
-export async function linkCodex(configPath: string): Promise<ChangeResult> {
-  return upsertTomlMarkerBlock(configPath);
+export async function linkCodex(
+  configPath: string,
+  _env?: EnvLike,
+  opts: LinkOptions = {},
+): Promise<ChangeResult> {
+  return upsertTomlMarkerBlock(configPath, undefined, opts);
 }
 
 export async function unlinkCodex(configPath: string): Promise<ChangeResult> {
