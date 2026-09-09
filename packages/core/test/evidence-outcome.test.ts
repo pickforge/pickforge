@@ -124,7 +124,10 @@ it("refreshes finalized reports and prints device and latest outcome", async () 
   const report = renderRunReport({ ...await run.readManifest(), device: { kind: "desktop" } }, run.dir, records).join("\n");
   expect(report).toContain('Device: {"kind":"desktop"}');
   expect(report).toContain("Outcome: pass; Checkout; 1 inspected");
-  expect(await fs.promises.readFile(path.join(run.dir, "report.html"), "utf8")).toContain("Outcome: pass");
+  // The viewer renders the latest outcome as its own banner, not a bare line.
+  const html = await fs.promises.readFile(path.join(run.dir, "report.html"), "utf8");
+  expect(html).toContain('class="panel outcome s-pass"');
+  expect(html).toContain('<span class="pill">Pass</span> Checkout');
   expect((await run.readManifest()).status).toBe("completed");
 });
 

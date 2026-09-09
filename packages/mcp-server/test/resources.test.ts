@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -157,7 +158,15 @@ describe("resource reads", () => {
     const html = first(contents).text as string;
     expect(html).toContain("Content-Security-Policy");
     expect(html).toContain("&lt;/dd&gt;&lt;script&gt;alert(1)&lt;/script&gt;");
-    expect(html).not.toContain("<script");
+    // Exactly one inline script element, whose text is the CSP's sha256 source.
+    const scripts = [...html.matchAll(/<script(\s[^>]*)?>([\s\S]*?)<\/script>/g)];
+    expect(scripts).toHaveLength(1);
+    expect(html.split("<script").length - 1).toBe(1);
+    expect(scripts[0]![1] ?? "").toBe("");
+    const digest = createHash("sha256")
+      .update(scripts[0]![2]!, "utf8")
+      .digest("base64");
+    expect(html).toContain(`script-src 'sha256-${digest}'`);
     expect(html).not.toMatch(/(?:src|href)="https:\/\/evil\.invalid/);
     expect(html).not.toContain(PLANTED_TOKEN);
   });

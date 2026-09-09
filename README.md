@@ -363,7 +363,7 @@ does not already assign, and only with both tools able to read version 1.
 Computer-use tools share an evidence run while its creating process is alive.
 Short-lived CLI, MCP, and browser DevTools processes can leave several runs for
 one session. Destroying a session, or reaping a dead one, finalizes its current
-run and writes a static `report.html` filmstrip.
+run and writes a self-contained `report.html` evidence viewer.
 
 After stopping evidence producers, run `pickforge-lab artifacts report
 --finalize-orphans --project-dir <project>` or call MCP `artifact_report` with
@@ -399,7 +399,10 @@ it lives) contains:
 
 - `manifest.json` — run identity, status, and evidence metadata
 - `actions.jsonl` — authoritative, append-only sanitized action timeline
-- `report.html` — escaped, no-script human filmstrip generated at finalization
+- `report.html` — escaped human viewer generated at finalization: device and
+  outcome summary, device/scenario filters, and a capture inspection view,
+  which stay usable with scripts blocked; text search and arrow-key browsing
+  come from one inline script pinned in the report CSP by hash
 - `screenshots/` and `logs/` — associated artifacts, when explicitly captured
 
 Runs may include optional device metadata from the session, including known
@@ -753,7 +756,7 @@ bundles the TypeScript packages; the installer adds the separate Rust binary.
 - Relay stdout is protocol-only. A pending JSON-RPC record is capped at 16 MiB. Upstream diagnostic lines are capped at 64 KiB, redacted, and forwarded only to stderr; an over-limit line is dropped with a safe notice. Upstream update checks and usage statistics are disabled.
 - VNC binds to loopback only by default: `x11vnc` is started with `-localhost`, so the server listens on `127.0.0.1` and is not reachable from the network. Tunnel over SSH for remote access. Normal `--vnc` and `pickforge-lab watch` observation is server-enforced read-only (`-viewonly`); viewer exit never stops the session or its Xvfb/VNC processes. `--vnc-control` is an explicit, persistent writable escape hatch for human secret entry and does not coordinate with agent input. `pickforge-lab watch --control` is the coordinated alternative: an atomic, TTL-bounded lease gates a temporary writable VNC server, and every agent desktop-input call (including `desktop_launch` and `desktop_exec`, which could otherwise grab input focus on the shared display) and DevTools relay request fails closed (a live human lease is checked immediately before delivery) for as long as it is held. A crash on either side is reclaimed actively — the controlling process force-ends on the first failed lease renewal (never waiting for the viewer to close) and carries a hard deadline timer at the lease's `expiresAt` as a backstop; a detached watchdog process, immune to a `SIGKILL` of its parent, independently polls and stops a stale writable VNC. Writable VNC never outlives its lease in wall-clock terms, on any exit path.
 - Artifacts are redacted by default: logcat output strips tokens and secrets before it is stored or returned. Only `android adb` is raw, and it says so.
-- Evidence timelines persist only allowlisted metadata; typed values become length/type metadata, and network headers, bodies, and URL queries are dropped. Static HTML reports escape page-controlled text and use a no-script, no-network CSP.
+- Evidence timelines persist only allowlisted metadata; typed values become length/type metadata, and network headers, bodies, and URL queries are dropped. Static HTML reports escape page-controlled text and use a no-network CSP that admits exactly one inline script by sha256 hash. Device and scenario filters, capture inspection, and the navigation links stay usable with scripts blocked; text search and arrow-key browsing need that pinned script.
 - Screenshot files contain raw pixels and cannot be redacted. Avoid explicit captures on screens containing secrets, and use `evidence.enabled: false` when an action timeline is not appropriate. See [SECURITY.md](SECURITY.md#recorded-evidence-and-screenshots).
 - Pickforge provisions a dedicated locked lab user (`pickforge-lab`) and a dedicated AVD (`pickforge-avd`) so lab workloads do not borrow your personal resources. Running session processes under the lab user is planned post-MVP.
 - Agent config edits are atomic, with backups of the previous config.
