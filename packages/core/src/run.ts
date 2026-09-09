@@ -34,6 +34,15 @@ export interface RunArtifact {
   createdAt: string;
 }
 
+export interface EvidenceDevice {
+  kind: "desktop" | "mobile-emulation" | "physical" | "emulator" | "unknown";
+  viewport?: { width: number; height: number };
+  scale?: number;
+  touch?: boolean;
+  browser?: string;
+  platform?: string;
+}
+
 export interface RunManifest {
   runId: string;
   slug: string;
@@ -42,6 +51,7 @@ export interface RunManifest {
   status: RunStatus;
   artifacts: RunArtifact[];
   meta?: Record<string, unknown>;
+  device?: EvidenceDevice;
   /**
    * Evidence marker. Present (value `1`) only on computer-use runs that carry
    * an append-only action journal. Absent on legacy/plain screenshot runs,
@@ -64,6 +74,7 @@ export interface CreateRunOptions {
   now?: Date;
   sessionId?: string;
   meta?: Record<string, unknown>;
+  device?: EvidenceDevice;
   /**
    * When true, stamp the manifest with evidence fields and create an empty
    * append-only action journal. Plain runs omit this and stay non-evidence.
@@ -300,6 +311,7 @@ function buildManifest(
   };
   if (opts.sessionId !== undefined) manifest.sessionId = opts.sessionId;
   if (opts.meta !== undefined) manifest.meta = opts.meta;
+  if (opts.device !== undefined) manifest.device = opts.device;
   if (opts.evidence === true) {
     manifest.evidenceVersion = EVIDENCE_VERSION;
     manifest.actionLog = EVIDENCE_ACTION_LOG;

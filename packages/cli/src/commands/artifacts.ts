@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import {
   EVIDENCE_ACTION_LOG,
+  recordEvidenceOutcome,
+  type EvidenceOutcomeInput,
   finalizeOrphanedEvidenceRuns,
   isEvidenceRun,
   openRunCatalog,
@@ -128,5 +130,19 @@ export async function runArtifactsReport(
         ...(recovery === undefined ? [] : recoveryReportLines(recovery)),
       ],
     };
+  });
+}
+
+export async function runArtifactsOutcome(
+  runId: string,
+  opts: BaseCliOptions & Omit<EvidenceOutcomeInput, "inspectedScreenshots"> & { inspected?: string[]; step?: string[]; limitation?: string[] },
+): Promise<number> {
+  return runReported(opts, async () => {
+    const outcome = await recordEvidenceOutcome(resolveProjectDir(opts), runId, {
+      scenario: opts.scenario, status: opts.status, revision: opts.revision,
+      steps: opts.step, limitations: opts.limitation, notes: opts.notes,
+      inspectedScreenshots: opts.inspected ?? [],
+    });
+    return { data: { runId, outcome }, lines: [`Outcome: ${outcome.status} (${outcome.scenario})`] };
   });
 }

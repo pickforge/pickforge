@@ -46,6 +46,7 @@ const EXPECTED_TOOLS = [
   "android_run_adb",
   "artifact_list",
   "artifact_report",
+  "evidence_outcome",
   "takeover_status",
   "request_user_input",
 ];
@@ -543,4 +544,24 @@ describe("server context", () => {
       await server.close();
     }
   });
+});
+
+it("records acceptance outcomes through MCP with redaction and typed validation errors", async () => {
+  const run = await createRun(dirs.projectDir, "acceptance", { evidence: true }, { PICKFORGE_HOME: dirs.home, PICKFORGE_STORAGE_MODE: "project-local" });
+  const args = { runId: run.runId, scenario: `token=${PLANTED_TOKEN}`, notes: `token=${PLANTED_TOKEN}`, status: "pass", inspectedScreenshots: ["screenshots/accepted.png"] };
+  const missing = parseToolJson(await lab.client.callTool({ name: "evidence_outcome", arguments: args }));
+  expect(missing.ok).toBe(false);
+  expect(missing.errors.join(" ")).toContain("screenshots/accepted.png");
+  fs.writeFileSync(path.join(run.dir, "screenshots/accepted.png"), "png");
+  const noInteraction = parseToolJson(await lab.client.callTool({ name: "evidence_outcome", arguments: args }));
+  expect(noInteraction.ok).toBe(false);
+  expect(noInteraction.errors.join(" ")).toContain("Recording alone");
+  await appendAction(run, { actionId: "click", source: "mcp", tool: "desktop_click", status: "ok", startedAt: new Date().toISOString() });
+  await run.finish();
+  const result = await lab.client.callTool({ name: "evidence_outcome", arguments: args });
+  expect(result.isError).toBeFalsy();
+  expect(parseToolJson(result).outcome.status).toBe("pass");
+  expect(JSON.stringify(result)).not.toContain(PLANTED_TOKEN);
+  expect(fs.readFileSync(path.join(run.dir, "actions.jsonl"), "utf8")).not.toContain(PLANTED_TOKEN);
+  expect(fs.readFileSync(path.join(run.dir, "report.html"), "utf8")).toContain("Outcome: pass");
 });

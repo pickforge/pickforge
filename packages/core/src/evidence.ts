@@ -1,3 +1,5 @@
+import { getSession } from "./session.js";
+import { isOutcomeRecord, sanitizeOutcome, validateOutcomeIn, validOutcomeFields, type EvidenceOutcomeRecord } from "./evidence-outcome.js";
 import fs from "node:fs";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -109,7 +111,7 @@ export interface EvidenceTruncationRecord {
   recordedAt: string;
 }
 
-export type EvidenceRecord = EvidenceAction | EvidenceTruncationRecord;
+export type EvidenceRecord = EvidenceAction | EvidenceTruncationRecord | EvidenceOutcomeRecord;
 
 export function isTruncationRecord(
   record: EvidenceRecord,
@@ -160,6 +162,7 @@ export interface BeginEvidenceRunOptions {
   slug?: string;
   now?: Date;
   meta?: Record<string, unknown>;
+  device?: RunManifest["device"];
   /**
    * @internal Test hook, awaited after the claim identity is stamped but before
    * the run directory is created. Lets a test hold a claim open while peers race
@@ -848,6 +851,16 @@ async function publishPointer(
   }
 }
 
+async function sessionDevice(sessionId: string, env: EnvLike): Promise<RunManifest["device"]> {
+  const session = await getSession(sessionId, env);
+  if (session === undefined) return undefined;
+  if (session.type === "android") return { kind: "emulator" };
+  const device: NonNullable<RunManifest["device"]> = { kind: "desktop" };
+  const { width, height } = session.desktop ?? {};
+  if (width !== undefined && height !== undefined) device.viewport = { width, height };
+  return device;
+}
+
 /**
  * Create the run, then publish the pointer over our claim. If publication or
  * verification fails, the just-created run is finalized (`failed`) so it is
@@ -870,6 +883,7 @@ async function createAndPublishRun(
         sessionId: ctx.sessionId,
         meta: opts.meta,
         evidence: true,
+        device: opts.device ?? await sessionDevice(ctx.sessionId, ctx.env),
       },
       ctx.env,
     );
@@ -1053,7 +1067,7 @@ function encodeRecord(record: EvidenceRecord): string {
 }
 
 function isMetadataOnly(record: EvidenceRecord): boolean {
-  if (isTruncationRecord(record)) return true;
+  if (isTruncationRecord(record) || isOutcomeRecord(record)) return true;
   return record.artifacts === undefined || record.artifacts.length === 0;
 }
 
@@ -1356,6 +1370,19 @@ function withEvidenceReadDir<T>(
   return withDirHandle(DirHandle.open(run), fn);
 }
 
+function boundedRecordLine(record: EvidenceRecord, maxLineBytes: number): string {
+  const line = encodeRecord(record);
+  const lineBytes = Buffer.byteLength(line, "utf8");
+  if (lineBytes > maxLineBytes) {
+    throw new RangeError(
+      `evidence record is ${lineBytes} bytes, exceeding the ` +
+        `${maxLineBytes}-byte per-record limit`,
+    );
+  }
+
+  return line;
+}
+
 /**
  * Append one bounded, newline-terminated JSON record to the run's action
  * journal using a single `O_APPEND` write, and verify the full write. The
@@ -1388,23 +1415,18 @@ export async function appendAction(
     failAppend: opts._failMarkerAppend,
   };
 
-  const line = encodeRecord(record);
-  const lineBytes = Buffer.byteLength(line, "utf8");
-  if (lineBytes > maxLineBytes) {
-    throw new RangeError(
-      `evidence record is ${lineBytes} bytes, exceeding the ` +
-        `${maxLineBytes}-byte per-record limit`,
-    );
-  }
+  if (isOutcomeRecord(record)) record = sanitizeOutcome(record, record.recordedAt);
+  const line = boundedRecordLine(record, maxLineBytes);
 
   return withBoundRunDir(run.binding, (dir) =>
     withJournalLock(dir, async () => {
       const status = (await readEvidenceManifestIn(dir)).status;
-      if (status === "orphaned") {
+      if (status === "orphaned" && !isOutcomeRecord(record)) {
         throw new Error(
           `Evidence run is ${status}; begin a new run before appending`,
         );
       }
+      if (isOutcomeRecord(record)) await validateOutcomeIn(dir, record);
       const handle = await dir.openFile(
         EVIDENCE_ACTION_LOG,
         fs.constants.O_RDWR |
@@ -1956,6 +1978,7 @@ export async function inspectEvidenceManifestIn(
 function validEvidenceRecord(value: unknown): value is EvidenceRecord {
   if (typeof value !== "object" || value === null) return false;
   const record = value as Record<string, unknown>;
+  if (record.kind === "outcome") return validOutcomeFields(record);
   if (typeof record.actionId !== "string") return false;
   if (record.evidenceTruncated === true) {
     return record.reason === "evidence-cap" && typeof record.recordedAt === "string" &&
@@ -1979,7 +2002,7 @@ function validActionFields(record: Record<string, unknown>): boolean {
 }
 
 type JournalSegment =
-  | { ok: true; record: EvidenceRecord }
+  | { ok: true; record?: EvidenceRecord }
   | { ok: false; reason: string; blank: boolean };
 
 function parseJournalSegment(segment: string, line: number): JournalSegment {
@@ -1988,6 +2011,7 @@ function parseJournalSegment(segment: string, line: number): JournalSegment {
   }
   try {
     const parsed: unknown = JSON.parse(segment);
+    if (typeof parsed === "object" && parsed !== null && "kind" in parsed && parsed.kind !== "outcome") return { ok: true };
     if (!validEvidenceRecord(parsed)) {
       return { ok: false, reason: "record is not a valid evidence record", blank: false };
     }
@@ -2012,7 +2036,7 @@ function scanActionsJournal(raw: string): {
     if (!parsed.ok) {
       return { records, torn: false, corrupt: { line: index + 1, reason: parsed.reason, blank: parsed.blank } };
     }
-    records.push(parsed.record);
+    if (parsed.record !== undefined) records.push(parsed.record);
   }
   return { records, torn };
 }

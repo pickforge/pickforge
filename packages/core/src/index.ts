@@ -294,3 +294,6 @@ export {
   pruneSessionLogs,
   retainSessionLogs,
 } from "./session-retention.js";
+
+export { recordEvidenceOutcome, isOutcomeRecord, EvidenceOutcomeError, type EvidenceOutcomeInput, type EvidenceOutcomeRecord } from "./evidence-outcome.js";
+export type { EvidenceDevice } from "./run.js";

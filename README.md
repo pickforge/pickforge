@@ -369,7 +369,7 @@ After stopping evidence producers, run `pickforge-lab artifacts report
 `{"finalizeOrphans":true}`. This explicitly recovers evidence throughout the
 configured storage root, even when a report run id is supplied. It returns one
 `session-<sessionId>.html` index per recovered session, linking its run reports
-in run-id order. Ordinary artifact commands remain read-only.
+in run-id order. Listing and reading reports remain read-only.
 
 Recovery marks interrupted runs `orphaned`, not successfully completed, and
 rebuilds artifact inventories from existing files and the journal. Completed and
@@ -381,7 +381,7 @@ record; a missing journal is reported as unavailable, not an empty success.
 Repeat the command after an interrupted recovery. Live owners, ambiguous
 pointers, invalid manifests, and disappeared run directories are skipped with a
 reason. Stop all producers first because old pointers track the creator, not
-every process that adopted its run; stale handles cannot append to a recovered
+every process that adopted its run; stale handles cannot append actions to a recovered
 orphan. Legacy catalog fallback roots remain read-only; select their original
 storage mode explicitly to recover them in place. Pointers and locks do not
 record a hostname, so pid probes on shared storage are meaningless. Orphaned
@@ -395,6 +395,22 @@ it lives) contains:
 - `actions.jsonl` — authoritative, append-only sanitized action timeline
 - `report.html` — escaped, no-script human filmstrip generated at finalization
 - `screenshots/` and `logs/` — associated artifacts, when explicitly captured
+
+Runs may include optional device metadata from the session, including known
+viewport dimensions. Missing device metadata means unknown; existing runs need
+no migration. Explicit acceptance outcomes are appended to the same journal:
+
+```sh
+pickforge-lab artifacts outcome <runId> --scenario "Checkout" --status pass --inspected screenshots/checkout.png --step "Submit order" --json
+```
+
+MCP `evidence_outcome` accepts a required `runId`, `scenario`, `status`, and
+`inspectedScreenshots`, plus optional `steps`, `limitations`, `revision`, and
+`notes`. Pass requires a successful interaction and an inspected screenshot;
+partial requires an inspected screenshot. Fail and blocked can record missing
+evidence. Screenshot paths must name safe regular files in that run. Text is
+redacted and capped. Recording alone does not establish acceptance. Appending
+to a finalized run refreshes its report.
 
 Typed values are stored only as length and input type. Network failures keep
 only allowlisted method, URL origin/path without its query, status, resource

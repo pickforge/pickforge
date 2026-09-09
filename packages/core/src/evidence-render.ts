@@ -1,3 +1,4 @@
+import { isOutcomeRecord } from "./evidence-outcome.js";
 import path from "node:path";
 import { assertSafeEntryName, RunStorageAccessError, type DirHandle } from "./dir-handle.js";
 import { redactSecrets } from "./redact.js";
@@ -46,7 +47,7 @@ function compareText(left: string, right: string): number {
 }
 
 function recordTimestamp(record: EvidenceRecord): string {
-  return isTruncationRecord(record) ? record.recordedAt : record.startedAt;
+  return (isTruncationRecord(record) || isOutcomeRecord(record)) ? record.recordedAt : record.startedAt;
 }
 
 export function sortEvidenceRecords(
@@ -60,7 +61,7 @@ export function sortEvidenceRecords(
         recordTimestamp(right.record),
       );
       if (byTime !== 0) return byTime;
-      const byId = compareText(left.record.actionId, right.record.actionId);
+      const byId = compareText(isOutcomeRecord(left.record) ? "" : left.record.actionId, isOutcomeRecord(right.record) ? "" : right.record.actionId);
       return byId !== 0 ? byId : left.index - right.index;
     })
     .map(({ record }) => record);
@@ -103,6 +104,9 @@ export function renderRunReport(
   if (manifest.sessionId !== undefined) {
     lines.push(`- Session: ${safeText(manifest.sessionId)}`);
   }
+  if (manifest.device !== undefined) lines.push(`- Device: ${stableJson(manifest.device)}`);
+  const outcome = records.filter(isOutcomeRecord).at(-1);
+  if (outcome !== undefined) lines.push(`- Outcome: ${safeText(outcome.status)}; ${safeText(outcome.scenario)}; ${outcome.inspectedScreenshots.length} inspected screenshot(s)`);
   lines.push(
     `- Directory: ${safeText(dir)}`,
     "",
@@ -131,6 +135,7 @@ export function renderRunReport(
   }
   ordered.forEach((record, index) => {
     const step = index + 1;
+    if (isOutcomeRecord(record)) return;
     if (isTruncationRecord(record)) {
       lines.push(
         `### Step ${step} — Evidence truncated`,
@@ -253,6 +258,7 @@ export function renderEvidenceHtml(
   const steps = ordered
     .map((record, index) => {
       const step = index + 1;
+      if (isOutcomeRecord(record)) return `<article><h2>Outcome: ${escapeHtml(record.status)}</h2><p>${escapeHtml(record.scenario)} (${record.inspectedScreenshots.length} inspected screenshots)</p></article>`;
       if (!isTruncationRecord(record)) {
         return renderAction(record, step, safeScreenshots);
       }
@@ -309,7 +315,7 @@ async function collectSafeScreenshots(
   if (screenshots === undefined) return safe;
   const candidates = new Set(
     records.flatMap((record) =>
-      isTruncationRecord(record) ? [] : (record.artifacts ?? []),
+      isTruncationRecord(record) || isOutcomeRecord(record) ? [] : (record.artifacts ?? []),
     ),
   );
   try {
@@ -367,7 +373,7 @@ async function evidenceInventory(
     manifest.artifacts.map((artifact) => [artifact.path, artifact]),
   );
   for (const record of records) {
-    if (isTruncationRecord(record)) continue;
+    if (isTruncationRecord(record) || isOutcomeRecord(record)) continue;
     for (const relative of record.artifacts ?? []) {
       candidates.set(relative, {
         type: safeScreenshotPath(relative) ? "screenshot" : "other",
