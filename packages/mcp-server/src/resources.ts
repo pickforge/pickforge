@@ -11,6 +11,7 @@ import {
   getSession,
   isEvidenceRun,
   listSessions,
+  listArtifactRuns,
   openRunCatalog,
   parseActionsJournal,
   redactSecrets,
@@ -219,13 +220,7 @@ function registerResource1(server: McpServer, ctx: ServerContext): void {
     },
     async (uri) => {
       const catalog = await openRunCatalog(ctx.projectDir, ctx.env);
-      const runs = (await catalog.list()).map(({ manifest }) => ({
-        runId: manifest.runId,
-        slug: manifest.slug,
-        createdAt: manifest.createdAt,
-        status: manifest.status,
-        artifacts: manifest.artifacts.length,
-      }));
+      const runs = await listArtifactRuns(catalog);
       return {
         contents: [
           {

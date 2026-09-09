@@ -294,3 +294,10 @@ export {
   pruneSessionLogs,
   retainSessionLogs,
 } from "./session-retention.js";
+export {
+  readRustEvidenceRun,
+  listRustEvidenceRuns,
+  listArtifactRuns,
+  renderRustEvidenceReport,
+  type RustEvidenceRun,
+} from "./rust-evidence.js";
