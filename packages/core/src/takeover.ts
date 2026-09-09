@@ -586,7 +586,7 @@ async function drainAgentPermits(
   const deadline = Date.now() + timeoutMs;
 
   while (pending.size > 0) {
-    for (const name of [...pending]) {
+    for (const name of Array.from(pending)) {
       const full = path.join(dir, name);
       const raw = await readTextIfPresent(full);
       if (raw === undefined) {

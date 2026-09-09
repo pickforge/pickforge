@@ -1968,7 +1968,7 @@ async function collectActiveRunIds(parent: string): Promise<Set<string>> {
  * `finalizeActiveEvidenceRun` calls this automatically after every
  * finalization.
  */
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
+// oxlint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function pruneFinalizedEvidenceRuns(
   projectDir: string,
   opts: PruneEvidenceOptions = {},

@@ -19,7 +19,7 @@ function destination(value) {
   try {
     const url = new URL(value.includes("://") ? value : `http://${value}`);
     const host = url.hostname.toLowerCase();
-    if (["localhost", "[::1]"].includes(host) || /^127\./.test(host) || /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]+\]$/.test(host)) return null;
+    if (["localhost", "[::1]"].includes(host) || host.startsWith("127.") || /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]+\]$/.test(host)) return null;
     if (!["http:", "https:", "ws:", "wss:"].includes(url.protocol)) return null;
     return url.host;
   } catch {

@@ -111,7 +111,7 @@ async function handshake(options) {
   const server = resolveServer(options);
   const child = spawn(server.command, server.args ?? [], {
     cwd: options.project,
-    env: { ...process.env, ...(server.env ?? {}) },
+    env: { ...process.env, ...server.env },
     stdio: ["pipe", "pipe", "pipe"],
   });
   const stderr = [];
