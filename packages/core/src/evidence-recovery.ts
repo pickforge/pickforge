@@ -125,7 +125,17 @@ async function writeRecoveredRun(dir: DirHandle, manifest: RunManifest): Promise
 }
 
 async function finalizeLockedRun(root: DirHandle, dir: DirHandle): Promise<RecoverOutcome> {
-  const manifest = await readEvidenceManifestIn(dir);
+  let manifest: RunManifest;
+  try {
+    // The manifest can turn invalid, symlinked or hard-linked between
+    // inspection and lock acquisition; skip that run instead of aborting.
+    manifest = await readEvidenceManifestIn(dir);
+  } catch (error) {
+    if (error instanceof RunStorageAccessError) {
+      return { kind: "skip", reason: "invalid evidence manifest" };
+    }
+    throw error;
+  }
   if (!safeId(manifest.sessionId) || await recoverySessionMayBeWritingIn(root, manifest.sessionId)) {
     return skipIdentity();
   }

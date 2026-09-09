@@ -223,6 +223,36 @@ describe("explicit evidence recovery", () => {
     expect(fs.existsSync(path.join(run.dir, "report.html"))).toBe(false);
   });
 
+  it("skips a manifest that turns invalid between inspection and finalization", async () => {
+    const run = await seed();
+    const file = path.join(run.dir, "manifest.json");
+    const bytes = await fs.promises.readFile(file, "utf8");
+    const twin = path.join(root, "manifest-twin.json");
+    const openFile = DirHandle.prototype.openFile;
+    let swapped = false;
+    vi.spyOn(DirHandle.prototype, "openFile").mockImplementation(async function (
+      this: DirHandle,
+      name: string,
+      flags: number | string,
+      mode?: number,
+    ) {
+      // The journal lock is taken after inspection and before the manifest is
+      // re-read, so swap in a hard-linked manifest exactly in that window.
+      if (!swapped && name === ".evidence-journal.lock") {
+        swapped = true;
+        await fs.promises.writeFile(twin, bytes);
+        await fs.promises.rm(file);
+        await fs.promises.link(twin, file);
+      }
+      return openFile.call(this, name, flags, mode);
+    });
+    expect(await finalizeOrphanedEvidenceRuns(project)).toEqual({
+      sessions: [], skipped: skipped(run.runId, "invalid evidence manifest"),
+    });
+    expect(swapped).toBe(true);
+    expect(fs.existsSync(path.join(run.dir, "report.html"))).toBe(false);
+  });
+
   it("indexes short-lived CLI/MCP owners together without changing any journal or run directory", async () => {
     const runs = [await seed("write", "cli"), await seed("write", "mcp"), await seed("write", "relay")];
     const journals = await Promise.all(runs.map((run) => fs.promises.readFile(path.join(run.dir, "actions.jsonl"))));
