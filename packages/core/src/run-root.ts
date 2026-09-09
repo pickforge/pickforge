@@ -201,7 +201,9 @@ async function openTrustedDir(
 async function openChain(
   spec: RunWriteSpec,
   create: boolean,
+  claimExisting = false,
 ): Promise<DirHandle | undefined> {
+  let layout: DirHandle | undefined;
   let current = await openTrustedDir(spec, create);
   let logical = spec.trustedDir;
   let handedOver = false;
@@ -221,21 +223,31 @@ async function openChain(
       // lab's own subtree, so ownership is settled before any run exists
       // under it and a concurrent `pickforge init` sees a claimed directory
       // rather than a half-populated one.
-      if (create && index === spec.claimLayoutAt) {
-        try {
-          await claimProjectStateLayout(next);
-        } catch (error) {
-          await next.close().catch(() => {});
-          throw error;
-        }
+      if (index === spec.claimLayoutAt) {
+        if (claimExisting) layout = next;
+        if (create) await claimOpenedLayout(next);
       }
-      await current.close();
+      if (current !== layout) await current.close();
       current = next;
     }
+    // Recovery holds the shared parent until the entire existing root is open.
+    // Missing roots stay untouched; adoption and run writes share this chain.
+    if (layout !== undefined) await claimProjectStateLayout(layout);
     handedOver = true;
     return current;
   } finally {
     if (!handedOver) await current.close().catch(() => {});
+    if (layout !== undefined && layout !== current) await layout.close().catch(() => {});
+  }
+}
+
+/** A failed creating claim must close the child not yet owned by the walk. */
+async function claimOpenedLayout(dir: DirHandle): Promise<void> {
+  try {
+    await claimProjectStateLayout(dir);
+  } catch (error) {
+    await dir.close().catch(() => {});
+    throw error;
   }
 }
 
@@ -321,6 +333,26 @@ export async function withExistingRunsRootDir<T>(
   fn: (root: DirHandle | undefined) => Promise<T>,
 ): Promise<T> {
   const root = await openExistingRunsRootDir(projectDir, env);
+  try {
+    return await fn(root);
+  } finally {
+    if (root !== undefined) await root.close().catch(() => {});
+  }
+}
+
+/** Recovery may claim an existing shared layout, but never creates a missing root. */
+export async function withRecoveryRunsRootDir<T>(
+  projectDir: string,
+  env: EnvLike,
+  fn: (root: DirHandle | undefined) => Promise<T>,
+): Promise<T> {
+  const spec = await resolveWriteSpec(projectDir, env);
+  let root: DirHandle | undefined;
+  try {
+    root = await openChain(spec, false, true);
+  } catch (error) {
+    if (!isAbsent(error) && !(error instanceof RunStorageAccessError && /does not exist/.test(error.message))) throw error;
+  }
   try {
     return await fn(root);
   } finally {

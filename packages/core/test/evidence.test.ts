@@ -12,6 +12,7 @@ import {
   isEvidenceRun,
   isEvidenceTruncated,
   isTruncationRecord,
+  parseActionsJournal,
   pruneFinalizedEvidenceRuns,
   readActions,
   resolveActivePointer,
@@ -580,6 +581,23 @@ describe("readActions corruption handling", () => {
   it("rejects a record that is valid JSON but not an evidence record", async () => {
     const { runDir, journal } = await journalOf("desk-shape0");
     await fs.promises.writeFile(journal, "[1,2,3]\n");
+    await expect(readActions(runDir)).rejects.toThrow(/corrupt/i);
+  });
+
+  it("tolerates unknown action status values on ordinary reads", async () => {
+    const { runDir, journal } = await journalOf("desk-status");
+    const record = { ...action({ actionId: "future" }), status: "deferred" };
+    await fs.promises.writeFile(journal, `${JSON.stringify(record)}\n`);
+    expect(await readActions(runDir)).toEqual([record]);
+    expect(parseActionsJournal(`${JSON.stringify(record)}\n`, runDir)).toEqual([record]);
+  });
+
+  it("still requires actionId on ordinary reads", async () => {
+    const { runDir, journal } = await journalOf("desk-noid00");
+    await fs.promises.writeFile(
+      journal,
+      `${JSON.stringify({ source: "mcp", tool: "x", startedAt: "2026-01-01T00:00:00.000Z", status: "ok" })}\n`,
+    );
     await expect(readActions(runDir)).rejects.toThrow(/corrupt/i);
   });
 });

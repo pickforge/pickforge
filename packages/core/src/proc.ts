@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import type { Readable, Writable } from "node:stream";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -67,142 +68,221 @@ export function runCommand(
   args: readonly string[],
   opts?: RunCommandOptions,
 ): Promise<RunCommandResult>;
-// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/pickforge#60
 export function runCommand(
   cmd: string,
   args: readonly string[],
   opts: RunCommandOptions = {},
 ): Promise<RunCommandResult> {
-  // eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/pickforge#60
-  return new Promise((resolve, reject) => {
-    const maxBytes = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
-    const killGraceMs = opts.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
-    const child = spawn(cmd, args, {
-      cwd: opts.cwd,
-      env: resolveEnv(opts),
-      shell: false,
-      detached: true,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+  const child = spawn(cmd, args, {
+    cwd: opts.cwd,
+    env: resolveEnv(opts),
+    shell: false,
+    detached: true,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  return observeSpawnedCommand(child as PipedChild, cmd, args, opts);
+}
 
-    const stdoutChunks: Buffer[] = [];
-    const stderrChunks: Buffer[] = [];
-    let stdoutBytes = 0;
-    let stderrBytes = 0;
-    let timedOut = false;
-    let settled = false;
-    let exited = false;
-    let exitCode: number | null = null;
-    let exitSignal: NodeJS.Signals | null = null;
-    const timers: NodeJS.Timeout[] = [];
+type PipedChild = ChildProcess & {
+  stdin: Writable;
+  stdout: Readable;
+  stderr: Readable;
+};
 
-    const collect = (
-      chunks: Buffer[],
-      counted: number,
-      chunk: Buffer,
-    ): number => {
-      if (counted >= maxBytes) return counted + chunk.length;
-      const remaining = maxBytes - counted;
-      chunks.push(chunk.length > remaining ? chunk.subarray(0, remaining) : chunk);
-      return counted + chunk.length;
-    };
+function collectBoundedChunk(
+  chunks: Buffer[],
+  counted: number,
+  chunk: Buffer,
+  maxBytes: number,
+): number {
+  if (counted >= maxBytes) return counted + chunk.length;
+  const remaining = maxBytes - counted;
+  chunks.push(chunk.length > remaining ? chunk.subarray(0, remaining) : chunk);
+  return counted + chunk.length;
+}
 
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdoutBytes = collect(stdoutChunks, stdoutBytes, chunk);
-    });
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderrBytes = collect(stderrChunks, stderrBytes, chunk);
-    });
+function killProcessTree(child: PipedChild, signal: NodeJS.Signals): void {
+  if (child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // fall through to direct kill
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // already gone
+  }
+}
 
-    const buildResult = (
-      code: number | null,
-      signal: NodeJS.Signals | null,
-    ): RunCommandResult => {
-      const stdoutBuffer = Buffer.concat(stdoutChunks);
-      const result: RunCommandResult = {
-        ok: code === 0 && !timedOut,
-        code,
-        signal,
-        stdout: opts.binary ? "" : stdoutBuffer.toString("utf8"),
-        stderr: Buffer.concat(stderrChunks).toString("utf8"),
-        timedOut,
-        stdoutTruncated: stdoutBytes > maxBytes,
-        stderrTruncated: stderrBytes > maxBytes,
-      };
-      if (opts.binary) {
-        result.stdoutBuffer = stdoutBuffer;
-      }
-      return result;
-    };
+interface CommandRunState {
+  stdoutChunks: Buffer[];
+  stderrChunks: Buffer[];
+  stdoutBytes: number;
+  stderrBytes: number;
+  timedOut: boolean;
+  settled: boolean;
+  exited: boolean;
+  exitCode: number | null;
+  exitSignal: NodeJS.Signals | null;
+  timers: NodeJS.Timeout[];
+}
 
-    const settle = (result: RunCommandResult): void => {
-      if (settled) return;
-      settled = true;
-      for (const timer of timers) clearTimeout(timer);
-      if (opts.check && !result.ok) {
-        reject(new CommandError(cmd, args, result));
-        return;
-      }
-      resolve(result);
-    };
+function createCommandRunState(): CommandRunState {
+  return {
+    stdoutChunks: [],
+    stderrChunks: [],
+    stdoutBytes: 0,
+    stderrBytes: 0,
+    timedOut: false,
+    settled: false,
+    exited: false,
+    exitCode: null,
+    exitSignal: null,
+    timers: [],
+  };
+}
 
-    const killTree = (signal: NodeJS.Signals): void => {
-      if (child.pid !== undefined) {
-        try {
-          process.kill(-child.pid, signal);
-          return;
-        } catch {
-          // fall through to direct kill
-        }
-      }
-      try {
-        child.kill(signal);
-      } catch {
-        // already gone
-      }
-    };
+function buildCommandResult(
+  state: CommandRunState,
+  opts: RunCommandOptions,
+  maxBytes: number,
+  code: number | null,
+  signal: NodeJS.Signals | null,
+): RunCommandResult {
+  const stdoutBuffer = Buffer.concat(state.stdoutChunks);
+  const result: RunCommandResult = {
+    ok: code === 0 && !state.timedOut,
+    code,
+    signal,
+    stdout: opts.binary ? "" : stdoutBuffer.toString("utf8"),
+    stderr: Buffer.concat(state.stderrChunks).toString("utf8"),
+    timedOut: state.timedOut,
+    stdoutTruncated: state.stdoutBytes > maxBytes,
+    stderrTruncated: state.stderrBytes > maxBytes,
+  };
+  if (opts.binary) {
+    result.stdoutBuffer = stdoutBuffer;
+  }
+  return result;
+}
 
-    if (opts.timeoutMs !== undefined) {
-      timers.push(
+interface CommandSettlement {
+  cmd: string;
+  args: readonly string[];
+  opts: RunCommandOptions;
+  resolve: (result: RunCommandResult) => void;
+  reject: (error: unknown) => void;
+}
+
+function settleCommand(
+  state: CommandRunState,
+  settlement: CommandSettlement,
+  result: RunCommandResult,
+): void {
+  if (state.settled) return;
+  state.settled = true;
+  for (const timer of state.timers) clearTimeout(timer);
+  if (settlement.opts.check && !result.ok) {
+    settlement.reject(new CommandError(settlement.cmd, settlement.args, result));
+    return;
+  }
+  settlement.resolve(result);
+}
+
+function scheduleCommandTimeout(
+  child: PipedChild,
+  state: CommandRunState,
+  killGraceMs: number,
+  timeoutMs: number,
+  settle: (result: RunCommandResult) => void,
+  build: (code: number | null, signal: NodeJS.Signals | null) => RunCommandResult,
+): void {
+  state.timers.push(
+    setTimeout(() => {
+      state.timedOut = true;
+      killProcessTree(child, "SIGTERM");
+      state.timers.push(
         setTimeout(() => {
-          timedOut = true;
-          killTree("SIGTERM");
-          timers.push(
+          killProcessTree(child, "SIGKILL");
+          state.timers.push(
             setTimeout(() => {
-              killTree("SIGKILL");
-              timers.push(
-                setTimeout(() => {
-                  child.stdout.destroy();
-                  child.stderr.destroy();
-                  child.stdin.destroy();
-                  settle(
-                    buildResult(exitCode, exited ? exitSignal : "SIGKILL"),
-                  );
-                }, killGraceMs),
+              child.stdout.destroy();
+              child.stderr.destroy();
+              child.stdin.destroy();
+              settle(
+                build(state.exitCode, state.exited ? state.exitSignal : "SIGKILL"),
               );
             }, killGraceMs),
           );
-        }, opts.timeoutMs),
+        }, killGraceMs),
+      );
+    }, timeoutMs),
+  );
+}
+
+function observeSpawnedCommand(
+  child: PipedChild,
+  cmd: string,
+  args: readonly string[],
+  opts: RunCommandOptions,
+): Promise<RunCommandResult> {
+  return new Promise((resolve, reject) => {
+    const maxBytes = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+    const killGraceMs = opts.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
+    const state = createCommandRunState();
+    const build = (
+      code: number | null,
+      signal: NodeJS.Signals | null,
+    ): RunCommandResult => buildCommandResult(state, opts, maxBytes, code, signal);
+    const settlement: CommandSettlement = { cmd, args, opts, resolve, reject };
+    const settle = (result: RunCommandResult): void =>
+      settleCommand(state, settlement, result);
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      state.stdoutBytes = collectBoundedChunk(
+        state.stdoutChunks,
+        state.stdoutBytes,
+        chunk,
+        maxBytes,
+      );
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      state.stderrBytes = collectBoundedChunk(
+        state.stderrChunks,
+        state.stderrBytes,
+        chunk,
+        maxBytes,
+      );
+    });
+
+    if (opts.timeoutMs !== undefined) {
+      scheduleCommandTimeout(
+        child,
+        state,
+        killGraceMs,
+        opts.timeoutMs,
+        settle,
+        build,
       );
     }
 
     child.on("error", (error) => {
-      if (settled) return;
-      settled = true;
-      for (const timer of timers) clearTimeout(timer);
+      if (state.settled) return;
+      state.settled = true;
+      for (const timer of state.timers) clearTimeout(timer);
       reject(error);
     });
-
     child.on("exit", (code, signal) => {
-      exited = true;
-      exitCode = code;
-      exitSignal = signal;
+      state.exited = true;
+      state.exitCode = code;
+      state.exitSignal = signal;
     });
-
     child.on("close", (code, signal) => {
-      settle(buildResult(code, signal));
+      settle(build(code, signal));
     });
-
     child.stdin.on("error", () => {
       // child exited before consuming stdin (EPIPE); output collection continues
     });
@@ -492,6 +572,7 @@ function readProcStat(pid: number): ProcStat | undefined {
   try {
     content = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
   } catch {
+    // Unreadable is not proof of death: EPERM still has a live process.
     return undefined;
   }
   return parseProcStat(content);
@@ -529,6 +610,19 @@ export function readProcessGroupLeaderIdentity(
 export function processIdentityMatches(identity: ProcessIdentity): boolean {
   const startTicks = readProcessStartTicks(identity.pid);
   return startTicks !== undefined && startTicks === identity.startTicks;
+}
+
+/**
+ * Whether a recorded owner is still the same live process. A readable start-time
+ * mismatch is PID reuse, and a readable zombie is dead even when its start time
+ * still matches. If `/proc/<pid>/stat` cannot be read, fall back to
+ * {@link isPidAlive}: only ESRCH is dead, EPERM stays alive.
+ */
+export function identityIsAlive(pid: number, startTicks?: number): boolean {
+  if (startTicks === undefined) return isPidAlive(pid);
+  const stat = readProcStat(pid);
+  if (stat === undefined) return isPidAlive(pid);
+  return stat.state !== "Z" && stat.startTicks === startTicks;
 }
 
 /**
@@ -590,6 +684,53 @@ function signalGroup(pid: number, signal: NodeJS.Signals): void {
   }
 }
 
+function leaderGroupMismatch(leader: ProcStat, identity: ProcessIdentity): boolean {
+  return leader.startTicks !== identity.startTicks || leader.pgrp !== identity.pid;
+}
+
+function processGroupGone(identity: ProcessIdentity): boolean {
+  return (
+    listProcessGroupMembers(identity.pid).length === 0 &&
+    !processIdentityMatches(identity)
+  );
+}
+
+function missingLeaderOutcome(identity: ProcessIdentity): StopProcessGroupResult {
+  return {
+    outcome:
+      listProcessGroupMembers(identity.pid).length === 0
+        ? "already-dead"
+        : "reused",
+    signaled: false,
+  };
+}
+
+async function waitForProcessGroupExit(
+  identity: ProcessIdentity,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (processGroupGone(identity)) {
+      return true;
+    }
+    await sleep(POLL_INTERVAL_MS);
+  }
+  return false;
+}
+
+function classifyAfterTerm(identity: ProcessIdentity): StopProcessGroupResult | undefined {
+  const members = listProcessGroupMembers(identity.pid);
+  const currentLeader = readProcStat(identity.pid);
+  if (currentLeader !== undefined && leaderGroupMismatch(currentLeader, identity)) {
+    return { outcome: "reused", signaled: true };
+  }
+  if (members.length === 0 && (currentLeader === undefined || currentLeader.state === "Z")) {
+    return { outcome: "terminated", signaled: true };
+  }
+  return undefined;
+}
+
 /**
  * Terminate a whole process group, identified by its group-leader identity,
  * with SIGTERM then SIGKILL escalation. Before the first signal, the recorded
@@ -602,7 +743,6 @@ function signalGroup(pid: number, signal: NodeJS.Signals): void {
  * The leader must have been spawned as a process-group leader (e.g. `spawn`
  * with `detached: true`), so its PID doubles as the group id.
  */
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 export async function stopProcessGroupVerified(
   identity: ProcessIdentity,
   opts: { timeoutMs?: number } = {},
@@ -610,65 +750,25 @@ export async function stopProcessGroupVerified(
   const timeoutMs = opts.timeoutMs ?? 5_000;
   const leader = readProcStat(identity.pid);
   if (leader === undefined) {
-    return {
-      outcome:
-        listProcessGroupMembers(identity.pid).length === 0
-          ? "already-dead"
-          : "reused",
-      signaled: false,
-    };
+    return missingLeaderOutcome(identity);
   }
-  if (
-    leader.startTicks !== identity.startTicks ||
-    leader.pgrp !== identity.pid
-  ) {
+  if (leaderGroupMismatch(leader, identity)) {
     return { outcome: "reused", signaled: false };
   }
 
   signalGroup(identity.pid, "SIGTERM");
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (
-      listProcessGroupMembers(identity.pid).length === 0 &&
-      !processIdentityMatches(identity)
-    ) {
-      return { outcome: "terminated", signaled: true };
-    }
-    await sleep(POLL_INTERVAL_MS);
-  }
-
-  const members = listProcessGroupMembers(identity.pid);
-  const currentLeader = readProcStat(identity.pid);
-  if (
-    currentLeader !== undefined &&
-    (currentLeader.startTicks !== identity.startTicks ||
-      currentLeader.pgrp !== identity.pid)
-  ) {
-    return { outcome: "reused", signaled: true };
-  }
-  if (
-    members.length === 0 &&
-    (currentLeader === undefined || currentLeader.state === "Z")
-  ) {
+  if (await waitForProcessGroupExit(identity, timeoutMs)) {
     return { outcome: "terminated", signaled: true };
   }
-  signalGroup(identity.pid, "SIGKILL");
-  const killDeadline = Date.now() + 1_000;
-  while (Date.now() < killDeadline) {
-    if (
-      listProcessGroupMembers(identity.pid).length === 0 &&
-      !processIdentityMatches(identity)
-    ) {
-      return { outcome: "terminated", signaled: true };
-    }
-    await sleep(POLL_INTERVAL_MS);
+
+  const afterTerm = classifyAfterTerm(identity);
+  if (afterTerm !== undefined) {
+    return afterTerm;
   }
+  signalGroup(identity.pid, "SIGKILL");
+  const gone = await waitForProcessGroupExit(identity, 1_000);
   return {
-    outcome:
-      listProcessGroupMembers(identity.pid).length === 0 &&
-      !processIdentityMatches(identity)
-        ? "terminated"
-        : "survived",
+    outcome: gone || processGroupGone(identity) ? "terminated" : "survived",
     signaled: true,
   };
 }

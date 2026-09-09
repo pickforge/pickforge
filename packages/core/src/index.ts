@@ -145,6 +145,13 @@ export {
   writeEvidenceReport,
 } from "./evidence-render.js";
 
+export {
+  finalizeOrphanedEvidenceRuns,
+  type EvidenceRecoveryResult,
+  type RecoveredEvidenceRun,
+  type SkippedEvidenceRun,
+} from "./evidence-recovery.js";
+
 export { isSecretKey, redactEnv, redactSecrets } from "./redact.js";
 
 export {
@@ -164,6 +171,7 @@ export {
 
 export {
   CommandError,
+  identityIsAlive,
   isPidAlive,
   isProcessGroupAlive,
   listProcessGroupMembers,

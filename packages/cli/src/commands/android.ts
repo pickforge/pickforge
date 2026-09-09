@@ -276,72 +276,89 @@ export async function runAndroidLogcat(
   });
 }
 
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
+async function resolveImplicitAndroidTarget(
+  opts: AndroidTargetOptions,
+): Promise<AndroidTarget | undefined> {
+  // Fall back to a raw, untargeted adb call only when there is genuinely no
+  // running android session anywhere under PICKFORGE_HOME. If this project has
+  // no session but other projects do, fail closed rather than guessing a
+  // device another project owns. Ambiguous (multiple-session) or any other
+  // resolution failure also fails closed.
+  return resolveAndroidTarget(opts).then(
+    (target) => target,
+    async (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.startsWith("No running android session")) {
+        throw error;
+      }
+      const running = (await listSessions()).filter(
+        (record) => record.type === "android" && record.status === "running",
+      );
+      if (running.length > 0) {
+        throw new Error(
+          "No running android session for this project, but other projects " +
+            "have running android sessions. Pass --session <id> or --serial " +
+            "<serial>, or run the command from the project that owns the session.",
+        );
+      }
+      return undefined;
+    },
+  );
+}
+
+async function resolveAdbTarget(
+  opts: AndroidTargetOptions,
+): Promise<AndroidTarget | undefined> {
+  if (opts.serial !== undefined || opts.session !== undefined) {
+    return resolveAndroidTarget(opts);
+  }
+  return resolveImplicitAndroidTarget(opts);
+}
+
+function writeAdbResult(
+  result: Awaited<ReturnType<typeof runAdb>>,
+  opts: AndroidTargetOptions,
+  target: AndroidTarget | undefined,
+): void {
+  if (opts.json === true) {
+    const report: Record<string, unknown> = {
+      ok: result.ok,
+      code: result.code,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      errors: result.ok ? [] : [`adb exited with code ${result.code}`],
+    };
+    if (target?.serial !== undefined) report.serial = target.serial;
+    if (target?.sessionId !== undefined) report.sessionId = target.sessionId;
+    console.log(JSON.stringify(report, null, 2));
+    return;
+  }
+  if (result.stdout !== "") process.stdout.write(result.stdout);
+  if (result.stderr !== "") process.stderr.write(result.stderr);
+}
+
+function writeAdbFailure(message: string, opts: AndroidTargetOptions): void {
+  if (opts.json === true) {
+    console.log(JSON.stringify({ ok: false, errors: [message] }, null, 2));
+    return;
+  }
+  console.error(`error: ${message}`);
+}
+
 export async function runAndroidAdb(
   args: string[],
   opts: AndroidTargetOptions,
 ): Promise<number> {
   try {
-    let serial: string | undefined;
-    let sessionId: string | undefined;
-    if (opts.serial !== undefined || opts.session !== undefined) {
-      ({ serial, sessionId } = await resolveAndroidTarget(opts));
-    } else {
-      // Fall back to a raw, untargeted adb call only when there is genuinely no
-      // running android session anywhere under PICKFORGE_HOME. If this project has
-      // no session but other projects do, fail closed rather than guessing a
-      // device another project owns. Ambiguous (multiple-session) or any other
-      // resolution failure also fails closed.
-      const implicit = await resolveAndroidTarget(opts).then(
-        (target) => target,
-        async (error: unknown) => {
-          const message = error instanceof Error ? error.message : String(error);
-          if (!message.startsWith("No running android session")) {
-            throw error;
-          }
-          const running = (await listSessions()).filter(
-            (record) =>
-              record.type === "android" && record.status === "running",
-          );
-          if (running.length > 0) {
-            throw new Error(
-              "No running android session for this project, but other projects " +
-                "have running android sessions. Pass --session <id> or --serial " +
-                "<serial>, or run the command from the project that owns the session.",
-            );
-          }
-          return undefined;
-        },
-      );
-      serial = implicit?.serial;
-      sessionId = implicit?.sessionId;
-    }
+    const target = await resolveAdbTarget(opts);
     const result = await runAdb(
-      serial === undefined ? { args } : { serial, args },
+      target === undefined ? { args } : { serial: target.serial, args },
     );
-    if (opts.json === true) {
-      const report: Record<string, unknown> = {
-        ok: result.ok,
-        code: result.code,
-        stdout: result.stdout,
-        stderr: result.stderr,
-        errors: result.ok ? [] : [`adb exited with code ${result.code}`],
-      };
-      if (serial !== undefined) report.serial = serial;
-      if (sessionId !== undefined) report.sessionId = sessionId;
-      console.log(JSON.stringify(report, null, 2));
-    } else {
-      if (result.stdout !== "") process.stdout.write(result.stdout);
-      if (result.stderr !== "") process.stderr.write(result.stderr);
-    }
+    writeAdbResult(result, opts, target);
     return result.ok ? 0 : (result.code ?? 1);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (opts.json === true) {
-      console.log(JSON.stringify({ ok: false, errors: [message] }, null, 2));
-    } else {
-      console.error(`error: ${message}`);
-    }
+    writeAdbFailure(message, opts);
     return 1;
   }
 }

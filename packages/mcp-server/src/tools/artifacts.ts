@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import {
   EVIDENCE_ACTION_LOG,
+  finalizeOrphanedEvidenceRuns,
   isEvidenceRun,
   openRunCatalog,
   parseActionsJournal,
@@ -34,7 +35,7 @@ async function readCatalogActions(
   catalog: RunCatalog,
   entry: RunCatalogEntry,
 ): Promise<ReturnType<typeof parseActionsJournal>> {
-  if (!isEvidenceRun(entry.manifest)) return [];
+  if (!isEvidenceRun(entry.manifest) || entry.manifest.evidenceRecovery === "corrupt") return [];
   const raw = await catalog.readRootTextIfPresent(
     entry,
     EVIDENCE_ACTION_LOG,
@@ -80,10 +81,16 @@ export function registerArtifactTools(
         "including its artifact inventory and evidence action timeline.",
       inputSchema: {
         runId: z.string().min(1).optional().describe("Run id"),
+        finalizeOrphans: z.boolean().optional().describe(
+          "Recover orphaned evidence and session indexes in the configured storage root. Stop producers first; live owners are skipped.",
+        ),
       },
     },
     (args) =>
       runTool(async () => {
+        const recovery = args.finalizeOrphans === true
+          ? await finalizeOrphanedEvidenceRuns(ctx.projectDir, ctx.env)
+          : undefined;
         const { catalog, entry } = await findRun(
           ctx.projectDir,
           args.runId,
@@ -97,6 +104,7 @@ export function registerArtifactTools(
             dir,
             manifest,
             report: renderRunReport(manifest, dir, records).join("\n"),
+            ...(recovery === undefined ? {} : { recovery }),
           },
         };
       }),

@@ -142,6 +142,112 @@ function isEmbeddingBoundary(text: string, index: number): boolean {
   return ch === undefined || /[\s,}\]>/]/.test(ch);
 }
 
+function cookieQuoteTokenAt(text: string, i: number): string | undefined {
+  if (text[i] === '"' || text[i] === "'") {
+    return text[i];
+  }
+  if (text[i] === "\\" && (text[i + 1] === '"' || text[i + 1] === "'")) {
+    return text.slice(i, i + 2);
+  }
+  return undefined;
+}
+
+function redactUnterminatedQuotedCookie(
+  text: string,
+  name: string,
+  valueStart: number,
+  quoteToken: string,
+  isAttribute: boolean,
+): { replacement: string; end: number } {
+  const afterQuote = valueStart + quoteToken.length;
+  if (
+    isEmbeddingBoundary(text, afterQuote) &&
+    hasLaterQuoteToken(text, quoteToken, afterQuote)
+  ) {
+    // Unbalanced empty value followed by an embedding boundary: the
+    // opening quote plausibly belongs to the embedding document.
+    // Redact the value and stop before the quote.
+    return {
+      replacement: `${name}=${isAttribute ? "" : REPLACEMENT}`,
+      end: valueStart,
+    };
+  }
+  // No candidate close exists anywhere on the line: this is a truly
+  // unterminated quoted value, not an embedding boundary. Fail closed
+  // and redact through the end of the line/text so no opaque
+  // credential tail can survive.
+  let end = afterQuote;
+  while (end < text.length && text[end] !== "\r" && text[end] !== "\n") end++;
+  return {
+    replacement: `${name}=${isAttribute ? text.slice(valueStart, end) : REPLACEMENT}`,
+    end,
+  };
+}
+
+function redactQuotedCookieValue(
+  text: string,
+  name: string,
+  valueStart: number,
+  quoteToken: string,
+  isAttribute: boolean,
+): { piece: string; next: number } | { replacement: string; end: number } {
+  const close = findQuotedValueClose(text, quoteToken, valueStart + quoteToken.length);
+  if (close === -1) {
+    return redactUnterminatedQuotedCookie(
+      text,
+      name,
+      valueStart,
+      quoteToken,
+      isAttribute,
+    );
+  }
+  const closeEnd = close + quoteToken.length;
+  const value = text.slice(valueStart, closeEnd);
+  return {
+    piece: isAttribute
+      ? `${name}=${value}`
+      : `${name}=${quoteToken}${REPLACEMENT}${quoteToken}`,
+    next: closeEnd,
+  };
+}
+
+function readUnquotedCookieValue(
+  text: string,
+  valueStart: number,
+): { value: string; next: number } {
+  let i = valueStart;
+  while (i < text.length) {
+    const ch = text[i]!;
+    if (ch === ";" || ch === '"' || ch === "\r" || ch === "\n") break;
+    // An apostrophe stays in the value only when more value text follows
+    // (o'brien); otherwise it closes the embedding document.
+    if (ch === "'" && !/[A-Za-z0-9]/.test(text[i + 1] ?? "")) break;
+    i++;
+  }
+  return { value: text.slice(valueStart, i), next: i };
+}
+
+function consumeCookiePairSeparator(
+  text: string,
+  i: number,
+): { piece: string; next: number } | undefined {
+  let ws = i;
+  while (ws < text.length && (text[ws] === " " || text[ws] === "\t")) ws++;
+  if (text[ws] === ";") {
+    return { piece: text.slice(i, ws) + ";", next: ws + 1 };
+  }
+  return undefined;
+}
+
+function readCookiePairName(
+  text: string,
+  start: number,
+): { name: string; next: number } {
+  let i = start;
+  while (i < text.length && !'=;"\'\r\n'.includes(text[i]!)) i++;
+  return { name: text.slice(start, i), next: i };
+}
+
 /**
  * Walk the remainder of a Cookie/Set-Cookie header from `start`, redacting
  * each pair's value while preserving structure. Handles balanced quoted
@@ -150,20 +256,17 @@ function isEmbeddingBoundary(text: string, index: number): boolean {
  * XML/JSON embedding: a quote that does not open a value ends the header so
  * the surrounding document's delimiters survive.
  */
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 function redactCookiePairs(
   text: string,
   start: number,
 ): { replacement: string; end: number } {
   let out = "";
   let i = start;
-  const len = text.length;
-  while (i < len) {
-    // Pair name (leading whitespace kept verbatim; trimmed for lookup).
-    const nameStart = i;
-    while (i < len && !'=;"\'\r\n'.includes(text[i]!)) i++;
-    const name = text.slice(nameStart, i);
-    if (i >= len || text[i] !== "=") {
+  while (i < text.length) {
+    const named = readCookiePairName(text, i);
+    const name = named.name;
+    i = named.next;
+    if (i >= text.length || text[i] !== "=") {
       if (text[i] === ";") {
         // Valueless flag such as HttpOnly / Secure.
         out += `${name};`;
@@ -177,65 +280,28 @@ function redactCookiePairs(
     }
     i++; // consume '='
     const isAttribute = COOKIE_ATTRIBUTES.has(name.trim().toLowerCase());
-    // Quoted value? Accept `"`, `'`, or their backslash-escaped forms as the
-    // delimiter when a matching close exists on the same line.
-    let quoteToken: string | undefined;
-    if (text[i] === '"' || text[i] === "'") {
-      quoteToken = text[i];
-    } else if (text[i] === "\\" && (text[i + 1] === '"' || text[i + 1] === "'")) {
-      quoteToken = text.slice(i, i + 2);
-    }
-    let value: string;
+    const quoteToken = cookieQuoteTokenAt(text, i);
     if (quoteToken !== undefined) {
-      const close = findQuotedValueClose(text, quoteToken, i + quoteToken.length);
-      if (close === -1) {
-        if (
-          isEmbeddingBoundary(text, i + quoteToken.length) &&
-          hasLaterQuoteToken(text, quoteToken, i + quoteToken.length)
-        ) {
-          // Unbalanced empty value followed by an embedding boundary: the
-          // opening quote plausibly belongs to the embedding document.
-          // Redact the value and stop before the quote.
-          out += `${name}=${isAttribute ? "" : REPLACEMENT}`;
-          return { replacement: out, end: i };
-        }
-        // No candidate close exists anywhere on the line: this is a truly
-        // unterminated quoted value, not an embedding boundary. Fail closed
-        // and redact through the end of the line/text so no opaque
-        // credential tail can survive.
-        let end = i + quoteToken.length;
-        while (end < len && text[end] !== "\r" && text[end] !== "\n") end++;
-        out += `${name}=${isAttribute ? text.slice(i, end) : REPLACEMENT}`;
-        return { replacement: out, end };
+      const quoted = redactQuotedCookieValue(text, name, i, quoteToken, isAttribute);
+      if ("end" in quoted) {
+        out += quoted.replacement;
+        return { replacement: out, end: quoted.end };
       }
-      const closeEnd = close + quoteToken.length;
-      value = text.slice(i, closeEnd);
-      out += isAttribute
-        ? `${name}=${value}`
-        : `${name}=${quoteToken}${REPLACEMENT}${quoteToken}`;
-      i = closeEnd;
+      out += quoted.piece;
+      i = quoted.next;
     } else {
-      const valueStart = i;
-      while (i < len) {
-        const ch = text[i]!;
-        if (ch === ";" || ch === '"' || ch === "\r" || ch === "\n") break;
-        // An apostrophe stays in the value only when more value text follows
-        // (o'brien); otherwise it closes the embedding document.
-        if (ch === "'" && !/[A-Za-z0-9]/.test(text[i + 1] ?? "")) break;
-        i++;
-      }
-      value = text.slice(valueStart, i);
-      out += isAttribute ? `${name}=${value}` : `${name}=${REPLACEMENT}`;
+      const unquoted = readUnquotedCookieValue(text, i);
+      out += isAttribute
+        ? `${name}=${unquoted.value}`
+        : `${name}=${REPLACEMENT}`;
+      i = unquoted.next;
     }
-    // Optional whitespace, then either the next pair or the header's end.
-    let ws = i;
-    while (ws < len && (text[ws] === " " || text[ws] === "\t")) ws++;
-    if (text[ws] === ";") {
-      out += text.slice(i, ws) + ";";
-      i = ws + 1;
-      continue;
+    const separator = consumeCookiePairSeparator(text, i);
+    if (separator === undefined) {
+      return { replacement: out, end: i };
     }
-    return { replacement: out, end: i };
+    out += separator.piece;
+    i = separator.next;
   }
   return { replacement: out, end: i };
 }

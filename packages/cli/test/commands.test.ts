@@ -2057,6 +2057,33 @@ describe("pickforge-lab artifacts", () => {
     expect(legacy.stdout).not.toContain("## Actions");
   });
 
+  it("explicitly recovers orphan reports and returns a shared session index", async () => {
+    const env = makeEnv();
+    const projectDir = makeProjectDir();
+    const runId = "20260609-120000-orphan";
+    writeSyntheticRun(projectDir, runId, {
+      status: "running", sessionId: "brow-orphan", evidenceVersion: 1, actionLog: "actions.jsonl", artifacts: [],
+    });
+    const dir = path.join(projectDir, ".picklab", "runs", runId);
+    const journal = `${JSON.stringify({
+      actionId: "cli", source: "cli", tool: "synthetic", startedAt: "2026-06-09T12:00:00.000Z", status: "ok",
+    })}\n`;
+    fs.writeFileSync(path.join(dir, "actions.jsonl"), journal);
+    const args = ["artifacts", "report", runId, "--project-dir", projectDir, "--json"];
+    expect(parseJson(await runCli(args, env)).manifest.status).toBe("running");
+    expect(fs.existsSync(path.join(dir, "report.html"))).toBe(false);
+    const result = await runCli([...args, "--finalize-orphans"], env);
+    expect(result.code).toBe(0);
+    const report = parseJson(result);
+    expect(report.manifest.status).toBe("orphaned");
+    expect(report.manifest.artifacts.map((artifact: { path: string }) => artifact.path)).toEqual(["actions.jsonl", "report.html"]);
+    expect(report.recovery.sessions[0].sessionId).toBe("brow-orphan");
+    expect(fs.readFileSync(report.recovery.sessions[0].index, "utf8")).toContain(`${runId}/report.html`);
+    expect(fs.readFileSync(path.join(dir, "actions.jsonl"), "utf8")).toBe(journal);
+    const text = await runCli(["artifacts", "report", "--project-dir", projectDir, "--finalize-orphans"], env);
+    expect(text.stdout).toContain("Session index:");
+  });
+
   it("fails actionably for a corrupt evidence journal", async () => {
     const env = makeEnv();
     const projectDir = makeProjectDir();

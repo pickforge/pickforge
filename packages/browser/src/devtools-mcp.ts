@@ -401,14 +401,7 @@ async function stopChild(
   return exit;
 }
 
-// eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/pickforge#60
-export async function runDevtoolsMcpRelay(
-  opts: RunDevtoolsMcpRelayOptions,
-): Promise<RelayExit> {
-  const input = opts.input ?? process.stdin;
-  const output = opts.output ?? process.stdout;
-  const diagnostics = opts.diagnostics ?? process.stderr;
-  const timeoutMs = opts.shutdownTimeoutMs ?? 1_000;
+function spawnDevtoolsRelayChild(opts: RunDevtoolsMcpRelayOptions): RelayChild {
   const childEnv: NodeJS.ProcessEnv = {
     ...(opts.env ?? process.env),
     CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS: "true",
@@ -416,11 +409,7 @@ export async function runDevtoolsMcpRelay(
   };
   const child = (opts.spawnProcess ?? spawn)(
     process.execPath,
-    [
-      opts.executable.binPath,
-      "--browser-url",
-      opts.session.browserUrl,
-    ],
+    [opts.executable.binPath, "--browser-url", opts.session.browserUrl],
     {
       cwd: opts.cwd,
       env: childEnv,
@@ -429,9 +418,24 @@ export async function runDevtoolsMcpRelay(
     },
   );
   assertRelayChild(child);
-  const { outcome: exit, exited } = observeChildExit(child);
+  return child;
+}
+
+interface RelayPumps {
+  inputPump: Promise<void>;
+  outputPump: Promise<void>;
+  diagnosticsPump: Promise<void>;
+  inputAbort: AbortController;
+}
+
+function startRelayPumps(
+  child: RelayChild,
+  opts: RunDevtoolsMcpRelayOptions,
+  input: Readable,
+  output: Writable,
+  diagnostics: Writable,
+): RelayPumps {
   const inputAbort = new AbortController();
-  let terminationRequested = false;
   // The intercept path (inputPump, answering directly on `output`) and the
   // normal child-response forward path (outputPump, also writing to `output`)
   // are two independent concurrent pumps that can both target the same
@@ -440,11 +444,13 @@ export async function runDevtoolsMcpRelay(
   // interleaved with an in-flight child response can never produce a torn or
   // out-of-order frame on the wire (pickforge/pickforge#21 P1-D).
   const outputWriteQueue = createJsonRpcWriteQueue();
+  const intercept = opts.hooks?.intercept;
   const inputPump = pumpJsonRpcNdjson(input, child.stdin, {
     hook: opts.hooks?.beforeForward,
-    intercept: opts.hooks?.intercept,
-    interceptDestination: opts.hooks?.intercept === undefined ? undefined : output,
-    interceptWriteSerializer: opts.hooks?.intercept === undefined ? undefined : outputWriteQueue,
+    intercept,
+    interceptDestination: intercept === undefined ? undefined : output,
+    interceptWriteSerializer:
+      intercept === undefined ? undefined : outputWriteQueue,
     signal: inputAbort.signal,
     endDestination: true,
     maxRecordBytes: opts.maxRecordBytes,
@@ -459,110 +465,236 @@ export async function runDevtoolsMcpRelay(
     diagnostics,
     opts.maxDiagnosticLineBytes ?? DEFAULT_MAX_DIAGNOSTIC_LINE_BYTES,
   );
+  return { inputPump, outputPump, diagnosticsPump, inputAbort };
+}
 
-  let eofTimer: NodeJS.Timeout | undefined;
-  void inputPump.then(
+interface RelayTermination {
+  requested: boolean;
+  eofTimer?: NodeJS.Timeout;
+  signalKillTimer?: NodeJS.Timeout;
+  handlers: Map<RelaySignal, () => void>;
+  signalSource: RelaySignalSource;
+}
+
+function armRelayEofShutdown(
+  pumps: RelayPumps,
+  child: ChildProcess,
+  exited: Promise<RelayExit>,
+  timeoutMs: number,
+  termination: RelayTermination,
+): void {
+  void pumps.inputPump.then(
     () => {
-      eofTimer = setTimeout(() => {
-        terminationRequested = true;
+      termination.eofTimer = setTimeout(() => {
+        termination.requested = true;
         void stopChild(child, exited, timeoutMs).catch(() => {});
       }, timeoutMs);
-      eofTimer.unref();
+      termination.eofTimer.unref();
     },
     () => {},
   );
+}
 
-  let signalKillTimer: NodeJS.Timeout | undefined;
-  const signalSource = opts.signalSource ?? process;
-  const handlers = new Map<RelaySignal, () => void>();
+function attachRelaySignalHandlers(
+  child: ChildProcess,
+  timeoutMs: number,
+  termination: RelayTermination,
+): void {
   for (const signal of SIGNALS) {
     const handler = (): void => {
-      terminationRequested = true;
+      termination.requested = true;
       child.kill(signal);
-      if (signalKillTimer === undefined) {
-        signalKillTimer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
-        signalKillTimer.unref();
+      if (termination.signalKillTimer === undefined) {
+        termination.signalKillTimer = setTimeout(
+          () => child.kill("SIGKILL"),
+          timeoutMs,
+        );
+        termination.signalKillTimer.unref();
       }
     };
-    handlers.set(signal, handler);
-    signalSource.on(signal, handler);
+    termination.handlers.set(signal, handler);
+    termination.signalSource.on(signal, handler);
   }
+}
 
+function detachRelaySignalHandlers(termination: RelayTermination): void {
+  clearTimeout(termination.eofTimer);
+  clearTimeout(termination.signalKillTimer);
+  for (const [signal, handler] of termination.handlers) {
+    termination.signalSource.off(signal, handler);
+  }
+}
+
+type RelayRace =
+  | { kind: "exit"; value: RelayExit }
+  | { kind: "child-error"; error: unknown }
+  | { kind: "error"; error: unknown };
+
+async function raceRelayOutcome(
+  exit: Promise<RelayExit>,
+  pumps: RelayPumps,
+): Promise<RelayRace> {
+  const failedPump = Promise.race([
+    pendingAfterSuccess(pumps.inputPump),
+    pendingAfterSuccess(pumps.outputPump),
+    pendingAfterSuccess(pumps.diagnosticsPump),
+  ]);
+  return Promise.race([
+    exit.then(
+      (value) => ({ kind: "exit" as const, value }),
+      (error: unknown) => ({ kind: "child-error" as const, error }),
+    ),
+    failedPump.catch((error: unknown) => ({ kind: "error" as const, error })),
+  ]);
+}
+
+function relayFailureMessage(prefix: string, error: unknown, upstream: string): string {
+  const detail = error instanceof Error ? error.message : String(error);
+  return `Chrome DevTools MCP relay failed: ${prefix}${detail} (upstream exit ${upstream})`;
+}
+
+async function failOnRelayChildError(
+  outcome: Extract<RelayRace, { kind: "child-error" }>,
+  child: RelayChild,
+  pumps: RelayPumps,
+  exited: Promise<RelayExit>,
+  timeoutMs: number,
+  termination: RelayTermination,
+): Promise<never> {
+  termination.requested = true;
+  pumps.inputAbort.abort();
+  child.stdin.destroy();
+  child.stdout.destroy();
+  child.stderr.destroy();
+  const stopping = stopChild(child, exited, timeoutMs);
+  const pumpCleanup = Promise.allSettled([
+    pumps.inputPump,
+    pumps.outputPump,
+    pumps.diagnosticsPump,
+  ]);
+  const stopped = await stopping;
+  await pumpCleanup;
+  throw new Error(
+    relayFailureMessage(
+      "child process error: ",
+      outcome.error,
+      String(stopped.code ?? stopped.signal ?? "unknown"),
+    ),
+  );
+}
+
+async function settleRelayPumps(pumps: RelayPumps): Promise<
+  [PromiseSettledResult<void>, PromiseSettledResult<void>, PromiseSettledResult<void>]
+> {
+  return Promise.allSettled([
+    pumps.inputPump,
+    pumps.outputPump,
+    pumps.diagnosticsPump,
+  ]);
+}
+
+async function failOnRelayPumpError(
+  outcome: Extract<RelayRace, { kind: "error" }>,
+  child: RelayChild,
+  pumps: RelayPumps,
+  exited: Promise<RelayExit>,
+  timeoutMs: number,
+  termination: RelayTermination,
+): Promise<RelayExit> {
+  if (termination.requested) {
+    const observed = await exited;
+    pumps.inputAbort.abort();
+    await settleRelayPumps(pumps);
+    return observed;
+  }
+  termination.requested = true;
+  pumps.inputAbort.abort();
+  const stopped = await stopChild(child, exited, timeoutMs);
+  await settleRelayPumps(pumps);
+  throw new Error(
+    relayFailureMessage(
+      "",
+      outcome.error,
+      String(stopped.code ?? stopped.signal ?? "unknown"),
+    ),
+  );
+}
+
+function throwIfRelayPumpsFailed(
+  inputResult: PromiseSettledResult<void>,
+  outputResult: PromiseSettledResult<void>,
+  exit: RelayExit,
+): void {
+  if (
+    inputResult.status === "rejected" &&
+    inputResult.reason instanceof JsonRpcProtocolError
+  ) {
+    throw new Error(
+      relayFailureMessage("", inputResult.reason, String(exit.code ?? "unknown")),
+    );
+  }
+  if (outputResult.status === "rejected") {
+    throw new Error(
+      relayFailureMessage("", outputResult.reason, String(exit.code ?? "unknown")),
+    );
+  }
+}
+
+async function finishRelayExit(
+  outcome: Extract<RelayRace, { kind: "exit" }>,
+  pumps: RelayPumps,
+  termination: RelayTermination,
+): Promise<RelayExit> {
+  pumps.inputAbort.abort();
+  const [inputResult, outputResult] = await settleRelayPumps(pumps);
+  if (!termination.requested && outcome.value.signal === null) {
+    throwIfRelayPumpsFailed(inputResult, outputResult, outcome.value);
+  }
+  return outcome.value;
+}
+
+export async function runDevtoolsMcpRelay(
+  opts: RunDevtoolsMcpRelayOptions,
+): Promise<RelayExit> {
+  const input = opts.input ?? process.stdin;
+  const output = opts.output ?? process.stdout;
+  const diagnostics = opts.diagnostics ?? process.stderr;
+  const timeoutMs = opts.shutdownTimeoutMs ?? 1_000;
+  const child = spawnDevtoolsRelayChild(opts);
+  const { outcome: exit, exited } = observeChildExit(child);
+  const pumps = startRelayPumps(child, opts, input, output, diagnostics);
+  const termination: RelayTermination = {
+    requested: false,
+    handlers: new Map(),
+    signalSource: opts.signalSource ?? process,
+  };
+  armRelayEofShutdown(pumps, child, exited, timeoutMs, termination);
+  attachRelaySignalHandlers(child, timeoutMs, termination);
   try {
-    const failedPump = Promise.race([
-      pendingAfterSuccess(inputPump),
-      pendingAfterSuccess(outputPump),
-      pendingAfterSuccess(diagnosticsPump),
-    ]);
-    const outcome = await Promise.race([
-      exit.then(
-        (value) => ({ kind: "exit" as const, value }),
-        (error: unknown) => ({ kind: "child-error" as const, error }),
-      ),
-      failedPump.catch((error: unknown) => ({ kind: "error" as const, error })),
-    ]);
+    const outcome = await raceRelayOutcome(exit, pumps);
     if (outcome.kind === "child-error") {
-      terminationRequested = true;
-      inputAbort.abort();
-      child.stdin.destroy();
-      child.stdout.destroy();
-      child.stderr.destroy();
-      const stopping = stopChild(child, exited, timeoutMs);
-      const pumpCleanup = Promise.allSettled([
-        inputPump,
-        outputPump,
-        diagnosticsPump,
-      ]);
-      const stopped = await stopping;
-      await pumpCleanup;
-      throw new Error(
-        `Chrome DevTools MCP relay failed: child process error: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)} (upstream exit ${stopped.code ?? stopped.signal ?? "unknown"})`,
+      return await failOnRelayChildError(
+        outcome,
+        child,
+        pumps,
+        exited,
+        timeoutMs,
+        termination,
       );
     }
     if (outcome.kind === "error") {
-      if (terminationRequested) {
-        const observed = await exited;
-        inputAbort.abort();
-        await Promise.allSettled([inputPump, outputPump, diagnosticsPump]);
-        return observed;
-      }
-      terminationRequested = true;
-      inputAbort.abort();
-      const stopped = await stopChild(child, exited, timeoutMs);
-      await Promise.allSettled([inputPump, outputPump, diagnosticsPump]);
-      throw new Error(
-        `Chrome DevTools MCP relay failed: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)} (upstream exit ${stopped.code ?? stopped.signal ?? "unknown"})`,
+      return await failOnRelayPumpError(
+        outcome,
+        child,
+        pumps,
+        exited,
+        timeoutMs,
+        termination,
       );
     }
-    inputAbort.abort();
-    const [inputResult, outputResult] = await Promise.allSettled([
-      inputPump,
-      outputPump,
-      diagnosticsPump,
-    ]);
-    if (!terminationRequested && outcome.value.signal === null) {
-      if (
-        inputResult.status === "rejected" &&
-        inputResult.reason instanceof JsonRpcProtocolError
-      ) {
-        throw new Error(
-          `Chrome DevTools MCP relay failed: ${inputResult.reason.message} (upstream exit ${outcome.value.code ?? "unknown"})`,
-        );
-      }
-      if (outputResult.status === "rejected") {
-        const reason = outputResult.reason;
-        throw new Error(
-          `Chrome DevTools MCP relay failed: ${reason instanceof Error ? reason.message : String(reason)} (upstream exit ${outcome.value.code ?? "unknown"})`,
-        );
-      }
-    }
-    return outcome.value;
+    return await finishRelayExit(outcome, pumps, termination);
   } finally {
-    clearTimeout(eofTimer);
-    clearTimeout(signalKillTimer);
-    for (const [signal, handler] of handlers) {
-      signalSource.off(signal, handler);
-    }
+    detachRelaySignalHandlers(termination);
   }
 }
 

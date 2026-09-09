@@ -389,10 +389,34 @@ does not already assign, and only with both tools able to read version 1.
 
 ### Evidence recording
 
-Computer-use tools record one session-scoped evidence run by default. MCP
-desktop, Android, and session actions share the same append-only timeline as
-browser DevTools actions. Destroying a session, or reaping a dead one, finalizes
-the run and writes a static `report.html` filmstrip.
+Computer-use tools share an evidence run while its creating process is alive.
+Short-lived CLI, MCP, and browser DevTools processes can leave several runs for
+one session. Destroying a session, or reaping a dead one, finalizes its current
+run and writes a static `report.html` filmstrip.
+
+After stopping evidence producers, run `pickforge-lab artifacts report
+--finalize-orphans --project-dir <project>` or call MCP `artifact_report` with
+`{"finalizeOrphans":true}`. This explicitly recovers evidence throughout the
+configured storage root, even when a report run id is supplied. It returns one
+`session-<sessionId>.html` index per recovered session, linking its run reports
+in run-id order. Ordinary artifact commands remain read-only.
+
+Recovery marks interrupted runs `orphaned`, not successfully completed, and
+rebuilds artifact inventories from existing files and the journal. Completed and
+failed runs with a report stay read-only inputs for the session index. Every run
+stays in place; recovery never rewrites or deletes actions, moves evidence, or
+invokes retention. A torn final line is preserved but omitted from the report.
+A corrupt journal keeps its valid prefix and is labeled corrupt after that
+record; a missing journal is reported as unavailable, not an empty success.
+Repeat the command after an interrupted recovery. Live owners, ambiguous
+pointers, invalid manifests, and disappeared run directories are skipped with a
+reason. Stop all producers first because old pointers track the creator, not
+every process that adopted its run; stale handles cannot append to a recovered
+orphan. Legacy catalog fallback roots remain read-only; select their original
+storage mode explicitly to recover them in place. Pointers and locks do not
+record a hostname, so pid probes on shared storage are meaningless. Orphaned
+runs are never pruned by retention, and session index links can dangle after
+retention.
 
 A finalized evidence run directory (see [Run storage](#run-storage) for where
 it lives) contains:

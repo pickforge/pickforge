@@ -124,18 +124,16 @@ async function rootAndRunStillMatch(
   }
 }
 
-// eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/pickforge#60
-async function readVerifiedRootFile(
-  root: RunCatalogRoot,
-  dirName: string,
-  fileName: string,
-  readContents: boolean,
-  expectedIdentity?: CatalogIdentity,
-): Promise<{ value: Buffer | true; identity: CatalogIdentity }> {
+function requireSafeCatalogNames(dirName: string, fileName: string): void {
   if (!isSafeEntryName(dirName) || !isSafeEntryName(fileName)) {
     throw new RunCatalogAccessError("Unsafe run catalog entry");
   }
+}
 
+async function requireVerifiedCatalogRoot(
+  root: RunCatalogRoot,
+  expectedIdentity?: CatalogIdentity,
+): Promise<{ stat: fs.Stats; realDir: string }> {
   const rootBefore = await verifiedRoot(root);
   if (rootBefore === undefined) {
     throw new RunCatalogAccessError("Unsafe run catalog root");
@@ -146,66 +144,97 @@ async function readVerifiedRootFile(
   ) {
     throw new RunCatalogAccessError("Run catalog root changed");
   }
+  return rootBefore;
+}
 
-  const runDir = path.join(root.dir, dirName);
-  const filePath = path.join(runDir, fileName);
+interface CatalogFileSnapshot {
+  root: RunCatalogRoot;
+  dirName: string;
+  fileName: string;
+  rootBefore: { stat: fs.Stats; realDir: string };
+  runBefore: fs.Stats;
+  fileBefore: fs.Stats;
+}
+
+async function lstatVerifiedRunDirectory(
+  snapshot: Pick<CatalogFileSnapshot, "root" | "dirName" | "rootBefore">,
+  expectedIdentity?: CatalogIdentity,
+): Promise<fs.Stats> {
+  const runDir = path.join(snapshot.root.dir, snapshot.dirName);
+  const runBefore = await fs.promises.lstat(runDir);
+  if (runBefore.isSymbolicLink() || !runBefore.isDirectory()) {
+    throw new RunCatalogAccessError("Unsafe run catalog directory");
+  }
+  if (
+    expectedIdentity !== undefined &&
+    !sameIdentity(runBefore, expectedIdentity.run)
+  ) {
+    throw new RunCatalogAccessError("Run catalog directory changed");
+  }
+  if (
+    (await fs.promises.realpath(runDir)) !==
+    path.join(snapshot.rootBefore.realDir, snapshot.dirName)
+  ) {
+    throw new RunCatalogAccessError("Unsafe run catalog directory");
+  }
+  return runBefore;
+}
+
+async function lstatVerifiedCatalogFile(
+  snapshot: Pick<CatalogFileSnapshot, "root" | "dirName" | "fileName" | "rootBefore">,
+): Promise<fs.Stats> {
+  const filePath = path.join(snapshot.root.dir, snapshot.dirName, snapshot.fileName);
+  const fileBefore = await fs.promises.lstat(filePath);
+  if (fileBefore.isSymbolicLink() || !fileBefore.isFile()) {
+    throw new RunCatalogAccessError("Unsafe run catalog file");
+  }
+  if (
+    (await fs.promises.realpath(filePath)) !==
+    path.join(snapshot.rootBefore.realDir, snapshot.dirName, snapshot.fileName)
+  ) {
+    throw new RunCatalogAccessError("Unsafe run catalog file");
+  }
+  return fileBefore;
+}
+
+async function snapshotCatalogFile(
+  root: RunCatalogRoot,
+  dirName: string,
+  fileName: string,
+  rootBefore: { stat: fs.Stats; realDir: string },
+  expectedIdentity?: CatalogIdentity,
+): Promise<CatalogFileSnapshot> {
   let runBefore: fs.Stats | undefined;
-  let fileBefore: fs.Stats;
+  const partial = { root, dirName, fileName, rootBefore };
   try {
-    runBefore = await fs.promises.lstat(runDir);
-    if (runBefore.isSymbolicLink() || !runBefore.isDirectory()) {
-      throw new RunCatalogAccessError("Unsafe run catalog directory");
-    }
-    if (
-      expectedIdentity !== undefined &&
-      !sameIdentity(runBefore, expectedIdentity.run)
-    ) {
-      throw new RunCatalogAccessError("Run catalog directory changed");
-    }
-    if (
-      (await fs.promises.realpath(runDir)) !==
-      path.join(rootBefore.realDir, dirName)
-    ) {
-      throw new RunCatalogAccessError("Unsafe run catalog directory");
-    }
-    fileBefore = await fs.promises.lstat(filePath);
-    if (fileBefore.isSymbolicLink() || !fileBefore.isFile()) {
-      throw new RunCatalogAccessError("Unsafe run catalog file");
-    }
-    if (
-      (await fs.promises.realpath(filePath)) !==
-      path.join(rootBefore.realDir, dirName, fileName)
-    ) {
-      throw new RunCatalogAccessError("Unsafe run catalog file");
-    }
+    runBefore = await lstatVerifiedRunDirectory(partial, expectedIdentity);
+    const fileBefore = await lstatVerifiedCatalogFile(partial);
+    return { ...partial, runBefore, fileBefore };
   } catch (error) {
     if (error instanceof RunCatalogAccessError) throw error;
     if (isMissing(error)) {
       const unchanged =
         runBefore !== undefined &&
-        (await rootAndRunStillMatch(
-          root,
-          dirName,
-          rootBefore.stat,
-          runBefore,
-        ));
+        (await rootAndRunStillMatch(root, dirName, rootBefore.stat, runBefore));
       throw new RunCatalogAccessError(
-        unchanged
-          ? "Run catalog file not found"
-          : "Run catalog directory changed",
+        unchanged ? "Run catalog file not found" : "Run catalog directory changed",
         unchanged,
       );
     }
     throw new RunCatalogAccessError("Could not verify run catalog file");
   }
+}
 
-  if (runBefore === undefined) {
-    throw new RunCatalogAccessError("Run catalog directory not found");
-  }
-
-  let handle: fs.promises.FileHandle;
+async function openCatalogFileNoFollow(
+  snapshot: CatalogFileSnapshot,
+): Promise<fs.promises.FileHandle> {
+  const filePath = path.join(
+    snapshot.root.dir,
+    snapshot.dirName,
+    snapshot.fileName,
+  );
   try {
-    handle = await fs.promises.open(
+    return await fs.promises.open(
       filePath,
       fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
     );
@@ -214,10 +243,10 @@ async function readVerifiedRootFile(
     const unchanged =
       missing &&
       (await rootAndRunStillMatch(
-        root,
-        dirName,
-        rootBefore.stat,
-        runBefore,
+        snapshot.root,
+        snapshot.dirName,
+        snapshot.rootBefore.stat,
+        snapshot.runBefore,
       ));
     throw new RunCatalogAccessError(
       missing && unchanged
@@ -226,45 +255,85 @@ async function readVerifiedRootFile(
       missing && unchanged,
     );
   }
+}
 
+function catalogRunOrFileChanged(
+  snapshot: CatalogFileSnapshot,
+  runAfter: fs.Stats,
+  opened: fs.Stats,
+  fileAfter: fs.Stats,
+): boolean {
+  if (runAfter.isSymbolicLink() || !runAfter.isDirectory()) return true;
+  if (!sameIdentity(snapshot.runBefore, runAfter)) return true;
+  if (fileAfter.isSymbolicLink() || !fileAfter.isFile()) return true;
+  return !sameIdentity(opened, fileAfter);
+}
+
+async function catalogPathsEscaped(
+  snapshot: CatalogFileSnapshot,
+  realDir: string,
+): Promise<boolean> {
+  const runDir = path.join(snapshot.root.dir, snapshot.dirName);
+  const filePath = path.join(runDir, snapshot.fileName);
+  const runReal = await fs.promises.realpath(runDir);
+  if (runReal !== path.join(realDir, snapshot.dirName)) return true;
+  const fileReal = await fs.promises.realpath(filePath);
+  return fileReal !== path.join(realDir, snapshot.dirName, snapshot.fileName);
+}
+
+async function readAndRevalidateCatalogFile(
+  handle: fs.promises.FileHandle,
+  snapshot: CatalogFileSnapshot,
+  readContents: boolean,
+): Promise<{ value: Buffer | true; identity: CatalogIdentity }> {
+  const opened = await handle.stat();
+  if (!opened.isFile() || !sameIdentity(opened, snapshot.fileBefore)) {
+    throw new RunCatalogAccessError("Run catalog file changed during read");
+  }
+  const value = readContents ? await handle.readFile() : true;
+
+  const rootAfter = await verifiedRoot(snapshot.root);
+  if (
+    rootAfter === undefined ||
+    !sameIdentity(snapshot.rootBefore.stat, rootAfter.stat)
+  ) {
+    throw new RunCatalogAccessError("Run catalog root changed during read");
+  }
+  const runDir = path.join(snapshot.root.dir, snapshot.dirName);
+  const filePath = path.join(runDir, snapshot.fileName);
+  const runAfter = await fs.promises.lstat(runDir);
+  const fileAfter = await fs.promises.lstat(filePath);
+  if (catalogRunOrFileChanged(snapshot, runAfter, opened, fileAfter)) {
+    throw new RunCatalogAccessError("Run catalog entry changed during read");
+  }
+  if (await catalogPathsEscaped(snapshot, rootAfter.realDir)) {
+    throw new RunCatalogAccessError("Run catalog entry escaped during read");
+  }
+  return {
+    value,
+    identity: { root: snapshot.rootBefore.stat, run: snapshot.runBefore },
+  };
+}
+
+async function readVerifiedRootFile(
+  root: RunCatalogRoot,
+  dirName: string,
+  fileName: string,
+  readContents: boolean,
+  expectedIdentity?: CatalogIdentity,
+): Promise<{ value: Buffer | true; identity: CatalogIdentity }> {
+  requireSafeCatalogNames(dirName, fileName);
+  const rootBefore = await requireVerifiedCatalogRoot(root, expectedIdentity);
+  const snapshot = await snapshotCatalogFile(
+    root,
+    dirName,
+    fileName,
+    rootBefore,
+    expectedIdentity,
+  );
+  const handle = await openCatalogFileNoFollow(snapshot);
   try {
-    const opened = await handle.stat();
-    if (!opened.isFile() || !sameIdentity(opened, fileBefore)) {
-      throw new RunCatalogAccessError("Run catalog file changed during read");
-    }
-    const value = readContents ? await handle.readFile() : true;
-
-    const rootAfter = await verifiedRoot(root);
-    if (
-      rootAfter === undefined ||
-      !sameIdentity(rootBefore.stat, rootAfter.stat)
-    ) {
-      throw new RunCatalogAccessError("Run catalog root changed during read");
-    }
-    const runAfter = await fs.promises.lstat(runDir);
-    const fileAfter = await fs.promises.lstat(filePath);
-    if (
-      runAfter.isSymbolicLink() ||
-      !runAfter.isDirectory() ||
-      !sameIdentity(runBefore, runAfter) ||
-      fileAfter.isSymbolicLink() ||
-      !fileAfter.isFile() ||
-      !sameIdentity(opened, fileAfter)
-    ) {
-      throw new RunCatalogAccessError("Run catalog entry changed during read");
-    }
-    if (
-      (await fs.promises.realpath(runDir)) !==
-        path.join(rootAfter.realDir, dirName) ||
-      (await fs.promises.realpath(filePath)) !==
-        path.join(rootAfter.realDir, dirName, fileName)
-    ) {
-      throw new RunCatalogAccessError("Run catalog entry escaped during read");
-    }
-    return {
-      value,
-      identity: { root: rootBefore.stat, run: runBefore },
-    };
+    return await readAndRevalidateCatalogFile(handle, snapshot, readContents);
   } catch (error) {
     if (error instanceof RunCatalogAccessError) throw error;
     throw new RunCatalogAccessError("Could not read run catalog file");
