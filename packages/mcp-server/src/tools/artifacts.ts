@@ -2,6 +2,9 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import {
   EVIDENCE_ACTION_LOG,
+  listArtifactRuns,
+  listRustEvidenceRuns,
+  renderRustEvidenceReport,
   finalizeOrphanedEvidenceRuns,
   isEvidenceRun,
   openRunCatalog,
@@ -60,14 +63,7 @@ export function registerArtifactTools(
     () =>
       runTool(async () => {
         const catalog = await openRunCatalog(ctx.projectDir, ctx.env);
-        const entries = await catalog.list();
-        const runs = entries.map(({ manifest }) => ({
-          runId: manifest.runId,
-          slug: manifest.slug,
-          createdAt: manifest.createdAt,
-          status: manifest.status,
-          artifacts: manifest.artifacts.length,
-        }));
+        const runs = await listArtifactRuns(catalog);
         return { data: { projectDir: ctx.projectDir, runs } };
       }),
   );
@@ -91,6 +87,18 @@ export function registerArtifactTools(
         const recovery = args.finalizeOrphans === true
           ? await finalizeOrphanedEvidenceRuns(ctx.projectDir, ctx.env)
           : undefined;
+        const rustRuns = await listRustEvidenceRuns(await openRunCatalog(ctx.projectDir, ctx.env));
+        const rust = rustRuns.find(run => run.runId === args.runId);
+        if (rust !== undefined) {
+          return { data: { ...rust, report: renderRustEvidenceReport(rust).join("\n"),
+            ...(recovery === undefined ? {} : { recovery }) } };
+        }
+        const rustLines = rustRuns.map(run => `${run.runId}  rust  ${run.outcome}`);
+        if (args.runId === undefined && rustRuns.length > 0 &&
+            await (await openRunCatalog(ctx.projectDir, ctx.env)).find() === undefined) {
+          return { data: { rustRuns, report: rustLines.join("\n"),
+            ...(recovery === undefined ? {} : { recovery }) } };
+        }
         const { catalog, entry } = await findRun(
           ctx.projectDir,
           args.runId,
@@ -100,10 +108,13 @@ export function registerArtifactTools(
         const records = await readCatalogActions(catalog, entry);
         return {
           data: {
+            source: "lab",
+            ...(args.runId === undefined ? { rustRuns } : {}),
             runId: manifest.runId,
             dir,
             manifest,
-            report: renderRunReport(manifest, dir, records).join("\n"),
+            report: [...renderRunReport(manifest, dir, records),
+              ...(args.runId === undefined ? rustLines : [])].join("\n"),
             ...(recovery === undefined ? {} : { recovery }),
           },
         };

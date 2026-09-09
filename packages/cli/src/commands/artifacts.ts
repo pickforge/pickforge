@@ -1,6 +1,9 @@
 import { spawn } from "node:child_process";
 import {
   EVIDENCE_ACTION_LOG,
+  listArtifactRuns,
+  listRustEvidenceRuns,
+  renderRustEvidenceReport,
   finalizeOrphanedEvidenceRuns,
   isEvidenceRun,
   openRunCatalog,
@@ -22,14 +25,7 @@ export async function runArtifactsList(opts: BaseCliOptions): Promise<number> {
   return runReported(opts, async () => {
     const projectDir = resolveProjectDir(opts);
     const catalog = await openRunCatalog(projectDir);
-    const entries = await catalog.list();
-    const runs = entries.map(({ manifest }) => ({
-      runId: manifest.runId,
-      slug: manifest.slug,
-      createdAt: manifest.createdAt,
-      status: manifest.status,
-      artifacts: manifest.artifacts.length,
-    }));
+    const runs = await listArtifactRuns(catalog);
     return {
       data: { projectDir, runs },
       lines:
@@ -39,7 +35,7 @@ export async function runArtifactsList(opts: BaseCliOptions): Promise<number> {
             ]
           : runs.map(
               (run) =>
-                `${run.runId}  ${run.status}  ${run.artifacts} artifact(s)`,
+                `${run.runId}  ${run.source}  ${run.status}  ${run.artifacts} artifact(s)`,
             ),
     };
   });
@@ -118,13 +114,28 @@ export async function runArtifactsReport(
     const recovery = opts.finalizeOrphans === true
       ? await finalizeOrphanedEvidenceRuns(projectDir)
       : undefined;
+    const rustRuns = await listRustEvidenceRuns(await openRunCatalog(projectDir));
+    const rust = rustRuns.find(run => run.runId === runId);
+    const rustLines = rustRuns.map(run => `${run.runId}  rust  ${run.outcome}`);
+    if (rust !== undefined) {
+      const lines = renderRustEvidenceReport(rust);
+      return {
+        data: { ...rust, report: lines.join("\n"), ...(recovery === undefined ? {} : { recovery }) },
+        lines: [...lines, ...(recovery === undefined ? [] : recoveryReportLines(recovery))],
+      };
+    }
+    if (runId === undefined && rustRuns.length > 0 &&
+        await (await openRunCatalog(projectDir)).find() === undefined) {
+      return { data: { rustRuns, ...(recovery === undefined ? {} : { recovery }) }, lines: rustLines };
+    }
     const { catalog, entry } = await findRun(projectDir, runId);
     const { manifest, dir } = entry;
     const records = await readCatalogActions(catalog, entry);
     return {
-      data: { runId: manifest.runId, dir, manifest, ...(recovery === undefined ? {} : { recovery }) },
+      data: { source: "lab", runId: manifest.runId, dir, manifest, ...(runId === undefined ? { rustRuns } : {}), ...(recovery === undefined ? {} : { recovery }) },
       lines: [
         ...renderRunReport(manifest, dir, records),
+        ...(runId === undefined ? rustLines : []),
         ...(recovery === undefined ? [] : recoveryReportLines(recovery)),
       ],
     };
