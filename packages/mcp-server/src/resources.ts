@@ -10,8 +10,8 @@ import {
   EVIDENCE_REPORT,
   getSession,
   isEvidenceRun,
-  isOutcomeRecord,
   listSessions,
+  listArtifactRuns,
   openRunCatalog,
   parseActionsJournal,
   redactSecrets,
@@ -20,7 +20,6 @@ import {
   type RunCatalogEntry,
 } from "@pickforge/lab-core";
 import type { ServerContext } from "./context.js";
-import { readCatalogActions } from "./tools/artifacts.js";
 import { sessionStatusEntry } from "./tools/session.js";
 
 const SAFE_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
@@ -221,18 +220,7 @@ function registerResource1(server: McpServer, ctx: ServerContext): void {
     },
     async (uri) => {
       const catalog = await openRunCatalog(ctx.projectDir, ctx.env);
-      const runs = await Promise.all((await catalog.list()).map(async (entry) => {
-        const { manifest } = entry;
-        const records = await readCatalogActions(catalog, entry).catch((): ReturnType<typeof parseActionsJournal> => []);
-        return {
-          runId: manifest.runId,
-          slug: manifest.slug,
-          createdAt: manifest.createdAt,
-          status: manifest.status,
-          artifacts: manifest.artifacts.length,
-          outcome: records.filter(isOutcomeRecord).at(-1)?.status ?? null,
-        };
-      }));
+      const runs = await listArtifactRuns(catalog);
       return {
         contents: [
           {
