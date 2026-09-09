@@ -142,6 +142,7 @@ export {
   renderEvidenceHtml,
   renderRunReport,
   sortEvidenceRecords,
+  reportContentSecurityPolicy,
   writeEvidenceReport,
 } from "./evidence-render.js";
 

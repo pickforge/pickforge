@@ -563,7 +563,7 @@ it("records acceptance outcomes through MCP with redaction and typed validation 
   expect(parseToolJson(result).outcome.status).toBe("pass");
   expect(JSON.stringify(result)).not.toContain(PLANTED_TOKEN);
   expect(fs.readFileSync(path.join(run.dir, "actions.jsonl"), "utf8")).not.toContain(PLANTED_TOKEN);
-  expect(fs.readFileSync(path.join(run.dir, "report.html"), "utf8")).toContain("Outcome: pass");
+  expect(fs.readFileSync(path.join(run.dir, "report.html"), "utf8")).toContain('class="panel outcome s-pass"');
 });
 
 it("rejects oversize outcome lists at the schema instead of truncating them", async () => {
