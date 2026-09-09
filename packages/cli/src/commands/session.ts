@@ -18,6 +18,8 @@ import {
   loadConfig,
   localSessionStatusEntry,
   reapDeadRunningSessions,
+  pruneSessionLogs,
+  parseSessionRetentionDuration,
   type LocalSessionCreateRuntime,
   type LocalSessionDestroyRuntime,
   type LocalSessionRecipe,
@@ -268,6 +270,25 @@ export async function runSessionStatus(
     return {
       data: { sessions },
       lines: sessions.length === 0 ? ["no sessions"] : sessions.map(statusLine),
+    };
+  });
+}
+
+export interface SessionPruneOptions extends BaseCliOptions {
+  allStopped?: boolean;
+  olderThan?: string;
+}
+
+export async function runSessionPrune(opts: SessionPruneOptions): Promise<number> {
+  return runReported(opts, async () => {
+    if ((opts.allStopped === true) === (opts.olderThan !== undefined)) {
+      throw new Error("Pass either --older-than <duration> or --all-stopped");
+    }
+    const age = opts.olderThan === undefined ? 0 : parseSessionRetentionDuration(opts.olderThan);
+    const pruned = await pruneSessionLogs(age);
+    return {
+      data: { pruned },
+      lines: pruned.length === 0 ? ["no session logs pruned"] : pruned.map((id) => `pruned session logs ${id}`),
     };
   });
 }

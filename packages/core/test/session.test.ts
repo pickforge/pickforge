@@ -883,7 +883,7 @@ describe("session registry", () => {
     const rm = vi
       .spyOn(fs.promises, "rm")
       .mockImplementation(async (target, options) => {
-        if (failRemoval && path.resolve(String(target)) === sessionDir) {
+        if (failRemoval && path.resolve(String(target)) === profileDir) {
           const error = new Error("simulated removal failure");
           Object.assign(error, { code: "EACCES" });
           throw error;
@@ -895,7 +895,7 @@ describe("session registry", () => {
       const failed = await getSession(stale.id, env);
       expect(failed?.status).toBe("error");
       expect(failed?.meta?.reaperCleanupPending).toBe(true);
-      expect(fs.existsSync(profileDir)).toBe(false);
+      expect(fs.existsSync(profileDir)).toBe(true);
 
       failRemoval = false;
       expect(
@@ -941,7 +941,7 @@ describe("session registry", () => {
     for (const runtimePath of runtimePaths) {
       expect(fs.existsSync(runtimePath)).toBe(false);
     }
-    expect(fs.existsSync(sessionDir)).toBe(false);
+    expect(fs.readdirSync(sessionDir)).toEqual(["stopped.json"]);
   });
 
   it("does not delete a profile that escapes the session dir when reaping", async () => {

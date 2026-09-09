@@ -280,3 +280,9 @@ export {
   type SessionStatus,
   type SessionType,
 } from "./session.js";
+
+export {
+  parseSessionRetentionDuration,
+  pruneSessionLogs,
+  retainSessionLogs,
+} from "./session-retention.js";

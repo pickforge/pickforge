@@ -1,6 +1,7 @@
 import {
   createSession,
   destroySessionRecord,
+  retainSessionLogs,
   getSession,
   isPidAlive,
   reapDeadRunningSessions,
@@ -220,6 +221,7 @@ export async function teardownAndroidSession(
       );
     }
   }
+  await retainSessionLogs(record, registryEnv);
   await finalize();
 }
 

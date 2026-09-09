@@ -336,8 +336,8 @@ function registerSessionDestroyTool(
     {
       title: "Destroy lab session",
       description:
-        "Destroy a session and stop its processes. Pass a session id, or " +
-        "all=true to destroy every session.",
+        "Stop processes and remove runtime data; retain session logs. Pass a session id, or " +
+        "all=true to destroy every session. Use pickforge-lab session prune to delete retained logs.",
       inputSchema: {
         sessionId: z.string().min(1).optional().describe("Session id"),
         all: z.boolean().optional().describe("Destroy all sessions"),

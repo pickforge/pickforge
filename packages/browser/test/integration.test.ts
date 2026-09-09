@@ -107,7 +107,8 @@ describe.skipIf(!ready)("real headed Chrome under Xvfb", () => {
         await destroyBrowserSession(session.id, longEnv).catch(() => {});
       }
       expect(fs.existsSync(layout.chromeTmpDir)).toBe(false);
-      expect(fs.existsSync(session.logDir)).toBe(false);
+      expect(fs.existsSync(path.join(session.logDir, "chrome.log"))).toBe(true);
+      expect(fs.existsSync(path.join(session.logDir, "stopped.json"))).toBe(true);
     },
   );
 

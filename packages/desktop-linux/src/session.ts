@@ -10,6 +10,7 @@ import {
   destroyContainmentScope,
   ensureContainmentScope,
   destroySessionRecord,
+  retainSessionLogs,
   getSession,
   isHumanLeaseStale,
   isPidAlive,
@@ -943,6 +944,7 @@ export async function teardownDesktopSession(
           failures.map((failure) => failure.message).join("; "),
       );
     }
+    await retainSessionLogs(record, registryEnv);
     await finalize();
   });
 }

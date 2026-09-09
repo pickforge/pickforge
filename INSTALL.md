@@ -194,6 +194,8 @@ isolation for desktop sessions is tracked in
 
 Finally, remind the user to restart the agent so the `pickforge-lab` MCP tools load, and that `session_status` over MCP is the quickest end-to-end check.
 
+Session logs: desktop, browser and Android logs are retained after teardown; runtime sockets, locks, permits, profiles and temporary data are removed once processes stop. Failed starts keep logs and an error record. There is no automatic pruning. After explicit destroy, use `pickforge-lab session prune --older-than 7d` or `--all-stopped`. Age is measured from successful teardown. Pruning keeps registry-backed sessions, symlinks, unknown data and legacy directories without `stopped.json`.
+
 ## Report back
 
 Tell the user: install location and version, which agent config was updated, which system packages were installed or are still missing, whether the AVD and the optional lab user exist, and the doctor result. Keep it short and honest — unresolved `[missing]` checks are not "non-blockers", they are setup the user still has to approve.

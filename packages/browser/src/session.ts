@@ -4,6 +4,7 @@ import {
   REAPER_CLEANUP_PENDING_META_KEY,
   createSession,
   destroySessionRecord,
+  retainSessionLogs,
   getSession,
   isPidAlive,
   isProfileConfined,
@@ -686,6 +687,48 @@ export async function getBrowserSessionStatus(
   };
 }
 
+async function stopBrowserVnc(
+  record: SessionRecord,
+  browserGone: boolean,
+  failures: Error[],
+): Promise<void> {
+  const desktop = record.desktop;
+  if (desktop?.vncPid === undefined) return;
+  if (!browserGone) {
+    failures.push(new Error(`Refusing to stop x11vnc for ${record.id}: Chrome process group is not confirmed gone`));
+    return;
+  }
+  try {
+    await stopOwnedSessionVnc(record.id, desktop);
+  } catch (error) {
+    failures.push(asError(error));
+  }
+}
+
+async function stopBrowserDisplay(
+  record: SessionRecord,
+  browserGone: boolean,
+  failures: Error[],
+): Promise<void> {
+  const pid = record.desktop?.xvfbPid;
+  if (pid === undefined) return;
+  if (!browserGone) {
+    failures.push(new Error(`Refusing to stop Xvfb for ${record.id}: Chrome process group is not confirmed gone`));
+    return;
+  }
+  const startTicks = record.desktop?.xvfbStartTimeTicks;
+  if (startTicks === undefined) {
+    if (isPidAlive(pid)) {
+      failures.push(new Error(`Refusing to stop Xvfb (pid ${pid}): process identity is unavailable`));
+    }
+    return;
+  }
+  const stopped = await stopBrowserGroup({ pid, startTicks });
+  if (!stopped.gone) {
+    failures.push(stopped.error ?? new Error(`Xvfb process group (pid ${pid}) could not be verified as gone`));
+  }
+}
+
 /**
  * Destroy a browser session: kill the verified Chrome process group and confirm
  * it is dead, stop lazy VNC before the private Xvfb, then delete the ephemeral
@@ -694,7 +737,6 @@ export async function getBrowserSessionStatus(
  * into one error
  * and leave the record in `error` state for inspection.
  */
-// eslint-disable-next-line max-lines-per-function -- Legacy gate debt: pickforge/pickforge#60
 export async function teardownBrowserSession(
   id: string,
   registryEnv: EnvLike,
@@ -708,7 +750,6 @@ export async function teardownBrowserSession(
     throw new Error(`Session ${id} is not a browser session`);
   }
 
-  // eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/pickforge#60
   await withSessionVncLock(id, registryEnv, async () => {
     const record = await getSession(id, registryEnv);
     if (record === undefined) {
@@ -738,53 +779,8 @@ export async function teardownBrowserSession(
       );
     }
 
-    const desktop = record.desktop;
-    if (desktop?.vncPid !== undefined && gone) {
-      try {
-        await stopOwnedSessionVnc(id, desktop);
-      } catch (error) {
-        failures.push(error instanceof Error ? error : new Error(String(error)));
-      }
-    } else if (desktop?.vncPid !== undefined) {
-      failures.push(
-        new Error(
-          `Refusing to stop x11vnc for ${id}: Chrome process group is not confirmed gone`,
-        ),
-      );
-    }
-
-    const xvfbPid = desktop?.xvfbPid;
-    const xvfbStartTimeTicks = desktop?.xvfbStartTimeTicks;
-    if (xvfbPid !== undefined && gone) {
-      if (xvfbStartTimeTicks === undefined) {
-        if (isPidAlive(xvfbPid)) {
-          failures.push(
-            new Error(
-              `Refusing to stop Xvfb (pid ${xvfbPid}): process identity is unavailable`,
-            ),
-          );
-        }
-      } else {
-        const stopped = await stopBrowserGroup({
-          pid: xvfbPid,
-          startTicks: xvfbStartTimeTicks,
-        });
-        if (!stopped.gone) {
-          failures.push(
-            stopped.error ??
-              new Error(
-                `Xvfb process group (pid ${xvfbPid}) could not be verified as gone`,
-              ),
-          );
-        }
-      }
-    } else if (xvfbPid !== undefined) {
-      failures.push(
-        new Error(
-          `Refusing to stop Xvfb for ${id}: Chrome process group is not confirmed gone`,
-        ),
-      );
-    }
+    await stopBrowserVnc(record, gone, failures);
+    await stopBrowserDisplay(record, gone, failures);
 
     const sessionDir = browserSessionLogDir(id, registryEnv);
     const layout = browserRuntimeLayout(sessionDir);
@@ -800,13 +796,6 @@ export async function teardownBrowserSession(
       );
     } else if (gone) {
       failures.push(...(await removeRuntimeData(layout, profileDir)));
-      if (failures.length === 0) {
-        try {
-          await fs.promises.rm(sessionDir, { recursive: true, force: true });
-        } catch (error) {
-          failures.push(asError(error));
-        }
-      }
     } else {
       failures.push(
         new Error(
@@ -832,6 +821,7 @@ export async function teardownBrowserSession(
         `Failed to fully destroy browser session ${id}`,
       );
     }
+    await retainSessionLogs(record, registryEnv);
     await finalize();
   });
 }
