@@ -221,7 +221,12 @@ export async function teardownAndroidSession(
       );
     }
   }
-  await retainSessionLogs(record, registryEnv);
+  try {
+    await retainSessionLogs(record, registryEnv);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to retain logs of session ${record.id}: ${message}`, { cause: error });
+  }
   await finalize();
 }
 
