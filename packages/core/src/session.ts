@@ -221,7 +221,7 @@ export function isDisplaySocketAlive(display: string): boolean {
 }
 
 
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
+// oxlint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 export function isSessionProcessAlive(record: SessionRecord): boolean {
   if (record.type === "desktop") {
     const desktop = record.desktop;

@@ -850,7 +850,7 @@ async function sweepUntilEmpty(
     for (const identity of listContainedIdentities(token)) {
       state.pending.set(identityKey(identity), identity);
     }
-    for (const identity of [...state.pending.values()]) {
+    for (const identity of Array.from(state.pending.values())) {
       decidePending(identity, token, signal, state, settled);
     }
     // A process mid-exec is invisible to one scan; only two consecutive passes

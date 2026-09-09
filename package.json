@@ -18,7 +18,7 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "lint": "eslint .",
+    "lint": "oxlint",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:live:android": "PICKFORGE_LIVE_ANDROID=1 vitest run packages/android/test/integration.test.ts",
@@ -27,10 +27,9 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@vitest/coverage-v8": "3.2.6",
-    "eslint": "10.7.0",
+    "oxlint": "1.82.0",
     "tsup": "^8.5.0",
     "typescript": "^5.9.0",
-    "typescript-eslint": "8.65.0",
     "vitest": "3.2.6"
   }
 }
