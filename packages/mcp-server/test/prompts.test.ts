@@ -1,3 +1,4 @@
+import { DEVICE_PASS_SUMMARY, DEVICE_PASS_WORKFLOW } from "@pickforge/lab-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   connectLab,
@@ -32,13 +33,19 @@ function promptText(result: {
 }
 
 describe("prompts", () => {
-  it("lists the three workflow prompts with arguments", async () => {
+  it("lists the workflow prompts with arguments", async () => {
     const { prompts } = await lab.client.listPrompts();
     const byName = new Map(prompts.map((prompt) => [prompt.name, prompt]));
     expect([...byName.keys()].sort()).toEqual([
       "debug-android-apk",
+      "device_pass",
       "run-visual-regression-check",
       "test-flutter-desktop-visually",
+    ]);
+    expect(byName.get("device_pass")?.arguments).toEqual([
+      expect.objectContaining({ name: "scenario", required: true }),
+      expect.objectContaining({ name: "revision", required: false }),
+      expect.objectContaining({ name: "device", required: false }),
     ]);
     expect(
       byName
@@ -55,6 +62,32 @@ describe("prompts", () => {
         .get("test-flutter-desktop-visually")
         ?.arguments?.map((argument) => argument.name),
     ).toContain("appCommand");
+  });
+
+  it("delivers short acceptance instructions during initialization", () => {
+    const instructions = lab.client.getInstructions();
+    expect(instructions).toBe(DEVICE_PASS_SUMMARY);
+    expect(instructions).toContain("Pass is refused without a successful interaction and an inspected screenshot");
+    expect(instructions).toContain("evidence_outcome");
+    expect(instructions).toContain("device_pass");
+    expect(instructions).not.toBe(DEVICE_PASS_WORKFLOW);
+  });
+
+  it("renders the device pass with its arguments as a user message", async () => {
+    const result = await lab.client.getPrompt({
+      name: "device_pass",
+      arguments: { scenario: "Checkout", revision: "abc123", device: "mobile 390x844" },
+    });
+    expect(result.messages).toEqual([{
+      role: "user",
+      content: { type: "text", text: `Scenario: Checkout\nRevision: abc123\nDevice: mobile 390x844\n\n${DEVICE_PASS_WORKFLOW}` },
+    }]);
+  });
+
+  it("keeps omitted device and revision unknown and requires a scenario", async () => {
+    const result = await lab.client.getPrompt({ name: "device_pass", arguments: { scenario: "Login" } });
+    expect(promptText(result)).toBe(`Scenario: Login\nRevision: unknown\nDevice: unknown\n\n${DEVICE_PASS_WORKFLOW}`);
+    await expect(lab.client.getPrompt({ name: "device_pass" })).rejects.toThrow();
   });
 
   it("guides a desktop visual test workflow", async () => {

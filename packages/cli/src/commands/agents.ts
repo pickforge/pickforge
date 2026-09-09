@@ -227,7 +227,10 @@ export async function runAgentsLink(
         warning: result.warning ?? null,
         snippets,
       },
-      lines: changeLines(name, result, "registered", browser),
+      lines: [
+        ...changeLines(name, result, "registered", browser),
+        `Acceptance workflow: ${snippets.devicePassPath}`,
+      ],
     };
   });
 }

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DEVICE_PASS_WORKFLOW } from "@pickforge/lab-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   browserMcpServerEntry,
@@ -98,9 +99,14 @@ describe("renderTomlSnippet", () => {
 });
 
 describe("writeSharedSnippets", () => {
-  it("writes both snippet files into the agents dir", async () => {
+  it("writes shared snippets and the acceptance workflow into the agents dir", async () => {
     const env = { PICKFORGE_HOME: path.join(tmpDir, "state") };
     const snippets = await writeSharedSnippets(env);
+    expect(snippets.devicePassPath).toBe(
+      path.join(tmpDir, "state", "agents", "device-pass.md"),
+    );
+    const workflow = fs.readFileSync(snippets.devicePassPath, "utf8");
+    expect(workflow).toBe(DEVICE_PASS_WORKFLOW);
     expect(snippets.jsonPath).toBe(
       path.join(tmpDir, "state", "agents", "pickforge-mcp.json"),
     );

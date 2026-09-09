@@ -623,7 +623,9 @@ describe("pickforge-lab agents link claude-code (claude binary on PATH)", () => 
 
     expect(result.code).toBe(0);
     expect(result.stderr).toBe("");
-    expect(result.stdout.trim()).toBe(
+    const outputLines = result.stdout.trim().split("\n");
+    expect(outputLines.at(-1)).toMatch(/^Acceptance workflow: .*[/\\]device-pass\.md$/);
+    expect(outputLines.slice(0, -1).join("\n")).toBe(
       `claude-code is already registered in ${configPath} (no changes made)\n` +
         `Left the existing pickforge-lab-browser MCP entry in ${configPath} ` +
         "untouched (re-run with --browser to manage it)",
@@ -659,9 +661,11 @@ describe("pickforge-lab agents link claude-code (claude binary on PATH)", () => 
 
     expect(result.code).toBe(0);
     expect(result.stderr).toBe("");
-    expect(result.stdout.trim()).toBe(
+    const [registered, workflow] = result.stdout.trim().split("\n");
+    expect(registered).toBe(
       `Registered the pickforge-lab MCP server for claude-code in ${configPath}`,
     );
+    expect(workflow).toMatch(/^Acceptance workflow: .*[/\\]device-pass\.md$/);
     expect(JSON.parse(fs.readFileSync(configPath, "utf8"))).toEqual({
       mcpServers: {
         "pickforge-lab": { command: "pickforge-lab", args: ["mcp", "serve"] },

@@ -1,4 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/server";
+import { DEVICE_PASS_WORKFLOW } from "@pickforge/lab-core";
 import { z } from "zod";
 
 function userMessage(text: string): {
@@ -148,8 +149,28 @@ function registerPrompt3(server: McpServer): void {
   );
 }
 
+function registerDevicePassPrompt(server: McpServer): void {
+  server.registerPrompt(
+    "device_pass",
+    {
+      title: "Run a device pass",
+      description: "Interact with a rendered journey, inspect its screenshots, and record acceptance.",
+      argsSchema: {
+        scenario: z.string().describe("Scoped user journey to test"),
+        revision: z.string().optional().describe("Revision under test"),
+        device: z.string().optional().describe("Target device and viewports"),
+      },
+    },
+    ({ scenario, revision, device }) =>
+      userMessage(
+        `Scenario: ${scenario}\nRevision: ${revision ?? "unknown"}\nDevice: ${device ?? "unknown"}\n\n${DEVICE_PASS_WORKFLOW}`,
+      ),
+  );
+}
+
 export function registerPrompts(server: McpServer): void {
   registerPrompt1(server);
   registerPrompt2(server);
   registerPrompt3(server);
+  registerDevicePassPrompt(server);
 }
