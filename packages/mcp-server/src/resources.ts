@@ -344,7 +344,7 @@ function registerResource4(server: McpServer, ctx: ServerContext): void {
     }),
     {
       title: "Run HTML report",
-      description: "Static evidence filmstrip for a recorded run",
+      description: "HTML viewer for a recorded run’s evidence filmstrip",
       mimeType: "text/html",
     },
     async (uri, variables) => {

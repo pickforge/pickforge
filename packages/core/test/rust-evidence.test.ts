@@ -18,7 +18,8 @@ it("merges both sources, reports corruption and never recovers Rust evidence", a
   const catalog = await openRunCatalog(project, env);
   const runs = await listArtifactRuns(catalog);
   expect(runs.map(run => run.source)).toEqual(["rust", "lab", "rust", "rust"]);
-  expect(runs[0]).toMatchObject({ runId: rustId, status: "passed", artifacts: 1 });
+  expect(runs[0]).toMatchObject({ runId: rustId, status: "passed", artifacts: 1, outcome: null });
+  expect(runs.find(run => run.source === "lab")).toMatchObject({ outcome: null });
   const rust = await listRustEvidenceRuns(catalog);
   expect(rust.filter(run => run.state === "corrupt")).toHaveLength(2);
   expect(renderRustEvidenceReport(rust[0]!).join("\n")).toContain("artifacts/before-home-abcd.png");

@@ -1,6 +1,9 @@
+import path from "node:path";
 import { spawn } from "node:child_process";
 import {
   EVIDENCE_ACTION_LOG,
+  EVIDENCE_REPORT,
+  latestOutcome,
   recordEvidenceOutcome,
   type EvidenceOutcomeInput,
   listArtifactRuns,
@@ -37,7 +40,7 @@ export async function runArtifactsList(opts: BaseCliOptions): Promise<number> {
             ]
           : runs.map(
               (run) =>
-                `${run.runId}  ${run.source}  ${run.status}  ${run.artifacts} artifact(s)`,
+                `${run.runId}  ${run.source}  ${run.status}  ${run.artifacts} artifact(s)  outcome: ${run.outcome ?? "none"}`,
             ),
     };
   });
@@ -132,18 +135,47 @@ export async function runArtifactsReport(
     if (runId === undefined && rustRuns.length > 0 && entries.length === 0) {
       return { data: { rustRuns, ...(recovery === undefined ? {} : { recovery }) }, lines: rustLines };
     }
-    const { catalog, entry } = await findRun(projectDir, runId, opened);
-    const { manifest, dir } = entry;
-    const records = await readCatalogActions(catalog, entry);
-    return {
-      data: { source: "lab", runId: manifest.runId, dir, manifest, ...(runId === undefined ? { rustRuns } : {}), ...(recovery === undefined ? {} : { recovery }) },
-      lines: [
-        ...renderRunReport(manifest, dir, records),
-        ...(runId === undefined ? rustLines : []),
-        ...(recovery === undefined ? [] : recoveryReportLines(recovery)),
-      ],
-    };
+    return labReport(projectDir, runId, opened, { rustRuns, rustLines, recovery });
   });
+}
+
+interface LabReportContext {
+  rustRuns: Awaited<ReturnType<typeof listRustEvidenceRuns>>;
+  rustLines: string[];
+  recovery: Awaited<ReturnType<typeof finalizeOrphanedEvidenceRuns>> | undefined;
+}
+
+function reportPathLine(reportPath: string | null, status: string): string[] {
+  if (reportPath !== null) return [`Report: ${reportPath}`];
+  return status === "running" ? ["Report: not finalized yet"] : [];
+}
+
+async function labReport(
+  projectDir: string,
+  runId: string | undefined,
+  opened: RunCatalog,
+  { rustRuns, rustLines, recovery }: LabReportContext,
+) {
+  const { catalog, entry } = await findRun(projectDir, runId, opened);
+  const { manifest, dir } = entry;
+  const records = await readCatalogActions(catalog, entry);
+  const latest = latestOutcome(records);
+  const outcome = latest === null ? null : { status: latest.status, scenario: latest.scenario };
+  const reportPath = await catalog.hasRootFile(entry, EVIDENCE_REPORT)
+    ? path.join(dir, EVIDENCE_REPORT) : null;
+  const listing = runId === undefined;
+  return {
+    data: {
+      source: "lab", runId: manifest.runId, dir, manifest, reportPath, outcome, device: manifest.device ?? null,
+      ...(listing ? { rustRuns } : {}), ...(recovery === undefined ? {} : { recovery }),
+    },
+    lines: [
+      ...renderRunReport(manifest, dir, records),
+      ...(listing ? rustLines : []),
+      ...(recovery === undefined ? [] : recoveryReportLines(recovery)),
+      ...reportPathLine(reportPath, manifest.status),
+    ],
+  };
 }
 
 /** Oversize repeated options are refused outright; the core never silently truncates them. */

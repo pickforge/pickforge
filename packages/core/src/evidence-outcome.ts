@@ -1,10 +1,11 @@
 import type { DirHandle } from "./dir-handle.js";
-import { appendAction, isEvidenceRun, isTruncationRecord, readActionsIn, readEvidenceManifestIn, type EvidenceRecord } from "./evidence.js";
+import { EVIDENCE_ACTION_LOG } from "./run.js";
+import { appendAction, isEvidenceRun, isTruncationRecord, parseActionsJournal, readActionsIn, readEvidenceManifestIn, type EvidenceRecord } from "./evidence.js";
 import { redactSecrets } from "./redact.js";
 import { writeEvidenceReport } from "./evidence-render.js";
 import { adoptRunIn } from "./run.js";
 import { withExistingRunsRootDir } from "./run-root.js";
-import { openRunCatalog } from "./run-catalog.js";
+import { openRunCatalog, type RunCatalog, type RunCatalogEntry } from "./run-catalog.js";
 import type { EnvLike } from "./paths.js";
 
 export interface EvidenceOutcomeInput {
@@ -150,4 +151,21 @@ export async function recordEvidenceOutcome(projectDir: string, runId: string, i
   const manifest = await run.readManifest();
   if (manifest.status !== "running") await writeEvidenceReport(run, manifest);
   return record;
+}
+
+/** Latest outcome record among already-parsed journal records, or null. */
+export function latestOutcome(records: readonly EvidenceRecord[]): EvidenceOutcomeRecord | null {
+  return records.filter(isOutcomeRecord).at(-1) ?? null;
+}
+
+/** Latest recorded outcome status for a catalog entry, or null when absent or unreadable. */
+export async function latestOutcomeStatus(catalog: RunCatalog, entry: RunCatalogEntry): Promise<EvidenceOutcomeRecord["status"] | null> {
+  if (!isEvidenceRun(entry.manifest) || entry.manifest.evidenceRecovery === "corrupt") return null;
+  try {
+    const raw = await catalog.readRootTextIfPresent(entry, EVIDENCE_ACTION_LOG);
+    if (raw === undefined) return null;
+    return latestOutcome(parseActionsJournal(raw, entry.dir))?.status ?? null;
+  } catch {
+    return null;
+  }
 }

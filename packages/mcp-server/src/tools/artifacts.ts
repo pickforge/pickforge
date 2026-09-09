@@ -1,7 +1,10 @@
+import path from "node:path";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import {
   EVIDENCE_ACTION_LOG,
+  EVIDENCE_REPORT,
+  latestOutcome,
   recordEvidenceOutcome,
   listArtifactRuns,
   listRustEvidenceRuns,
@@ -36,7 +39,7 @@ export async function findRun(
   return { catalog, entry };
 }
 
-async function readCatalogActions(
+export async function readCatalogActions(
   catalog: RunCatalog,
   entry: RunCatalogEntry,
 ): Promise<ReturnType<typeof parseActionsJournal>> {
@@ -48,10 +51,7 @@ async function readCatalogActions(
   return raw === undefined ? [] : parseActionsJournal(raw, entry.dir);
 }
 
-export function registerArtifactTools(
-  server: McpServer,
-  ctx: ServerContext,
-): void {
+function registerOutcomeTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "evidence_outcome",
     {
@@ -72,6 +72,13 @@ export function registerArtifactTools(
       data: { runId: args.runId, outcome: await recordEvidenceOutcome(ctx.projectDir, args.runId, args, ctx.env) },
     })),
   );
+}
+
+export function registerArtifactTools(
+  server: McpServer,
+  ctx: ServerContext,
+): void {
+  registerOutcomeTool(server, ctx);
 
   server.registerTool(
     "artifact_list",
@@ -131,6 +138,10 @@ export function registerArtifactTools(
         );
         const { manifest, dir } = entry;
         const records = await readCatalogActions(catalog, entry);
+        const latest = latestOutcome(records);
+        const outcome = latest === null ? null : { status: latest.status, scenario: latest.scenario };
+        const reportPath = await catalog.hasRootFile(entry, EVIDENCE_REPORT)
+          ? path.join(dir, EVIDENCE_REPORT) : null;
         return {
           data: {
             source: "lab",
@@ -138,6 +149,9 @@ export function registerArtifactTools(
             runId: manifest.runId,
             dir,
             manifest,
+            reportPath,
+            outcome,
+            device: manifest.device ?? null,
             report: [...renderRunReport(manifest, dir, records),
               ...(args.runId === undefined ? rustLines : [])].join("\n"),
             ...(recovery === undefined ? {} : { recovery }),

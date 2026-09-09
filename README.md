@@ -384,6 +384,14 @@ configured storage root, even when a report run id is supplied. It returns one
 `session-<sessionId>.html` index per recovered session, linking its run reports
 in run-id order. Listing and reading reports remain read-only.
 
+Artifact reports expose the existing absolute HTML report path (or null), latest
+acceptance outcome (status and scenario, or null), and device metadata (or null)
+as `reportPath`, `outcome`, and `device` in CLI JSON and MCP `artifact_report`.
+Text reports end with the path, or `Report: not finalized yet` for running runs
+without a report; run lists include the latest outcome status or null. `outcome`
+reflects only the lab journal's acceptance record; Rust evidence runs carry their
+result in `status` and always list `outcome` as null.
+
 Recovery marks interrupted runs `orphaned`, not successfully completed, and
 rebuilds artifact inventories from existing files and the journal. Completed and
 failed runs with a report stay read-only inputs for the session index. Every run
@@ -671,7 +679,7 @@ pickforge-lab agents add --name my-agent --mcp-command "pickforge-lab mcp serve"
 | Takeover | `takeover status [--session <id>]` |
 | Desktop | `desktop launch <cmd>`, `desktop exec <cmd>`, `desktop env`, `desktop screenshot`, `desktop click <x> <y>`, `desktop move <x> <y>`, `desktop scroll <deltaX> <deltaY>`, `desktop drag <fromX> <fromY> <toX> <toY>`, `desktop double-click <x> <y>`, `desktop type <text>`, `desktop key <keys>` |
 | Android | `android start`, `android install-apk <apk> [--wait-ready <s>]`, `android launch-app <pkg> [--wait-ready <s>]`, `android screenshot`, `android tap <x> <y>`, `android type <text>`, `android back`, `android home`, `android ui-tree`, `android logcat`, `android adb [args...]` |
-| Artifacts | `artifacts list`, `artifacts open <runId>`, `artifacts report [runId]` |
+| Artifacts | `artifacts list`, `artifacts open <runId>`, `artifacts report [runId]` (HTML report path; JSON includes `reportPath`, `outcome`, `device`) |
 | Agents | `agents list`, `agents install <agent> [--browser]`, `agents link <agent> [--browser]`, `agents unlink <agent>`, `agents doctor`, `agents add` |
 | Browser | `browser devtools-mcp` |
 | MCP | `mcp serve` |
@@ -731,12 +739,12 @@ reported as suppressed for an explicitly writable `--vnc-control` session.
 
 Resources, addressable as `pickforge://` URIs:
 
-- `pickforge://runs` — recorded runs
-- `pickforge://runs/{runId}/manifest` — run manifest
+- `pickforge://runs` — recorded runs with latest acceptance outcome status (or null)
+- `pickforge://runs/{runId}/manifest` — run manifest, including device metadata when known
 - `pickforge://runs/{runId}/screenshots/{name}` — screenshots
 - `pickforge://runs/{runId}/logs/{name}` — logs
 - `pickforge://runs/{runId}/actions` — sanitized action timeline JSON
-- `pickforge://runs/{runId}/report` — static HTML evidence filmstrip
+- `pickforge://runs/{runId}/report` — HTML viewer for the evidence filmstrip; its local path is `artifact_report.reportPath`
 - `pickforge://sessions/{sessionId}/status` — session liveness
   The status includes a read-only viewer endpoint/readiness report when VNC is
   present. MCP never opens a host GUI; only the CLI launches viewer windows.

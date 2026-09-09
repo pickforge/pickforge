@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import os from "node:os";
 import {
+  recordEvidenceOutcome,
   appendAction,
   createRun,
   writeEvidenceReport,
@@ -87,6 +88,8 @@ afterEach(async () => {
 describe("resource listing", () => {
   it("lists run evidence, artifacts, and session statuses", async () => {
     const { resources } = await lab.client.listResources();
+    const templates = await lab.client.listResourceTemplates();
+    expect(templates.resourceTemplates.find((item) => item.uriTemplate === "pickforge://runs/{runId}/report")?.description).toContain("HTML viewer");
     const uris = resources.map((resource) => resource.uri);
     expect(uris).toContain("pickforge://runs");
     expect(uris).toContain(`pickforge://runs/${RUN_ID}/manifest`);
@@ -832,4 +835,26 @@ describe("symlink protection", () => {
       `pickforge://runs/${RUN_ID}/screenshots/leak.png`,
     );
   });
+});
+
+
+it("exposes report availability and journal acceptance through existing surfaces", async () => {
+  const env = { PICKFORGE_HOME: dirs.home, PICKFORGE_STORAGE_MODE: "project-local" };
+  const run = await createRun(dirs.projectDir, "exposure", { evidence: true, device: { kind: "desktop", platform: "linux" } }, env);
+  const report = async () => parseToolJson(await lab.client.callTool({ name: "artifact_report", arguments: { runId: run.runId } }));
+  expect(await report()).toMatchObject({ reportPath: null, outcome: null, device: { kind: "desktop", platform: "linux" } });
+  const reportPath = path.join(run.dir, "report.html");
+  expect(fs.existsSync(reportPath)).toBe(false);
+  await recordEvidenceOutcome(dirs.projectDir, run.runId, { scenario: "First", status: "fail", inspectedScreenshots: [] }, env);
+  await recordEvidenceOutcome(dirs.projectDir, run.runId, { scenario: "Checkout", status: "blocked", inspectedScreenshots: [] }, env);
+  await run.finish();
+  await writeEvidenceReport(run);
+  expect(await report()).toMatchObject({ reportPath, outcome: { status: "blocked", scenario: "Checkout" } });
+  const runs = async () => JSON.parse(first((await lab.client.readResource({ uri: "pickforge://runs" })).contents).text);
+  expect((await runs()).find((item: { runId: string }) => item.runId === run.runId).outcome).toBe("blocked");
+  fs.renameSync(reportPath, path.join(run.dir, "saved.html"));
+  fs.symlinkSync("saved.html", reportPath);
+  expect((await report()).reportPath).toBeNull();
+  fs.appendFileSync(path.join(run.dir, "actions.jsonl"), "corrupt\n");
+  expect((await runs()).find((item: { runId: string }) => item.runId === run.runId).outcome).toBeNull();
 });

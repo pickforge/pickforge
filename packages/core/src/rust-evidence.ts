@@ -4,6 +4,7 @@ import { DirHandle, RunStorageAccessError, withDirHandle } from "./dir-handle.js
 import { isMissing, openRunDirIn, verifyExistingRoot } from "./run-root.js";
 import { redactSecrets } from "./redact.js";
 import type { RunCatalog, RunCatalogEntry, RunCatalogRoot } from "./run-catalog.js";
+import { latestOutcomeStatus } from "./evidence-outcome.js";
 
 const MAX_EVIDENCE_BYTES = 1024 * 1024;
 const SAFE_NAME = /^[A-Za-z0-9._-]+$/;
@@ -183,13 +184,18 @@ function compareRuns(left: { createdAt: string; runId: string }, right: { create
 
 export async function listArtifactRuns(catalog: RunCatalog) {
   const entries = await catalog.list();
-  const lab = entries.map(({ manifest }) => ({
-    source: "lab" as const, runId: text(manifest.runId), slug: text(manifest.slug),
-    createdAt: text(manifest.createdAt), status: text(manifest.status), artifacts: manifest.artifacts.length,
-  }));
+  // Journals are read one at a time so a listing never buffers more than one run's journal.
+  const lab = [];
+  for (const entry of entries) {
+    lab.push({
+      source: "lab" as const, runId: text(entry.manifest.runId), slug: text(entry.manifest.slug),
+      createdAt: text(entry.manifest.createdAt), status: text(entry.manifest.status),
+      artifacts: entry.manifest.artifacts.length, outcome: await latestOutcomeStatus(catalog, entry),
+    });
+  }
   const rust = (await listRustEvidenceRuns(catalog, entries)).map(run => ({
     source: run.source, runId: run.runId, slug: run.scenario, createdAt: run.createdAt,
-    status: run.outcome, artifacts: run.screenshots.length,
+    status: run.outcome, artifacts: run.screenshots.length, outcome: null,
   }));
   return [...lab, ...rust].sort(compareRuns);
 }

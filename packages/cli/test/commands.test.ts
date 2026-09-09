@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { isProcessGroupAlive } from "@pickforge/lab-core";
+import { createRun, recordEvidenceOutcome, writeEvidenceReport, isProcessGroupAlive } from "@pickforge/lab-core";
 import { ensureCliBuilt } from "./build-once.js";
 
 const cliPath = fileURLToPath(new URL("../dist/pickforge-lab.js", import.meta.url));
@@ -1924,6 +1924,41 @@ describe("pickforge-lab android session lifecycle (fake sdk)", () => {
 });
 
 describe("pickforge-lab artifacts", () => {
+
+  it("discovers report paths and latest acceptance without generating reports", async () => {
+    const env = makeEnv();
+    const projectDir = makeProjectDir();
+    const run = await createRun(projectDir, "exposure", { evidence: true, device: { kind: "desktop", platform: "linux" } }, env);
+    const args = ["artifacts", "report", run.runId, "--project-dir", projectDir];
+    expect(parseJson(await runCli([...args, "--json"], env))).toMatchObject({
+      reportPath: null, outcome: null, device: { kind: "desktop", platform: "linux" },
+    });
+    expect((await runCli(args, env)).stdout.trim()).toMatch(/Report: not finalized yet$/);
+    const reportPath = path.join(run.dir, "report.html");
+    expect(fs.existsSync(reportPath)).toBe(false);
+    await recordEvidenceOutcome(projectDir, run.runId, { scenario: "First", status: "fail", inspectedScreenshots: [] }, env);
+    await recordEvidenceOutcome(projectDir, run.runId, { scenario: "Checkout", status: "blocked", inspectedScreenshots: [] }, env);
+    await run.finish();
+    await writeEvidenceReport(run);
+    expect(parseJson(await runCli([...args, "--json"], env))).toMatchObject({
+      reportPath, outcome: { status: "blocked", scenario: "Checkout" },
+    });
+    expect((await runCli(args, env)).stdout.trim().endsWith(`Report: ${reportPath}`)).toBe(true);
+    const listArgs = ["artifacts", "list", "--json", "--project-dir", projectDir];
+    expect(parseJson(await runCli(listArgs, env)).runs[0].outcome).toBe("blocked");
+    fs.renameSync(reportPath, path.join(run.dir, "saved.html"));
+    fs.symlinkSync("saved.html", reportPath);
+    expect(parseJson(await runCli([...args, "--json"], env)).reportPath).toBeNull();
+    fs.appendFileSync(path.join(run.dir, "actions.jsonl"), "corrupt\n");
+    expect(parseJson(await runCli(listArgs, env)).runs[0].outcome).toBeNull();
+    const bare = await createRun(projectDir, "bare", { evidence: true }, env);
+    await bare.finish();
+    const bareArgs = ["artifacts", "report", bare.runId, "--project-dir", projectDir];
+    expect((await runCli(bareArgs, env)).stdout).not.toContain("Report:");
+    expect(JSON.parse((await runCli([...bareArgs, "--json"], env)).stdout)).toMatchObject({ device: null, reportPath: null, outcome: null });
+  }, 30_000);
+
+
   it("lists runs with artifact counts", async () => {
     const env = makeEnv();
     const projectDir = makeProjectDir();
@@ -1948,6 +1983,7 @@ describe("pickforge-lab artifacts", () => {
         createdAt: "2026-06-09T12:00:00.000Z",
         status: "completed",
         artifacts: 1,
+        outcome: null,
       },
       {
         source: "lab",
@@ -1956,6 +1992,7 @@ describe("pickforge-lab artifacts", () => {
         createdAt: "2026-06-09T11:00:00.000Z",
         status: "failed",
         artifacts: 0,
+        outcome: null,
       },
     ]);
   });
