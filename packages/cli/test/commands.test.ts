@@ -2361,5 +2361,5 @@ it("records an artifacts outcome through the CLI and refuses unsupported accepta
   expect(parseJson(accepted).outcome).toMatchObject({ status: "pass", steps: ["Click submit", "Check result"], limitations: ["One viewport"], revision: "abc123" });
   expect(accepted.stdout).not.toContain(PLANTED_TOKEN);
   expect(fs.readFileSync(path.join(dir, "actions.jsonl"), "utf8")).not.toContain(PLANTED_TOKEN);
-  expect(fs.readFileSync(path.join(dir, "report.html"), "utf8")).toContain("Outcome: pass");
+  expect(fs.readFileSync(path.join(dir, "report.html"), "utf8")).toContain('class="panel outcome s-pass"');
 });
