@@ -16,8 +16,8 @@ Follow the steps in order. Verify each one before moving on. Rules:
 curl -fsSL https://pickforge.dev/install.sh | sh
 ```
 
-The installer installs the release channel that matches this version of the
-docs, then downloads the matching Rust binary from the same `v<version>` GitHub
+The installer installs the stable `pickforge` release, then downloads the
+matching Rust binary from the same `v<version>` GitHub
 release and verifies its SHA-256 file. It supports Linux x86_64 and Apple silicon macOS. Other hosts are
 unsupported by the published evidence. An installed TypeScript package does not
 imply a working lab on that host.
@@ -40,7 +40,7 @@ This does not install the Rust binary. Never install with sudo.
 
 Use `npm install -g pickforge@next` to opt into the TypeScript prerelease
 channel. `@next` is not the stable default. Use the installer above for the
-matching Rust and TypeScript release.
+matching stable Rust and TypeScript release.
 
 Verify all three commands and their versions:
 
@@ -59,7 +59,7 @@ the Rust download at a directory containing `pickforge-linux-x86_64` or
 `pickforge-macos-arm64` plus its same-named `.sha256` file:
 
 ```sh
-PICKFORGE_INSTALL_FROM_TARBALL=/absolute/path/pickforge-0.4.0-beta.1.tgz \
+PICKFORGE_INSTALL_FROM_TARBALL=/absolute/path/pickforge-0.4.0.tgz \
 PICKFORGE_INSTALL_RELEASE_BASE_URL=file:///absolute/path/release-assets \
 PICKFORGE_INSTALL_RUNTIME=npm \
 sh scripts/install.sh

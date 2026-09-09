@@ -6,7 +6,7 @@ failure. Do not reuse or move a release tag. Do not publish the GitHub draft
 until every gate below is green.
 
 ```sh
-export VERSION=0.4.0-beta.1      # the version being released
+export VERSION=0.4.0      # the version being released
 export TAG="v${VERSION}"
 export REPO=pickforge/pickforge
 cd ~/Projects/Pickforge/picklab

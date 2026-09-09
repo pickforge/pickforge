@@ -16,7 +16,7 @@ warn_legacy_env() {
 }
 
 resolve_package_spec() {
-  package_spec="pickforge@next"
+  package_spec="pickforge@latest"
   tarball="${PICKFORGE_INSTALL_FROM_TARBALL:-}"
   if [ "${PICKFORGE_INSTALL_FROM_TARBALL+set}" != "set" ] && [ "${PICKLAB_INSTALL_FROM_TARBALL+set}" = "set" ]; then
     warn_legacy_env PICKLAB_INSTALL_FROM_TARBALL PICKFORGE_INSTALL_FROM_TARBALL
