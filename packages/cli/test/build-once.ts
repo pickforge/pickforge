@@ -32,6 +32,8 @@ function newestSourceMtimeMs(): number {
     }
   };
   visit(path.join(repoRoot, "scripts"));
+  visit(path.join(repoRoot, "package.json"));
+  visit(path.join(repoRoot, "bun.lock"));
   const packagesDir = path.join(repoRoot, "packages");
   for (const entry of fs.readdirSync(packagesDir)) {
     visit(path.join(packagesDir, entry, "src"));
