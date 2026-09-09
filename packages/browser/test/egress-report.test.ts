@@ -2,9 +2,10 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-const script = path.resolve("scripts/lab/chrome-egress-check.mjs");
+const script = fileURLToPath(new URL("../../../scripts/lab/chrome-egress-check.mjs", import.meta.url));
 let dir: string;
 beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), "egress-report-")); });
 afterEach(() => { fs.rmSync(dir, { recursive: true, force: true }); });

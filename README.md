@@ -495,16 +495,16 @@ Chromium documents these switches in
 (`--disable-notifications`) and
 [Optimization Guide features](https://chromium.googlesource.com/chromium/src/+/140.0.7339.80/components/optimization_guide/core/optimization_guide_features.cc).
 The #112 log's `registration_request.cc` errors are GCM registration retries,
-not a periodic sync job. The source-backed desktop startup path is
+not a periodic sync job. The likely desktop startup path is
 [user cloud policy invalidation](https://chromium.googlesource.com/chromium/src/+/152.0.7977.64/chrome/browser/policy/cloud/user_fm_registration_token_uploader.cc):
 its token uploaders start invalidation listeners even without account sync or
 a website push subscription. Starting GCM also initializes its
 [account mapper](https://chromium.googlesource.com/chromium/src/+/152.0.7977.64/components/gcm_driver/gcm_account_mapper.cc),
-which requests a legacy registration. That path explains the log's initial
+which requests a legacy registration. That path is consistent with the log's initial
 registrations and retry pattern; the log alone lacks app IDs to prove which
 request received `DEPRECATED_ENDPOINT`. Chromium's
 [registration transport](https://chromium.googlesource.com/chromium/src/+/152.0.7977.64/google_apis/gcm/engine/registration_request.cc)
-explicitly documents that there is no option to completely disable GCM.
+offers no switch to disable GCM entirely.
 Neither `--disable-background-networking` nor `--disable-notifications` stops
 these internal clients.
 
