@@ -1,6 +1,9 @@
+import path from "node:path";
 import { spawn } from "node:child_process";
 import {
   EVIDENCE_ACTION_LOG,
+  EVIDENCE_REPORT,
+  isOutcomeRecord,
   recordEvidenceOutcome,
   type EvidenceOutcomeInput,
   finalizeOrphanedEvidenceRuns,
@@ -25,12 +28,17 @@ export async function runArtifactsList(opts: BaseCliOptions): Promise<number> {
     const projectDir = resolveProjectDir(opts);
     const catalog = await openRunCatalog(projectDir);
     const entries = await catalog.list();
-    const runs = entries.map(({ manifest }) => ({
-      runId: manifest.runId,
-      slug: manifest.slug,
-      createdAt: manifest.createdAt,
-      status: manifest.status,
-      artifacts: manifest.artifacts.length,
+    const runs = await Promise.all(entries.map(async (entry) => {
+      const { manifest } = entry;
+      const records = await readCatalogActions(catalog, entry).catch((): ReturnType<typeof parseActionsJournal> => []);
+      return {
+        runId: manifest.runId,
+        slug: manifest.slug,
+        createdAt: manifest.createdAt,
+        status: manifest.status,
+        artifacts: manifest.artifacts.length,
+        outcome: records.filter(isOutcomeRecord).at(-1)?.status ?? null,
+      };
     }));
     return {
       data: { projectDir, runs },
@@ -41,7 +49,7 @@ export async function runArtifactsList(opts: BaseCliOptions): Promise<number> {
             ]
           : runs.map(
               (run) =>
-                `${run.runId}  ${run.status}  ${run.artifacts} artifact(s)`,
+                `${run.runId}  ${run.status}  ${run.artifacts} artifact(s)  outcome: ${run.outcome ?? "unknown"}`,
             ),
     };
   });
@@ -123,11 +131,16 @@ export async function runArtifactsReport(
     const { catalog, entry } = await findRun(projectDir, runId);
     const { manifest, dir } = entry;
     const records = await readCatalogActions(catalog, entry);
+    const latest = records.filter(isOutcomeRecord).at(-1);
+    const outcome = latest === undefined ? null : { status: latest.status, scenario: latest.scenario };
+    const reportPath = await catalog.hasRootFile(entry, EVIDENCE_REPORT)
+      ? path.join(dir, EVIDENCE_REPORT) : null;
     return {
-      data: { runId: manifest.runId, dir, manifest, ...(recovery === undefined ? {} : { recovery }) },
+      data: { runId: manifest.runId, dir, manifest, reportPath, outcome, device: manifest.device ?? null, ...(recovery === undefined ? {} : { recovery }) },
       lines: [
         ...renderRunReport(manifest, dir, records),
         ...(recovery === undefined ? [] : recoveryReportLines(recovery)),
+        ...(reportPath !== null ? [`Report: ${reportPath}`] : manifest.status === "running" ? ["Report: not finalized yet"] : []),
       ],
     };
   });

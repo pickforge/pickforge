@@ -1,7 +1,10 @@
+import path from "node:path";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import {
   EVIDENCE_ACTION_LOG,
+  EVIDENCE_REPORT,
+  isOutcomeRecord,
   recordEvidenceOutcome,
   finalizeOrphanedEvidenceRuns,
   isEvidenceRun,
@@ -32,7 +35,7 @@ export async function findRun(
   return { catalog, entry };
 }
 
-async function readCatalogActions(
+export async function readCatalogActions(
   catalog: RunCatalog,
   entry: RunCatalogEntry,
 ): Promise<ReturnType<typeof parseActionsJournal>> {
@@ -83,12 +86,17 @@ export function registerArtifactTools(
       runTool(async () => {
         const catalog = await openRunCatalog(ctx.projectDir, ctx.env);
         const entries = await catalog.list();
-        const runs = entries.map(({ manifest }) => ({
-          runId: manifest.runId,
-          slug: manifest.slug,
-          createdAt: manifest.createdAt,
-          status: manifest.status,
-          artifacts: manifest.artifacts.length,
+        const runs = await Promise.all(entries.map(async (entry) => {
+          const { manifest } = entry;
+          const records = await readCatalogActions(catalog, entry).catch((): ReturnType<typeof parseActionsJournal> => []);
+          return {
+            runId: manifest.runId,
+            slug: manifest.slug,
+            createdAt: manifest.createdAt,
+            status: manifest.status,
+            artifacts: manifest.artifacts.length,
+            outcome: records.filter(isOutcomeRecord).at(-1)?.status ?? null,
+          };
         }));
         return { data: { projectDir: ctx.projectDir, runs } };
       }),
@@ -120,11 +128,18 @@ export function registerArtifactTools(
         );
         const { manifest, dir } = entry;
         const records = await readCatalogActions(catalog, entry);
+        const latest = records.filter(isOutcomeRecord).at(-1);
+        const outcome = latest === undefined ? null : { status: latest.status, scenario: latest.scenario };
+        const reportPath = await catalog.hasRootFile(entry, EVIDENCE_REPORT)
+          ? path.join(dir, EVIDENCE_REPORT) : null;
         return {
           data: {
             runId: manifest.runId,
             dir,
             manifest,
+            reportPath,
+            outcome,
+            device: manifest.device ?? null,
             report: renderRunReport(manifest, dir, records).join("\n"),
             ...(recovery === undefined ? {} : { recovery }),
           },

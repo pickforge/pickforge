@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { appendAction, createRun, isProcessGroupAlive } from "@pickforge/lab-core";
+import { recordEvidenceOutcome, writeEvidenceReport, appendAction, createRun, isProcessGroupAlive } from "@pickforge/lab-core";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { imageContent } from "../src/context.js";
 import { createMcpServer } from "../src/index.js";
@@ -579,4 +579,26 @@ it("rejects oversize outcome lists at the schema instead of truncating them", as
   }
   const missingList = await lab.client.callTool({ name: "evidence_outcome", arguments: { runId: run.runId, scenario: "Checkout", status: "blocked" } });
   expect(missingList.isError).toBe(true);
+});
+
+
+it("exposes report availability and journal acceptance through existing surfaces", async () => {
+  const env = { PICKFORGE_HOME: dirs.home, PICKFORGE_STORAGE_MODE: "project-local" };
+  const run = await createRun(dirs.projectDir, "exposure", { evidence: true, device: { kind: "desktop", platform: "linux" } }, env);
+  const report = async () => parseToolJson(await lab.client.callTool({ name: "artifact_report", arguments: { runId: run.runId } }));
+  expect(await report()).toMatchObject({ reportPath: null, outcome: null, device: { kind: "desktop", platform: "linux" } });
+  const reportPath = path.join(run.dir, "report.html");
+  expect(fs.existsSync(reportPath)).toBe(false);
+  await recordEvidenceOutcome(dirs.projectDir, run.runId, { scenario: "First", status: "fail", inspectedScreenshots: [] }, env);
+  await recordEvidenceOutcome(dirs.projectDir, run.runId, { scenario: "Checkout", status: "blocked", inspectedScreenshots: [] }, env);
+  await run.finish();
+  await writeEvidenceReport(run);
+  expect(await report()).toMatchObject({ reportPath, outcome: { status: "blocked", scenario: "Checkout" } });
+  const runs = async () => parseToolJson(await lab.client.callTool({ name: "artifact_list", arguments: {} })).runs;
+  expect((await runs()).find((item: { runId: string }) => item.runId === run.runId).outcome).toBe("blocked");
+  fs.renameSync(reportPath, path.join(run.dir, "saved.html"));
+  fs.symlinkSync("saved.html", reportPath);
+  expect((await report()).reportPath).toBeNull();
+  fs.appendFileSync(path.join(run.dir, "actions.jsonl"), "corrupt\n");
+  expect((await runs()).find((item: { runId: string }) => item.runId === run.runId).outcome).toBeNull();
 });
