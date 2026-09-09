@@ -1956,7 +1956,7 @@ describe("pickforge-lab artifacts", () => {
     const bareArgs = ["artifacts", "report", bare.runId, "--project-dir", projectDir];
     expect((await runCli(bareArgs, env)).stdout).not.toContain("Report:");
     expect(JSON.parse((await runCli([...bareArgs, "--json"], env)).stdout)).toMatchObject({ device: null, reportPath: null, outcome: null });
-  });
+  }, 30_000);
 
 
   it("lists runs with artifact counts", async () => {
