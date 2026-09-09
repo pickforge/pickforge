@@ -53,6 +53,7 @@ const EXPECTED_TOOLS = [
   "desktop_screenshot",
   "desktop_scroll",
   "desktop_type",
+  "evidence_outcome",
   "request_user_input",
   "session_create",
   "session_destroy",

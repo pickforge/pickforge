@@ -269,8 +269,9 @@ Ownership there is by entry name, exhaustive, and non-overlapping:
 
 `runs/` is shared because both tools write into it: the lab creates run
 directories there, and `pickforge evidence record` writes its own. Each writes
-only its own run directories and neither reads, rewrites, or deletes the
-other's. Everything else each tool writes is its own, and neither writes,
+only its own run directories and neither rewrites nor deletes the other's.
+The lab also reads Rust evidence runs for artifact listings and summaries.
+Everything else each tool writes is its own, and neither writes,
 moves, or deletes anything unowned. Above this directory the split is by name
 too: `sessions/`, `agents/`, and `config.json` at the root are the lab's, and
 `projects/` is the only shared parent.
@@ -369,7 +370,7 @@ After stopping evidence producers, run `pickforge-lab artifacts report
 `{"finalizeOrphans":true}`. This explicitly recovers evidence throughout the
 configured storage root, even when a report run id is supplied. It returns one
 `session-<sessionId>.html` index per recovered session, linking its run reports
-in run-id order. Ordinary artifact commands remain read-only.
+in run-id order. Listing and reading reports remain read-only.
 
 Recovery marks interrupted runs `orphaned`, not successfully completed, and
 rebuilds artifact inventories from existing files and the journal. Completed and
@@ -381,12 +382,17 @@ record; a missing journal is reported as unavailable, not an empty success.
 Repeat the command after an interrupted recovery. Live owners, ambiguous
 pointers, invalid manifests, and disappeared run directories are skipped with a
 reason. Stop all producers first because old pointers track the creator, not
-every process that adopted its run; stale handles cannot append to a recovered
+every process that adopted its run; stale handles cannot append actions to a recovered
 orphan. Legacy catalog fallback roots remain read-only; select their original
 storage mode explicitly to recover them in place. Pointers and locks do not
 record a hostname, so pid probes on shared storage are meaningless. Orphaned
 runs are never pruned by retention, and session index links can dangle after
 retention.
+
+Rust `evidence.json` runs appear with `source: "rust"` in artifact listings and
+`pickforge://runs`; lab runs use `source: "lab"`. Reports summarize Rust evidence
+and point to its existing `report.md`. No HTML or per-file MCP resources are
+added for Rust runs. Reading and orphan recovery never migrate or modify them.
 
 A finalized evidence run directory (see [Run storage](#run-storage) for where
 it lives) contains:
@@ -398,6 +404,24 @@ it lives) contains:
   which stay usable with scripts blocked; text search and arrow-key browsing
   come from one inline script pinned in the report CSP by hash
 - `screenshots/` and `logs/` — associated artifacts, when explicitly captured
+
+Runs may include optional device metadata from the session, including known
+viewport dimensions. Missing device metadata means unknown; existing runs need
+no migration. Explicit acceptance outcomes are appended to the same journal:
+
+```sh
+pickforge-lab artifacts outcome <runId> --scenario "Checkout" --status pass --inspected screenshots/checkout.png --step "Submit order" --json
+```
+
+MCP `evidence_outcome` accepts a required `runId`, `scenario`, `status`, and
+`inspectedScreenshots`, plus optional `steps`, `limitations`, `revision`, and
+`notes`. Pass requires a successful interaction and an inspected screenshot,
+and is refused on an orphaned or failed run; partial requires an inspected
+screenshot. Fail and blocked can record missing evidence. Screenshot paths
+must name safe regular files in that run. At most 32 steps, 32 limitations and
+64 inspected screenshots are accepted; longer lists are rejected, never
+truncated. Text is redacted and capped. Recording alone does not establish
+acceptance. Appending to a finalized run refreshes its report.
 
 Typed values are stored only as length and input type. Network failures keep
 only allowlisted method, URL origin/path without its query, status, resource

@@ -1,10 +1,15 @@
 import { createHash } from "node:crypto";
+import {
+  isOutcomeRecord,
+  type EvidenceOutcomeRecord,
+} from "./evidence-outcome.js";
 import path from "node:path";
 import { assertSafeEntryName, RunStorageAccessError, type DirHandle } from "./dir-handle.js";
 import { redactSecrets } from "./redact.js";
 import {
   EVIDENCE_ACTION_LOG,
   RunHandle,
+  type EvidenceDevice,
   type RunArtifact,
   type RunManifest,
 } from "./run.js";
@@ -47,7 +52,7 @@ function compareText(left: string, right: string): number {
 }
 
 function recordTimestamp(record: EvidenceRecord): string {
-  return isTruncationRecord(record) ? record.recordedAt : record.startedAt;
+  return (isTruncationRecord(record) || isOutcomeRecord(record)) ? record.recordedAt : record.startedAt;
 }
 
 export function sortEvidenceRecords(
@@ -61,7 +66,7 @@ export function sortEvidenceRecords(
         recordTimestamp(right.record),
       );
       if (byTime !== 0) return byTime;
-      const byId = compareText(left.record.actionId, right.record.actionId);
+      const byId = compareText(isOutcomeRecord(left.record) ? "" : left.record.actionId, isOutcomeRecord(right.record) ? "" : right.record.actionId);
       return byId !== 0 ? byId : left.index - right.index;
     })
     .map(({ record }) => record);
@@ -104,6 +109,9 @@ export function renderRunReport(
   if (manifest.sessionId !== undefined) {
     lines.push(`- Session: ${safeText(manifest.sessionId)}`);
   }
+  if (manifest.device !== undefined) lines.push(`- Device: ${stableJson(manifest.device)}`);
+  const outcome = records.filter(isOutcomeRecord).at(-1);
+  if (outcome !== undefined) lines.push(`- Outcome: ${safeText(outcome.status)}; ${safeText(outcome.scenario)}; ${outcome.inspectedScreenshots.length} inspected screenshot(s)`);
   lines.push(
     `- Directory: ${safeText(dir)}`,
     "",
@@ -132,6 +140,7 @@ export function renderRunReport(
   }
   ordered.forEach((record, index) => {
     const step = index + 1;
+    if (isOutcomeRecord(record)) return;
     if (isTruncationRecord(record)) {
       lines.push(
         `### Step ${step} — Evidence truncated`,
@@ -201,35 +210,10 @@ function escapeHtml(value: unknown): string {
 }
 
 /**
- * Device metadata that a later manifest revision will carry. Declared locally
- * so this renderer compiles against today's `RunManifest`; the rebase swaps
- * this alias for the shared type without touching the rendering code.
+ * Records that carry a step in the timeline. Outcome records are acceptance
+ * metadata, not steps, so they are partitioned out before step numbering.
  */
-export interface ReportDevice {
-  kind: "desktop" | "mobile-emulation" | "physical" | "emulator" | "unknown";
-  viewport?: { width: number; height: number };
-  scale?: number;
-  touch?: boolean;
-  browser?: string;
-  platform?: string;
-}
-
-export type ReportManifest = RunManifest & { device?: ReportDevice };
-
-/** Append-only acceptance record. Detected structurally by `kind`. */
-export interface ReportOutcome {
-  kind: "outcome";
-  recordedAt: string;
-  scenario: string;
-  status: "pass" | "fail" | "partial" | "blocked";
-  revision?: string;
-  steps?: string[];
-  inspectedScreenshots: string[];
-  limitations?: string[];
-  notes?: string;
-}
-
-export type ReportRecord = EvidenceRecord | ReportOutcome;
+type TimelineRecord = Exclude<EvidenceRecord, EvidenceOutcomeRecord>;
 
 type Lens = "desktop" | "mobile" | "android";
 
@@ -409,10 +393,6 @@ function safeScreenshotPath(value: string): boolean {
   return /^screenshots\/[A-Za-z0-9._-]+\.png$/.test(value) && !value.includes("..");
 }
 
-function isOutcomeRecord(record: ReportRecord): record is ReportOutcome {
-  return (record as { kind?: unknown }).kind === "outcome";
-}
-
 function outcomeStatus(value: unknown): string {
   return value === "pass" || value === "fail" || value === "partial" || value === "blocked"
     ? value
@@ -423,7 +403,7 @@ function textList(value: unknown): string[] {
   return Array.isArray(value) ? value.map((entry) => String(entry)) : [];
 }
 
-function sortOutcomes(outcomes: readonly ReportOutcome[]): ReportOutcome[] {
+function sortOutcomes(outcomes: readonly EvidenceOutcomeRecord[]): EvidenceOutcomeRecord[] {
   return outcomes
     .map((outcome, index) => ({ outcome, index }))
     .sort((left, right) => {
@@ -441,7 +421,7 @@ function sortOutcomes(outcomes: readonly ReportOutcome[]): ReportOutcome[] {
     .map(({ outcome }) => outcome);
 }
 
-function deviceLens(device: ReportDevice | undefined): Lens {
+function deviceLens(device: EvidenceDevice | undefined): Lens {
   const kind = deviceKind(device?.kind);
   if (kind === "emulator") return "android";
   return kind === "mobile-emulation" || kind === "physical" ? "mobile" : "desktop";
@@ -511,7 +491,7 @@ function stringText(value: unknown): string {
   return typeof value === "string" && value.trim() !== "" ? value : "unknown";
 }
 
-function deviceRows(device: ReportDevice | undefined): string {
+function deviceRows(device: EvidenceDevice | undefined): string {
   const fields = (device ?? {}) as Record<string, unknown>;
   return [
     renderMetadata("Device", deviceKind(fields.kind)),
@@ -524,8 +504,8 @@ function deviceRows(device: ReportDevice | undefined): string {
 }
 
 function renderSummary(
-  manifest: ReportManifest,
-  latest: ReportOutcome | undefined,
+  manifest: RunManifest,
+  latest: EvidenceOutcomeRecord | undefined,
 ): string {
   return `<section class="panel" aria-label="Run summary">
 <h1>Run ${escapeHtml(manifest.runId)}</h1>
@@ -533,7 +513,7 @@ function renderSummary(
 </section>`;
 }
 
-function renderOutcome(outcome: ReportOutcome, index: number): string {
+function renderOutcome(outcome: EvidenceOutcomeRecord, index: number): string {
   const status = outcomeStatus(outcome.status);
   const limitations = textList(outcome.limitations);
   const steps = textList(outcome.steps);
@@ -562,7 +542,7 @@ function renderOutcome(outcome: ReportOutcome, index: number): string {
 </section>`;
 }
 
-function renderOutcomes(outcomes: readonly ReportOutcome[]): string {
+function renderOutcomes(outcomes: readonly EvidenceOutcomeRecord[]): string {
   if (outcomes.length === 0) {
     return `<section class="panel outcome s-none" aria-label="Acceptance outcome">
 <h2><span class="pill">Not recorded</span> Acceptance outcome</h2>
@@ -573,7 +553,7 @@ function renderOutcomes(outcomes: readonly ReportOutcome[]): string {
 }
 
 function renderWarnings(
-  manifest: ReportManifest,
+  manifest: RunManifest,
   records: readonly EvidenceRecord[],
 ): string {
   const warnings: string[] = [];
@@ -600,7 +580,7 @@ interface Capture {
 
 function captureScenarios(
   relative: string,
-  outcomes: readonly ReportOutcome[],
+  outcomes: readonly EvidenceOutcomeRecord[],
 ): number[] {
   const matched: number[] = [];
   outcomes.forEach((outcome, index) => {
@@ -612,9 +592,9 @@ function captureScenarios(
 }
 
 function collectCaptures(
-  ordered: readonly EvidenceRecord[],
+  ordered: readonly TimelineRecord[],
   safeScreenshots: ReadonlySet<string>,
-  outcomes: readonly ReportOutcome[],
+  outcomes: readonly EvidenceOutcomeRecord[],
   fallback: Lens,
 ): Capture[] {
   const captures: Capture[] = [];
@@ -690,7 +670,7 @@ function renderInspect(captures: readonly Capture[], index: number): string {
 }
 
 function renderStep(
-  record: EvidenceRecord,
+  record: TimelineRecord,
   step: number,
   captures: readonly Capture[],
   fallback: Lens,
@@ -794,7 +774,7 @@ function lensButtons(captures: readonly Capture[]): string {
 }
 
 function scenarioButtons(
-  outcomes: readonly ReportOutcome[],
+  outcomes: readonly EvidenceOutcomeRecord[],
   captures: readonly Capture[],
 ): string {
   if (outcomes.length < 2) return "";
@@ -810,7 +790,7 @@ function scenarioButtons(
   return `<hr><span class="eyebrow">Scenario</span>${buttons.join("")}`;
 }
 
-function scenarioRadios(outcomes: readonly ReportOutcome[]): string {
+function scenarioRadios(outcomes: readonly EvidenceOutcomeRecord[]): string {
   if (outcomes.length < 2) return "";
   const rows = [`<input type="radio" class="scn-input" name="scn" id="scn-all" checked>`];
   outcomes.forEach((_outcome, index) => {
@@ -826,15 +806,16 @@ export function reportContentSecurityPolicy(script: string = REPORT_SCRIPT): str
 }
 
 export function renderEvidenceHtml(
-  manifest: ReportManifest,
-  records: readonly ReportRecord[],
+  manifest: RunManifest,
+  records: readonly EvidenceRecord[],
   safeScreenshots: ReadonlySet<string> = new Set(),
 ): string {
   const outcomes = sortOutcomes(records.filter(isOutcomeRecord));
   const timeline = records.filter(
-    (record): record is EvidenceRecord => !isOutcomeRecord(record),
+    (record): record is TimelineRecord => !isOutcomeRecord(record),
   );
-  const ordered = sortEvidenceRecords(timeline);
+  // Sorting preserves membership, and `timeline` holds no outcome records.
+  const ordered = sortEvidenceRecords(timeline) as TimelineRecord[];
   const fallback = deviceLens(manifest.device);
   const captures = collectCaptures(ordered, safeScreenshots, outcomes, fallback);
   const steps = ordered
@@ -911,7 +892,7 @@ async function collectSafeScreenshots(
   if (screenshots === undefined) return safe;
   const candidates = new Set(
     records.flatMap((record) =>
-      isTruncationRecord(record) ? [] : (record.artifacts ?? []),
+      isTruncationRecord(record) || isOutcomeRecord(record) ? [] : (record.artifacts ?? []),
     ),
   );
   try {
@@ -969,7 +950,7 @@ async function evidenceInventory(
     manifest.artifacts.map((artifact) => [artifact.path, artifact]),
   );
   for (const record of records) {
-    if (isTruncationRecord(record)) continue;
+    if (isTruncationRecord(record) || isOutcomeRecord(record)) continue;
     for (const relative of record.artifacts ?? []) {
       candidates.set(relative, {
         type: safeScreenshotPath(relative) ? "screenshot" : "other",

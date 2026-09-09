@@ -144,10 +144,6 @@ export {
   sortEvidenceRecords,
   reportContentSecurityPolicy,
   writeEvidenceReport,
-  type ReportDevice,
-  type ReportManifest,
-  type ReportOutcome,
-  type ReportRecord,
 } from "./evidence-render.js";
 
 export {
@@ -299,3 +295,13 @@ export {
   pruneSessionLogs,
   retainSessionLogs,
 } from "./session-retention.js";
+
+export { recordEvidenceOutcome, isOutcomeRecord, EvidenceOutcomeError, type EvidenceOutcomeInput, type EvidenceOutcomeRecord } from "./evidence-outcome.js";
+export type { EvidenceDevice } from "./run.js";
+export {
+  readRustEvidenceRun,
+  listRustEvidenceRuns,
+  listArtifactRuns,
+  renderRustEvidenceReport,
+  type RustEvidenceRun,
+} from "./rust-evidence.js";

@@ -1,6 +1,11 @@
 import { spawn } from "node:child_process";
 import {
   EVIDENCE_ACTION_LOG,
+  recordEvidenceOutcome,
+  type EvidenceOutcomeInput,
+  listArtifactRuns,
+  listRustEvidenceRuns,
+  renderRustEvidenceReport,
   finalizeOrphanedEvidenceRuns,
   isEvidenceRun,
   openRunCatalog,
@@ -22,14 +27,7 @@ export async function runArtifactsList(opts: BaseCliOptions): Promise<number> {
   return runReported(opts, async () => {
     const projectDir = resolveProjectDir(opts);
     const catalog = await openRunCatalog(projectDir);
-    const entries = await catalog.list();
-    const runs = entries.map(({ manifest }) => ({
-      runId: manifest.runId,
-      slug: manifest.slug,
-      createdAt: manifest.createdAt,
-      status: manifest.status,
-      artifacts: manifest.artifacts.length,
-    }));
+    const runs = await listArtifactRuns(catalog);
     return {
       data: { projectDir, runs },
       lines:
@@ -39,7 +37,7 @@ export async function runArtifactsList(opts: BaseCliOptions): Promise<number> {
             ]
           : runs.map(
               (run) =>
-                `${run.runId}  ${run.status}  ${run.artifacts} artifact(s)`,
+                `${run.runId}  ${run.source}  ${run.status}  ${run.artifacts} artifact(s)`,
             ),
     };
   });
@@ -48,8 +46,9 @@ export async function runArtifactsList(opts: BaseCliOptions): Promise<number> {
 async function findRun(
   projectDir: string,
   runId: string | undefined,
+  catalog?: RunCatalog,
 ): Promise<{ catalog: RunCatalog; entry: RunCatalogEntry }> {
-  const catalog = await openRunCatalog(projectDir);
+  catalog ??= await openRunCatalog(projectDir);
   const entry = await catalog.find(runId);
   if (entry === undefined) {
     if (runId === undefined) {
@@ -118,15 +117,55 @@ export async function runArtifactsReport(
     const recovery = opts.finalizeOrphans === true
       ? await finalizeOrphanedEvidenceRuns(projectDir)
       : undefined;
-    const { catalog, entry } = await findRun(projectDir, runId);
+    const opened = await openRunCatalog(projectDir);
+    const entries = await opened.list();
+    const rustRuns = await listRustEvidenceRuns(opened, entries);
+    const rust = rustRuns.find(run => run.runId === runId);
+    const rustLines = rustRuns.map(run => `${run.runId}  rust  ${run.outcome}`);
+    if (rust !== undefined) {
+      const lines = renderRustEvidenceReport(rust);
+      return {
+        data: { ...rust, report: lines.join("\n"), ...(recovery === undefined ? {} : { recovery }) },
+        lines: [...lines, ...(recovery === undefined ? [] : recoveryReportLines(recovery))],
+      };
+    }
+    if (runId === undefined && rustRuns.length > 0 && entries.length === 0) {
+      return { data: { rustRuns, ...(recovery === undefined ? {} : { recovery }) }, lines: rustLines };
+    }
+    const { catalog, entry } = await findRun(projectDir, runId, opened);
     const { manifest, dir } = entry;
     const records = await readCatalogActions(catalog, entry);
     return {
-      data: { runId: manifest.runId, dir, manifest, ...(recovery === undefined ? {} : { recovery }) },
+      data: { source: "lab", runId: manifest.runId, dir, manifest, ...(runId === undefined ? { rustRuns } : {}), ...(recovery === undefined ? {} : { recovery }) },
       lines: [
         ...renderRunReport(manifest, dir, records),
+        ...(runId === undefined ? rustLines : []),
         ...(recovery === undefined ? [] : recoveryReportLines(recovery)),
       ],
     };
+  });
+}
+
+/** Oversize repeated options are refused outright; the core never silently truncates them. */
+function limitRepeated(flag: string, values: string[] | undefined, max: number): void {
+  if (values !== undefined && values.length > max) {
+    throw new Error(`At most ${max} --${flag} options are allowed (got ${values.length})`);
+  }
+}
+
+export async function runArtifactsOutcome(
+  runId: string,
+  opts: BaseCliOptions & Omit<EvidenceOutcomeInput, "inspectedScreenshots"> & { inspected?: string[]; step?: string[]; limitation?: string[] },
+): Promise<number> {
+  return runReported(opts, async () => {
+    limitRepeated("step", opts.step, 32);
+    limitRepeated("limitation", opts.limitation, 32);
+    limitRepeated("inspected", opts.inspected, 64);
+    const outcome = await recordEvidenceOutcome(resolveProjectDir(opts), runId, {
+      scenario: opts.scenario, status: opts.status, revision: opts.revision,
+      steps: opts.step, limitations: opts.limitation, notes: opts.notes,
+      inspectedScreenshots: opts.inspected ?? [],
+    });
+    return { data: { runId, outcome }, lines: [`Outcome: ${outcome.status} (${outcome.scenario})`] };
   });
 }

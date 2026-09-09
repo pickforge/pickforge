@@ -15,6 +15,7 @@ import {
 } from "./commands/android.js";
 import {
   runArtifactsList,
+  runArtifactsOutcome,
   runArtifactsOpen,
   runArtifactsReport,
 } from "./commands/artifacts.js";
@@ -611,6 +612,21 @@ function registerArtifactCommands(program: Command): void {
     .description(
       "Inspect recorded run artifacts (default storage: ~/.pickforge/lab)",
     );
+
+  withJson(withProjectDir(
+    artifacts.command("outcome")
+      .description("Record an explicit acceptance outcome")
+      .argument("<runId>", "run id")
+      .requiredOption("--scenario <text>", "scenario assessed")
+      .requiredOption("--status <status>", "pass, fail, partial, or blocked")
+      .option("--inspected <paths...>", "inspected run screenshot paths")
+      .option("--step <text>", "step, repeatable", (value: string, previous: string[]) => [...previous, value], [])
+      .option("--limitation <text>", "limitation, repeatable", (value: string, previous: string[]) => [...previous, value], [])
+      .option("--revision <revision>", "revision assessed")
+      .option("--notes <text>", "acceptance notes"),
+  )).action(async (runId, opts) => {
+    process.exitCode = await runArtifactsOutcome(runId, opts);
+  });
 
   withJson(
     withProjectDir(

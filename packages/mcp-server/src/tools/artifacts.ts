@@ -2,6 +2,10 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import {
   EVIDENCE_ACTION_LOG,
+  recordEvidenceOutcome,
+  listArtifactRuns,
+  listRustEvidenceRuns,
+  renderRustEvidenceReport,
   finalizeOrphanedEvidenceRuns,
   isEvidenceRun,
   openRunCatalog,
@@ -18,8 +22,9 @@ export async function findRun(
   projectDir: string,
   runId: string | undefined,
   env: EnvLike = process.env,
+  catalog?: RunCatalog,
 ): Promise<{ catalog: RunCatalog; entry: RunCatalogEntry }> {
-  const catalog = await openRunCatalog(projectDir, env);
+  catalog ??= await openRunCatalog(projectDir, env);
   const entry = await catalog.find(runId);
   if (entry === undefined) {
     if (runId === undefined) {
@@ -48,6 +53,27 @@ export function registerArtifactTools(
   ctx: ServerContext,
 ): void {
   server.registerTool(
+    "evidence_outcome",
+    {
+      title: "Record acceptance outcome",
+      description: "Append an explicit acceptance outcome. Recording alone does not establish acceptance. A run id is required because this server has no current session.",
+      inputSchema: {
+        runId: z.string().min(1),
+        scenario: z.string().min(1),
+        status: z.enum(["pass", "fail", "partial", "blocked"]),
+        inspectedScreenshots: z.array(z.string()).max(64),
+        revision: z.string().optional(),
+        steps: z.array(z.string()).max(32).optional(),
+        limitations: z.array(z.string()).max(32).optional(),
+        notes: z.string().optional(),
+      },
+    },
+    (args) => runTool(async () => ({
+      data: { runId: args.runId, outcome: await recordEvidenceOutcome(ctx.projectDir, args.runId, args, ctx.env) },
+    })),
+  );
+
+  server.registerTool(
     "artifact_list",
     {
       title: "List runs",
@@ -60,14 +86,7 @@ export function registerArtifactTools(
     () =>
       runTool(async () => {
         const catalog = await openRunCatalog(ctx.projectDir, ctx.env);
-        const entries = await catalog.list();
-        const runs = entries.map(({ manifest }) => ({
-          runId: manifest.runId,
-          slug: manifest.slug,
-          createdAt: manifest.createdAt,
-          status: manifest.status,
-          artifacts: manifest.artifacts.length,
-        }));
+        const runs = await listArtifactRuns(catalog);
         return { data: { projectDir: ctx.projectDir, runs } };
       }),
   );
@@ -91,19 +110,36 @@ export function registerArtifactTools(
         const recovery = args.finalizeOrphans === true
           ? await finalizeOrphanedEvidenceRuns(ctx.projectDir, ctx.env)
           : undefined;
+        const opened = await openRunCatalog(ctx.projectDir, ctx.env);
+        const entries = await opened.list();
+        const rustRuns = await listRustEvidenceRuns(opened, entries);
+        const rust = rustRuns.find(run => run.runId === args.runId);
+        if (rust !== undefined) {
+          return { data: { ...rust, report: renderRustEvidenceReport(rust).join("\n"),
+            ...(recovery === undefined ? {} : { recovery }) } };
+        }
+        const rustLines = rustRuns.map(run => `${run.runId}  rust  ${run.outcome}`);
+        if (args.runId === undefined && rustRuns.length > 0 && entries.length === 0) {
+          return { data: { rustRuns, report: rustLines.join("\n"),
+            ...(recovery === undefined ? {} : { recovery }) } };
+        }
         const { catalog, entry } = await findRun(
           ctx.projectDir,
           args.runId,
           ctx.env,
+          opened,
         );
         const { manifest, dir } = entry;
         const records = await readCatalogActions(catalog, entry);
         return {
           data: {
+            source: "lab",
+            ...(args.runId === undefined ? { rustRuns } : {}),
             runId: manifest.runId,
             dir,
             manifest,
-            report: renderRunReport(manifest, dir, records).join("\n"),
+            report: [...renderRunReport(manifest, dir, records),
+              ...(args.runId === undefined ? rustLines : [])].join("\n"),
             ...(recovery === undefined ? {} : { recovery }),
           },
         };

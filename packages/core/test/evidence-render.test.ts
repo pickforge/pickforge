@@ -14,8 +14,7 @@ import {
   writeEvidenceReport,
   type EvidenceAction,
   type EvidenceRecord,
-  type ReportManifest,
-  type ReportOutcome,
+  type EvidenceOutcomeRecord,
   type RunManifest,
 } from "../src/index.js";
 import { renderEvidenceSessionIndex } from "../src/evidence-render.js";
@@ -50,9 +49,7 @@ function action(overrides: Partial<EvidenceAction> = {}): EvidenceAction {
   };
 }
 
-function evidenceManifest(
-  overrides: Partial<ReportManifest> = {},
-): ReportManifest {
+function evidenceManifest(overrides: Partial<RunManifest> = {}): RunManifest {
   return {
     runId: "20260713-120000-evidence",
     slug: "evidence",
@@ -328,7 +325,7 @@ function cspOf(html: string): string {
   return found![1]!;
 }
 
-function outcome(overrides: Partial<ReportOutcome> = {}): ReportOutcome {
+function outcome(overrides: Partial<EvidenceOutcomeRecord> = {}): EvidenceOutcomeRecord {
   return {
     kind: "outcome",
     recordedAt: "2026-07-13T12:05:00.000Z",
@@ -453,7 +450,7 @@ describe("evidence report device, outcome, and filters", () => {
 
   it("falls back to an unknown outcome state and keeps the step numbering", () => {
     const html = renderEvidenceHtml(evidenceManifest(), [
-      outcome({ status: "flaky" as ReportOutcome["status"], steps: [], limitations: [] }),
+      outcome({ status: "flaky" as EvidenceOutcomeRecord["status"], steps: [], limitations: [] }),
       action(),
     ]);
 

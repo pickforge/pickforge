@@ -1942,6 +1942,7 @@ describe("pickforge-lab artifacts", () => {
     const report = parseJson(result);
     expect(report.runs).toEqual([
       {
+        source: "lab",
         runId: "20260609-120000-synthetic",
         slug: "synthetic",
         createdAt: "2026-06-09T12:00:00.000Z",
@@ -1949,6 +1950,7 @@ describe("pickforge-lab artifacts", () => {
         artifacts: 1,
       },
       {
+        source: "lab",
         runId: "20260609-110000-synthetic",
         slug: "synthetic",
         createdAt: "2026-06-09T11:00:00.000Z",
@@ -2339,4 +2341,25 @@ describe("pickforge-lab mcp serve", () => {
     const tools = responses.get(2)?.result?.tools as Array<{ name: string }>;
     expect(tools.length).toBeGreaterThanOrEqual(21);
   }, 60_000);
+});
+
+it("records an artifacts outcome through the CLI and refuses unsupported acceptance", async () => {
+  const env = makeEnv();
+  const projectDir = makeProjectDir();
+  const runId = "20260609-120000-acceptance";
+  writeSyntheticRun(projectDir, runId, { evidenceVersion: 1, actionLog: "actions.jsonl" });
+  const dir = path.join(projectDir, ".picklab", "runs", runId);
+  fs.writeFileSync(path.join(dir, "actions.jsonl"), "");
+  fs.writeFileSync(path.join(dir, "screenshots/screenshot.png"), PNG_MAGIC);
+  const args = ["artifacts", "outcome", runId, "--scenario", `token=${PLANTED_TOKEN}`, "--notes", `token=${PLANTED_TOKEN}`, "--status", "pass", "--inspected", "screenshots/screenshot.png", "--step", "Click submit", "--step", "Check result", "--limitation", "One viewport", "--revision", "abc123", "--json", "--project-dir", projectDir];
+  const refused = await runCli(args, env);
+  expect(refused.code).toBe(1);
+  expect(parseJson(refused).errors.join(" ")).toContain("Recording alone");
+  fs.writeFileSync(path.join(dir, "actions.jsonl"), JSON.stringify({ actionId: "click", source: "cli", tool: "desktop_click", status: "ok", startedAt: new Date().toISOString() }) + "\n");
+  const accepted = await runCli(args, env);
+  expect(accepted.code).toBe(0);
+  expect(parseJson(accepted).outcome).toMatchObject({ status: "pass", steps: ["Click submit", "Check result"], limitations: ["One viewport"], revision: "abc123" });
+  expect(accepted.stdout).not.toContain(PLANTED_TOKEN);
+  expect(fs.readFileSync(path.join(dir, "actions.jsonl"), "utf8")).not.toContain(PLANTED_TOKEN);
+  expect(fs.readFileSync(path.join(dir, "report.html"), "utf8")).toContain('class="panel outcome s-pass"');
 });
