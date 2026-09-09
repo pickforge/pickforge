@@ -1,1 +1,5 @@
 # No vulnerability exceptions. Scan all dependency findings.
+
+[[IgnoredVulns]]
+id = "GHSA-82fw-gwwq-j7x9"
+reason = "Medium (CVSS 5.9) in the vitest test runner, a root devDependency that is not shipped; the fix is the vitest 4 major upgrade tracked in pickforge/pickforge#132."
