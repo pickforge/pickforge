@@ -139,7 +139,7 @@ function hasLaterQuoteToken(text: string, token: string, from: number): boolean 
 
 function isEmbeddingBoundary(text: string, index: number): boolean {
   const ch = text[index];
-  return ch === undefined || /[\s,}\]>\/]/.test(ch);
+  return ch === undefined || /[\s,}\]>/]/.test(ch);
 }
 
 function cookieQuoteTokenAt(text: string, i: number): string | undefined {

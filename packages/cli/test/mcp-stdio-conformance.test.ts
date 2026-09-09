@@ -251,9 +251,8 @@ function modernRequest(
 }
 
 function toolNames(frame: RpcFrame): string[] {
-  return (frame.result?.tools as Array<{ name: string }>)
-    .map(({ name }) => name)
-    .sort();
+  const tools = frame.result?.tools as Array<{ name: string }> | undefined;
+  return (tools ?? []).map(({ name }) => name).sort();
 }
 
 function toolReport(frame: RpcFrame): Record<string, unknown> {
@@ -355,14 +354,12 @@ describe("raw MCP stdio wire", () => {
     expect(resources.result?.resources).toEqual([
       expect.objectContaining({ uri: "pickforge://runs" }),
     ]);
-    expect(
-      (templates.result?.resourceTemplates as Array<{ uriTemplate: string }>).map(
-        ({ uriTemplate }) => uriTemplate,
-      ),
-    ).toHaveLength(6);
-    expect(
-      (prompts.result?.prompts as Array<{ name: string }>).map(({ name }) => name).sort(),
-    ).toEqual([
+    const resourceTemplates = templates.result?.resourceTemplates as
+      | Array<{ uriTemplate: string }>
+      | undefined;
+    const promptsList = prompts.result?.prompts as Array<{ name: string }> | undefined;
+    expect(resourceTemplates?.map(({ uriTemplate }) => uriTemplate)).toHaveLength(6);
+    expect(promptsList?.map(({ name }) => name).sort()).toEqual([
       "debug-android-apk",
       "run-visual-regression-check",
       "test-flutter-desktop-visually",

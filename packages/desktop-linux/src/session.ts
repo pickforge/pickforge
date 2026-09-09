@@ -476,6 +476,15 @@ async function breakStaleVncLock(
   }
 }
 
+async function throwIfSessionGone(
+  id: string,
+  registryEnv: EnvLike,
+): Promise<void> {
+  if ((await getSession(id, registryEnv)) === undefined) {
+    throw new Error(`Session not found: ${id}`);
+  }
+}
+
 async function acquireSessionVncLock(
   id: string,
   registryEnv: EnvLike,
@@ -505,10 +514,7 @@ async function acquireSessionVncLock(
       } catch (error) {
         const code = errorCode(error);
         if (code === "ENOENT") {
-          // eslint-disable-next-line max-depth -- Legacy gate debt: pickforge/pickforge#60
-          if ((await getSession(id, registryEnv)) === undefined) {
-            throw new Error(`Session not found: ${id}`);
-          }
+          await throwIfSessionGone(id, registryEnv);
           await sleep(VNC_LOCK_POLL_MS);
           continue;
         }
@@ -650,7 +656,7 @@ export async function ensureSessionVnc(
   if ((await getSession(id, registryEnv)) === undefined) {
     throw new Error(`Session not found: ${id}`);
   }
-  // eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
+  // oxlint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
   return withSessionVncLock(id, registryEnv, async () => {
     let record = await getSession(id, registryEnv);
     if (record === undefined) {

@@ -1,0 +1,35 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc"],
+  "categories": {
+    "correctness": "error"
+  },
+  "ignorePatterns": ["coverage/**", "packages/*/dist/**"],
+  "env": {
+    "builtin": true
+  },
+  "rules": {
+    "complexity": ["error", 15],
+    "max-depth": ["error", 4],
+    "max-lines-per-function": [
+      "error",
+      {
+        "max": 100,
+        "skipBlankLines": true,
+        "skipComments": true
+      }
+    ],
+    // Intentional: reject C0/DEL/bidi controls in AVD names, android input
+    // text, and shell-unsafe path words. Matching those characters is the
+    // safety gate, not an accident.
+    "no-control-regex": "off"
+  },
+  "overrides": [
+    {
+      "files": ["**/*.test.ts", "test/**/*.ts"],
+      "rules": {
+        "max-lines-per-function": "off"
+      }
+    }
+  ]
+}

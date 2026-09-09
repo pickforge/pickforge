@@ -73,7 +73,8 @@ jobs:
 
       - run: bun run typecheck
 
-      - run: bun run lint
+      - name: Lint
+        run: bun run lint
 
       - name: Install desktop test dependencies
         run: |

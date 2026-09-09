@@ -88,7 +88,7 @@ function makeEnv(opts: EnvOptions = {}): Record<string, string> {
     // new "home" default explicitly override this via opts.extra.
     PICKFORGE_STORAGE_MODE: "project-local",
     PATH: pathParts.join(":"),
-    ...(opts.extra ?? {}),
+    ...opts.extra,
   };
 }
 
@@ -448,7 +448,7 @@ describe("pickforge-lab session (desktop)", () => {
         realPath: true,
         bins: {
           "remote-viewer":
-            `printf 'viewer noise\\n'; printf '%s\\n' \"$@\" > \"${viewerArgs}\"`,
+            `printf 'viewer noise\\n'; printf '%s\\n' "$@" > "${viewerArgs}"`,
         },
         extra: { DISPLAY: ":0" },
       });
@@ -514,7 +514,7 @@ describe("pickforge-lab session (desktop)", () => {
       const env = makeEnv({
         realPath: true,
         bins: {
-          "remote-viewer": `printf '%s\\n' \"$1\" >> \"${opens}\"; sleep 3`,
+          "remote-viewer": `printf '%s\\n' "$1" >> "${opens}"; sleep 3`,
         },
         extra: { DISPLAY: ":0" },
       });

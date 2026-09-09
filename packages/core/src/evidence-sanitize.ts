@@ -205,7 +205,7 @@ export interface SanitizedNetworkFailure {
  * timing, and a sanitized error summary. Headers, bodies, and query strings
  * have no field here and can never be persisted through this shape.
  */
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
+// oxlint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
 export function sanitizeNetworkFailure(input: {
   method?: string;
   url?: string;
