@@ -192,12 +192,15 @@ describe("writeEvidenceReport", () => {
     fs.writeFileSync(good, "png");
     fs.writeFileSync(outside, "secret");
     fs.symlinkSync(outside, path.join(run.dir, "screenshots", "escape.png"));
+    fs.linkSync(outside, path.join(run.dir, "screenshots", "hard.png"));
     await appendAction(
       run,
       action({
         artifacts: [
           "screenshots/good.png",
           "screenshots/escape.png",
+          "screenshots/hard.png",
+          "screenshots/missing.png",
           "../outside.png",
         ],
       }),
@@ -209,10 +212,30 @@ describe("writeEvidenceReport", () => {
     expect(reportPath).toBe(path.join(run.dir, EVIDENCE_REPORT));
     expect(html).toContain('src="screenshots/good.png"');
     expect(html).not.toContain("escape.png");
+    expect(html).not.toContain("hard.png");
+    expect(html).not.toContain("missing.png");
     expect(html).not.toContain("../outside.png");
+    const manifest = JSON.parse(fs.readFileSync(path.join(run.dir, "manifest.json"), "utf8")) as RunManifest;
+    expect(manifest.artifacts.map((artifact) => artifact.path)).toEqual([
+      "screenshots/good.png", "actions.jsonl", "report.html",
+    ]);
+    expect(manifest.evidenceTruncated).toBe(false);
     expect(
       fs.readdirSync(run.dir).some((name) => name.includes("report.html.tmp")),
     ).toBe(false);
+  });
+
+  it("reconciles truncation and preserves the final lifecycle-record refresh", async () => {
+    const run = await createRun(projectDir, "truncated", { evidence: true });
+    await appendAction(run, action(), { maxBytes: 1 });
+    await run.finish("completed");
+    await writeEvidenceReport(run);
+    expect(run.manifest.evidenceTruncated).toBe(true);
+    expect(run.manifest.artifacts.map((artifact) => artifact.path)).toEqual(["actions.jsonl", "report.html"]);
+    // Session teardown records its final action after finish, then refreshes.
+    await appendAction(run, action({ tool: "session_destroy" }));
+    await writeEvidenceReport(run);
+    expect(fs.readFileSync(path.join(run.dir, "report.html"), "utf8")).toContain("session_destroy");
   });
 
   it("replaces a planted report symlink without touching its target", async () => {

@@ -15,7 +15,7 @@ import {
   type RunDirBinding,
 } from "./run-root.js";
 
-export type RunStatus = "running" | "completed" | "failed";
+export type RunStatus = "running" | "completed" | "failed" | "orphaned";
 export type ArtifactType = "screenshot" | "log" | "report" | "other";
 
 /**
@@ -56,6 +56,8 @@ export interface RunManifest {
    * of truth; appends never rewrite the manifest to set this.
    */
   evidenceTruncated?: boolean;
+  /** Recovery diagnostics. The original journal remains unchanged on disk. */
+  evidenceRecovery?: "complete" | "torn-tail" | "corrupt" | "missing";
 }
 
 export interface CreateRunOptions {

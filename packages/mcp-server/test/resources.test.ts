@@ -132,7 +132,9 @@ describe("resource reads", () => {
     expect(first(contents).mimeType).toBe("application/json");
     const manifest = JSON.parse(first(contents).text as string);
     expect(manifest.runId).toBe(RUN_ID);
-    expect(manifest.artifacts).toHaveLength(2);
+    expect(manifest.artifacts.map((artifact: { path: string }) => artifact.path)).toEqual([
+      "screenshots/screenshot.png", "logs/app.log", "actions.jsonl", "report.html",
+    ]);
   });
 
   it("reads deterministically ordered actions with secrets redacted", async () => {

@@ -335,8 +335,9 @@ function parseClaim(raw: string): ActiveEvidenceClaim | undefined {
  * later, unrelated process that reused the PID); otherwise we fall back to a
  * plain liveness probe. A dead or reused owner is never treated as alive, so its
  * claim or run is safe to reclaim.
+ * @internal Shared owner-identity check for explicit recovery.
  */
-function identityIsAlive(pid: number, startTicks?: number): boolean {
+export function identityIsAlive(pid: number, startTicks?: number): boolean {
   if (startTicks !== undefined) {
     return processIdentityMatches({ pid, startTicks });
   }
@@ -401,8 +402,8 @@ export async function resolveActivePointer(
   );
 }
 
-/** {@link resolveActivePointer} against an already open, verified root. */
-async function resolveActivePointerIn(
+/** @internal {@link resolveActivePointer} through a held, verified root descriptor. */
+export async function resolveActivePointerIn(
   root: DirHandle,
   sessionId: string,
 ): Promise<PointerResolution> {
@@ -595,7 +596,8 @@ async function acquireJournalLock(dir: DirHandle): Promise<JournalLockHandle> {
   throw new Error(`Timed out waiting for evidence journal lock in ${dir.dir}`);
 }
 
-async function withJournalLock<T>(
+/** @internal Serialize recovery/report snapshots with appenders. */
+export async function withJournalLock<T>(
   dir: DirHandle,
   operation: () => Promise<T>,
 ): Promise<T> {
@@ -1414,6 +1416,12 @@ export async function appendAction(
 
   return withBoundRunDir(run.binding, (dir) =>
     withJournalLock(dir, async () => {
+      const status = (await readEvidenceManifestIn(dir)).status;
+      if (status === "orphaned") {
+        throw new Error(
+          `Evidence run is ${status}; begin a new run before appending`,
+        );
+      }
       const handle = await dir.openFile(
         EVIDENCE_ACTION_LOG,
         fs.constants.O_RDWR |
@@ -1824,6 +1832,111 @@ async function writeTruncationMarkerOnce(
   return false;
 }
 
+/** @internal Recovery treats unsafe pointer files and targets as ambiguous. */
+export async function recoverySessionMayBeWritingIn(
+  root: DirHandle,
+  sessionId: string,
+): Promise<boolean> {
+  try {
+    const raw = await readRecoveryFileIn(root, pointerName(sessionId));
+    if (raw === undefined) return false;
+    if (raw.trim() === "") return true;
+    const claim = parseClaim(raw);
+    if (claim !== undefined) return identityIsAlive(claim.ownerPid, claim.ownerStartTicks);
+    const pointer = parsePointer(raw);
+    if (pointer === undefined) return true;
+    const dir = await openRunDirIn(root, pointer.runId);
+    try {
+      const manifest = await readEvidenceManifestIn(dir);
+      if (!manifestMatchesPointer(manifest, pointer, sessionId)) return true;
+    } finally {
+      await dir.close();
+    }
+    return identityIsAlive(pointer.ownerPid, pointer.ownerStartTicks);
+  } catch (error) {
+    if (error instanceof RunStorageAccessError || error instanceof SyntaxError) return true;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (["ENOENT", "ELOOP", "ENXIO", "ENODEV"].includes(code ?? "")) return true;
+    throw error;
+  }
+}
+
+async function readRecoveryFileIn(dir: DirHandle, name: string): Promise<string | undefined> {
+  let handle: fs.promises.FileHandle;
+  try {
+    handle = await dir.openFile(name, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.nlink !== 1) throw new RunStorageAccessError(`Unsafe recovery file in ${dir.dir}: ${name}`);
+    return await handle.readFile("utf8");
+  } finally {
+    await handle.close();
+  }
+}
+
+function validManifestArtifact(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const artifact = value as Record<string, unknown>;
+  return typeof artifact.type === "string" && ["screenshot", "log", "report", "other"].includes(artifact.type) &&
+    [artifact.name, artifact.path, artifact.createdAt].every((field) => typeof field === "string");
+}
+
+function validEvidenceManifest(manifest: RunManifest): boolean {
+  if (!Array.isArray(manifest.artifacts) || !manifest.artifacts.every(validManifestArtifact)) return false;
+  if (![manifest.slug, manifest.createdAt].every((field) => typeof field === "string")) return false;
+  return ["running", "completed", "failed", "orphaned"].includes(manifest.status) && isEvidenceRun(manifest);
+}
+
+/** @internal Read summary data without following links or blocking on special files. */
+export async function readEvidenceManifestIn(
+  dir: DirHandle,
+): Promise<RunManifest> {
+  const handle = await dir.openFile(
+    "manifest.json",
+    fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
+  );
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.nlink !== 1) {
+      throw new RunStorageAccessError(`Unsafe evidence manifest in ${dir.dir}`);
+    }
+    const manifest = JSON.parse(await handle.readFile("utf8")) as RunManifest;
+    if (
+      manifest?.runId !== path.basename(dir.dir) ||
+      !validEvidenceManifest(manifest)
+    ) {
+      throw new RunStorageAccessError(`Invalid evidence manifest in ${dir.dir}`);
+    }
+    return manifest;
+  } finally {
+    await handle.close();
+  }
+}
+
+function validEvidenceRecord(value: unknown): value is EvidenceRecord {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  if (typeof record.actionId !== "string") return false;
+  if (record.evidenceTruncated === true) {
+    return record.reason === "evidence-cap" && typeof record.recordedAt === "string" &&
+      [record.bytes, record.maxBytes].every((field) => typeof field === "number" && Number.isFinite(field));
+  }
+  return validActionFields(record);
+}
+
+function validActionFields(record: Record<string, unknown>): boolean {
+  const strings = [record.source, record.tool, record.startedAt];
+  if (!strings.every((field) => typeof field === "string")) return false;
+  if (typeof record.status !== "string" || !["ok", "error", "cancelled", "timeout"].includes(record.status)) return false;
+  if (record.artifacts !== undefined && (!Array.isArray(record.artifacts) || !record.artifacts.every((item) => typeof item === "string"))) return false;
+  if (record.durationMs !== undefined && (typeof record.durationMs !== "number" || !Number.isFinite(record.durationMs))) return false;
+  return [record.sessionId, record.error].every((field) => field === undefined || typeof field === "string");
+}
+
 /** Parse an action journal using the same torn-tail and corruption rules as reads. */
 export function parseActionsJournal(
   raw: string,
@@ -1853,11 +1966,7 @@ export function parseActionsJournal(
           `${(error as Error).message}`,
       );
     }
-    if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      typeof (parsed as EvidenceAction).actionId !== "string"
-    ) {
+    if (!validEvidenceRecord(parsed)) {
       throw new Error(
         `Corrupt evidence journal in ${journalLabel} at line ${index + 1}: ` +
           `record is not a valid evidence record`,

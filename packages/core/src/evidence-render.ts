@@ -1,17 +1,45 @@
 import path from "node:path";
 import { RunStorageAccessError, type DirHandle } from "./dir-handle.js";
 import { redactSecrets } from "./redact.js";
-import { RunHandle, type RunManifest } from "./run.js";
+import {
+  EVIDENCE_ACTION_LOG,
+  RunHandle,
+  type RunArtifact,
+  type RunManifest,
+} from "./run.js";
 import { withBoundRunDir } from "./run-root.js";
 import {
   isEvidenceRun,
   isTruncationRecord,
   readActionsIn,
+  readEvidenceManifestIn,
+  withJournalLock,
   type EvidenceAction,
   type EvidenceRecord,
 } from "./evidence.js";
+import type { RecoveredEvidenceRun } from "./evidence-recovery.js";
 
 export const EVIDENCE_REPORT = "report.html";
+
+/** One stable entry point for a session's process-scoped evidence runs. */
+export function renderEvidenceSessionIndex(
+  sessionId: string,
+  runs: readonly RecoveredEvidenceRun[],
+): string {
+  const rows = runs
+    .map((run) =>
+      `<li><a href="${escapeHtml(run.runId)}/${EVIDENCE_REPORT}">${escapeHtml(run.runId)}</a>: ${escapeHtml(run.status)}, ${run.actions} records, journal ${escapeHtml(run.journal)}</li>`,
+    )
+    .join("\n");
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pickforge session ${escapeHtml(sessionId)}</title></head>
+<body><h1>Pickforge session ${escapeHtml(sessionId)}</h1>
+<p>Recovery snapshot. Runs remain in place, ordered by run id. Orphaned means the owner was unavailable, not successful completion. Journals are unchanged.</p>
+<ul>${rows}</ul></body></html>\n`;
+}
 
 function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -93,6 +121,8 @@ export function renderRunReport(
 
   if (!isEvidenceRun(manifest)) return lines;
 
+  const warning = recoveryWarning(manifest);
+  if (warning !== "") lines.push("", warning);
   const ordered = sortEvidenceRecords(records);
   lines.push("", `## Actions (${ordered.length})`, "");
   if (ordered.length === 0) {
@@ -137,6 +167,21 @@ export function renderRunReport(
     lines.push("");
   });
   return lines;
+}
+
+function recoveryWarning(manifest: RunManifest): string {
+  if (
+    manifest.evidenceRecovery === "corrupt" ||
+    manifest.evidenceRecovery === "missing"
+  ) {
+    return "Journal is corrupt or missing. Timeline unavailable; original evidence was not changed.";
+  }
+  if (manifest.evidenceRecovery === "torn-tail") {
+    return "Interrupted final journal line omitted from this report, preserved in actions.jsonl.";
+  }
+  return manifest.status === "orphaned"
+    ? "Owner unavailable. Recovered evidence is not a successful completion."
+    : "";
 }
 
 function escapeHtml(value: unknown): string {
@@ -228,6 +273,7 @@ export function renderEvidenceHtml(
 <section class="summary">
 <h1>Pickforge run ${escapeHtml(manifest.runId)}</h1>
 <dl>${renderMetadata("Slug", manifest.slug)}${renderMetadata("Status", manifest.status)}${renderMetadata("Created", manifest.createdAt)}${manifest.sessionId === undefined ? "" : renderMetadata("Session", manifest.sessionId)}</dl>
+<p>${escapeHtml(recoveryWarning(manifest))}</p>
 </section>
 <section aria-label="Action timeline">
 ${steps === "" ? '<p class="empty">No recorded actions.</p>' : steps}
@@ -265,12 +311,102 @@ async function collectSafeScreenshots(
       if (!safeScreenshotPath(relative)) continue;
       const name = relative.slice("screenshots/".length);
       const stat = await screenshots.lstatChild(name);
-      if (stat?.isFile() === true && !stat.isSymbolicLink()) safe.add(relative);
+      if (stat?.isFile() === true && !stat.isSymbolicLink() && stat.nlink === 1) {
+        safe.add(relative);
+      }
     }
   } finally {
     await screenshots.close().catch(() => {});
   }
   return safe;
+}
+
+async function regularArtifact(
+  runDir: DirHandle,
+  relative: string,
+): Promise<boolean> {
+  if (
+    !/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)?$/.test(relative) ||
+    relative.includes("..")
+  ) {
+    return false;
+  }
+  const parts = relative.split("/");
+  let dir = runDir;
+  try {
+    if (parts.length === 2) {
+      const stat = await runDir.lstatChild(parts[0]!);
+      if (stat?.isDirectory() !== true || stat.isSymbolicLink()) return false;
+      dir = await runDir.openChild(parts[0]!);
+    }
+    const stat = await dir.lstatChild(parts.at(-1)!);
+    return stat?.isFile() === true && !stat.isSymbolicLink() && stat.nlink === 1;
+  } finally {
+    if (dir !== runDir) await dir.close();
+  }
+}
+
+async function evidenceInventory(
+  dir: DirHandle,
+  manifest: RunManifest,
+  records: readonly EvidenceRecord[],
+): Promise<RunArtifact[]> {
+  const candidates = new Map(
+    manifest.artifacts.map((artifact) => [artifact.path, artifact]),
+  );
+  for (const record of records) {
+    if (isTruncationRecord(record)) continue;
+    for (const relative of record.artifacts ?? []) {
+      candidates.set(relative, {
+        type: safeScreenshotPath(relative) ? "screenshot" : "other",
+        name: path.basename(relative),
+        path: relative,
+        createdAt: record.startedAt,
+      });
+    }
+  }
+  candidates.set(EVIDENCE_ACTION_LOG, {
+    type: "log",
+    name: EVIDENCE_ACTION_LOG,
+    path: EVIDENCE_ACTION_LOG,
+    createdAt: manifest.createdAt,
+  });
+  candidates.set(EVIDENCE_REPORT, {
+    type: "report",
+    name: EVIDENCE_REPORT,
+    path: EVIDENCE_REPORT,
+    createdAt: manifest.createdAt,
+  });
+  const artifacts: RunArtifact[] = [];
+  for (const artifact of candidates.values()) {
+    if (
+      artifact.path === EVIDENCE_REPORT ||
+      await regularArtifact(dir, artifact.path)
+    ) {
+      artifacts.push(artifact);
+    }
+  }
+  return artifacts;
+}
+
+/** @internal Caller holds the journal lock and the verified run descriptor. */
+export async function writeEvidenceReportIn(
+  runDir: DirHandle,
+  manifest: RunManifest,
+  records: readonly EvidenceRecord[],
+): Promise<void> {
+  const safeScreenshots = await collectSafeScreenshots(runDir, records);
+  manifest.artifacts = await evidenceInventory(runDir, manifest, records);
+  if (manifest.evidenceRecovery === "corrupt" || manifest.evidenceRecovery === "missing") {
+    delete manifest.evidenceTruncated;
+  } else {
+    manifest.evidenceTruncated = records.some(isTruncationRecord);
+  }
+  const html = renderEvidenceHtml(manifest, records, safeScreenshots);
+  await runDir.writeFileAtomic(EVIDENCE_REPORT, html);
+  await runDir.writeFileAtomic(
+    "manifest.json", `${JSON.stringify(manifest, null, 2)}\n`,
+  );
 }
 
 export async function writeEvidenceReport(
@@ -290,11 +426,13 @@ export async function writeEvidenceReport(
       `Refusing report manifest ${manifest.runId} for run ${run.runId}`,
     );
   }
-  await withBoundRunDir(run.binding, async (runDir) => {
-    const records = await readActionsIn(runDir);
-    const safeScreenshots = await collectSafeScreenshots(runDir, records);
-    const html = renderEvidenceHtml(manifest, records, safeScreenshots);
-    await runDir.writeFileAtomic(EVIDENCE_REPORT, html);
-  });
+  await withBoundRunDir(run.binding, (runDir) =>
+    withJournalLock(runDir, async () => {
+      const fresh = await readEvidenceManifestIn(runDir);
+      const records = await readActionsIn(runDir);
+      await writeEvidenceReportIn(runDir, fresh, records);
+      Object.assign(manifest, fresh);
+    }),
+  );
   return path.join(run.dir, EVIDENCE_REPORT);
 }

@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import {
   EVIDENCE_ACTION_LOG,
+  finalizeOrphanedEvidenceRuns,
   isEvidenceRun,
   openRunCatalog,
   parseActionsJournal,
@@ -63,7 +64,7 @@ async function readCatalogActions(
   catalog: RunCatalog,
   entry: RunCatalogEntry,
 ): Promise<ReturnType<typeof parseActionsJournal>> {
-  if (!isEvidenceRun(entry.manifest)) return [];
+  if (!isEvidenceRun(entry.manifest) || entry.manifest.evidenceRecovery === "corrupt") return [];
   const raw = await catalog.readRootTextIfPresent(entry, EVIDENCE_ACTION_LOG);
   return raw === undefined ? [] : parseActionsJournal(raw, entry.dir);
 }
@@ -99,16 +100,23 @@ export async function runArtifactsOpen(
 
 export async function runArtifactsReport(
   runId: string | undefined,
-  opts: BaseCliOptions,
+  opts: BaseCliOptions & { finalizeOrphans?: boolean },
 ): Promise<number> {
   return runReported(opts, async () => {
     const projectDir = resolveProjectDir(opts);
+    const recovery = opts.finalizeOrphans === true
+      ? await finalizeOrphanedEvidenceRuns(projectDir)
+      : undefined;
     const { catalog, entry } = await findRun(projectDir, runId);
     const { manifest, dir } = entry;
     const records = await readCatalogActions(catalog, entry);
     return {
-      data: { runId: manifest.runId, dir, manifest },
-      lines: renderRunReport(manifest, dir, records),
+      data: { runId: manifest.runId, dir, manifest, ...(recovery === undefined ? {} : { recovery }) },
+      lines: [
+        ...renderRunReport(manifest, dir, records),
+        ...(recovery?.sessions.map((session) => `Session index: ${session.index}`) ?? []),
+        ...(recovery?.skipped.map((id) => `Recovery skipped (owner or session identity unavailable): ${id}`) ?? []),
+      ],
     };
   });
 }
