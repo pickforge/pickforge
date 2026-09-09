@@ -50,35 +50,40 @@ function isJsonRpcId(value: unknown): value is JsonRpcId {
   );
 }
 
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
-export function assertJsonRpcMessage(value: unknown): asserts value is JsonRpcMessage {
-  if (!isObject(value) || value.jsonrpc !== "2.0") {
-    throw new Error('expected a JSON-RPC 2.0 object with jsonrpc: "2.0"');
+function assertJsonRpcRequest(value: Record<string, unknown>): void {
+  if (typeof value.method !== "string" || value.method.length === 0) {
+    throw new Error("JSON-RPC request method must be a non-empty string");
   }
-  if ("method" in value) {
-    if (typeof value.method !== "string" || value.method.length === 0) {
-      throw new Error("JSON-RPC request method must be a non-empty string");
-    }
-    if ("result" in value || "error" in value) {
-      throw new Error("JSON-RPC request cannot contain result or error");
-    }
-    if (
-      "id" in value &&
-      value.id !== undefined &&
-      (!isJsonRpcId(value.id) || value.id === null)
-    ) {
+  if ("result" in value || "error" in value) {
+    throw new Error("JSON-RPC request cannot contain result or error");
+  }
+  if ("id" in value && value.id !== undefined) {
+    if (!isJsonRpcId(value.id) || value.id === null) {
       throw new Error("JSON-RPC request id must be a string or number");
     }
-    if (
-      "params" in value &&
-      value.params !== undefined &&
-      !isObject(value.params) &&
-      !Array.isArray(value.params)
-    ) {
-      throw new Error("JSON-RPC params must be an object or array");
-    }
+  }
+  if (!("params" in value) || value.params === undefined) {
     return;
   }
+  if (isObject(value.params) || Array.isArray(value.params)) {
+    return;
+  }
+  throw new Error("JSON-RPC params must be an object or array");
+}
+
+function assertJsonRpcErrorObject(error: unknown): void {
+  if (!isObject(error)) {
+    throw new Error("JSON-RPC error must contain numeric code and string message");
+  }
+  if (typeof error.code !== "number" || !Number.isFinite(error.code)) {
+    throw new Error("JSON-RPC error must contain numeric code and string message");
+  }
+  if (typeof error.message !== "string") {
+    throw new Error("JSON-RPC error must contain numeric code and string message");
+  }
+}
+
+function assertJsonRpcResponse(value: Record<string, unknown>): void {
   if (!("id" in value) || !isJsonRpcId(value.id)) {
     throw new Error("JSON-RPC response id must be a string, number, or null");
   }
@@ -87,15 +92,23 @@ export function assertJsonRpcMessage(value: unknown): asserts value is JsonRpcMe
   if (hasResult === hasError) {
     throw new Error("JSON-RPC response must contain exactly one of result or error");
   }
-  if (
-    hasError &&
-    (!isObject(value.error) ||
-      typeof value.error.code !== "number" ||
-      !Number.isFinite(value.error.code) ||
-      typeof value.error.message !== "string")
-  ) {
-    throw new Error("JSON-RPC error must contain numeric code and string message");
+  if (hasError) {
+    assertJsonRpcErrorObject(value.error);
   }
+}
+
+export function assertJsonRpcMessage(value: unknown): asserts value is JsonRpcMessage {
+  if (!isObject(value)) {
+    throw new Error('expected a JSON-RPC 2.0 object with jsonrpc: "2.0"');
+  }
+  if (value.jsonrpc !== "2.0") {
+    throw new Error('expected a JSON-RPC 2.0 object with jsonrpc: "2.0"');
+  }
+  if ("method" in value) {
+    assertJsonRpcRequest(value);
+    return;
+  }
+  assertJsonRpcResponse(value);
 }
 
 function decodeUtf8(bytes: Buffer): string {
@@ -334,7 +347,38 @@ export interface PumpJsonRpcNdjsonOptions {
 
 const runWriteImmediately: JsonRpcWriteSerializer = (write) => write();
 
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
+async function dispatchJsonRpcRecord(
+  record: JsonRpcRecord,
+  destination: Writable,
+  opts: PumpJsonRpcNdjsonOptions,
+  writeSerializer: JsonRpcWriteSerializer,
+  interceptWriteSerializer: JsonRpcWriteSerializer,
+): Promise<void> {
+  const intercepted =
+    opts.intercept === undefined ? undefined : await opts.intercept(record.message);
+  if (intercepted !== undefined) {
+    const interceptBytes = serializeJsonRpcMessage(intercepted);
+    await interceptWriteSerializer(() =>
+      writeWithBackpressure(opts.interceptDestination!, interceptBytes),
+    );
+    return;
+  }
+  const forwardBytes = await applyHook(record, opts.hook);
+  await writeSerializer(() => writeWithBackpressure(destination, forwardBytes));
+}
+
+async function closeJsonRpcIterator(
+  iterator: AsyncIterator<unknown>,
+  aborted: boolean,
+): Promise<void> {
+  const returned = iterator.return?.();
+  if (aborted) {
+    void returned?.catch(() => {});
+    return;
+  }
+  await returned;
+}
+
 export async function pumpJsonRpcNdjson(
   source: Readable,
   destination: Writable,
@@ -356,17 +400,13 @@ export async function pumpJsonRpcNdjson(
       const chunk =
         typeof item.value === "string" ? Buffer.from(item.value) : Buffer.from(item.value);
       for (const record of decoder.push(chunk)) {
-        const intercepted =
-          opts.intercept === undefined ? undefined : await opts.intercept(record.message);
-        if (intercepted !== undefined) {
-          const interceptBytes = serializeJsonRpcMessage(intercepted);
-          await interceptWriteSerializer(() =>
-            writeWithBackpressure(opts.interceptDestination!, interceptBytes),
-          );
-          continue;
-        }
-        const forwardBytes = await applyHook(record, opts.hook);
-        await writeSerializer(() => writeWithBackpressure(destination, forwardBytes));
+        await dispatchJsonRpcRecord(
+          record,
+          destination,
+          opts,
+          writeSerializer,
+          interceptWriteSerializer,
+        );
       }
     }
     decoder.end();
@@ -374,11 +414,6 @@ export async function pumpJsonRpcNdjson(
       destination.end();
     }
   } finally {
-    const returned = iterator.return?.();
-    if (opts.signal?.aborted === true) {
-      void returned?.catch(() => {});
-    } else {
-      await returned;
-    }
+    await closeJsonRpcIterator(iterator, opts.signal?.aborted === true);
   }
 }

@@ -136,76 +136,108 @@ function isSameOrDescendant(ancestor: string, descendant: string): boolean {
  * This is the single resolver every run-creation and artifact-lookup path
  * (core, CLI, MCP) goes through, so they always agree on where runs live.
  */
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
-export async function resolveRunStorage(
-  projectDir: string,
-  env: EnvLike = process.env,
-): Promise<ResolvedRunStorage> {
-  const { global, project } = await loadConfigLayers(projectDir, env);
-  const globalStorage: StorageConfig = global.storage ?? {};
-  const projectStorage: StorageConfig = project.storage ?? {};
+interface StorageSelection {
+  mode: StorageMode;
+  customPath: string | undefined;
+  rejectedProjectCustom?: { requestedPath?: string };
+}
 
+function selectRunStorageMode(
+  globalStorage: StorageConfig,
+  projectStorage: StorageConfig,
+  env: EnvLike,
+): StorageSelection {
   const envMode = envStorageMode(env);
-  let mode: StorageMode;
-  let customPath: string | undefined;
-  let rejectedProjectCustom: { requestedPath?: string } | undefined;
-
   if (envMode !== undefined) {
     // The environment is always user/automation-controlled, never
     // repo-committed: it may select any mode, including custom. Its custom
     // path may come from the env itself or from global config, but never
     // from project config — project config never supplies a custom path,
     // regardless of which layer selected the mode.
-    mode = envMode;
-    customPath = readPickforgeEnv(env, "STORAGE_PATH") ?? globalStorage.path;
-  } else if (projectStorage.mode === "custom") {
-    rejectedProjectCustom = { requestedPath: projectStorage.path };
-    mode = globalStorage.mode ?? resolvedDefaults.storage.mode;
-    customPath = globalStorage.path;
-  } else if (projectStorage.mode !== undefined) {
-    // Guaranteed not "custom" (handled above), so no path is needed.
-    mode = projectStorage.mode;
-    customPath = undefined;
-  } else {
-    mode = globalStorage.mode ?? resolvedDefaults.storage.mode;
-    customPath = globalStorage.path;
-  }
-
-  if (mode === "project-local") {
-    const resolved: ResolvedRunStorage = { mode, runsDir: runsDir(projectDir) };
-    if (rejectedProjectCustom !== undefined) {
-      resolved.rejectedProjectCustom = rejectedProjectCustom;
-    }
-    return resolved;
-  }
-
-  if (mode === "custom") {
-    const resolvedCustomRoot = validateCustomPath(customPath);
-    const resolvedProjectDir = path.resolve(projectDir);
-    if (isSameOrDescendant(resolvedProjectDir, resolvedCustomRoot)) {
-      throw new StorageConfigError(
-        `storage path must be outside the project directory, got "${customPath}" ` +
-          `under "${resolvedProjectDir}"`,
-      );
-    }
-    const resolved: ResolvedRunStorage = {
-      mode,
-      runsDir: path.join(resolvedCustomRoot, "runs"),
+    return {
+      mode: envMode,
+      customPath: readPickforgeEnv(env, "STORAGE_PATH") ?? globalStorage.path,
     };
-    if (rejectedProjectCustom !== undefined) {
-      resolved.rejectedProjectCustom = rejectedProjectCustom;
-    }
-    return resolved;
   }
-
-  const id = await projectId(projectDir);
-  const resolved: ResolvedRunStorage = {
-    mode: "home",
-    runsDir: path.join(pickforgeHome(env), "projects", id, "runs"),
-    projectId: id,
+  if (projectStorage.mode === "custom") {
+    return {
+      mode: globalStorage.mode ?? resolvedDefaults.storage.mode,
+      customPath: globalStorage.path,
+      rejectedProjectCustom: { requestedPath: projectStorage.path },
+    };
+  }
+  if (projectStorage.mode !== undefined) {
+    // Guaranteed not "custom" (handled above), so no path is needed.
+    return { mode: projectStorage.mode, customPath: undefined };
+  }
+  return {
+    mode: globalStorage.mode ?? resolvedDefaults.storage.mode,
+    customPath: globalStorage.path,
   };
+}
+
+function withRejectedProjectCustom(
+  resolved: ResolvedRunStorage,
+  rejectedProjectCustom: { requestedPath?: string } | undefined,
+): ResolvedRunStorage {
   if (rejectedProjectCustom !== undefined) {
     resolved.rejectedProjectCustom = rejectedProjectCustom;
   }
   return resolved;
+}
+
+function resolveCustomRunStorage(
+  projectDir: string,
+  customPath: string | undefined,
+  rejectedProjectCustom: { requestedPath?: string } | undefined,
+): ResolvedRunStorage {
+  const resolvedCustomRoot = validateCustomPath(customPath);
+  const resolvedProjectDir = path.resolve(projectDir);
+  if (isSameOrDescendant(resolvedProjectDir, resolvedCustomRoot)) {
+    throw new StorageConfigError(
+      `storage path must be outside the project directory, got "${customPath}" ` +
+        `under "${resolvedProjectDir}"`,
+    );
+  }
+  return withRejectedProjectCustom(
+    {
+      mode: "custom",
+      runsDir: path.join(resolvedCustomRoot, "runs"),
+    },
+    rejectedProjectCustom,
+  );
+}
+
+export async function resolveRunStorage(
+  projectDir: string,
+  env: EnvLike = process.env,
+): Promise<ResolvedRunStorage> {
+  const { global, project } = await loadConfigLayers(projectDir, env);
+  const selection = selectRunStorageMode(
+    global.storage ?? {},
+    project.storage ?? {},
+    env,
+  );
+  const rejected = selection.rejectedProjectCustom;
+
+  if (selection.mode === "project-local") {
+    return withRejectedProjectCustom(
+      { mode: selection.mode, runsDir: runsDir(projectDir) },
+      rejected,
+    );
+  }
+
+  if (selection.mode === "custom") {
+    return resolveCustomRunStorage(projectDir, selection.customPath, rejected);
+  }
+
+  const id = await projectId(projectDir);
+  return withRejectedProjectCustom(
+    {
+      mode: "home",
+      runsDir: path.join(pickforgeHome(env), "projects", id, "runs"),
+      projectId: id,
+    },
+    rejected,
+  );
 }

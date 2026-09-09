@@ -388,95 +388,175 @@ function prepareSections(
   });
 }
 
-// eslint-disable-next-line max-lines-per-function, complexity -- Legacy gate debt: pickforge/pickforge#60
-export async function executeProvisioning(
-  sections: readonly ProvisioningSection[],
-  opts: ExecuteProvisioningOptions = {},
-): Promise<ExecuteProvisioningResult> {
-  const adapter = opts.adapter ?? createLocalExecutionAdapter(opts);
-  const prepared = prepareSections(sections, adapter);
-  const selected: PreparedStep[] = [];
-  const satisfied = new Set<string>();
-  const skipped: string[] = [];
-  const errors: string[] = [];
-  let errorStatus: "declined" | "cancelled" | "failed" = "failed";
+type SelectionErrorStatus = "declined" | "cancelled" | "failed";
 
-  const addError = (
-    reason: string,
-    status: "declined" | "cancelled" | "failed" = "failed",
-  ): void => {
-    if (errors.length === 0) errorStatus = status;
-    errors.push(reason);
+interface ProvisioningSelection {
+  selected: PreparedStep[];
+  satisfied: Set<string>;
+  skipped: string[];
+  errors: string[];
+  errorStatus: SelectionErrorStatus;
+}
+
+function addSelectionError(
+  selection: ProvisioningSelection,
+  reason: string,
+  status: SelectionErrorStatus = "failed",
+): void {
+  if (selection.errors.length === 0) selection.errorStatus = status;
+  selection.errors.push(reason);
+}
+
+function applyBlockedSection(
+  entry: Extract<PreparedSection, { kind: "blocked" }>,
+  selection: ProvisioningSelection,
+): void {
+  if (
+    entry.section.unlessSatisfied !== undefined &&
+    selection.satisfied.has(entry.section.unlessSatisfied)
+  ) {
+    return;
+  }
+  if (entry.section.action === "skip") {
+    selection.skipped.push(entry.section.reason);
+    return;
+  }
+  addSelectionError(selection, entry.section.reason);
+}
+
+function applyUnavailableSection(
+  entry: Extract<PreparedSection, { kind: "unavailable" }>,
+  selection: ProvisioningSelection,
+): void {
+  if (entry.section.privilegeUnavailable?.action === "skip") {
+    selection.skipped.push(entry.reason);
+    return;
+  }
+  addSelectionError(selection, entry.reason);
+}
+
+function applyDeniedConsent(
+  entry: Extract<PreparedSection, { kind: "plan" }>,
+  decision: Extract<ConsentDecision, { kind: "declined" | "cancelled" }>,
+  selection: ProvisioningSelection,
+): void {
+  if (entry.section.consent?.onDenied === "skip") {
+    selection.skipped.push(decision.reason);
+    return;
+  }
+  addSelectionError(selection, decision.reason, decision.kind);
+  if (entry.section.consent?.retainPlanOnDenied === true) {
+    selection.selected.push(...entry.steps);
+  }
+}
+
+async function applyPlanSection(
+  entry: Extract<PreparedSection, { kind: "plan" }>,
+  opts: ExecuteProvisioningOptions,
+  selection: ProvisioningSelection,
+): Promise<void> {
+  const { classification, section } = entry;
+  const needsConsent =
+    opts.dryRun !== true &&
+    classification !== "empty" &&
+    classification !== "automatic";
+  if (needsConsent) {
+    if (section.consent === undefined) {
+      addSelectionError(
+        selection,
+        "Refusing to execute provisioning commands without a consent decision.",
+        "cancelled",
+      );
+      return;
+    }
+    let decision: ConsentDecision;
+    try {
+      decision = await section.consent.decide(classification);
+    } catch (error) {
+      addSelectionError(
+        selection,
+        `Provisioning consent failed: ${(error as Error).message}`,
+      );
+      return;
+    }
+    if (decision.kind !== "approved") {
+      applyDeniedConsent(entry, decision, selection);
+      return;
+    }
+  }
+
+  selection.selected.push(...entry.steps);
+  if (section.satisfies !== undefined) {
+    selection.satisfied.add(section.satisfies);
+  }
+}
+
+async function selectProvisioningSteps(
+  prepared: readonly PreparedSection[],
+  opts: ExecuteProvisioningOptions,
+): Promise<ProvisioningSelection> {
+  const selection: ProvisioningSelection = {
+    selected: [],
+    satisfied: new Set<string>(),
+    skipped: [],
+    errors: [],
+    errorStatus: "failed",
   };
-
   for (const entry of prepared) {
     if (entry.kind === "blocked") {
-      if (
-        entry.section.unlessSatisfied !== undefined &&
-        satisfied.has(entry.section.unlessSatisfied)
-      ) {
-        continue;
-      }
-      if (entry.section.action === "skip") {
-        skipped.push(entry.section.reason);
-      } else {
-        addError(entry.section.reason);
-      }
+      applyBlockedSection(entry, selection);
       continue;
     }
     if (entry.kind === "unavailable") {
-      if (entry.section.privilegeUnavailable?.action === "skip") {
-        skipped.push(entry.reason);
-      } else {
-        addError(entry.reason);
-      }
+      applyUnavailableSection(entry, selection);
       continue;
     }
-
-    const { classification, section } = entry;
-    if (
-      opts.dryRun !== true &&
-      classification !== "empty" &&
-      classification !== "automatic"
-    ) {
-      if (section.consent === undefined) {
-        addError(
-          "Refusing to execute provisioning commands without a consent decision.",
-          "cancelled",
-        );
-        continue;
-      }
-      let decision: ConsentDecision;
-      try {
-        decision = await section.consent.decide(classification);
-      } catch (error) {
-        addError(`Provisioning consent failed: ${(error as Error).message}`);
-        continue;
-      }
-      if (decision.kind !== "approved") {
-        if (section.consent.onDenied === "skip") {
-          skipped.push(decision.reason);
-        } else {
-          addError(decision.reason, decision.kind);
-          // eslint-disable-next-line max-depth -- Legacy gate debt: pickforge/pickforge#60
-          if (section.consent.retainPlanOnDenied === true) {
-            selected.push(...entry.steps);
-          }
-        }
-        continue;
-      }
-    }
-
-    selected.push(...entry.steps);
-    if (section.satisfies !== undefined) {
-      satisfied.add(section.satisfies);
-    }
+    await applyPlanSection(entry, opts, selection);
   }
+  return selection;
+}
 
-  if (errors.length > 0) {
-    return executionResult(errorStatus, selected, skipped, [], errors);
+async function executeOnePreparedStep(
+  preparedStep: PreparedStep,
+  presentation: ProvisioningStep,
+  adapter: ProvisioningExecutionAdapter,
+  log: (line: string) => void,
+): Promise<StepResult> {
+  const formatted = formatStep(presentation);
+  if (preparedStep.materialized.privileged) {
+    await adapter.executePrivileged(preparedStep.materialized);
+  } else {
+    await adapter.execute(preparedStep.materialized);
   }
+  log(`[done] ${presentation.title}`);
+  return { id: presentation.id, ok: true, detail: formatted };
+}
 
+function failedStepResult(
+  presentation: ProvisioningStep,
+  error: unknown,
+  log: (line: string) => void,
+): { result: StepResult; status: "cancelled" | "failed" } {
+  const detail = redactSecrets((error as Error).message);
+  // sudo denial/cancellation is a distinct, actionable runtime state
+  // (locked v1 contract) — never folded into a generic "failed" and
+  // never retried automatically.
+  const cancelledBySudo = error instanceof PrivilegedCommandDeniedError;
+  const status = cancelledBySudo ? "cancelled" : "failed";
+  const message = `Step "${presentation.id}" ${status}: ${detail}`;
+  log(`[${status}] ${presentation.title}: ${detail}`);
+  return {
+    result: { id: presentation.id, ok: false, detail: message },
+    status,
+  };
+}
+
+async function executeSelectedSteps(
+  selected: readonly PreparedStep[],
+  skipped: string[],
+  opts: ExecuteProvisioningOptions,
+  adapter: ProvisioningExecutionAdapter,
+): Promise<ExecuteProvisioningResult> {
   const plan = publicPlan(selected);
   if (opts.beforeExecute !== undefined) {
     try {
@@ -497,40 +577,50 @@ export async function executeProvisioning(
   for (let index = 0; index < selected.length; index += 1) {
     const preparedStep = selected[index]!;
     const presentation = plan.steps[index]!;
-    const formatted = formatStep(presentation);
-    const title = presentation.title;
     if (opts.dryRun === true) {
-      log(`[dry-run] ${title}: ${formatted}`);
+      log(`[dry-run] ${presentation.title}: ${formatStep(presentation)}`);
       results.push({ id: presentation.id, ok: true, detail: "dry-run" });
       continue;
     }
     try {
-      if (preparedStep.materialized.privileged) {
-        await adapter.executePrivileged(preparedStep.materialized);
-      } else {
-        await adapter.execute(preparedStep.materialized);
-      }
-      log(`[done] ${title}`);
-      results.push({ id: presentation.id, ok: true, detail: formatted });
+      results.push(
+        await executeOnePreparedStep(preparedStep, presentation, adapter, log),
+      );
     } catch (error) {
-      const detail = redactSecrets((error as Error).message);
-      // sudo denial/cancellation is a distinct, actionable runtime state
-      // (locked v1 contract) — never folded into a generic "failed" and
-      // never retried automatically.
-      const cancelledBySudo = error instanceof PrivilegedCommandDeniedError;
-      const message = `Step "${presentation.id}" ${
-        cancelledBySudo ? "cancelled" : "failed"
-      }: ${detail}`;
-      log(`[${cancelledBySudo ? "cancelled" : "failed"}] ${title}: ${detail}`);
-      results.push({ id: presentation.id, ok: false, detail: message });
+      const failed = failedStepResult(presentation, error, log);
+      results.push(failed.result);
       return executionResult(
-        cancelledBySudo ? "cancelled" : "failed",
+        failed.status,
         selected,
         skipped,
         results,
-        [message],
+        [failed.result.detail],
       );
     }
   }
   return executionResult("completed", selected, skipped, results, []);
+}
+
+export async function executeProvisioning(
+  sections: readonly ProvisioningSection[],
+  opts: ExecuteProvisioningOptions = {},
+): Promise<ExecuteProvisioningResult> {
+  const adapter = opts.adapter ?? createLocalExecutionAdapter(opts);
+  const prepared = prepareSections(sections, adapter);
+  const selection = await selectProvisioningSteps(prepared, opts);
+  if (selection.errors.length > 0) {
+    return executionResult(
+      selection.errorStatus,
+      selection.selected,
+      selection.skipped,
+      [],
+      selection.errors,
+    );
+  }
+  return executeSelectedSteps(
+    selection.selected,
+    selection.skipped,
+    opts,
+    adapter,
+  );
 }

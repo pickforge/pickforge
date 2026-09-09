@@ -214,6 +214,49 @@ describe("executeProvisioning", () => {
     expect(calls).toEqual(["run"]);
   });
 
+  it("records a consent decision failure without executing later mutation", async () => {
+    const target = path.join(tmpDir, "should-not-exist");
+    const adapter: ProvisioningExecutionAdapter = {
+      materialize: (step) => step,
+      execute: async () => {
+        throw new Error("must not execute");
+      },
+      executePrivileged: async () => {
+        throw new Error("must not execute");
+      },
+    };
+    const result = await executeProvisioning(
+      [
+        {
+          kind: "plan",
+          plan: {
+            steps: [
+              {
+                id: "mk",
+                title: "mk",
+                kind: "mkdir",
+                privileged: false,
+                dir: target,
+              },
+              command("later"),
+            ],
+          },
+          consent: {
+            decide: async () => {
+              throw new Error("consent backend down");
+            },
+          },
+        },
+      ],
+      { adapter },
+    );
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("Provisioning consent failed: consent backend down");
+    expect(result.results).toEqual([]);
+    expect(fs.existsSync(target)).toBe(false);
+  });
+
   it("routes mixed plans sequentially according to step privilege", async () => {
     const calls: string[] = [];
     const classifications: string[] = [];
