@@ -269,8 +269,9 @@ Ownership there is by entry name, exhaustive, and non-overlapping:
 
 `runs/` is shared because both tools write into it: the lab creates run
 directories there, and `pickforge evidence record` writes its own. Each writes
-only its own run directories and neither reads, rewrites, or deletes the
-other's. Everything else each tool writes is its own, and neither writes,
+only its own run directories and neither rewrites nor deletes the other's.
+The lab also reads Rust evidence runs for artifact listings and summaries.
+Everything else each tool writes is its own, and neither writes,
 moves, or deletes anything unowned. Above this directory the split is by name
 too: `sessions/`, `agents/`, and `config.json` at the root are the lab's, and
 `projects/` is the only shared parent.
@@ -387,6 +388,11 @@ storage mode explicitly to recover them in place. Pointers and locks do not
 record a hostname, so pid probes on shared storage are meaningless. Orphaned
 runs are never pruned by retention, and session index links can dangle after
 retention.
+
+Rust `evidence.json` runs appear with `source: "rust"` in artifact listings and
+`pickforge://runs`; lab runs use `source: "lab"`. Reports summarize Rust evidence
+and point to its existing `report.md`. No HTML or per-file MCP resources are
+added for Rust runs. Reading and orphan recovery never migrate or modify them.
 
 A finalized evidence run directory (see [Run storage](#run-storage) for where
 it lives) contains:
