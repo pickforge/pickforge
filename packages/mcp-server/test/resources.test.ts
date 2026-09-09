@@ -157,7 +157,10 @@ describe("resource reads", () => {
     const html = first(contents).text as string;
     expect(html).toContain("Content-Security-Policy");
     expect(html).toContain("&lt;/dd&gt;&lt;script&gt;alert(1)&lt;/script&gt;");
-    expect(html).not.toContain("<script");
+    // Exactly one inline script, pinned by a sha256 source in the report CSP.
+    expect(html.match(/<script>/g)).toHaveLength(1);
+    expect(html).toMatch(/script-src 'sha256-[A-Za-z0-9+/=]+'/);
+    expect(html).not.toContain("<script src");
     expect(html).not.toMatch(/(?:src|href)="https:\/\/evil\.invalid/);
     expect(html).not.toContain(PLANTED_TOKEN);
   });

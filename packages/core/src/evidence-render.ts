@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { assertSafeEntryName, RunStorageAccessError, type DirHandle } from "./dir-handle.js";
 import { redactSecrets } from "./redact.js";
@@ -199,6 +200,179 @@ function escapeHtml(value: unknown): string {
     .replaceAll("'", "&#39;");
 }
 
+/**
+ * Device metadata that a later manifest revision will carry. Declared locally
+ * so this renderer compiles against today's `RunManifest`; the rebase swaps
+ * this alias for the shared type without touching the rendering code.
+ */
+export interface ReportDevice {
+  kind: "desktop" | "mobile-emulation" | "physical" | "emulator" | "unknown";
+  viewport?: { width: number; height: number };
+  scale?: number;
+  touch?: boolean;
+  browser?: string;
+  platform?: string;
+}
+
+export type ReportManifest = RunManifest & { device?: ReportDevice };
+
+/** Append-only acceptance record. Detected structurally by `kind`. */
+export interface ReportOutcome {
+  kind: "outcome";
+  recordedAt: string;
+  scenario: string;
+  status: "pass" | "fail" | "partial" | "blocked";
+  revision?: string;
+  steps?: string[];
+  inspectedScreenshots: string[];
+  limitations?: string[];
+  notes?: string;
+}
+
+export type ReportRecord = EvidenceRecord | ReportOutcome;
+
+type Lens = "desktop" | "mobile" | "android";
+
+const LENS_LABELS: ReadonlyArray<readonly [Lens, string]> = [
+  ["desktop", "Desktop"],
+  ["mobile", "Mobile"],
+  ["android", "Android emulator"],
+];
+
+const OUTCOME_LABELS: Record<string, string> = {
+  pass: "Pass",
+  fail: "Fail",
+  partial: "Partial",
+  blocked: "Blocked",
+  unknown: "Unknown",
+};
+
+const OUTCOME_NOTE: Record<string, string> = {
+  pass: "Accepted after inspecting the captures below.",
+  fail: "Rejected. The captures below show the failure.",
+  partial: "Partly accepted. Unverified parts are listed as limitations.",
+  blocked: "Could not be verified. Nothing here establishes a pass.",
+  unknown: "Outcome status not recognised. Treat this run as unverified.",
+};
+
+const NO_OUTCOME =
+  "No acceptance outcome recorded. Recording alone does not establish a pass.";
+
+const EMPTY_RUN =
+  "No actions were recorded in this run. An empty run is evidence of nothing.";
+
+const TRUNCATED_RUN =
+  "Recording stopped at the evidence cap. Actions after the truncation marker are missing from this report.";
+
+/**
+ * The one pinned script. Kept literal so its sha256 is stable, and limited to
+ * text search plus arrow-key browsing; every control also works without it.
+ */
+const REPORT_SCRIPT = `(() => {
+const doc = document;
+doc.body.classList.add("js");
+const box = doc.getElementById("search");
+const cards = Array.prototype.slice.call(doc.querySelectorAll("[data-search]"));
+const shown = doc.getElementById("match-count");
+const none = doc.getElementById("no-match");
+const apply = () => {
+  const query = box.value.toLowerCase().trim();
+  let hits = 0;
+  cards.forEach((card) => {
+    const hit = query === "" || card.getAttribute("data-search").indexOf(query) >= 0;
+    card.hidden = !hit;
+    if (hit && card.classList.contains("cap")) hits += 1;
+  });
+  shown.textContent = String(hits);
+  none.hidden = hits > 0;
+};
+box.addEventListener("input", apply);
+doc.addEventListener("keydown", (event) => {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  const active = doc.activeElement;
+  if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) return;
+  const open = doc.querySelector(".inspect:target");
+  if (!open) return;
+  const step = open.querySelector(event.key === "ArrowRight" ? ".go-next" : ".go-prev");
+  if (!step || !step.getAttribute("href")) return;
+  event.preventDefault();
+  location.hash = step.getAttribute("href");
+});
+})();`;
+
+const REPORT_STYLE = `:root{color-scheme:dark;--bg:#0A0A0B;--p1:#0F0F11;--p2:#141417;--text:#F2F2F3;--muted:#6E6E75;--dim:#A4A4AB;--line:rgba(255,255,255,.08);--line2:rgba(255,255,255,.14);--ember:#FF7A1A;--pass:#55C993;--fail:#E77B86;--partial:#D9A441;--blocked:#9494B0;--unknown:#9494B0}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.55 Geist,Inter,ui-sans-serif,system-ui,-apple-system,sans-serif}
+a{color:inherit}
+.mono,.eyebrow,.brand,.count,.pill{font-family:'Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace}
+:focus-visible{outline:2px solid var(--ember);outline-offset:3px}
+.lens-input,.scn-input,.zoom{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.topbar{display:flex;align-items:center;gap:12px;height:60px;padding:0 24px;border-bottom:1px solid var(--line);background:var(--p1)}
+.mark{width:24px;height:24px;color:var(--ember);flex:none}
+.brand{font-size:11px;font-weight:600;letter-spacing:.14em}
+.brand span{color:var(--muted)}
+.cols{display:grid;grid-template-columns:232px minmax(0,1fr);max-width:1560px;margin:0 auto}
+.sidebar{border-right:1px solid var(--line);padding:28px 16px;min-height:calc(100vh - 60px)}
+.eyebrow{display:block;color:var(--muted);font-size:10px;letter-spacing:.16em;text-transform:uppercase;margin:0 0 10px}
+.sidebar label{display:flex;align-items:center;gap:8px;min-height:38px;padding:6px 12px;margin:2px 0;border:1px solid transparent;border-radius:8px;cursor:pointer;color:var(--dim)}
+.sidebar label:hover{border-color:var(--line2)}
+.count{margin-left:auto;font-size:11px;color:var(--muted)}
+.sidebar hr{border:0;border-top:1px solid var(--line);margin:22px 0}
+main{padding:32px 36px 64px;min-width:0}
+h1{font-size:clamp(24px,3vw,34px);letter-spacing:-.03em;font-weight:600;margin:4px 0 16px}
+h2{font-size:15px;font-weight:600;margin:0}
+.panel{border:1px solid var(--line);border-radius:14px;background:var(--p1);padding:18px 20px;margin:0 0 20px}
+dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:6px 20px;margin:0}
+dt{color:var(--muted);font-size:12px}
+dd{margin:0;overflow-wrap:anywhere;font-size:13px}
+.pill{display:inline-flex;align-items:center;gap:7px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;padding:5px 9px;border-radius:999px;border:1px solid currentColor}
+.pill::before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor}
+.outcome{border-left:2px solid currentColor}
+.outcome p{margin:8px 0 0;color:var(--dim);font-size:13px}
+.outcome ul{margin:8px 0 0;padding-left:18px;color:var(--dim);font-size:13px}
+.s-pass{color:var(--pass)}.s-fail{color:var(--fail)}.s-partial{color:var(--partial)}.s-blocked{color:var(--blocked)}.s-unknown{color:var(--unknown)}.s-none{color:var(--dim)}
+.outcome h2,.outcome dd{color:var(--text)}
+.warn{border:1px solid var(--partial);border-radius:10px;padding:12px 16px;margin:0 0 12px;color:var(--partial);font-size:13px}
+.toolbar{display:flex;align-items:center;justify-content:space-between;gap:14px;margin:26px 0 14px}
+.search-wrap{display:flex;align-items:center;gap:8px}
+body:not(.js) .search-wrap{display:none}
+#search{background:var(--p1);border:1px solid var(--line2);border-radius:8px;padding:9px 12px;color:var(--text);font:inherit;font-size:12px;width:220px;max-width:100%}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px}
+.cap{margin:0;border:1px solid var(--line);border-radius:12px;background:var(--p1);overflow:hidden}
+.cap:hover{border-color:var(--line2)}
+.cap a{display:block;text-decoration:none}
+.stage{height:170px;background:var(--p2);display:flex;align-items:center;justify-content:center;padding:10px;overflow:hidden}
+.stage img{max-width:100%;max-height:100%;object-fit:contain;object-position:top}
+figcaption{padding:12px;font-size:12px;line-height:1.5;color:var(--dim)}
+figcaption b{display:block;color:var(--text);font-weight:550;overflow-wrap:anywhere}
+figcaption .mono{display:block;margin-top:4px;font-size:10px;color:var(--muted);overflow-wrap:anywhere}
+.cap[data-lens="mobile"] .stage,.cap[data-lens="android"] .stage{height:220px}
+.step{border:1px solid var(--line);border-radius:12px;background:var(--p1);padding:16px 18px;margin:0 0 10px}
+.step header{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
+.step-number{font-family:'Geist Mono',ui-monospace,monospace;font-size:11px;color:var(--muted);white-space:nowrap}
+.step h2{font-size:14px;font-weight:550}
+.shots{margin-top:10px;display:flex;flex-wrap:wrap;gap:8px;font-size:12px}
+.shots a{color:var(--dim)}
+.status-error,.status-timeout,.status-truncated{border-color:var(--fail)}
+.empty{padding:28px;text-align:center;color:var(--dim);border:1px dashed var(--line2);border-radius:12px}
+footer{margin-top:36px;padding-top:16px;border-top:1px solid var(--line);color:var(--muted);font-size:11px}
+.inspect{display:none}
+.inspect:target{display:flex;flex-direction:column;position:fixed;inset:0;z-index:20;background:var(--p1)}
+.inspect-bar,.inspect-foot{display:flex;align-items:center;gap:10px;padding:10px 16px;font-size:12px;color:var(--dim)}
+.inspect-bar{border-bottom:1px solid var(--line)}
+.inspect-foot{border-top:1px solid var(--line);justify-content:space-between}
+.btn{display:inline-flex;align-items:center;min-height:36px;padding:6px 12px;border:1px solid var(--line2);border-radius:8px;background:var(--p2);color:var(--text);text-decoration:none;font-size:12px;cursor:pointer}
+.btn:hover{border-color:var(--ember)}
+.btn[aria-disabled="true"]{color:var(--muted);border-color:var(--line);cursor:default}
+.inspect-bar .grow{margin-left:auto}
+.inspect-stage{flex:1;min-height:0;overflow:auto;padding:16px;display:flex;justify-content:center;align-items:flex-start;background:var(--bg)}
+.inspect-stage img{max-width:100%;max-height:100%;object-fit:contain}
+.zoom:checked~.inspect-stage{display:block}
+.zoom:checked~.inspect-stage img{max-width:none;max-height:none;width:auto}
+@media (max-width:900px){.cols{display:block}.sidebar{min-height:0;border-right:0;border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:6px;padding:10px 14px}.sidebar .eyebrow,.sidebar hr{display:none}.sidebar label{width:auto;min-height:44px}main{padding:24px 16px 48px}.toolbar{flex-direction:column;align-items:stretch}#search{width:100%}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}`;
+
 function renderMetadata(label: string, value: unknown): string {
   return `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`;
 }
@@ -207,84 +381,442 @@ function safeScreenshotPath(value: string): boolean {
   return /^screenshots\/[A-Za-z0-9._-]+\.png$/.test(value) && !value.includes("..");
 }
 
-function renderAction(
-  action: EvidenceAction,
-  step: number,
-  safeScreenshots: ReadonlySet<string>,
-): string {
-  const metadata = [
-    renderMetadata("Started", action.startedAt),
-    renderMetadata("Status", action.status),
-  ];
-  if (action.sessionId !== undefined) {
-    metadata.push(renderMetadata("Session", action.sessionId));
-  }
-  if (action.durationMs !== undefined) {
-    metadata.push(renderMetadata("Duration", `${action.durationMs} ms`));
-  }
-  if (action.target !== undefined) {
-    metadata.push(renderMetadata("Target", stableJson(action.target)));
-  }
-  if (action.error !== undefined) {
-    metadata.push(renderMetadata("Error", action.error));
-  }
-
-  const screenshots = (action.artifacts ?? [])
-    .filter((artifact) => safeScreenshots.has(artifact))
-    .map(
-      (artifact) =>
-        `<figure><img src="${escapeHtml(artifact)}" alt="Screenshot for step ${step}" loading="lazy"><figcaption>${escapeHtml(artifact)}</figcaption></figure>`,
-    )
-    .join("");
-
-  return `<article class="step status-${escapeHtml(action.status)}">
-<header><span class="step-number">Step ${step}</span><h2>${escapeHtml(actionTitle(action))}</h2></header>
-<dl>${metadata.join("")}</dl>
-${screenshots === "" ? "" : `<div class="filmstrip">${screenshots}</div>`}
-</article>`;
+function isOutcomeRecord(record: ReportRecord): record is ReportOutcome {
+  return (record as { kind?: unknown }).kind === "outcome";
 }
 
-export function renderEvidenceHtml(
-  manifest: RunManifest,
-  records: readonly EvidenceRecord[],
-  safeScreenshots: ReadonlySet<string> = new Set(),
+function outcomeStatus(value: unknown): string {
+  return value === "pass" || value === "fail" || value === "partial" || value === "blocked"
+    ? value
+    : "unknown";
+}
+
+function textList(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((entry) => String(entry)) : [];
+}
+
+function sortOutcomes(outcomes: readonly ReportOutcome[]): ReportOutcome[] {
+  return outcomes
+    .map((outcome, index) => ({ outcome, index }))
+    .sort((left, right) => {
+      const byTime = compareText(
+        String(left.outcome.recordedAt),
+        String(right.outcome.recordedAt),
+      );
+      if (byTime !== 0) return byTime;
+      const byName = compareText(
+        String(left.outcome.scenario),
+        String(right.outcome.scenario),
+      );
+      return byName !== 0 ? byName : left.index - right.index;
+    })
+    .map(({ outcome }) => outcome);
+}
+
+function deviceLens(device: ReportDevice | undefined): Lens {
+  if (device?.kind === "emulator") return "android";
+  if (device?.kind === "mobile-emulation" || device?.kind === "physical") {
+    return "mobile";
+  }
+  return "desktop";
+}
+
+function actionLens(action: EvidenceAction, fallback: Lens): Lens {
+  const tool = String(action.tool);
+  if (tool.startsWith("android_")) return "android";
+  if (tool.startsWith("desktop_")) return "desktop";
+  return fallback;
+}
+
+function shortText(value: string, limit = 120): string {
+  return value.length <= limit ? value : `${value.slice(0, limit)}…`;
+}
+
+function searchAttribute(parts: readonly string[]): string {
+  return escapeHtml(parts.join(" ").toLowerCase());
+}
+
+function deviceRows(device: ReportDevice | undefined): string {
+  const viewport =
+    device?.viewport === undefined
+      ? "unknown"
+      : `${device.viewport.width}x${device.viewport.height}`;
+  return [
+    renderMetadata("Device", device?.kind ?? "unknown"),
+    renderMetadata("Viewport", viewport),
+    renderMetadata("Scale", device?.scale ?? "unknown"),
+    renderMetadata(
+      "Touch",
+      device?.touch === undefined ? "unknown" : device.touch ? "yes" : "no",
+    ),
+    renderMetadata("Browser", device?.browser ?? "unknown"),
+    renderMetadata("Platform", device?.platform ?? "unknown"),
+  ].join("");
+}
+
+function renderSummary(
+  manifest: ReportManifest,
+  latest: ReportOutcome | undefined,
 ): string {
-  const ordered = sortEvidenceRecords(records);
-  const steps = ordered
-    .map((record, index) => {
-      const step = index + 1;
-      if (!isTruncationRecord(record)) {
-        return renderAction(record, step, safeScreenshots);
-      }
-      return `<article class="step status-truncated">
+  return `<section class="panel" aria-label="Run summary">
+<h1>Run ${escapeHtml(manifest.runId)}</h1>
+<dl>${renderMetadata("Project", manifest.slug)}${renderMetadata("Status", manifest.status)}${renderMetadata("Created", manifest.createdAt)}${renderMetadata("Session", manifest.sessionId ?? "unknown")}${deviceRows(manifest.device)}${renderMetadata("Revision", latest?.revision ?? "unknown")}${renderMetadata("Scenario", latest?.scenario ?? "unknown")}</dl>
+</section>`;
+}
+
+function renderOutcome(outcome: ReportOutcome, index: number): string {
+  const status = outcomeStatus(outcome.status);
+  const limitations = textList(outcome.limitations);
+  const steps = textList(outcome.steps);
+  const inspected = textList(outcome.inspectedScreenshots).length;
+  const detail = [
+    renderMetadata("Recorded", outcome.recordedAt),
+    renderMetadata("Revision", outcome.revision ?? "unknown"),
+    renderMetadata("Inspected captures", inspected),
+  ].join("");
+  const notes =
+    outcome.notes === undefined
+      ? ""
+      : `<p>${escapeHtml(outcome.notes)}</p>`;
+  const stepList =
+    steps.length === 0
+      ? ""
+      : `<ul>${steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ul>`;
+  const limitationList =
+    limitations.length === 0
+      ? `<p>Limitations: none recorded.</p>`
+      : `<p>Limitations</p><ul>${limitations.map((entry) => `<li>${escapeHtml(entry)}</li>`).join("")}</ul>`;
+  return `<section class="panel outcome s-${status}" data-scenario="${index}">
+<h2><span class="pill">${escapeHtml(OUTCOME_LABELS[status] ?? "Unknown")}</span> ${escapeHtml(outcome.scenario)}</h2>
+<p>${escapeHtml(OUTCOME_NOTE[status] ?? OUTCOME_NOTE.unknown)}</p>
+<dl>${detail}</dl>${notes}${stepList}${limitationList}
+</section>`;
+}
+
+function renderOutcomes(outcomes: readonly ReportOutcome[]): string {
+  if (outcomes.length === 0) {
+    return `<section class="panel outcome s-none" aria-label="Acceptance outcome">
+<h2><span class="pill">Not recorded</span> Acceptance outcome</h2>
+<p>${NO_OUTCOME}</p>
+</section>`;
+  }
+  return outcomes.map(renderOutcome).join("\n");
+}
+
+function renderWarnings(
+  manifest: ReportManifest,
+  records: readonly EvidenceRecord[],
+): string {
+  const warnings: string[] = [];
+  const recovery = recoveryWarning(manifest, records);
+  if (recovery !== "") warnings.push(recovery);
+  if (records.some(isTruncationRecord)) warnings.push(TRUNCATED_RUN);
+  if (records.length === 0) warnings.push(EMPTY_RUN);
+  return warnings
+    .map((warning) => `<p class="warn">${escapeHtml(warning)}</p>`)
+    .join("\n");
+}
+
+interface Capture {
+  id: string;
+  step: number;
+  title: string;
+  path: string;
+  status: string;
+  target: string;
+  lens: Lens;
+  scenarios: number[];
+  search: string;
+}
+
+function captureScenarios(
+  relative: string,
+  outcomes: readonly ReportOutcome[],
+): number[] {
+  const matched: number[] = [];
+  outcomes.forEach((outcome, index) => {
+    if (textList(outcome.inspectedScreenshots).includes(relative)) {
+      matched.push(index);
+    }
+  });
+  return matched;
+}
+
+function collectCaptures(
+  ordered: readonly EvidenceRecord[],
+  safeScreenshots: ReadonlySet<string>,
+  outcomes: readonly ReportOutcome[],
+  fallback: Lens,
+): Capture[] {
+  const captures: Capture[] = [];
+  ordered.forEach((record, index) => {
+    if (isTruncationRecord(record)) return;
+    const step = index + 1;
+    const lens = actionLens(record, fallback);
+    const title = actionTitle(record);
+    const target =
+      record.target === undefined ? "" : shortText(stableJson(record.target));
+    (record.artifacts ?? [])
+      .filter((artifact) => safeScreenshots.has(artifact))
+      .forEach((artifact, position) => {
+        captures.push({
+          id: `cap-${step}-${position + 1}`,
+          step,
+          title,
+          path: artifact,
+          status: safeText(record.status),
+          target,
+          lens,
+          scenarios: captureScenarios(artifact, outcomes),
+          search: searchAttribute([
+            `step ${step}`,
+            title,
+            artifact,
+            safeText(record.status),
+            target,
+          ]),
+        });
+      });
+  });
+  return captures;
+}
+
+function filterAttributes(lens: Lens, scenarios: readonly number[]): string {
+  const scenarioAttribute =
+    scenarios.length === 0
+      ? ""
+      : ` data-scenario="${escapeHtml(scenarios.join(" "))}"`;
+  return ` data-lens="${lens}"${scenarioAttribute}`;
+}
+
+function renderCapture(capture: Capture): string {
+  return `<figure class="cap"${filterAttributes(capture.lens, capture.scenarios)} data-search="${capture.search}">
+<a href="#${capture.id}" aria-label="Inspect step ${capture.step} capture ${escapeHtml(capture.path)}">
+<span class="stage"><img src="${escapeHtml(capture.path)}" alt="Capture for step ${capture.step}, ${escapeHtml(capture.title)}" loading="lazy"></span>
+<figcaption><b>Step ${capture.step} · ${escapeHtml(capture.title)}</b><span class="mono">${escapeHtml(capture.status)} · ${escapeHtml(capture.path)}</span>${capture.target === "" ? "" : `<span class="mono">${escapeHtml(capture.target)}</span>`}</figcaption>
+</a></figure>`;
+}
+
+function browseLink(target: Capture | undefined, next: boolean): string {
+  const label = next ? "Next" : "Previous";
+  const className = next ? "go-next" : "go-prev";
+  if (target === undefined) {
+    return `<span class="btn ${className}" aria-disabled="true">${label}</span>`;
+  }
+  return `<a class="btn ${className}" href="#${target.id}">${label}</a>`;
+}
+
+function renderInspect(captures: readonly Capture[], index: number): string {
+  const capture = captures[index]!;
+  return `<section class="inspect" id="${capture.id}" aria-label="Capture for step ${capture.step}">
+<input type="checkbox" class="zoom" id="zoom-${capture.id}">
+<div class="inspect-bar"><span class="mono">Step ${capture.step} · ${escapeHtml(capture.title)} · ${escapeHtml(capture.path)}</span>
+<label class="btn grow" for="zoom-${capture.id}">Actual size</label>
+<a class="btn" href="${escapeHtml(capture.path)}">Open original</a>
+<a class="btn" href="#captures">Close</a></div>
+<div class="inspect-stage"><img src="${escapeHtml(capture.path)}" alt="Capture for step ${capture.step}, ${escapeHtml(capture.title)}"></div>
+<div class="inspect-foot">${browseLink(captures[index - 1], false)}<span class="mono">${index + 1} / ${captures.length}</span>${browseLink(captures[index + 1], true)}</div>
+</section>`;
+}
+
+function renderStep(
+  record: EvidenceRecord,
+  step: number,
+  captures: readonly Capture[],
+  fallback: Lens,
+): string {
+  if (isTruncationRecord(record)) {
+    return `<article class="step status-truncated" data-search="${searchAttribute([`step ${step}`, "evidence truncated"])}">
 <header><span class="step-number">Step ${step}</span><h2>Evidence truncated</h2></header>
 <dl>${renderMetadata("Recorded", record.recordedAt)}${renderMetadata("Bytes", `${record.bytes} / ${record.maxBytes}`)}</dl>
 </article>`;
-    })
+  }
+  const metadata = [
+    renderMetadata("Started", record.startedAt),
+    renderMetadata("Status", record.status),
+  ];
+  if (record.sessionId !== undefined) {
+    metadata.push(renderMetadata("Session", record.sessionId));
+  }
+  if (record.durationMs !== undefined) {
+    metadata.push(renderMetadata("Duration", `${record.durationMs} ms`));
+  }
+  if (record.target !== undefined) {
+    metadata.push(renderMetadata("Target", stableJson(record.target)));
+  }
+  if (record.error !== undefined) {
+    metadata.push(renderMetadata("Error", record.error));
+  }
+  const mine = captures.filter((capture) => capture.step === step);
+  const shots =
+    mine.length === 0
+      ? ""
+      : `<p class="shots">${mine.map((capture) => `<a href="#${capture.id}">${escapeHtml(capture.path)}</a>`).join("")}</p>`;
+  const scenarios = [...new Set(mine.flatMap((capture) => capture.scenarios))].sort(
+    (left, right) => left - right,
+  );
+  const search = searchAttribute([
+    `step ${step}`,
+    actionTitle(record),
+    safeText(record.status),
+    record.target === undefined ? "" : stableJson(record.target),
+    record.error === undefined ? "" : safeText(record.error),
+    ...mine.map((capture) => capture.path),
+  ]);
+  return `<article class="step status-${escapeHtml(record.status)}"${filterAttributes(actionLens(record, fallback), scenarios)} data-search="${search}">
+<header><span class="step-number">Step ${step}</span><h2>${escapeHtml(actionTitle(record))}</h2></header>
+<dl>${metadata.join("")}</dl>${shots}
+</article>`;
+}
+
+function lensRadios(): string {
+  const rows = [
+    `<input type="radio" class="lens-input" name="lens" id="lens-all" checked>`,
+  ];
+  for (const [lens] of LENS_LABELS) {
+    rows.push(`<input type="radio" class="lens-input" name="lens" id="lens-${lens}">`);
+  }
+  return rows.join("");
+}
+
+function activeRules(id: string): string {
+  return (
+    `#${id}:checked~.shell label[for="${id}"]{background:rgba(255,122,26,.08);` +
+    `border-color:rgba(255,122,26,.28);color:var(--ember)}` +
+    `#${id}:focus-visible~.shell label[for="${id}"]{outline:2px solid var(--ember);outline-offset:2px}`
+  );
+}
+
+function lensRules(): string {
+  return [
+    activeRules("lens-all"),
+    ...LENS_LABELS.map(
+      ([lens]) =>
+        `#lens-${lens}:checked~.shell [data-lens]:not([data-lens="${lens}"]){display:none}` +
+        activeRules(`lens-${lens}`),
+    ),
+  ].join("");
+}
+
+function scenarioRules(count: number): string {
+  if (count === 0) return "";
+  const rules: string[] = [activeRules("scn-all")];
+  for (let index = 0; index < count; index += 1) {
+    rules.push(
+      `#scn-${index}:checked~.shell [data-scenario]:not([data-scenario~="${index}"]){display:none}` +
+        activeRules(`scn-${index}`),
+    );
+  }
+  return rules.join("");
+}
+
+function lensButtons(captures: readonly Capture[]): string {
+  const buttons = [
+    `<label for="lens-all" data-for-lens>All<span class="count">${captures.length}</span></label>`,
+  ];
+  for (const [lens, label] of LENS_LABELS) {
+    const count = captures.filter((capture) => capture.lens === lens).length;
+    buttons.push(
+      `<label for="lens-${lens}" data-for-lens>${label}<span class="count">${count}</span></label>`,
+    );
+  }
+  return buttons.join("");
+}
+
+function scenarioButtons(
+  outcomes: readonly ReportOutcome[],
+  captures: readonly Capture[],
+): string {
+  if (outcomes.length < 2) return "";
+  const buttons = [`<label for="scn-all">All scenarios<span class="count">${captures.length}</span></label>`];
+  outcomes.forEach((outcome, index) => {
+    const count = captures.filter((capture) =>
+      capture.scenarios.includes(index),
+    ).length;
+    buttons.push(
+      `<label for="scn-${index}">${escapeHtml(outcome.scenario)}<span class="count">${count}</span></label>`,
+    );
+  });
+  return `<hr><span class="eyebrow">Scenario</span>${buttons.join("")}`;
+}
+
+function scenarioRadios(outcomes: readonly ReportOutcome[]): string {
+  if (outcomes.length < 2) return "";
+  const rows = [`<input type="radio" class="scn-input" name="scn" id="scn-all" checked>`];
+  outcomes.forEach((_outcome, index) => {
+    rows.push(`<input type="radio" class="scn-input" name="scn" id="scn-${index}">`);
+  });
+  return rows.join("");
+}
+
+/** The exact CSP the report carries, with the pinned script hash. */
+export function reportContentSecurityPolicy(script: string = REPORT_SCRIPT): string {
+  const digest = createHash("sha256").update(script, "utf8").digest("base64");
+  return `default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'sha256-${digest}'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
+}
+
+export function renderEvidenceHtml(
+  manifest: ReportManifest,
+  records: readonly ReportRecord[],
+  safeScreenshots: ReadonlySet<string> = new Set(),
+): string {
+  const outcomes = sortOutcomes(records.filter(isOutcomeRecord));
+  const timeline = records.filter(
+    (record): record is EvidenceRecord => !isOutcomeRecord(record),
+  );
+  const ordered = sortEvidenceRecords(timeline);
+  const fallback = deviceLens(manifest.device);
+  const captures = collectCaptures(ordered, safeScreenshots, outcomes, fallback);
+  const steps = ordered
+    .map((record, index) => renderStep(record, index + 1, captures, fallback))
+    .join("\n");
+  const gallery =
+    captures.length === 0
+      ? `<p class="empty">No screenshots were captured in this run.</p>`
+      : `<div class="grid">${captures.map(renderCapture).join("\n")}</div>`;
+  const inspects = captures
+    .map((_capture, index) => renderInspect(captures, index))
     .join("\n");
 
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+<meta http-equiv="Content-Security-Policy" content="${reportContentSecurityPolicy()}">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pickforge run ${escapeHtml(manifest.runId)}</title>
 <style>
-:root{color-scheme:light dark;font-family:system-ui,sans-serif}body{max-width:960px;margin:0 auto;padding:2rem;line-height:1.5}header{display:flex;align-items:baseline;gap:.75rem}.summary,.step{border:1px solid #8886;border-radius:.75rem;padding:1rem;margin:1rem 0}.step-number{font-weight:700;white-space:nowrap}h1,h2{margin:.25rem 0}dl{display:grid;grid-template-columns:max-content 1fr;gap:.25rem 1rem}dt{font-weight:700}dd{margin:0;overflow-wrap:anywhere}.filmstrip{display:grid;gap:1rem;margin-top:1rem}figure{margin:0}img{display:block;max-width:100%;height:auto;border:1px solid #8886;border-radius:.5rem}figcaption{font-size:.875rem;overflow-wrap:anywhere}.status-error,.status-timeout,.status-truncated{border-color:#b33}.empty{opacity:.7}
+${REPORT_STYLE}
+${lensRules()}${scenarioRules(outcomes.length < 2 ? 0 : outcomes.length)}
 </style>
 </head>
 <body>
+${lensRadios()}${scenarioRadios(outcomes)}
+<div class="shell">
+<header class="topbar"><svg class="mark" viewBox="0 0 28 28" fill="none" aria-hidden="true"><path d="M5 22V6h11l7 7-7 7H9" stroke="currentColor" stroke-width="2"/><path d="m10 12 4 4 8-9" stroke="currentColor" stroke-width="2"/></svg><span class="brand">PICKFORGE <span>/ EVIDENCE</span></span></header>
+<div class="cols">
+<nav class="sidebar" aria-label="Capture filters">
+<span class="eyebrow">Device</span>
+${lensButtons(captures)}${scenarioButtons(outcomes, captures)}
+</nav>
 <main>
-<section class="summary">
-<h1>Pickforge run ${escapeHtml(manifest.runId)}</h1>
-<dl>${renderMetadata("Slug", manifest.slug)}${renderMetadata("Status", manifest.status)}${renderMetadata("Created", manifest.createdAt)}${manifest.sessionId === undefined ? "" : renderMetadata("Session", manifest.sessionId)}</dl>
-<p>${escapeHtml(recoveryWarning(manifest, records))}</p>
-</section>
+${renderSummary(manifest, outcomes.at(-1))}
+${renderOutcomes(outcomes)}
+${renderWarnings(manifest, ordered)}
+<div class="toolbar"><h2 id="captures">Captures <span class="count"><span id="match-count">${captures.length}</span> shown</span></h2>
+<span class="search-wrap"><label class="eyebrow" for="search">Search</label><input id="search" type="search" placeholder="Filter captures and steps"></span></div>
+${gallery}
+<p class="empty" id="no-match" role="status" hidden>Nothing matches this search.</p>
+<div class="toolbar"><h2 id="timeline">Timeline</h2></div>
 <section aria-label="Action timeline">
-${steps === "" ? '<p class="empty">No recorded actions.</p>' : steps}
+${steps === "" ? `<p class="empty">No actions recorded.</p>` : steps}
 </section>
+<footer>Saved evidence for run ${escapeHtml(manifest.runId)}. Captures are files in this directory; the journal in actions.jsonl stays authoritative.</footer>
 </main>
+</div>
+</div>
+${inspects}
+<script>${REPORT_SCRIPT}</script>
 </body>
 </html>
 `;

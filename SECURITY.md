@@ -47,8 +47,10 @@ Reads (listing runs, reading manifests and journals) and retention pruning
 apply the lstat/realpath trust boundary, but are not descriptor-bound in the
 same way.
 `actions.jsonl` is the authoritative sanitized timeline; finalization
-produces an escaped, no-script `report.html` with a restrictive content
-security policy and no external requests.
+produces an escaped `report.html` with a restrictive content security policy
+and no external requests. Its policy allows exactly one inline script, pinned
+by the sha256 of the emitted text; the report is fully usable, filters and
+capture inspection included, with scripts blocked.
 
 The recorder persists only allowlisted metadata. Typed and filled text becomes
 length plus input type. Failed network records keep method, URL origin/path

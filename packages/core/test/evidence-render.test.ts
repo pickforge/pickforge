@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,12 +9,16 @@ import {
   createRun,
   renderEvidenceHtml,
   renderRunReport,
+  reportContentSecurityPolicy,
   sortEvidenceRecords,
   writeEvidenceReport,
   type EvidenceAction,
   type EvidenceRecord,
+  type ReportManifest,
+  type ReportOutcome,
   type RunManifest,
 } from "../src/index.js";
+import { renderEvidenceSessionIndex } from "../src/evidence-render.js";
 
 const TOKEN = `ghp_${"a".repeat(36)}`;
 
@@ -45,7 +50,9 @@ function action(overrides: Partial<EvidenceAction> = {}): EvidenceAction {
   };
 }
 
-function evidenceManifest(overrides: Partial<RunManifest> = {}): RunManifest {
+function evidenceManifest(
+  overrides: Partial<ReportManifest> = {},
+): ReportManifest {
   return {
     runId: "20260713-120000-evidence",
     slug: "evidence",
@@ -154,7 +161,7 @@ describe("renderEvidenceHtml", () => {
 
     expect(html).toContain("Content-Security-Policy");
     expect(html).toContain("default-src 'none'");
-    expect(html).not.toContain("<script");
+    expect(html.match(/<script>/g)).toHaveLength(1);
     expect(html).not.toMatch(/(?:src|href)="https:\/\/evil\.invalid/);
     expect(html).not.toContain(TOKEN);
     expect(html).toContain(
@@ -175,9 +182,11 @@ describe("renderEvidenceHtml", () => {
       }),
     ]);
 
-    expect(html.indexOf("Step 1")).toBeLessThan(html.indexOf("desktop_move"));
-    expect(html.indexOf("desktop_move")).toBeLessThan(html.indexOf("Step 2"));
-    expect(html.indexOf("Step 2")).toBeLessThan(html.indexOf("desktop_click"));
+    const headers = [...html.matchAll(
+      /<span class="step-number">Step (\d+)<\/span><h2>([^<]*)<\/h2>/g,
+    )].map((match) => `${match[1]}:${match[2]}`);
+
+    expect(headers).toEqual(["1:mcp / desktop_move", "2:mcp / desktop_click"]);
   });
 });
 
@@ -303,5 +312,398 @@ describe("writeEvidenceReport", () => {
     await expect(
       writeEvidenceReport(evidence),
     ).rejects.toThrow(/Corrupt evidence journal/);
+  });
+});
+
+const SCRIPT = /<script>([\s\S]*?)<\/script>/;
+
+function scriptOf(html: string): string {
+  const found = SCRIPT.exec(html);
+  expect(found).not.toBeNull();
+  return found![1]!;
+}
+
+function cspOf(html: string): string {
+  const found = /content="([^"]*)"/.exec(html);
+  return found![1]!;
+}
+
+function outcome(overrides: Partial<ReportOutcome> = {}): ReportOutcome {
+  return {
+    kind: "outcome",
+    recordedAt: "2026-07-13T12:05:00.000Z",
+    scenario: "Checkout",
+    status: "pass",
+    revision: "abc123",
+    steps: ["Open the cart", "Pay"],
+    inspectedScreenshots: ["screenshots/good.png"],
+    limitations: ["No payment provider sandbox"],
+    ...overrides,
+  };
+}
+
+describe("evidence report script pinning", () => {
+  it("allows exactly the emitted script through a sha256 CSP source", () => {
+    const html = renderEvidenceHtml(evidenceManifest(), []);
+    const digest = createHash("sha256")
+      .update(scriptOf(html), "utf8")
+      .digest("base64");
+
+    expect(cspOf(html)).toBe(
+      "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; " +
+        `script-src 'sha256-${digest}'; ` +
+        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    );
+    expect(reportContentSecurityPolicy()).toBe(cspOf(html));
+    expect(cspOf(html)).not.toContain("unsafe-eval");
+    expect(cspOf(html)).not.toContain("script-src 'unsafe-inline'");
+    expect(cspOf(html)).not.toContain("connect-src");
+  });
+
+  it("keeps the session index CSP script-free", () => {
+    const index = renderEvidenceSessionIndex("s1", []);
+    expect(index).toContain(
+      "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    );
+    expect(index).not.toContain("<script");
+    expect(index).not.toContain("sha256-");
+  });
+
+  it("carries no network, evaluation, or markup-injection primitives", () => {
+    const script = scriptOf(renderEvidenceHtml(evidenceManifest(), []));
+
+    for (const banned of [
+      "fetch",
+      "XMLHttpRequest",
+      "WebSocket",
+      "eval",
+      "Function",
+      "import",
+      "innerHTML",
+      "outerHTML",
+      "insertAdjacentHTML",
+      "document.write",
+    ]) {
+      expect(script).not.toContain(banned);
+    }
+  });
+});
+
+describe("evidence report device, outcome, and filters", () => {
+  it("renders unknown device fields rather than inventing them", () => {
+    const html = renderEvidenceHtml(evidenceManifest(), []);
+
+    expect(html).toContain("<dt>Device</dt><dd>unknown</dd>");
+    expect(html).toContain("<dt>Viewport</dt><dd>unknown</dd>");
+    expect(html).toContain("<dt>Touch</dt><dd>unknown</dd>");
+    expect(html).toContain("<dt>Revision</dt><dd>unknown</dd>");
+    expect(html).toContain("<dt>Scenario</dt><dd>unknown</dd>");
+  });
+
+  it("renders recorded device metadata", () => {
+    const html = renderEvidenceHtml(
+      evidenceManifest({
+        device: {
+          kind: "mobile-emulation",
+          viewport: { width: 390, height: 844 },
+          scale: 3,
+          touch: true,
+          browser: "Chromium 141",
+          platform: "linux",
+        },
+      }),
+      [],
+    );
+
+    expect(html).toContain("<dt>Device</dt><dd>mobile-emulation</dd>");
+    expect(html).toContain("<dt>Viewport</dt><dd>390x844</dd>");
+    expect(html).toContain("<dt>Scale</dt><dd>3</dd>");
+    expect(html).toContain("<dt>Touch</dt><dd>yes</dd>");
+    expect(html).toContain("<dt>Browser</dt><dd>Chromium 141</dd>");
+    expect(html).toContain("<dt>Platform</dt><dd>linux</dd>");
+  });
+
+  it("says plainly that recording alone is not a pass", () => {
+    const html = renderEvidenceHtml(evidenceManifest(), [action()]);
+
+    expect(html).toContain(
+      "No acceptance outcome recorded. Recording alone does not establish a pass.",
+    );
+    expect(html).toContain("s-none");
+  });
+
+  it.each([
+    ["pass", "Pass"],
+    ["fail", "Fail"],
+    ["partial", "Partial"],
+    ["blocked", "Blocked"],
+  ] as const)("renders the %s outcome state", (status, label) => {
+    const html = renderEvidenceHtml(evidenceManifest(), [
+      action(),
+      outcome({ status }),
+    ]);
+
+    expect(html).toContain(`outcome s-${status}`);
+    expect(html).toContain(`<span class="pill">${label}</span>`);
+    expect(html).toContain("<dt>Inspected captures</dt><dd>1</dd>");
+    expect(html).toContain("<li>No payment provider sandbox</li>");
+    expect(html).toContain("<dt>Revision</dt><dd>abc123</dd>");
+    expect(html).toContain("<dt>Scenario</dt><dd>Checkout</dd>");
+  });
+
+  it("falls back to an unknown outcome state and keeps the step numbering", () => {
+    const html = renderEvidenceHtml(evidenceManifest(), [
+      outcome({ status: "flaky" as ReportOutcome["status"], steps: [], limitations: [] }),
+      action(),
+    ]);
+
+    expect(html).toContain("outcome s-unknown");
+    expect(html).toContain("Limitations: none recorded.");
+    expect(html).toContain("Step 1");
+    expect(html).not.toContain("Step 2");
+  });
+
+  it("counts captures per device filter group", () => {
+    const html = renderEvidenceHtml(
+      evidenceManifest({ device: { kind: "mobile-emulation" } }),
+      [
+        action({
+          actionId: "a",
+          startedAt: "2026-07-13T12:00:01.000Z",
+          artifacts: ["screenshots/one.png"],
+        }),
+        action({
+          actionId: "b",
+          tool: "android_tap",
+          startedAt: "2026-07-13T12:00:02.000Z",
+          artifacts: ["screenshots/two.png"],
+        }),
+        action({
+          actionId: "c",
+          tool: "browser_click",
+          startedAt: "2026-07-13T12:00:03.000Z",
+          artifacts: ["screenshots/three.png", "screenshots/four.png"],
+        }),
+      ],
+      new Set([
+        "screenshots/one.png",
+        "screenshots/two.png",
+        "screenshots/three.png",
+        "screenshots/four.png",
+      ]),
+    );
+
+    expect(html).toContain('for="lens-all" data-for-lens>All<span class="count">4</span>');
+    expect(html).toContain('Desktop<span class="count">1</span>');
+    expect(html).toContain('Android emulator<span class="count">1</span>');
+    expect(html).toContain('Mobile<span class="count">2</span>');
+    expect(html).toContain(
+      '#lens-mobile:checked~.shell [data-lens]:not([data-lens="mobile"]){display:none}',
+    );
+    expect(html).toContain('data-lens="android"');
+  });
+
+  it("offers scenario filters only when several outcomes exist", () => {
+    const single = renderEvidenceHtml(evidenceManifest(), [outcome()]);
+    expect(single).not.toContain('id="scn-all"');
+
+    const many = renderEvidenceHtml(
+      evidenceManifest(),
+      [
+        action({ artifacts: ["screenshots/good.png"] }),
+        action({
+          actionId: "second",
+          startedAt: "2026-07-13T12:00:02.000Z",
+          artifacts: ["screenshots/other.png"],
+        }),
+        outcome(),
+        outcome({
+          scenario: "Refund",
+          recordedAt: "2026-07-13T12:06:00.000Z",
+          inspectedScreenshots: ["screenshots/other.png", "screenshots/good.png"],
+        }),
+      ],
+      new Set(["screenshots/good.png", "screenshots/other.png"]),
+    );
+
+    expect(many).toContain('id="scn-all"');
+    expect(many).toContain('Checkout<span class="count">1</span>');
+    expect(many).toContain('Refund<span class="count">2</span>');
+    expect(many).toContain(
+      '#scn-1:checked~.shell [data-scenario]:not([data-scenario~="1"]){display:none}',
+    );
+    // The later outcome supplies the summary revision and scenario.
+    expect(many).toContain("<dt>Scenario</dt><dd>Refund</dd>");
+  });
+
+  it("builds an inspection view with browsing links and an original file link", () => {
+    const html = renderEvidenceHtml(
+      evidenceManifest(),
+      [
+        action({ artifacts: ["screenshots/one.png"] }),
+        action({
+          actionId: "second",
+          startedAt: "2026-07-13T12:00:02.000Z",
+          artifacts: ["screenshots/two.png"],
+        }),
+      ],
+      new Set(["screenshots/one.png", "screenshots/two.png"]),
+    );
+
+    expect(html).toContain('<section class="inspect" id="cap-1-1"');
+    expect(html).toContain('<a class="btn go-next" href="#cap-2-1">Next</a>');
+    expect(html).toContain('<span class="btn go-prev" aria-disabled="true">Previous</span>');
+    expect(html).toContain('<a class="btn" href="screenshots/two.png">Open original</a>');
+    expect(html).toContain('href="#captures">Close</a>');
+    expect(html).toContain('id="zoom-cap-2-1"');
+  });
+});
+
+describe("evidence report recovery states", () => {
+  it("states the empty run explicitly", () => {
+    const html = renderEvidenceHtml(evidenceManifest(), []);
+
+    expect(html).toContain(
+      "No actions were recorded in this run. An empty run is evidence of nothing.",
+    );
+    expect(html).toContain("No actions recorded.");
+    expect(html).toContain("No screenshots were captured in this run.");
+  });
+
+  it("states truncation explicitly and keeps the marker card", () => {
+    const html = renderEvidenceHtml(evidenceManifest(), [
+      action(),
+      {
+        actionId: "marker",
+        evidenceTruncated: true,
+        reason: "evidence-cap",
+        bytes: 120,
+        maxBytes: 100,
+        recordedAt: "2026-07-13T12:00:09.000Z",
+      },
+    ]);
+
+    expect(html).toContain(
+      "Recording stopped at the evidence cap. Actions after the truncation marker are missing from this report.",
+    );
+    expect(html).toContain("Evidence truncated");
+    expect(html).toContain("<dt>Bytes</dt><dd>120 / 100</dd>");
+  });
+
+  it("states a corrupt, missing, or torn journal explicitly", () => {
+    expect(
+      renderEvidenceHtml(evidenceManifest({ evidenceRecovery: "missing" }), []),
+    ).toContain("Journal is corrupt or missing. Timeline unavailable");
+    expect(
+      renderEvidenceHtml(evidenceManifest({ evidenceRecovery: "corrupt" }), [
+        action(),
+      ]),
+    ).toContain("journal corrupt after record 1");
+    expect(
+      renderEvidenceHtml(evidenceManifest({ evidenceRecovery: "torn-tail" }), [
+        action(),
+      ]),
+    ).toContain("Interrupted final journal line omitted from this report");
+    expect(
+      renderEvidenceHtml(evidenceManifest({ status: "orphaned" }), [action()]),
+    ).toContain("Owner unavailable. Recovered evidence is not a successful completion.");
+  });
+
+  it("still renders a manifest that predates the evidence marker", () => {
+    const html = renderEvidenceHtml(
+      {
+        runId: "legacy",
+        slug: "legacy",
+        createdAt: "2026-07-13T12:00:00.000Z",
+        status: "completed",
+        artifacts: [],
+      },
+      [action()],
+    );
+
+    expect(html).toContain("Run legacy");
+    expect(html).toContain("mcp / desktop_click");
+  });
+});
+
+describe("evidence report escaping, redaction, and determinism", () => {
+  it("escapes and redacts device, outcome, and search-indexed text", () => {
+    const html = renderEvidenceHtml(
+      evidenceManifest({
+        device: {
+          kind: "unknown",
+          browser: '"><script>alert(1)</script>',
+          platform: `platform token=${TOKEN}`,
+        },
+      }),
+      [
+        action({
+          tool: '"><img src=x onerror=alert(1)>',
+          target: { note: `target token=${TOKEN}` },
+          artifacts: ["screenshots/good.png"],
+        }),
+        outcome({
+          scenario: '"><b>scenario</b>',
+          revision: `rev token=${TOKEN}`,
+          steps: ['step "><i>one</i>', `step token=${TOKEN}`],
+          limitations: [`limit token=${TOKEN}`, '"><u>limit</u>'],
+          notes: `note token=${TOKEN}`,
+        }),
+      ],
+      new Set(["screenshots/good.png"]),
+    );
+
+    expect(html).not.toContain(TOKEN);
+    expect(html).not.toContain("<script>alert(1)</script>");
+    expect(html).not.toContain("<img src=x");
+    expect(html).not.toContain("<b>scenario</b>");
+    expect(html).not.toContain("<i>one</i>");
+    expect(html).not.toContain("<u>limit</u>");
+    expect(html).toContain("&lt;b&gt;scenario&lt;/b&gt;");
+    expect(html).toContain("limit token=[REDACTED]");
+    // The search index is an escaped, lowercased attribute, never raw markup.
+    expect(html).toMatch(/data-search="[^"<>]*"/);
+    expect(html).toContain('data-search="step 1 mcp / &quot;&gt;&lt;img');
+    expect(html.match(/<script>/g)).toHaveLength(1);
+  });
+
+  it("renders byte-identical HTML for the same inputs", () => {
+    const build = () =>
+      renderEvidenceHtml(
+        evidenceManifest({ device: { kind: "desktop", touch: false } }),
+        [
+          action({ actionId: "b", startedAt: "2026-07-13T12:00:02.000Z" }),
+          action({
+            actionId: "a",
+            startedAt: "2026-07-13T12:00:01.000Z",
+            target: { z: 1, a: 2 },
+            artifacts: ["screenshots/good.png"],
+          }),
+          outcome(),
+        ],
+        new Set(["screenshots/good.png"]),
+      );
+
+    expect(build()).toBe(build());
+  });
+
+  it("keeps screenshot path admission unchanged", () => {
+    const html = renderEvidenceHtml(
+      evidenceManifest(),
+      [
+        action({
+          artifacts: [
+            "screenshots/good.png",
+            "screenshots/../../leak.png",
+            "logs/other.txt",
+          ],
+        }),
+      ],
+      new Set(["screenshots/good.png"]),
+    );
+
+    expect(html).toContain('src="screenshots/good.png"');
+    expect(html).not.toContain("leak.png");
+    expect(html).not.toContain("logs/other.txt");
   });
 });

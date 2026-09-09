@@ -142,7 +142,12 @@ export {
   renderEvidenceHtml,
   renderRunReport,
   sortEvidenceRecords,
+  reportContentSecurityPolicy,
   writeEvidenceReport,
+  type ReportDevice,
+  type ReportManifest,
+  type ReportOutcome,
+  type ReportRecord,
 } from "./evidence-render.js";
 
 export {
