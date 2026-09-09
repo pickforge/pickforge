@@ -25,12 +25,14 @@ afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-const EXPECTED_BLOCK =
-  `${TOML_MARKER_BEGIN}\n` +
-  '[mcp_servers."pickforge-lab"]\ncommand = "pickforge-lab"\nargs = ["mcp", "serve"]\n' +
+const CORE_SECTION =
+  '[mcp_servers."pickforge-lab"]\ncommand = "pickforge-lab"\nargs = ["mcp", "serve"]\n';
+const BROWSER_SECTION =
   '[mcp_servers."pickforge-lab-browser"]\ncommand = "pickforge-lab"\n' +
-  'args = ["browser", "devtools-mcp"]\n' +
-  `${TOML_MARKER_END}\n`;
+  'args = ["browser", "devtools-mcp"]\n';
+const EXPECTED_BLOCK = `${TOML_MARKER_BEGIN}\n${CORE_SECTION}${TOML_MARKER_END}\n`;
+const EXPECTED_BROWSER_BLOCK =
+  `${TOML_MARKER_BEGIN}\n${CORE_SECTION}${BROWSER_SECTION}${TOML_MARKER_END}\n`;
 
 function backupsIn(dir: string): string[] {
   return fs.readdirSync(dir).filter((entry) => entry.includes("pickforge-backup"));
@@ -77,6 +79,155 @@ describe("upsertTomlMarkerBlock", () => {
     );
   });
 
+  it("adds the browser section only when opted in and stays idempotent", async () => {
+    const result = await upsertTomlMarkerBlock(file, undefined, { browser: true });
+    expect(result.changed).toBe(true);
+    expect(result.retainedEntries).toBeUndefined();
+    expect(fs.readFileSync(file, "utf8")).toBe(EXPECTED_BROWSER_BLOCK);
+    const again = await upsertTomlMarkerBlock(file, undefined, { browser: true });
+    expect(again.changed).toBe(false);
+    expect(fs.readFileSync(file, "utf8")).toBe(EXPECTED_BROWSER_BLOCK);
+  });
+
+  it("retains a mismatching browser section verbatim unless opted in", async () => {
+    const stale =
+      '[mcp_servers."pickforge-lab-browser"]\ncommand = "old-pickforge-lab"\n' +
+      'args = ["browser", "old"]\n';
+    fs.writeFileSync(
+      file,
+      `${TOML_MARKER_BEGIN}\n${stale}${CORE_SECTION}${TOML_MARKER_END}\n`,
+    );
+    const result = await upsertTomlMarkerBlock(file);
+    expect(result.changed).toBe(true);
+    expect(result.retainedEntries).toEqual(["pickforge-lab-browser"]);
+    const expected = `${TOML_MARKER_BEGIN}\n${CORE_SECTION}${stale}${TOML_MARKER_END}\n`;
+    expect(fs.readFileSync(file, "utf8")).toBe(expected);
+
+    const again = await upsertTomlMarkerBlock(file);
+    expect(again.changed).toBe(false);
+    expect(again.retainedEntries).toEqual(["pickforge-lab-browser"]);
+    expect(fs.readFileSync(file, "utf8")).toBe(expected);
+    expect(await inspectTomlFile(file)).toMatchObject({
+      markersHaveSection: true,
+    });
+
+    const repaired = await upsertTomlMarkerBlock(file, undefined, {
+      browser: true,
+    });
+    expect(repaired.changed).toBe(true);
+    expect(repaired.retainedEntries).toBeUndefined();
+    expect(fs.readFileSync(file, "utf8")).toBe(EXPECTED_BROWSER_BLOCK);
+  });
+
+  it("retains browser subtables and header variants without dropping any line", async () => {
+    const customized =
+      "[ mcp_servers.'pickforge-lab-browser' ]  # keep me\n" +
+      'command = "custom-browser"\n' +
+      'args = ["browser", "custom"]\n' +
+      '[mcp_servers."pickforge-lab-browser".env] # relay env\n' +
+      'CHROME_PATH = "/opt/chrome"\n' +
+      "[mcp_servers.pickforge-lab-browser.headers]\n" +
+      'Authorization = "Bearer x"\n';
+    fs.writeFileSync(
+      file,
+      `${TOML_MARKER_BEGIN}\nstale = true\n${customized}${TOML_MARKER_END}\n`,
+    );
+    const result = await upsertTomlMarkerBlock(file);
+    expect(result.changed).toBe(true);
+    expect(result.retainedEntries).toEqual(["pickforge-lab-browser"]);
+    const expected = `${TOML_MARKER_BEGIN}\n${CORE_SECTION}${customized}${TOML_MARKER_END}\n`;
+    expect(fs.readFileSync(file, "utf8")).toBe(expected);
+
+    const again = await upsertTomlMarkerBlock(file);
+    expect(again.changed).toBe(false);
+    expect(again.retainedEntries).toEqual(["pickforge-lab-browser"]);
+    expect(fs.readFileSync(file, "utf8")).toBe(expected);
+  });
+
+  it("retains multiline string values containing bracket-leading lines unchanged", async () => {
+    const customized =
+      '[mcp_servers."pickforge-lab-browser"]\n' +
+      'command = "custom-browser"\n' +
+      'args = [\n  "browser",\n  "custom",\n]\n' +
+      '[mcp_servers."pickforge-lab-browser".env]\n' +
+      'CONFIG = """\n[profile]\nvalue = "a \\"quoted\\" # not a comment"\n' +
+      '[mcp_servers."pickforge-lab"]\n""" # trailing comment\n' +
+      "SCRIPT = '''\n[section]\nkey = \"v\"\n'''\n" +
+      'ONE_LINE = """[inline] value"""\n' +
+      'TABLE = { a = [\n  "[not a header]",\n], b = 1 }\n';
+    fs.writeFileSync(
+      file,
+      `${TOML_MARKER_BEGIN}\n${customized}${CORE_SECTION}${TOML_MARKER_END}\n`,
+    );
+    const result = await upsertTomlMarkerBlock(file);
+    expect(result.changed).toBe(true);
+    expect(result.retainedEntries).toEqual(["pickforge-lab-browser"]);
+    const expected = `${TOML_MARKER_BEGIN}\n${CORE_SECTION}${customized}${TOML_MARKER_END}\n`;
+    expect(fs.readFileSync(file, "utf8")).toBe(expected);
+
+    const again = await upsertTomlMarkerBlock(file);
+    expect(again.changed).toBe(false);
+    expect(again.retainedEntries).toEqual(["pickforge-lab-browser"]);
+    expect(fs.readFileSync(file, "utf8")).toBe(expected);
+  });
+
+  it("does not retain multiline string content of a non-browser table as a browser section", async () => {
+    const otherTable =
+      "[mcp_servers.other]\n" +
+      'NOTE = """\n[mcp_servers."pickforge-lab-browser"]\ncommand = "fake"\n"""\n';
+    fs.writeFileSync(
+      file,
+      `${TOML_MARKER_BEGIN}\n${otherTable}${CORE_SECTION}${TOML_MARKER_END}\n`,
+    );
+    const result = await upsertTomlMarkerBlock(file);
+    expect(result.changed).toBe(true);
+    expect(result.retainedEntries).toBeUndefined();
+    expect(fs.readFileSync(file, "utf8")).toBe(EXPECTED_BLOCK);
+  });
+
+  it("retains a browser subtable that sits after the core section", async () => {
+    const browserEnv =
+      '[mcp_servers."pickforge-lab-browser".env]\nCHROME_PATH = "/opt/chrome"\n';
+    fs.writeFileSync(
+      file,
+      `${TOML_MARKER_BEGIN}\n${BROWSER_SECTION}${CORE_SECTION}${browserEnv}${TOML_MARKER_END}\n`,
+    );
+    const result = await upsertTomlMarkerBlock(file);
+    expect(result.retainedEntries).toEqual(["pickforge-lab-browser"]);
+    expect(fs.readFileSync(file, "utf8")).toBe(
+      `${TOML_MARKER_BEGIN}\n${CORE_SECTION}${BROWSER_SECTION}${browserEnv}${TOML_MARKER_END}\n`,
+    );
+  });
+
+  it("keeps a customized current browser section when a legacy browser block migrates without --browser", async () => {
+    const customized =
+      '[mcp_servers."pickforge-lab-browser"]\ncommand = "custom-browser"\n' +
+      'args = ["browser", "custom"]\n' +
+      '[mcp_servers."pickforge-lab-browser".env]\nCHROME_PATH = "/opt/chrome"\n';
+    fs.writeFileSync(
+      file,
+      `${LEGACY_TOML_MARKER_BEGIN}\n` +
+        '[mcp_servers.picklab]\ncommand = "picklab"\nargs = ["mcp", "serve"]\n' +
+        '[mcp_servers.picklab-browser]\ncommand = "picklab"\n' +
+        'args = ["browser", "devtools-mcp"]\n' +
+        `${LEGACY_TOML_MARKER_END}\n\n` +
+        `${TOML_MARKER_BEGIN}\n${customized}${TOML_MARKER_END}\n`,
+    );
+    const result = await upsertTomlMarkerBlock(file);
+    expect(result.changed).toBe(true);
+    expect(result.migratedLegacyEntries).toEqual(["picklab", "picklab-browser"]);
+    expect(result.retainedEntries).toEqual(["pickforge-lab-browser"]);
+    expect(fs.readFileSync(file, "utf8")).toBe(
+      `\n${TOML_MARKER_BEGIN}\n${CORE_SECTION}${customized}${TOML_MARKER_END}\n`,
+    );
+
+    const repaired = await upsertTomlMarkerBlock(file, undefined, {
+      browser: true,
+    });
+    expect(repaired.retainedEntries).toBeUndefined();
+    expect(fs.readFileSync(file, "utf8")).toBe(`\n${EXPECTED_BROWSER_BLOCK}`);
+  });
+
   it("replaces an owned legacy block in the same atomic update", async () => {
     fs.writeFileSync(
       file,
@@ -93,7 +244,7 @@ describe("upsertTomlMarkerBlock", () => {
     ]);
     expect(result.backupPath).toBeDefined();
     expect(fs.readFileSync(file, "utf8")).toBe(
-      `model = "gpt-5"\n\n${EXPECTED_BLOCK}`,
+      `model = "gpt-5"\n\n${EXPECTED_BROWSER_BLOCK}`,
     );
   });
 

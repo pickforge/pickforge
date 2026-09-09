@@ -1,5 +1,10 @@
 import type { EnvLike } from "@pickforge/lab-core";
-import type { AgentKind, ChangeResult, RegistrationState } from "../types.js";
+import type {
+  AgentKind,
+  ChangeResult,
+  LinkOptions,
+  RegistrationState,
+} from "../types.js";
 import {
   claudeCodeConfigPath,
   claudeCodeIsRegistered,
@@ -24,7 +29,11 @@ export interface BuiltinAgent {
   name: AgentKind;
   defaultConfigPath(env: EnvLike): string;
   isRegistered(configPath: string): Promise<RegistrationState>;
-  link(configPath: string, env?: EnvLike): Promise<ChangeResult>;
+  link(
+    configPath: string,
+    env?: EnvLike,
+    opts?: LinkOptions,
+  ): Promise<ChangeResult>;
   unlink(configPath: string, env?: EnvLike): Promise<ChangeResult>;
 }
 

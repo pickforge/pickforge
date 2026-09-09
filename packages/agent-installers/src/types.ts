@@ -12,11 +12,18 @@ export interface McpServerEntry {
   args: string[];
 }
 
+export interface LinkOptions {
+  /** Also register the pickforge-lab-browser DevTools relay (opt-in). */
+  browser?: boolean;
+}
+
 export interface ChangeResult {
   configPath: string;
   changed: boolean;
   backupPath?: string;
   migratedLegacyEntries?: string[];
+  /** Pickforge-named entries left untouched because they were not requested. */
+  retainedEntries?: string[];
   instructions?: string;
   warning?: string;
 }

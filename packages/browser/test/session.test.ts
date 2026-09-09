@@ -406,6 +406,8 @@ describe.skipIf(!hasXvfb)("destroyBrowserSession (fake binaries)", () => {
       cdpTimeoutMs: 5000,
     });
     const { browserPid, xvfbPid, profileDir, logDir } = session;
+    fs.mkdirSync(path.join(logDir, "permits"));
+    fs.writeFileSync(path.join(logDir, "permits", "old.json"), "{}");
     const layout = browserRuntimeLayout(logDir);
     const vnc = spawn(
       process.execPath,
@@ -445,7 +447,13 @@ describe.skipIf(!hasXvfb)("destroyBrowserSession (fake binaries)", () => {
       expect(isPidAlive(vncPid)).toBe(false);
       expect(isPidAlive(xvfbPid)).toBe(false);
       expect(fs.existsSync(profileDir)).toBe(false);
-      expect(fs.existsSync(logDir)).toBe(false);
+      expect(fs.existsSync(path.join(logDir, "chrome.log"))).toBe(true);
+      expect(fs.existsSync(path.join(logDir, "xvfb.log"))).toBe(true);
+      for (const removed of [layout.homeDir, layout.xdgRuntimeDir, layout.tmpDir, path.join(logDir, "permits")]) {
+        expect(fs.existsSync(removed)).toBe(false);
+      }
+      expect(fs.existsSync(path.join(logDir, "stopped.json"))).toBe(true);
+      expect(fs.readdirSync(path.dirname(logDir)).some((name) => name.startsWith(`${session.id}.ensure-vnc.lock`))).toBe(false);
       expect(fs.existsSync(layout.chromeTmpDir)).toBe(false);
       expect(await getSession(session.id, registryEnv)).toBeUndefined();
     } finally {
@@ -662,6 +670,10 @@ describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
     expect(fs.existsSync(path.join(browserSessionLogDir(id, registryEnv), "profile"))).toBe(
       false,
     );
+    const failedDir = browserSessionLogDir(id, registryEnv);
+    expect(fs.readFileSync(path.join(failedDir, "chrome.log"), "utf8")).toContain("fake Chrome crashed");
+    expect(fs.existsSync(path.join(failedDir, "xvfb.log"))).toBe(true);
+    expect(fs.existsSync(path.join(failedDir, "permits"))).toBe(false);
     const xvfbPid = record?.desktop?.xvfbPid;
     if (xvfbPid !== undefined) {
       expect(isPidAlive(xvfbPid)).toBe(false);

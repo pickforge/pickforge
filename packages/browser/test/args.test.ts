@@ -12,6 +12,30 @@ describe("buildChromeArgs", () => {
     expect(args[args.length - 1]).toBe("about:blank");
   });
 
+  it("disables vendor background services without disabling web networking or CDP", () => {
+    const args = buildChromeArgs({ profileDir: "/tmp/p" });
+    for (const flag of [
+      "--disable-background-networking",
+      "--disable-sync",
+      "--disable-notifications",
+      "--gcm-checkin-url=https://127.0.0.1:0",
+      "--gcm-registration-url=https://127.0.0.1:0",
+      "--gcm-mcs-endpoint=https://127.0.0.1:0",
+      "--disable-component-update",
+      "--disable-domain-reliability",
+      "--disable-client-side-phishing-detection",
+    ]) {
+      expect(args).toContain(flag);
+    }
+    expect(args.filter((arg) => arg.startsWith("--disable-features="))).toEqual([
+      "--disable-features=Translate,MediaRouter,AutofillServerCommunication,OptimizationHints,OptimizationTargetPrediction,OptimizationGuideModelExecution",
+    ]);
+    expect(args).toContain("--remote-debugging-address=127.0.0.1");
+    expect(args).toContain("--remote-debugging-port=0");
+    expect(args).not.toContain("--no-sandbox");
+    expect(args.some((arg) => /^(--headless|--proxy-server|--host-resolver-rules)/.test(arg))).toBe(false);
+  });
+
   it("adds a window size only when both dimensions are given", () => {
     expect(buildChromeArgs({ profileDir: "/p", width: 800, height: 600 })).toContain(
       "--window-size=800,600",

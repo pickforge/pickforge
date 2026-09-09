@@ -45,6 +45,7 @@ import { runMcpServe } from "./commands/mcp.js";
 import {
   runSessionCreate,
   runSessionDestroy,
+  runSessionPrune,
   runSessionStatus,
 } from "./commands/session.js";
 import { runSetupAndroid } from "./commands/setup-android.js";
@@ -212,11 +213,20 @@ function registerSessionCommands(program: Command): void {
   withJson(
     session
       .command("destroy")
-      .description("Destroy a session and stop its processes")
+      .description("Stop processes and remove runtime data; retain session logs")
       .argument("[id]", "session id")
       .option("--all", "destroy all sessions"),
   ).action(async (id, opts) => {
     process.exitCode = await runSessionDestroy(id, opts);
+  });
+
+  withJson(
+    session.command("prune")
+      .description("Explicitly delete retained logs of destroyed sessions; keep active/error records and unknown data")
+      .option("--older-than <duration>", "age since teardown, e.g. 7d (positive integer with s, m, h, d or w)")
+      .option("--all-stopped", "delete all eligible retained session logs, regardless of age"),
+  ).action(async (opts) => {
+    process.exitCode = await runSessionPrune(opts);
   });
 }
 
@@ -662,6 +672,11 @@ function registerAgentLinkCommands(agents: Command): void {
         .option(
           "--config-path <path>",
           "agent config file (overrides the default location)",
+        )
+        .option(
+          "--browser",
+          "also register the pickforge-lab-browser DevTools MCP server " +
+            "(it needs a live browser session; existing entries are kept as-is without this flag)",
         ),
     ).action(async (agent, opts) => {
       process.exitCode = await runAgentsLink(agent, opts);

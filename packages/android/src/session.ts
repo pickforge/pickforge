@@ -1,6 +1,7 @@
 import {
   createSession,
   destroySessionRecord,
+  retainSessionLogs,
   getSession,
   isPidAlive,
   reapDeadRunningSessions,
@@ -219,6 +220,12 @@ export async function teardownAndroidSession(
           (failure !== undefined ? `: ${failure.message}` : ""),
       );
     }
+  }
+  try {
+    await retainSessionLogs(record, registryEnv);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to retain logs of session ${record.id}: ${message}`, { cause: error });
   }
   await finalize();
 }

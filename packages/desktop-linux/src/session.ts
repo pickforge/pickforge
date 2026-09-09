@@ -10,6 +10,7 @@ import {
   destroyContainmentScope,
   ensureContainmentScope,
   destroySessionRecord,
+  retainSessionLogs,
   getSession,
   isHumanLeaseStale,
   isPidAlive,
@@ -942,6 +943,12 @@ export async function teardownDesktopSession(
         `Failed to stop ${failures.length} process(es) of desktop session ${id}: ` +
           failures.map((failure) => failure.message).join("; "),
       );
+    }
+    try {
+      await retainSessionLogs(record, registryEnv);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to retain logs of session ${record.id}: ${message}`, { cause: error });
     }
     await finalize();
   });

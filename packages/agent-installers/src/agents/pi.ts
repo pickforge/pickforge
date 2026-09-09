@@ -5,7 +5,11 @@ import {
   mergeMcpServerIntoJsonFile,
   removeMcpServerFromJsonFile,
 } from "../jsonConfig.js";
-import type { ChangeResult, RegistrationState } from "../types.js";
+import type {
+  ChangeResult,
+  LinkOptions,
+  RegistrationState,
+} from "../types.js";
 import { homeDir } from "./home.js";
 
 export function piConfigPath(env: EnvLike = process.env): string {
@@ -18,8 +22,15 @@ export async function piIsRegistered(
   return jsonFileMcpServerState(configPath);
 }
 
-export async function linkPi(configPath: string): Promise<ChangeResult> {
-  return mergeMcpServerIntoJsonFile(configPath, { createIfMissing: true });
+export async function linkPi(
+  configPath: string,
+  _env?: EnvLike,
+  opts: LinkOptions = {},
+): Promise<ChangeResult> {
+  return mergeMcpServerIntoJsonFile(configPath, {
+    createIfMissing: true,
+    browser: opts.browser,
+  });
 }
 
 export async function unlinkPi(configPath: string): Promise<ChangeResult> {

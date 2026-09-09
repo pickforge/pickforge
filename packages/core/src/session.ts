@@ -141,6 +141,8 @@ export async function createSession(
       status: input.status ?? "starting",
       projectDir: input.projectDir,
     };
+    // Retained directories reserve IDs until explicit pruning completes.
+    if (fs.existsSync(path.join(sessionsDir(env), record.id))) continue;
     if (input.desktop !== undefined) record.desktop = input.desktop;
     if (input.android !== undefined) record.android = input.android;
     if (input.browser !== undefined) record.browser = input.browser;

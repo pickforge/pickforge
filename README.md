@@ -197,6 +197,12 @@ screenshots report the visible client-window count and warn when it is zero.
 If `xdotool` is missing, capture still succeeds and warns that the count is
 unavailable instead of reporting a possible escape.
 
+### Session logs
+
+Desktop, browser and Android logs stay in the session directory after teardown. Runtime sockets, locks, permits, profiles and temporary data are removed once processes are confirmed stopped. Failed starts keep their logs and error record; cleanup failures keep runtime data needed for retry.
+
+Logs are never pruned automatically. Run `pickforge-lab session prune --older-than 7d` or `pickforge-lab session prune --all-stopped` to remove retained logs. Age starts at successful teardown (`stopped.json`), not session creation. Destroy failed sessions explicitly before pruning; their failure record is retained in `stopped.json`. Pruning skips directories with registry records, teardown locks, unknown data or symlinks, and older directories without retention metadata.
+
 ### Run storage
 
 By default, run artifacts (screenshots, logs, manifests, evidence journals)
@@ -462,6 +468,80 @@ Each session gets its own isolated display or emulator, so several agents and pr
   <img src="https://raw.githubusercontent.com/pickforge/pickforge/main/assets/brand/pickforge-run-lab-mock.svg" alt="PICKFORGE · RUN LAB — desktop session, Android emulator, live screenshots, logs, and agent terminal" width="900">
 </p>
 
+## Browser lab
+
+`pickforge-lab session create --type browser --no-viewer` starts headed Chrome
+on a private Xvfb display with an ephemeral profile and a scrubbed environment.
+Isolated sessions **can reach the network**, including the public internet and
+LAN services accessible to the host. Isolation is not a network namespace,
+firewall, proxy, or offline mode. Page navigation, fetch, WebSockets and other
+web traffic remain available. CDP still binds to `127.0.0.1` on an allocated
+port; VNC remains loopback-only and read-only by default. Inbound loopback
+binding does not restrict outbound traffic.
+
+The default browser arguments reduce vendor background traffic:
+`--disable-background-networking` disables selected background services
+(including Safe Browsing service traffic, extension updates and metrics upload),
+`--disable-sync` disables account sync, `--disable-notifications` disables the
+Web Notification and Push APIs, `--disable-component-update` stops component
+updates, `--disable-domain-reliability` stops reliability reporting, and
+`--disable-client-side-phishing-detection` disables client-side phishing checks.
+The single `--disable-features` list contains `Translate`, `MediaRouter`,
+`AutofillServerCommunication`, `OptimizationHints`,
+`OptimizationTargetPrediction` and `OptimizationGuideModelExecution`: translation,
+cast discovery, server-backed autofill, optimization hints, prediction models
+and model execution are disabled. These defaults are for automation, not a
+hardened personal browser: Safe Browsing protection and component updates are
+reduced, and notification/push journeys cannot be tested with these defaults.
+Normal DevTools automation does not need those services.
+
+Chromium documents these switches in
+[Chrome flags for tools](https://github.com/GoogleChrome/chrome-launcher/blob/main/docs/chrome-flags-for-tools.md#background-networking),
+[content switches](https://chromium.googlesource.com/chromium/src/+/140.0.7339.80/content/public/common/content_switches.cc)
+(`--disable-notifications`) and
+[Optimization Guide features](https://chromium.googlesource.com/chromium/src/+/140.0.7339.80/components/optimization_guide/core/optimization_guide_features.cc).
+The #112 log's `registration_request.cc` errors are GCM registration retries,
+not a periodic sync job. The likely desktop startup path is
+[user cloud policy invalidation](https://chromium.googlesource.com/chromium/src/+/152.0.7977.64/chrome/browser/policy/cloud/user_fm_registration_token_uploader.cc):
+its token uploaders start invalidation listeners even without account sync or
+a website push subscription. Starting GCM also initializes its
+[account mapper](https://chromium.googlesource.com/chromium/src/+/152.0.7977.64/components/gcm_driver/gcm_account_mapper.cc),
+which requests a legacy registration. That path is consistent with the log's initial
+registrations and retry pattern; the log alone lacks app IDs to prove which
+request received `DEPRECATED_ENDPOINT`. Chromium's
+[registration transport](https://chromium.googlesource.com/chromium/src/+/152.0.7977.64/google_apis/gcm/engine/registration_request.cc)
+offers no switch to disable GCM entirely.
+Neither `--disable-background-networking` nor `--disable-notifications` stops
+these internal clients.
+
+The lab therefore also sets `--gcm-checkin-url`, `--gcm-registration-url` and
+`--gcm-mcs-endpoint` to `https://127.0.0.1:0`, replacing all three vendor
+transports with an unusable loopback endpoint, without opening a listener.
+These are Chromium's actual
+[GCM endpoint switches](https://chromium.googlesource.com/chromium/src/+/152.0.7977.64/google_apis/gcm/engine/gservices_switches.cc),
+not an invented `GCM` feature flag. GCM can still initialize and log local
+failures/retries; its service code is not disabled. Switch support varies by
+Chrome version and host proxy/policy settings can affect behavior. Library
+callers can override defaults through `extraArgs`; in particular, another
+`--disable-features` argument replaces the entire default list rather than
+merging with it. No zero-egress guarantee is made.
+
+For a later authorized Astra low execution pass, install the candidate lab build,
+then run `node scripts/lab/chrome-egress-check.mjs` with Node.js 22 or newer and
+the browser lab dependencies installed. `LAB_BIN` selects an installed lab
+executable; `CHROME_BIN` selects an absolute Chrome executable path. The script
+uses a fresh lab home and project, never opens a host viewer, leaves `about:blank`
+idle for 90 seconds, closes Chrome through loopback CDP to flush NetLog, destroys
+only its own sessions, and prints non-loopback request/DNS/socket destinations.
+It does not proxy or block traffic. Evidence remains owner-only under
+`~/.pickforge/lab/chrome-egress-checks/`; raw NetLog is not redacted and must not
+be published or used with private browsing data. The report drops URL paths,
+credentials and queries and counts unparseable destination fields. A quiet
+sample is not proof of no egress, and observed
+attempts are not proof of delivery. `--parse-net-log FILE` runs only the reporter
+without launching anything. This capture remains a separate release check,
+not a unit-test assertion.
+
 ## Telemetry
 
 Fatal-error telemetry in the `pickforge-lab` CLI and `pickforge-mcp` server is disabled by default: Sentry is not initialized and no telemetry is sent. Set `PICKFORGE_TELEMETRY=1` (also `true` or `on`, case-insensitive, with surrounding whitespace ignored) to enable reporting to Sentry. Any other value or unset disables it. Enabled reports contain the error message and stack trace, which can reference the failing command and its output, with secrets redacted, plus OS, Node.js, and app versions. This is fatal-error reporting, not product analytics; breadcrumbs and performance tracing are disabled.
@@ -478,6 +558,19 @@ pickforge-lab agents list
 pickforge-lab agents doctor
 ```
 
+`agents install` registers only the `pickforge-lab` server. The browser
+DevTools relay (`pickforge-lab-browser`) fails to start until a browser session
+exists, so it is opt-in: pass `--browser` to register it as well. Without the
+flag an existing `pickforge-lab-browser` entry is left exactly as it is, even
+if its command differs, and the command reports it as retained (JSON:
+`retainedEntries`). Upgrading a legacy `picklab-browser` registration keeps a
+browser entry without the flag, because that install already had one.
+`agents unlink` removes both entries.
+
+```sh
+pickforge-lab agents install claude-code --browser
+```
+
 Pi uses `$HOME/.config/mcp/mcp.json`; core Pi needs `pi-mcp-adapter` to load it.
 The adapter's shared global config path is fixed and ignores `XDG_CONFIG_HOME`.
 Both `pickforge init --harness pi` and `pickforge-lab agents install pi` keep
@@ -491,7 +584,16 @@ For any other agent, add the stdio server yourself:
     "pickforge-lab": {
       "command": "pickforge-lab",
       "args": ["mcp", "serve"]
-    },
+    }
+  }
+}
+```
+
+Add the browser relay only when the agent should drive lab browser sessions:
+
+```json
+{
+  "mcpServers": {
     "pickforge-lab-browser": {
       "command": "pickforge-lab",
       "args": ["browser", "devtools-mcp"]
@@ -514,13 +616,13 @@ pickforge-lab agents add --name my-agent --mcp-command "pickforge-lab mcp serve"
 | Group | Commands |
 | --- | --- |
 | Setup | `doctor`, `init`, `setup lab-user`, `setup android` |
-| Sessions | `session create`, `session status [id]`, `session destroy <id\|--all>` |
+| Sessions | `session create`, `session status [id]`, `session destroy <id\|--all>`, `session prune --older-than <duration>\|--all-stopped` |
 | Watch | `watch [--session <id>] [--control]` |
 | Takeover | `takeover status [--session <id>]` |
 | Desktop | `desktop launch <cmd>`, `desktop exec <cmd>`, `desktop env`, `desktop screenshot`, `desktop click <x> <y>`, `desktop move <x> <y>`, `desktop scroll <deltaX> <deltaY>`, `desktop drag <fromX> <fromY> <toX> <toY>`, `desktop double-click <x> <y>`, `desktop type <text>`, `desktop key <keys>` |
 | Android | `android start`, `android install-apk <apk> [--wait-ready <s>]`, `android launch-app <pkg> [--wait-ready <s>]`, `android screenshot`, `android tap <x> <y>`, `android type <text>`, `android back`, `android home`, `android ui-tree`, `android logcat`, `android adb [args...]` |
 | Artifacts | `artifacts list`, `artifacts open <runId>`, `artifacts report [runId]` |
-| Agents | `agents list`, `agents install <agent>`, `agents link <agent>`, `agents unlink <agent>`, `agents doctor`, `agents add` |
+| Agents | `agents list`, `agents install <agent> [--browser]`, `agents link <agent> [--browser]`, `agents unlink <agent>`, `agents doctor`, `agents add` |
 | Browser | `browser devtools-mcp` |
 | MCP | `mcp serve` |
 

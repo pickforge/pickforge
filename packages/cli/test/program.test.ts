@@ -20,6 +20,17 @@ describe("pickforge", () => {
     );
   });
 
+  it("exposes --browser on agents install and its link alias", () => {
+    const program = buildProgram();
+    const agents = program.commands.find((command) => command.name() === "agents");
+    for (const name of ["install", "link"]) {
+      const command = agents?.commands.find((candidate) => candidate.name() === name);
+      expect(command?.options.map((option) => option.long)).toContain("--browser");
+    }
+    const unlink = agents?.commands.find((command) => command.name() === "unlink");
+    expect(unlink?.options.map((option) => option.long)).not.toContain("--browser");
+  });
+
   it("exposes only project scope on the static browser relay command", () => {
     const program = buildProgram();
     const browser = program.commands.find((command) => command.name() === "browser");
