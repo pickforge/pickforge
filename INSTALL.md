@@ -54,7 +54,9 @@ PICKFORGE_INSTALL_RUNTIME=npm \
 sh scripts/install.sh
 ```
 
-On fatal errors the CLI and MCP server report the error message and stack trace — the message can reference the failing command and its output, with secrets redacted — plus OS, Node.js, and app versions to Sentry; nothing else is collected. Tell the user they can disable this with `PICKFORGE_TELEMETRY=0`.
+Fatal-error telemetry in the TypeScript CLI and MCP server is disabled by default: no Sentry initialization or telemetry network traffic. Tell the user that only `PICKFORGE_TELEMETRY=1`, `true`, or `on` enables it (case-insensitive; surrounding whitespace ignored). Any other value or unset disables it. When enabled, Sentry receives error messages and stack traces, which can reference the failing command and its output, with secrets redacted, plus OS, Node.js, and app versions. This is not product analytics; breadcrumbs and performance tracing are disabled.
+
+For the 0.4 train, the same values work with legacy `PICKLAB_TELEMETRY` only when `PICKFORGE_TELEMETRY` is unset, with one deprecation warning per process. The current name takes precedence, including when empty.
 
 For one release, old `PICKLAB_*` environment variables still work and print a
 deprecation warning to stderr. New TypeScript state goes under
@@ -88,7 +90,10 @@ pickforge-lab agents install pi             # ~/.config/mcp/mcp.json
 ```
 
 Core Pi has no built-in MCP support, so its config requires
-`pi-mcp-adapter`.
+`pi-mcp-adapter`. The adapter reads shared global config from the fixed path
+`$HOME/.config/mcp/mcp.json`, ignoring `XDG_CONFIG_HOME`. Both
+`pickforge init --harness pi` and `pickforge-lab agents install pi` write there
+so the adapter can discover the generated config.
 
 Any other agent gets a stdio server with `command: pickforge-lab`, `args: ["mcp", "serve"]`:
 

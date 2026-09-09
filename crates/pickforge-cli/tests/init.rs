@@ -620,10 +620,23 @@ fn planning_nonempty_pack_is_read_only_and_deduplicates_in_fixed_order() {
         vec![Harness::ClaudeCode, Harness::Pi]
     );
     assert_eq!(plan.report.actions.len(), 3);
-    assert!(plan.report.actions.iter().any(|action| action
-        .warning
-        .as_deref()
-        .is_some_and(|warning| warning.contains("pi-mcp-adapter"))));
+    assert!(plan
+        .report
+        .actions
+        .iter()
+        .any(|action| action.warning.as_deref().is_some_and(|warning| {
+            warning.contains("pi-mcp-adapter")
+                && warning.contains("fixed at $HOME/.config/mcp/mcp.json")
+                && warning.contains("XDG_CONFIG_HOME is ignored")
+        })));
+    assert!(plan.report.actions.iter().any(|action| {
+        Path::new(&action.target).ends_with(
+            Path::new("home")
+                .join(".config")
+                .join("mcp")
+                .join("mcp.json"),
+        )
+    }));
     assert!(!temp.path().join("home").exists());
     assert!(!temp.path().join("state").exists());
     assert!(before.elapsed().is_ok());

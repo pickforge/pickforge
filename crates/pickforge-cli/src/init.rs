@@ -509,7 +509,10 @@ fn plan_harness_configs(
         let outcome = plan_harness_config(request, env, harness).map(|planned| {
             if let Some(file) = planned {
                 let warning = (harness == Harness::Pi).then(|| {
-                    "Core Pi has no built-in MCP; this config requires pi-mcp-adapter.".to_string()
+                    "Core Pi has no built-in MCP; this config requires pi-mcp-adapter. \
+                     Its shared global config path is fixed at $HOME/.config/mcp/mcp.json; \
+                     XDG_CONFIG_HOME is ignored."
+                        .to_string()
                 });
                 builder.push(
                     file,
