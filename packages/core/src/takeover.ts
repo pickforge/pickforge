@@ -317,34 +317,15 @@ export interface AcquireHumanLeaseOptions {
   _afterCreate?: () => void | Promise<void>;
 }
 
-/**
- * Acquire exclusive human control of a session: atomically (`wx`) create the
- * lease file, then wait for every agent permit that existed at that instant
- * to drain (finish, or be recognized as owned by a dead process and swept).
- *
- * A second acquisition attempt while the lease is live throws
- * `HumanLeaseHeldError` immediately — this is a single-winner primitive, not
- * a queue. An existing lease whose owner is dead or whose TTL elapsed throws
- * `StaleHumanLeaseError` so the caller can recover it (see
- * `clearStaleHumanLease`) and retry. If permits fail to drain in time, the
- * lease this call just created is released and `HumanLeaseDrainTimeoutError`
- * is thrown — "timeout aborts cleanly."
- */
-// eslint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
-export async function acquireHumanLease(
+function buildHumanLease(
   sessionId: string,
-  env: EnvLike = process.env,
-  opts: AcquireHumanLeaseOptions = {},
-): Promise<HumanLease> {
-  assertSafeSessionId(sessionId);
-  const dir = await ensureDir(sessionDataDir(sessionId, env));
-  const leasePath = path.join(dir, HUMAN_LEASE_FILE);
+  now: Date,
+  opts: AcquireHumanLeaseOptions,
+): HumanLease {
   const ttlMs = opts.ttlMs ?? HUMAN_LEASE_TTL_MS;
   const heartbeatMs = opts.heartbeatMs ?? HUMAN_LEASE_HEARTBEAT_MS;
-  const now = opts.now ?? new Date();
   const ownerPid = process.pid;
   const ownerStartTicks = readProcessStartTicks(ownerPid);
-
   const lease: HumanLease = {
     leaseId: crypto.randomUUID(),
     sessionId,
@@ -356,9 +337,19 @@ export async function acquireHumanLease(
   };
   if (ownerStartTicks !== undefined) lease.ownerStartTicks = ownerStartTicks;
   if (opts.vncPid !== undefined) lease.vncPid = opts.vncPid;
-  if (opts.vncStartTimeTicks !== undefined) lease.vncStartTimeTicks = opts.vncStartTimeTicks;
+  if (opts.vncStartTimeTicks !== undefined) {
+    lease.vncStartTimeTicks = opts.vncStartTimeTicks;
+  }
   if (opts.vncPort !== undefined) lease.vncPort = opts.vncPort;
+  return lease;
+}
 
+async function createExclusiveHumanLeaseFile(
+  leasePath: string,
+  lease: HumanLease,
+  sessionId: string,
+  now: Date,
+): Promise<void> {
   try {
     await fs.promises.writeFile(leasePath, `${JSON.stringify(lease)}\n`, {
       encoding: "utf8",
@@ -381,7 +372,32 @@ export async function acquireHumanLease(
     }
     throw new StaleHumanLeaseError(raw, existing);
   }
+}
 
+/**
+ * Acquire exclusive human control of a session: atomically (`wx`) create the
+ * lease file, then wait for every agent permit that existed at that instant
+ * to drain (finish, or be recognized as owned by a dead process and swept).
+ *
+ * A second acquisition attempt while the lease is live throws
+ * `HumanLeaseHeldError` immediately — this is a single-winner primitive, not
+ * a queue. An existing lease whose owner is dead or whose TTL elapsed throws
+ * `StaleHumanLeaseError` so the caller can recover it (see
+ * `clearStaleHumanLease`) and retry. If permits fail to drain in time, the
+ * lease this call just created is released and `HumanLeaseDrainTimeoutError`
+ * is thrown — "timeout aborts cleanly."
+ */
+export async function acquireHumanLease(
+  sessionId: string,
+  env: EnvLike = process.env,
+  opts: AcquireHumanLeaseOptions = {},
+): Promise<HumanLease> {
+  assertSafeSessionId(sessionId);
+  const dir = await ensureDir(sessionDataDir(sessionId, env));
+  const leasePath = path.join(dir, HUMAN_LEASE_FILE);
+  const now = opts.now ?? new Date();
+  const lease = buildHumanLease(sessionId, now, opts);
+  await createExclusiveHumanLeaseFile(leasePath, lease, sessionId, now);
   if (opts._afterCreate !== undefined) await opts._afterCreate();
 
   try {

@@ -1,6 +1,7 @@
 import { Readable, Writable } from "node:stream";
 import { describe, expect, it } from "vitest";
 import {
+  assertJsonRpcMessage,
   createDeferred,
   createJsonRpcWriteQueue,
   JsonRpcNdjsonBuffer,
@@ -95,6 +96,58 @@ describe("JsonRpcNdjsonBuffer", () => {
     expect(() => decoder.push("m")).toThrow(
       "JSON-RPC record exceeds 12 byte limit",
     );
+  });
+});
+
+describe("assertJsonRpcMessage", () => {
+  it("accepts requests, notifications, and exclusive result or error responses", () => {
+    expect(() =>
+      assertJsonRpcMessage({ jsonrpc: "2.0", method: "tools/list" }),
+    ).not.toThrow();
+    expect(() =>
+      assertJsonRpcMessage({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "click" },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertJsonRpcMessage({ jsonrpc: "2.0", id: null, result: { ok: true } }),
+    ).not.toThrow();
+    expect(() =>
+      assertJsonRpcMessage({
+        jsonrpc: "2.0",
+        id: "a",
+        error: { code: -32000, message: "busy" },
+      }),
+    ).not.toThrow();
+  });
+
+  it("rejects mixed request/response shapes and invalid params or error objects", () => {
+    expect(() =>
+      assertJsonRpcMessage({
+        jsonrpc: "2.0",
+        method: "tools/call",
+        result: { ok: true },
+      }),
+    ).toThrow("cannot contain result or error");
+    expect(() =>
+      assertJsonRpcMessage({ jsonrpc: "2.0", method: "tools/call", id: null }),
+    ).toThrow("request id must be a string or number");
+    expect(() =>
+      assertJsonRpcMessage({
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: "nope",
+      }),
+    ).toThrow("params must be an object or array");
+    expect(() =>
+      assertJsonRpcMessage({ jsonrpc: "2.0", id: 1, result: 1, error: { code: 1, message: "x" } }),
+    ).toThrow("exactly one of result or error");
+    expect(() =>
+      assertJsonRpcMessage({ jsonrpc: "2.0", id: 1, error: { code: "x", message: "nope" } }),
+    ).toThrow("numeric code and string message");
   });
 });
 
