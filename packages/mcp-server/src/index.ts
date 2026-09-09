@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { DEVICE_PASS_WORKFLOW } from "@pickforge/lab-core";
+import { DEVICE_PASS_SUMMARY } from "@pickforge/lab-core";
 import { McpServer } from "@modelcontextprotocol/server";
 import { resolveContext, type CreateMcpServerOptions } from "./context.js";
 import { registerPrompts } from "./prompts.js";
@@ -24,7 +24,7 @@ export function createMcpServer(
   const ctx = resolveContext(opts);
   const server = new McpServer(
     { name: "pickforge-lab", version },
-    { instructions: DEVICE_PASS_WORKFLOW, inputRequired: { roundTimeoutMs: 60_000 } },
+    { instructions: DEVICE_PASS_SUMMARY, inputRequired: { roundTimeoutMs: 60_000 } },
   );
   registerSessionTools(server, ctx);
   registerDesktopTools(server, ctx);

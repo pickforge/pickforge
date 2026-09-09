@@ -32,7 +32,6 @@ it.each([
   expect(process.exitCode ?? 0).toBe(0);
   const workflowPath = path.join(home, "state", "agents", "device-pass.md");
   expect(output).toHaveBeenCalledWith(`Acceptance workflow: ${workflowPath}`);
-  expect(fs.statSync(workflowPath).mode & 0o777).toBe(0o600);
   expect(fs.readFileSync(workflowPath, "utf8")).toContain(
     "Pass is refused without a successful interaction and an inspected screenshot.",
   );

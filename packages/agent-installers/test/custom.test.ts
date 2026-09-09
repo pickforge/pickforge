@@ -131,6 +131,17 @@ describe("addCustomAgent / listCustomAgents / removeCustomAgent", () => {
     }
   });
 
+  it("allows a custom agent named after the non-JSON shared files", async () => {
+    const agent = await addCustomAgent(
+      { name: "device-pass", mcpCommand: "node serve.js" },
+      env,
+    );
+    expect(agent.name).toBe("device-pass");
+    expect(
+      (await listCustomAgents(env)).map((entry) => entry.name),
+    ).toContain("device-pass");
+  });
+
   it("refuses to overwrite an existing custom agent without force", async () => {
     await addCustomAgent({ name: "dup", mcpCommand: "one serve" }, env);
     await expect(

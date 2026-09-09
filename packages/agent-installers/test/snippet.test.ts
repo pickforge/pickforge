@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DEVICE_PASS_WORKFLOW } from "@pickforge/lab-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   browserMcpServerEntry,
@@ -104,10 +105,8 @@ describe("writeSharedSnippets", () => {
     expect(snippets.devicePassPath).toBe(
       path.join(tmpDir, "state", "agents", "device-pass.md"),
     );
-    expect(fs.statSync(snippets.devicePassPath).mode & 0o777).toBe(0o600);
     const workflow = fs.readFileSync(snippets.devicePassPath, "utf8");
-    expect(workflow).toContain("Pass is refused without a successful interaction and an inspected screenshot.");
-    expect(workflow).toMatchSnapshot();
+    expect(workflow).toBe(DEVICE_PASS_WORKFLOW);
     expect(snippets.jsonPath).toBe(
       path.join(tmpDir, "state", "agents", "pickforge-mcp.json"),
     );

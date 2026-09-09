@@ -1,4 +1,4 @@
-import { DEVICE_PASS_WORKFLOW } from "@pickforge/lab-core";
+import { DEVICE_PASS_SUMMARY, DEVICE_PASS_WORKFLOW } from "@pickforge/lab-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   connectLab,
@@ -64,11 +64,13 @@ describe("prompts", () => {
     ).toContain("appCommand");
   });
 
-  it("delivers acceptance instructions during initialization", () => {
+  it("delivers short acceptance instructions during initialization", () => {
     const instructions = lab.client.getInstructions();
-    expect(instructions).toBe(DEVICE_PASS_WORKFLOW);
-    expect(instructions).toContain("Pass is refused without a successful interaction and an inspected screenshot.");
-    expect(instructions).toContain("outside the repository, never in the project repository");
+    expect(instructions).toBe(DEVICE_PASS_SUMMARY);
+    expect(instructions).toContain("Pass is refused without a successful interaction and an inspected screenshot");
+    expect(instructions).toContain("evidence_outcome");
+    expect(instructions).toContain("device_pass");
+    expect(instructions).not.toBe(DEVICE_PASS_WORKFLOW);
   });
 
   it("renders the device pass with its arguments as a user message", async () => {

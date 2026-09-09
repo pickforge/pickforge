@@ -298,7 +298,7 @@ export {
 export { recordEvidenceOutcome, isOutcomeRecord, EvidenceOutcomeError, type EvidenceOutcomeInput, type EvidenceOutcomeRecord } from "./evidence-outcome.js";
 export type { EvidenceDevice } from "./run.js";
 
-export { DEVICE_PASS_WORKFLOW } from "./acceptance-workflow.js";
+export { DEVICE_PASS_SUMMARY, DEVICE_PASS_WORKFLOW } from "./acceptance-workflow.js";
 export {
   readRustEvidenceRun,
   listRustEvidenceRuns,

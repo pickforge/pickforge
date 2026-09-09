@@ -118,9 +118,6 @@ export async function writeSharedSnippets(
   await fs.promises.writeFile(jsonPath, renderJsonSnippet(), "utf8");
   await fs.promises.writeFile(tomlPath, renderTomlSnippet(), "utf8");
   const devicePassPath = path.join(dir, SHARED_SNIPPET_BASENAMES[2]);
-  await fs.promises.writeFile(devicePassPath, DEVICE_PASS_WORKFLOW, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
+  await fs.promises.writeFile(devicePassPath, DEVICE_PASS_WORKFLOW, "utf8");
   return { jsonPath, tomlPath, devicePassPath };
 }
