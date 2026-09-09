@@ -30,9 +30,8 @@ The stable npm package installs the TypeScript lab commands without the Rust CLI
 npm install -g pickforge
 ```
 
-Use the installer above for the Rust CLI as well. It installs the release
-channel that matches this version of the docs and downloads the matching Rust
-release.
+Use the installer above for the Rust CLI as well. It installs the stable
+`pickforge` release and downloads the matching Rust release.
 
 The installer adds three commands side by side: `pickforge` (Rust),
 `pickforge-lab` (TypeScript lab CLI), and `pickforge-mcp` (MCP stdio server).

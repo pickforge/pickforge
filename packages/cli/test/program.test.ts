@@ -5,7 +5,7 @@ describe("pickforge", () => {
   it("builds the pickforge-lab program", () => {
     const program = buildProgram();
     expect(program.name()).toBe("pickforge-lab");
-    expect(program.version()).toBe("0.4.0-beta.1");
+    expect(program.version()).toBe("0.4.0");
   });
 
   it("prints the stable support boundaries in help", () => {
