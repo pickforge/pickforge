@@ -366,6 +366,11 @@ describe("hosted CI prerequisites", () => {
 describe("startVnc startup supervision", () => {
   const dyingBin = path.join(tmpRoot, "fake-vnc-dying");
   const listeningBin = path.join(tmpRoot, "fake-vnc-listening");
+  // Below the kernel's local port range (32768-60999 by default), so no
+  // unrelated process on a busy runner can be handed these ports while the
+  // test runs and make the fake server fail to bind.
+  const DYING_VNC_PORT = 21_791;
+  const LISTENING_VNC_PORT = 21_792;
 
   beforeAll(() => {
     writeExecutable(
@@ -374,12 +379,20 @@ describe("startVnc startup supervision", () => {
     );
     const serverJs = path.join(listeningBin, "fake-vnc-server.cjs");
     fs.mkdirSync(listeningBin, { recursive: true });
+    // The fake must never exit on its own: startVnc reports any death before
+    // the port listens as "x11vnc exited during startup", which would read as
+    // a supervision bug rather than as the fake losing a bind. Retrying keeps
+    // a lost bind visible as a startup timeout with the reason in the log.
     fs.writeFileSync(
       serverJs,
       'const net = require("node:net");\n' +
         'const idx = process.argv.indexOf("-rfbport");\n' +
         "const port = Number(process.argv[idx + 1]);\n" +
         "const server = net.createServer(() => {});\n" +
+        'server.on("error", (error) => {\n' +
+        '  console.error("fake x11vnc bind failed: " + error.message);\n' +
+        '  setTimeout(() => server.listen(port, "127.0.0.1"), 50);\n' +
+        "});\n" +
         'server.listen(port, "127.0.0.1");\n',
     );
     writeExecutable(
@@ -402,7 +415,7 @@ describe("startVnc startup supervision", () => {
     await expect(
       startVnc({
         display: DEAD_DISPLAY,
-        port: 56_791,
+        port: DYING_VNC_PORT,
         logDir: path.join(tmpRoot, "vnc-dying"),
         env: { PATH: dyingBin },
       }),
@@ -412,12 +425,12 @@ describe("startVnc startup supervision", () => {
   it("spawns the detected binary and waits for its port to listen", async () => {
     const handle = await startVnc({
       display: DEAD_DISPLAY,
-      port: 56_792,
+      port: LISTENING_VNC_PORT,
       logDir: path.join(tmpRoot, "vnc-listening"),
       env: { PATH: listeningBin },
     });
     try {
-      expect(handle.port).toBe(56_792);
+      expect(handle.port).toBe(LISTENING_VNC_PORT);
       expect(isPidAlive(handle.pid)).toBe(true);
     } finally {
       await stopPid(handle.pid);

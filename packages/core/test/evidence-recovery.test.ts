@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { appendAction, beginEvidenceRun, activePointerPath } from "../src/evidence.js";
-import { finalizeOrphanedEvidenceRuns } from "../src/evidence-recovery.js";
+import { finalizeOrphanedEvidenceRuns, type EvidenceRecoveryResult } from "../src/evidence-recovery.js";
 import { createRun, type RunManifest } from "../src/run.js";
 import { DirHandle, RunStorageAccessError } from "../src/dir-handle.js";
 import { openExistingRunsRootDir } from "../src/run-root.js";
@@ -297,14 +297,40 @@ describe("explicit evidence recovery", () => {
     expect(await fs.promises.readFile(path.join(run.dir, "actions.jsonl"))).toEqual(before);
   });
 
+  // A recovery process classifies a run's manifest before it takes that run's
+  // journal lock. A peer that wins the lock replaces manifest.json by rename,
+  // so the loser's already-open descriptor points at an unlinked inode and the
+  // run is reported as "invalid evidence manifest". That is a legal
+  // serialization of two concurrent recoveries, not disagreement, so the fixed
+  // outcome is the recovered state rather than each process's own view of it:
+  // whoever recovered the run recovered exactly the same run, and the run ends
+  // up recovered once, with one index and no duplicated artifacts.
   it("serializes concurrent recovery processes to the same reports and index", async () => {
     const run = await seed();
+    const runsRoot = path.dirname(run.dir);
     const results = await Promise.all(Array.from({ length: 4 }, () => subprocess("recover")));
-    for (const result of results) {
+    const outcomes = results.map((result) => {
       expect(result.code).toBe(0);
-      expect(JSON.parse(result.stdout)).toEqual(JSON.parse(results[0]!.stdout));
+      return JSON.parse(result.stdout) as EvidenceRecoveryResult;
+    });
+    const recovered = outcomes.filter((outcome) => outcome.sessions.length > 0);
+    expect(recovered.length).toBeGreaterThan(0);
+    for (const outcome of recovered) {
+      expect(outcome).toEqual({
+        sessions: [{
+          sessionId: "brow-synthetic",
+          index: path.join(runsRoot, "session-brow-synthetic.html"),
+          runs: [{ runId: run.runId, status: "orphaned", actions: 1, journal: "complete" }],
+        }],
+        skipped: [],
+      });
+    }
+    for (const outcome of outcomes.filter((candidate) => candidate.sessions.length === 0)) {
+      expect(outcome.skipped).toEqual(skipped(run.runId, "invalid evidence manifest"));
     }
     expect((await manifest(run.dir)).artifacts).toHaveLength(3);
+    expect((await fs.promises.readdir(runsRoot)).filter((name) => name.startsWith("session-")))
+      .toEqual(["session-brow-synthetic.html"]);
   });
 
   it("skips a live owner process, then recovers after it is killed", async () => {
