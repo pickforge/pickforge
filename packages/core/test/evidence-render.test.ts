@@ -131,6 +131,24 @@ describe("renderRunReport", () => {
     expect(report).toContain('Target: {"a":"token=[REDACTED]","z":1}');
     expect(report).not.toContain(TOKEN);
   });
+
+  it("numbers steps without a gap when an outcome is recorded mid-run", () => {
+    const lines = renderRunReport(evidenceManifest(), "/tmp/evidence", [
+      action({ actionId: "first", startedAt: "2026-07-13T12:00:01.000Z" }),
+      outcome({ recordedAt: "2026-07-13T12:00:02.000Z" }),
+      action({
+        actionId: "second",
+        tool: "desktop_type",
+        startedAt: "2026-07-13T12:00:03.000Z",
+      }),
+    ]);
+    const report = lines.join("\n");
+
+    expect(report).toContain("## Actions (2)");
+    expect(report).toContain("Step 2 — mcp / desktop_type");
+    expect(report).not.toContain("Step 3");
+    expect(report).toContain("- Outcome: pass; Checkout; 1 inspected screenshot(s)");
+  });
 });
 
 describe("renderEvidenceHtml", () => {
