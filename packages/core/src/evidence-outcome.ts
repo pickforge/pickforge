@@ -1,6 +1,5 @@
 import type { DirHandle } from "./dir-handle.js";
-import { EVIDENCE_ACTION_LOG } from "./run.js";
-import { appendAction, isEvidenceRun, isTruncationRecord, parseActionsJournal, readActionsIn, readEvidenceManifestIn, type EvidenceRecord } from "./evidence.js";
+import { appendAction, findLastActionIn, isEvidenceRun, isTruncationRecord, readActionsIn, readEvidenceManifestIn, type EvidenceRecord } from "./evidence.js";
 import { redactSecrets } from "./redact.js";
 import { writeEvidenceReport } from "./evidence-render.js";
 import { adoptRunIn } from "./run.js";
@@ -158,13 +157,18 @@ export function latestOutcome(records: readonly EvidenceRecord[]): EvidenceOutco
   return records.filter(isOutcomeRecord).at(-1) ?? null;
 }
 
-/** Latest recorded outcome status for a catalog entry, or null when absent or unreadable. */
+/**
+ * Latest recorded outcome status for a catalog entry, or null when absent or
+ * unreadable. The journal's tail is scanned backwards rather than parsed in
+ * full, so listing many runs does not read every line of every journal. The
+ * catalog opens the run directory, so a root or run directory replaced after
+ * the listing reports nothing instead of another run's outcome.
+ */
 export async function latestOutcomeStatus(catalog: RunCatalog, entry: RunCatalogEntry): Promise<EvidenceOutcomeRecord["status"] | null> {
   if (!isEvidenceRun(entry.manifest) || entry.manifest.evidenceRecovery === "corrupt") return null;
   try {
-    const raw = await catalog.readRootTextIfPresent(entry, EVIDENCE_ACTION_LOG);
-    if (raw === undefined) return null;
-    return latestOutcome(parseActionsJournal(raw, entry.dir))?.status ?? null;
+    const record = await catalog.withRunDir(entry, (dir) => findLastActionIn(dir, isOutcomeRecord));
+    return record?.status ?? null;
   } catch {
     return null;
   }

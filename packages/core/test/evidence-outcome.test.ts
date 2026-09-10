@@ -1,11 +1,14 @@
 import fs from "node:fs";
+import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { appendAction, beginEvidenceRun, parseActionsJournal, parseRecoverableActionsJournal, readActions } from "../src/evidence.js";
 import { createRun, type RunHandle } from "../src/run.js";
 import { createSession } from "../src/session.js";
-import { EvidenceOutcomeError, recordEvidenceOutcome, sanitizeOutcome, type EvidenceOutcomeInput } from "../src/evidence-outcome.js";
+import { EvidenceOutcomeError, latestOutcome, latestOutcomeStatus, recordEvidenceOutcome, sanitizeOutcome, type EvidenceOutcomeInput } from "../src/evidence-outcome.js";
+import { openRunCatalog } from "../src/run-catalog.js";
+import { listArtifactRuns } from "../src/rust-evidence.js";
 import { renderRunReport } from "../src/evidence-render.js";
 
 let project: string;
@@ -164,4 +167,94 @@ it("enforces sanitization and acceptance even through direct journal appends", a
   await expect(appendAction(run, { ...input, kind: "outcome", recordedAt: new Date().toISOString() })).rejects.toThrow(/Recording alone/);
   await appendAction(run, { ...input, kind: "outcome", recordedAt: new Date().toISOString(), status: "blocked", notes: `token=${secret}` });
   expect(JSON.stringify(await readActions(run.dir))).not.toContain(secret);
+});
+
+/** Latest outcome status the catalog reports for a run, through the tail scan. */
+async function catalogStatus(runId = run.runId): Promise<string | null> {
+  const catalog = await openRunCatalog(project);
+  const entry = (await catalog.list()).find((candidate) => candidate.manifest.runId === runId);
+  return latestOutcomeStatus(catalog, entry!);
+}
+
+/** One well-formed action line padded close to the per-record cap. */
+function paddedActionLine(): string {
+  return `${JSON.stringify({
+    actionId: "pad", source: "mcp", tool: "desktop_click", status: "ok",
+    startedAt: "2026-09-09T12:00:00Z", error: "p".repeat(60_000),
+  })}\n`;
+}
+
+async function appendRaw(text: string): Promise<void> {
+  await fs.promises.appendFile(path.join(run.dir, "actions.jsonl"), text);
+}
+
+it("reads the latest outcome from the tail and ignores torn or corrupt tail lines", async () => {
+  expect(await catalogStatus()).toBeNull();
+  await interaction();
+  await recordEvidenceOutcome(project, run.runId, { ...input, status: "partial" });
+  await recordEvidenceOutcome(project, run.runId, { ...input, status: "blocked", inspectedScreenshots: [] });
+  expect(await catalogStatus()).toBe("blocked");
+  // An unterminated final record is dropped, exactly as a full read drops it.
+  await appendRaw(JSON.stringify({ ...input, kind: "outcome", status: "fail", recordedAt: new Date().toISOString() }));
+  expect(await catalogStatus()).toBe("blocked");
+  // A complete line a full read would reject keeps the corrupt-journal rule.
+  await appendRaw("\n{ not json\n");
+  expect(await catalogStatus()).toBeNull();
+  const legacy = await createRun(project, "legacy");
+  expect(await catalogStatus(legacy.runId)).toBeNull();
+});
+
+it("bounds the tail scan on a journal of near-cap lines", async () => {
+  await interaction();
+  await appendRaw(paddedActionLine().repeat(80));
+  await recordEvidenceOutcome(project, run.runId, input);
+  const journal = await fs.promises.stat(path.join(run.dir, "actions.jsonl"));
+  expect(journal.size).toBeGreaterThan(4 * 1024 * 1024);
+  expect(await catalogStatus()).toBe("pass");
+  expect((await listArtifactRuns(await openRunCatalog(project))).find((entry) => entry.runId === run.runId))
+    .toMatchObject({ outcome: "pass" });
+  // The full parse agrees; the tail scan just does not have to read that far.
+  expect(latestOutcome(await readActions(run.dir))?.status).toBe("pass");
+  // Still found when several near-cap lines sit between the outcome and the end.
+  await appendRaw(paddedActionLine().repeat(4));
+  expect(await catalogStatus()).toBe("pass");
+});
+
+it("reports no outcome once the byte budget is spent before reaching it", async () => {
+  await interaction();
+  await recordEvidenceOutcome(project, run.runId, input);
+  expect(await catalogStatus()).toBe("pass");
+  await appendRaw(paddedActionLine().repeat(40));
+  expect(await catalogStatus()).toBeNull();
+});
+
+it("reports no outcome when the scanned tail is corrupt before the outcome", async () => {
+  await appendRaw("{ not json\n");
+  await interaction();
+  await recordEvidenceOutcome(project, run.runId, { ...input, status: "blocked", inspectedScreenshots: [] });
+  await expect(readActions(run.dir)).rejects.toThrow(/Corrupt evidence journal/);
+  expect(await catalogStatus()).toBeNull();
+});
+
+it("never reads past the byte budget, so far older corruption is not seen", async () => {
+  await appendRaw("{ not json\n");
+  // More than the 1 MiB budget of padding, so the corrupt head is out of reach.
+  await appendRaw(paddedActionLine().repeat(24));
+  await recordEvidenceOutcome(project, run.runId, { ...input, status: "blocked", inspectedScreenshots: [] });
+  const journal = await fs.promises.stat(path.join(run.dir, "actions.jsonl"));
+  expect(journal.size).toBeGreaterThan(1024 * 1024);
+  // A full read of this journal fails, so a status here proves the scan stopped
+  // well before the file start: it read the budget, not the 1.4 MiB journal.
+  await expect(readActions(run.dir)).rejects.toThrow(/Corrupt evidence journal/);
+  expect(await catalogStatus()).toBe("blocked");
+});
+
+it("reports no outcome for a journal replaced by a fifo, without waiting for a writer", async () => {
+  await interaction();
+  await recordEvidenceOutcome(project, run.runId, { ...input, status: "blocked", inspectedScreenshots: [] });
+  const journal = path.join(run.dir, "actions.jsonl");
+  await fs.promises.rm(journal);
+  expect(spawnSync("mkfifo", ["--", journal]).status).toBe(0);
+  // No writer is ever opened: a blocking open would hang the whole listing.
+  expect(await catalogStatus()).toBeNull();
 });

@@ -10,6 +10,9 @@
   search. Filters, inspection and navigation work with scripts blocked;
   text search and arrow-key browsing come from one inline script, pinned in
   the report CSP by hash.
+- Listing artifact runs now finds each run's latest outcome by reading the end
+  of its action journal instead of parsing every line, so only the last 1 MiB
+  of a journal decides the outcome a listing shows.
 
 ## Validation
 
