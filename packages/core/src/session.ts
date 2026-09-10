@@ -51,6 +51,12 @@ export interface BrowserSessionInfo {
   profileMode: "ephemeral";
   profileDir: string;
   cdpPort?: number;
+  /**
+   * Browser build string as reported by the DevTools endpoint, e.g.
+   * `Chrome/131.0.6778.85`. Captured once at session start and advisory: it is
+   * absent when the endpoint could not be read.
+   */
+  browserVersion?: string;
 }
 
 export interface SessionRecord {
