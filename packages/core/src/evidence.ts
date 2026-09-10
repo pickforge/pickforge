@@ -862,6 +862,14 @@ async function sessionDevice(sessionId: string, env: EnvLike): Promise<RunManife
   const device: NonNullable<RunManifest["device"]> = { kind: "desktop" };
   const { width, height } = session.desktop ?? {};
   if (width !== undefined && height !== undefined) device.viewport = { width, height };
+  // A browser session additionally knows which browser build it drives and
+  // which host platform it runs on. A pure desktop session has neither, and a
+  // browser build that could not be read stays absent rather than guessed.
+  if (session.type === "browser") {
+    const browser = session.browser?.browserVersion;
+    if (browser !== undefined && browser !== "") device.browser = browser;
+    device.platform = `${process.platform} ${process.arch}`;
+  }
   return device;
 }
 

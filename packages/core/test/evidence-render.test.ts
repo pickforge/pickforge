@@ -438,6 +438,26 @@ describe("evidence report device, outcome, and filters", () => {
     expect(html).toContain("<dt>Platform</dt><dd>linux</dd>");
   });
 
+  it("shows a browser session's build and platform in the desktop lens", () => {
+    const html = renderEvidenceHtml(
+      evidenceManifest({
+        device: {
+          kind: "desktop",
+          viewport: { width: 1280, height: 720 },
+          browser: "Chrome/131.0.6778.85",
+          platform: "linux x64",
+        },
+      }),
+      [action({ tool: "browser_click", artifacts: ["screenshots/good.png"] })],
+      new Set(["screenshots/good.png"]),
+    );
+
+    expect(html).toContain("<dt>Browser</dt><dd>Chrome/131.0.6778.85</dd>");
+    expect(html).toContain("<dt>Platform</dt><dd>linux x64</dd>");
+    expect(html).toContain('data-lens="desktop"');
+    expect(html).toContain('Desktop<span class="count">1</span>');
+  });
+
   it("says plainly that recording alone is not a pass", () => {
     const html = renderEvidenceHtml(evidenceManifest(), [action()]);
 

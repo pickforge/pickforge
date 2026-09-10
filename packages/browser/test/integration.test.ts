@@ -146,6 +146,11 @@ describe.skipIf(!ready)("real headed Chrome under Xvfb", () => {
         expect(raw).not.toContain("/devtools/browser/");
         expect(raw).not.toContain("webSocketDebuggerUrl");
 
+        // The browser build is captured once at startup so evidence runs can
+        // record it without touching the network.
+        const record = await getSession(session.id, registryEnv);
+        expect(record?.browser?.browserVersion).toMatch(/^[\w.]+\/[\d.]+$/);
+
         // The planted secret must not be in the browser's own environment,
         // while the isolated display and HOME must be.
         const environ = fs.readFileSync(

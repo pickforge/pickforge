@@ -11,6 +11,7 @@ import {
   readDevToolsActivePort,
   waitForDevToolsPort,
   probeDevToolsHttp,
+  readDevToolsBrowserVersion,
 } from "../src/devtools.js";
 import { writeFakeChrome } from "./fakes.js";
 
@@ -321,4 +322,76 @@ describe("readiness probing against a real Chrome stand-in", () => {
       chrome.kill("SIGKILL");
     }
   }, 30_000);
+});
+
+describe("readDevToolsBrowserVersion", () => {
+  async function withVersionEndpoint(
+    handler: (response: import("node:http").ServerResponse) => void,
+    check: (port: number) => Promise<void>,
+  ): Promise<void> {
+    const server = createServer((_request, response) => handler(response));
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("Version server did not expose a TCP port");
+    }
+    try {
+      await check(address.port);
+    } finally {
+      const closed = once(server, "close");
+      server.close();
+      await closed;
+    }
+  }
+
+  it("reads the Browser build string from /json/version", async () => {
+    await withVersionEndpoint(
+      (response) =>
+        response
+          .writeHead(200, { "content-type": "application/json" })
+          .end(JSON.stringify({ Browser: " Chrome/131.0.6778.85 " })),
+      async (port) => {
+        expect(await readDevToolsBrowserVersion(port)).toBe(
+          "Chrome/131.0.6778.85",
+        );
+      },
+    );
+  });
+
+  it("returns undefined for a missing, malformed, or oversized value", async () => {
+    const bodies = [
+      JSON.stringify({}),
+      JSON.stringify({ Browser: 7 }),
+      JSON.stringify({ Browser: "   " }),
+      JSON.stringify({ Browser: "Chrome/131<script>" }),
+      JSON.stringify({ Browser: `Chrome/${"9".repeat(200)}` }),
+      "not json",
+    ];
+    for (const body of bodies) {
+      await withVersionEndpoint(
+        (response) => response.writeHead(200).end(body),
+        async (port) => {
+          expect(await readDevToolsBrowserVersion(port)).toBeUndefined();
+        },
+      );
+    }
+  });
+
+  it("returns undefined for a non-200 endpoint and for a dead port", async () => {
+    await withVersionEndpoint(
+      (response) => response.writeHead(500).end("{}"),
+      async (port) => {
+        expect(await readDevToolsBrowserVersion(port)).toBeUndefined();
+      },
+    );
+    let deadPort = 0;
+    await withVersionEndpoint(
+      (response) => response.writeHead(200).end("{}"),
+      async (port) => {
+        deadPort = port;
+      },
+    );
+    expect(await readDevToolsBrowserVersion(deadPort, 200)).toBeUndefined();
+  });
 });

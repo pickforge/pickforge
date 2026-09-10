@@ -86,6 +86,55 @@ export async function probeDevToolsHttp(
   }
 }
 
+/** Longest browser build string we persist; real values are far shorter. */
+const MAX_BROWSER_VERSION_LENGTH = 120;
+/** Conservative shape for a build string such as `Chrome/131.0.6778.85`. */
+const BROWSER_VERSION_PATTERN = /^[\w.+/() -]+$/;
+
+/**
+ * Read the browser build string (the `Browser` field of `/json/version`, e.g.
+ * `Chrome/131.0.6778.85`) from the loopback DevTools endpoint. Advisory: any
+ * failure, or a value that does not look like a build string, returns
+ * `undefined` so the caller records no browser rather than failing.
+ */
+export async function readDevToolsBrowserVersion(
+  port: number,
+  timeoutMs = 500,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  const signals = [AbortSignal.timeout(timeoutMs)];
+  if (signal !== undefined) signals.push(signal);
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/json/version`, {
+      signal: AbortSignal.any(signals),
+      redirect: "manual",
+    });
+    if (response.status !== 200) {
+      await response.body?.cancel();
+      return undefined;
+    }
+    const body: unknown = await response.json();
+    return browserVersionOf(body);
+  } catch {
+    return undefined;
+  }
+}
+
+function browserVersionOf(body: unknown): string | undefined {
+  if (typeof body !== "object" || body === null) return undefined;
+  const raw = (body as { Browser?: unknown }).Browser;
+  if (typeof raw !== "string") return undefined;
+  const version = raw.trim();
+  if (
+    version === "" ||
+    version.length > MAX_BROWSER_VERSION_LENGTH ||
+    !BROWSER_VERSION_PATTERN.test(version)
+  ) {
+    return undefined;
+  }
+  return version;
+}
+
 export interface WaitForDevToolsPortOptions {
   profileDir: string;
   /** Authoritative Chrome daemon log path used for durable diagnostics. */
