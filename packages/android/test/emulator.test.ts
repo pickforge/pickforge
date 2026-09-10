@@ -63,6 +63,19 @@ const BOOTING_ADB_SCRIPT = [
   "exit 0",
 ].join("\n");
 
+/**
+ * An adb that never reports a finished boot. Start failures must be observed
+ * through the emulator process dying, not through a boot that the fake adb
+ * reports at the same moment, so tests that assert a failure use this script.
+ */
+const NEVER_BOOTING_ADB_SCRIPT = [
+  'case "$*" in',
+  "  *getprop*) echo 0 ;;",
+  '  devices) printf "List of devices attached\\n" ;;',
+  "esac",
+  "exit 0",
+].join("\n");
+
 let homeCounter = 0;
 
 function makeRegistryEnv(): EnvLike {
@@ -499,8 +512,12 @@ describe("AVD pre-flight checks", () => {
 
 describe("start failure diagnostics", () => {
   it("classifies an early exit from the log and keeps the tail after the log is gone", async () => {
+    // `waitForBoot` polls the emulator process and `adb getprop` in the same
+    // loop, so an adb that answers "booted" races the fake emulator's exit and
+    // the start can succeed instead of failing. This adb never reports a boot,
+    // which leaves the early exit as the only way out of the loop.
     const sdk = makeFakeSdk(
-      BOOTING_ADB_SCRIPT,
+      NEVER_BOOTING_ADB_SCRIPT,
       [
         "#!/bin/sh",
         'echo "INFO         | Android emulator version 36.5.10.0"',
