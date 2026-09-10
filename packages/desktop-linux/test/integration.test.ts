@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -68,6 +69,21 @@ afterAll(() => {
 function writeExecutable(filePath: string, content: string): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, content, { mode: 0o755 });
+}
+
+/** Whether something accepts a loopback connection on `port` right now. */
+function portAccepts(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: "127.0.0.1", port });
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once("error", () => {
+      socket.destroy();
+      resolve(false);
+    });
+  });
 }
 
 describe("Xvfb startup failure ownership", () => {
@@ -366,39 +382,50 @@ describe("hosted CI prerequisites", () => {
 describe("startVnc startup supervision", () => {
   const dyingBin = path.join(tmpRoot, "fake-vnc-dying");
   const listeningBin = path.join(tmpRoot, "fake-vnc-listening");
+  const delayedBin = path.join(tmpRoot, "fake-vnc-delayed");
   // Below the kernel's local port range (32768-60999 by default), so no
   // unrelated process on a busy runner can be handed these ports while the
   // test runs and make the fake server fail to bind.
   const DYING_VNC_PORT = 21_791;
   const LISTENING_VNC_PORT = 21_792;
+  const BIND_DELAY_MS = 300;
 
-  beforeAll(() => {
-    writeExecutable(
-      path.join(dyingBin, "x11vnc"),
-      '#!/bin/sh\necho "fake x11vnc failure" >&2\nexit 7\n',
-    );
-    const serverJs = path.join(listeningBin, "fake-vnc-server.cjs");
-    fs.mkdirSync(listeningBin, { recursive: true });
-    // The fake must never exit on its own: startVnc reports any death before
-    // the port listens as "x11vnc exited during startup", which would read as
-    // a supervision bug rather than as the fake losing a bind. Retrying keeps
-    // a lost bind visible as a startup timeout with the reason in the log.
+  /**
+   * A fake x11vnc that starts listening `bindDelayMs` after it is spawned. It
+   * never exits on its own, because startVnc reports any death before the port
+   * listens as "x11vnc exited during startup" and that would read as a
+   * supervision bug rather than as the fake losing a bind, so a failed bind is
+   * logged to the x11vnc log and retried instead.
+   */
+  function writeFakeVnc(dir: string, bindDelayMs: number): void {
+    const serverJs = path.join(dir, "fake-vnc-server.cjs");
+    fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
       serverJs,
       'const net = require("node:net");\n' +
         'const idx = process.argv.indexOf("-rfbport");\n' +
         "const port = Number(process.argv[idx + 1]);\n" +
         "const server = net.createServer(() => {});\n" +
+        'const listen = () => server.listen(port, "127.0.0.1");\n' +
         'server.on("error", (error) => {\n' +
         '  console.error("fake x11vnc bind failed: " + error.message);\n' +
-        '  setTimeout(() => server.listen(port, "127.0.0.1"), 50);\n' +
+        "  setTimeout(listen, 50);\n" +
         "});\n" +
-        'server.listen(port, "127.0.0.1");\n',
+        `setTimeout(listen, ${bindDelayMs});\n`,
     );
     writeExecutable(
-      path.join(listeningBin, "x11vnc"),
+      path.join(dir, "x11vnc"),
       `#!/bin/sh\nexec '${process.execPath}' '${serverJs}' "$@"\n`,
     );
+  }
+
+  beforeAll(() => {
+    writeExecutable(
+      path.join(dyingBin, "x11vnc"),
+      '#!/bin/sh\necho "fake x11vnc failure" >&2\nexit 7\n',
+    );
+    writeFakeVnc(listeningBin, 0);
+    writeFakeVnc(delayedBin, BIND_DELAY_MS);
   });
 
   it("reports a missing binary actionably", async () => {
@@ -423,15 +450,18 @@ describe("startVnc startup supervision", () => {
   });
 
   it("spawns the detected binary and waits for its port to listen", async () => {
+    // This fake only binds after a delay, so a supervisor that returned as
+    // soon as the process was spawned would leave nothing to connect to.
     const handle = await startVnc({
       display: DEAD_DISPLAY,
       port: LISTENING_VNC_PORT,
       logDir: path.join(tmpRoot, "vnc-listening"),
-      env: { PATH: listeningBin },
+      env: { PATH: delayedBin },
     });
     try {
       expect(handle.port).toBe(LISTENING_VNC_PORT);
       expect(isPidAlive(handle.pid)).toBe(true);
+      await expect(portAccepts(handle.port)).resolves.toBe(true);
     } finally {
       await stopPid(handle.pid);
     }
