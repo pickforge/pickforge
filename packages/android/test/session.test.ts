@@ -33,6 +33,13 @@ fs.mkdirSync(avdHome, { recursive: true });
 fs.writeFileSync(path.join(avdHome, "pickforge-avd.ini"), "avd.ini.encoding=UTF-8\n");
 const toolEnv: EnvLike = { PATH: "", ANDROID_AVD_HOME: avdHome };
 
+/**
+ * A test-private console-port window, clear of the 5554-5562 ports a real
+ * emulator on this machine would hold and of the window emulator.test.ts
+ * uses. Every explicit port below is derived from this base.
+ */
+const BASE = 5640;
+
 afterAll(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
@@ -57,7 +64,7 @@ function makeFakeSdk(opts: { bootCompleted: string }): string {
       "#!/bin/sh",
       'case "$*" in',
       `  *getprop*) echo ${opts.bootCompleted} ;;`,
-      '  devices) printf "List of devices attached\\nemulator-5554\\tdevice\\n" ;;',
+      `  devices) printf "List of devices attached\\nemulator-${BASE}\\tdevice\\n" ;;`,
       '  *"emu kill"*) exit 0 ;;',
       "esac",
       "exit 0",
@@ -75,15 +82,15 @@ describe("createAndroidSession", () => {
         projectDir,
         registryEnv,
         sdk,
-        port: 5554,
+        port: BASE,
         env: toolEnv,
         bootPollIntervalMs: 20,
         bootTimeoutMs: 5_000,
       });
       try {
         expect(session.avdName).toBe("pickforge-avd");
-        expect(session.serial).toBe("emulator-5554");
-        expect(session.consolePort).toBe(5554);
+        expect(session.serial).toBe(`emulator-${BASE}`);
+        expect(session.consolePort).toBe(BASE);
         expect(isPidAlive(session.emulatorPid)).toBe(true);
         expect(session.logDir).toBe(androidSessionLogDir(session.id, registryEnv));
         expect(fs.existsSync(session.logPath)).toBe(true);
@@ -92,9 +99,9 @@ describe("createAndroidSession", () => {
         expect(record?.status).toBe("running");
         expect(record?.android).toEqual({
           avdName: "pickforge-avd",
-          serial: "emulator-5554",
+          serial: `emulator-${BASE}`,
           emulatorPid: session.emulatorPid,
-          consolePort: 5554,
+          consolePort: BASE,
           bootMode: "unknown",
           readOnly: false,
         });
@@ -119,7 +126,7 @@ describe("createAndroidSession", () => {
       expect(isPidAlive(session.emulatorPid)).toBe(false);
       expect(await getSession(session.id, registryEnv)).toBeUndefined();
       expect(fs.readdirSync(session.logDir).sort()).toEqual(["emulator.log", "stopped.json"]);
-      expect(fs.existsSync(consolePortLockPath(5554, registryEnv))).toBe(false);
+      expect(fs.existsSync(consolePortLockPath(BASE, registryEnv))).toBe(false);
     },
     20_000,
   );
@@ -133,7 +140,7 @@ describe("createAndroidSession", () => {
         projectDir,
         registryEnv: isolatedEnv,
         sdk,
-        port: 5556,
+        port: BASE + 2,
         env: toolEnv,
         bootPollIntervalMs: 20,
         bootTimeoutMs: 200,
@@ -156,8 +163,8 @@ describe("createAndroidSession", () => {
     expect(failure).toMatchObject({
       kind: "boot-timeout",
       avdName: "pickforge-avd",
-      serial: "emulator-5556",
-      consolePort: 5556,
+      serial: `emulator-${BASE + 2}`,
+      consolePort: BASE + 2,
       deviceState: "missing",
     });
     expect(failure.logPath).toBe(
@@ -165,7 +172,7 @@ describe("createAndroidSession", () => {
     );
     expect(Array.isArray(failure.logTail)).toBe(true);
     expect(fs.existsSync(failure.logPath as string)).toBe(true);
-    expect(fs.existsSync(consolePortLockPath(5556, isolatedEnv))).toBe(false);
+    expect(fs.existsSync(consolePortLockPath(BASE + 2, isolatedEnv))).toBe(false);
     expect(fs.existsSync(path.join(androidSessionLogDir(id, isolatedEnv), "permits"))).toBe(false);
     expect(record?.meta?.[REAPER_CLEANUP_PENDING_META_KEY]).toBeUndefined();
   });
@@ -212,7 +219,7 @@ describe("createAndroidSession", () => {
       projectDir,
       registryEnv: isolatedEnv,
       sdk,
-      port: 5560,
+      port: BASE + 6,
       env: toolEnv,
       bootPollIntervalMs: 20,
       bootTimeoutMs: 5_000,
@@ -240,15 +247,17 @@ describe("startEmulator failure detail", () => {
       startEmulator({
         avdName: "pickforge-avd",
         sdk,
-        port: 5558,
+        port: BASE + 4,
         logDir: path.join(tmpRoot, "emu-logs"),
         env: toolEnv,
         registryEnv: failureEnv,
         bootTimeoutMs: 200,
         bootPollIntervalMs: 20,
       }),
-    ).rejects.toThrow(/emulator-5558 did not finish booting[\s\S]*emulator\.log/);
-    expect(fs.existsSync(consolePortLockPath(5558, failureEnv))).toBe(false);
+    ).rejects.toThrow(
+      new RegExp(`emulator-${BASE + 4} did not finish booting[\\s\\S]*emulator\\.log`),
+    );
+    expect(fs.existsSync(consolePortLockPath(BASE + 4, failureEnv))).toBe(false);
   });
 });
 
