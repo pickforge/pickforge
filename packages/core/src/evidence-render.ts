@@ -132,7 +132,7 @@ export function renderRunReport(
 
   const warning = recoveryWarning(manifest, records);
   if (warning !== "") lines.push("", warning);
-  const ordered = sortEvidenceRecords(records);
+  const ordered = timelineRecords(records);
   lines.push("", `## Actions (${ordered.length})`, "");
   if (ordered.length === 0) {
     lines.push("(none)");
@@ -140,7 +140,6 @@ export function renderRunReport(
   }
   ordered.forEach((record, index) => {
     const step = index + 1;
-    if (isOutcomeRecord(record)) return;
     if (isTruncationRecord(record)) {
       lines.push(
         `### Step ${step} — Evidence truncated`,
@@ -214,6 +213,14 @@ function escapeHtml(value: unknown): string {
  * metadata, not steps, so they are partitioned out before step numbering.
  */
 type TimelineRecord = Exclude<EvidenceRecord, EvidenceOutcomeRecord>;
+
+function timelineRecords(records: readonly EvidenceRecord[]): TimelineRecord[] {
+  const timeline = records.filter(
+    (record): record is TimelineRecord => !isOutcomeRecord(record),
+  );
+  // Sorting preserves membership, and `timeline` holds no outcome records.
+  return sortEvidenceRecords(timeline) as TimelineRecord[];
+}
 
 type Lens = "desktop" | "mobile" | "android";
 
@@ -811,11 +818,7 @@ export function renderEvidenceHtml(
   safeScreenshots: ReadonlySet<string> = new Set(),
 ): string {
   const outcomes = sortOutcomes(records.filter(isOutcomeRecord));
-  const timeline = records.filter(
-    (record): record is TimelineRecord => !isOutcomeRecord(record),
-  );
-  // Sorting preserves membership, and `timeline` holds no outcome records.
-  const ordered = sortEvidenceRecords(timeline) as TimelineRecord[];
+  const ordered = timelineRecords(records);
   const fallback = deviceLens(manifest.device);
   const captures = collectCaptures(ordered, safeScreenshots, outcomes, fallback);
   const steps = ordered
