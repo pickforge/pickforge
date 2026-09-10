@@ -74,6 +74,17 @@ export interface EmulatorArgsOptions {
   readOnly?: boolean;
 }
 
+/**
+ * Narrows automatic console-port allocation to a private window. Test-only
+ * seam: production callers omit it and get the defaults below.
+ */
+export interface ConsolePortRange {
+  /** First port tried by automatic allocation (default AUTO_MIN_CONSOLE_PORT). */
+  autoMin?: number;
+  /** Last port tried by automatic allocation (default MAX_CONSOLE_PORT). */
+  max?: number;
+}
+
 export interface StartEmulatorOptions {
   avdName?: string;
   sdk?: string | null;
@@ -86,6 +97,7 @@ export interface StartEmulatorOptions {
   registryEnv?: EnvLike;
   bootTimeoutMs?: number;
   bootPollIntervalMs?: number;
+  portRange?: ConsolePortRange;
   onProgress?: (message: string) => void;
   signal?: AbortSignal;
 }
@@ -391,6 +403,7 @@ interface AllocateConsolePortOptions {
   registryEnv?: EnvLike;
   /** Ports that already failed with a collision during this start. */
   exclude?: ReadonlySet<number>;
+  portRange?: ConsolePortRange;
   onProgress?: (message: string) => void;
 }
 
@@ -430,7 +443,9 @@ async function allocateConsolePort(
     used.add(port);
   }
   const registryEnv = opts.registryEnv ?? process.env;
-  for (let port = AUTO_MIN_CONSOLE_PORT; port <= MAX_CONSOLE_PORT; port += 2) {
+  const autoMin = opts.portRange?.autoMin ?? AUTO_MIN_CONSOLE_PORT;
+  const max = opts.portRange?.max ?? MAX_CONSOLE_PORT;
+  for (let port = autoMin; port <= max; port += 2) {
     if (used.has(port) || !tryReserveConsolePort(port, registryEnv)) {
       continue;
     }
@@ -443,8 +458,8 @@ async function allocateConsolePort(
     );
   }
   throw new Error(
-    `No free emulator console port between ${AUTO_MIN_CONSOLE_PORT} and ` +
-      `${MAX_CONSOLE_PORT} for automatic allocation`,
+    `No free emulator console port between ${autoMin} and ` +
+      `${max} for automatic allocation`,
   );
 }
 
@@ -542,6 +557,7 @@ async function acquireConsolePort(
       env: opts.env,
       registryEnv: ctx.registryEnv,
       exclude,
+      portRange: opts.portRange,
       onProgress: opts.onProgress,
     });
   }
