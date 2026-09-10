@@ -136,6 +136,11 @@ async function finalizeLockedRun(root: DirHandle, dir: DirHandle): Promise<Recov
     }
     throw error;
   }
+  // A peer may have finalized this run while we waited for the lock; index it
+  // like any already finalized run instead of rewriting its report.
+  if (isReadOnlyRecoveryInput(manifest, await reportIsMissing(dir))) {
+    return indexReadOnlyRun(dir, manifest);
+  }
   if (!safeId(manifest.sessionId) || await recoverySessionMayBeWritingIn(root, manifest.sessionId)) {
     return skipIdentity();
   }

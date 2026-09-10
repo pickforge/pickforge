@@ -1910,13 +1910,25 @@ function validEvidenceManifest(manifest: RunManifest): boolean {
   return validEvidenceManifestFields(manifest) && isEvidenceRun(manifest);
 }
 
-async function parseEvidenceManifestFile(dir: DirHandle): Promise<RunManifest> {
-  const handle = await dir.openFile(
+function openEvidenceManifestFile(dir: DirHandle): Promise<fs.promises.FileHandle> {
+  return dir.openFile(
     "manifest.json",
     fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
   );
+}
+
+async function parseEvidenceManifestFile(dir: DirHandle): Promise<RunManifest> {
+  let handle = await openEvidenceManifestFile(dir);
   try {
-    const stat = await handle.stat();
+    let stat = await handle.stat();
+    if (stat.isFile() && stat.nlink === 0) {
+      // A peer replaced manifest.json by rename after we opened it, so this
+      // descriptor holds the unlinked inode. Reopen the name once; a hard link
+      // or a non-regular file still fails the check below.
+      await handle.close();
+      handle = await openEvidenceManifestFile(dir);
+      stat = await handle.stat();
+    }
     if (!isSingletonRegularFile(stat)) {
       throw new RunStorageAccessError(`Unsafe evidence manifest in ${dir.dir}`);
     }

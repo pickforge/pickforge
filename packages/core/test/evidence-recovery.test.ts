@@ -253,6 +253,51 @@ describe("explicit evidence recovery", () => {
     expect(fs.existsSync(path.join(run.dir, "report.html"))).toBe(false);
   });
 
+  it("re-reads a manifest that a peer replaced while it was open", async () => {
+    const run = await seed();
+    const file = path.join(run.dir, "manifest.json");
+    const peer = { ...(await manifest(run.dir)), status: "completed", evidenceRecovery: "complete" };
+    const openFile = DirHandle.prototype.openFile;
+    let replaced = false;
+    vi.spyOn(DirHandle.prototype, "openFile").mockImplementation(async function (
+      this: DirHandle,
+      name: string,
+      flags: number | string,
+      mode?: number,
+    ) {
+      const handle = await openFile.call(this, name, flags, mode);
+      // Replace manifest.json by rename exactly between open and stat, the way
+      // a peer recovery that won the journal lock does.
+      if (!replaced && name === "manifest.json") {
+        replaced = true;
+        const staged = path.join(run.dir, "manifest.staged.json");
+        await fs.promises.writeFile(staged, `${JSON.stringify(peer, null, 2)}\n`);
+        await fs.promises.rename(staged, file);
+        await fs.promises.writeFile(path.join(run.dir, "report.html"), "<html>peer</html>");
+      }
+      return handle;
+    });
+    expect(await finalizeOrphanedEvidenceRuns(project)).toMatchObject({
+      sessions: [{
+        sessionId: "brow-synthetic",
+        runs: [{ runId: run.runId, status: "completed", actions: 1, journal: "complete" }],
+      }],
+      skipped: [],
+    });
+    expect(replaced).toBe(true);
+    expect(await manifest(run.dir)).toEqual(peer);
+    expect(await fs.promises.readFile(path.join(run.dir, "report.html"), "utf8")).toBe("<html>peer</html>");
+  });
+
+  it("skips a hard-linked manifest instead of retrying it", async () => {
+    const run = await seed();
+    await fs.promises.link(path.join(run.dir, "manifest.json"), path.join(run.dir, "manifest-link.json"));
+    expect(await finalizeOrphanedEvidenceRuns(project)).toEqual({
+      sessions: [], skipped: skipped(run.runId, "invalid evidence manifest"),
+    });
+    expect(fs.existsSync(path.join(run.dir, "report.html"))).toBe(false);
+  });
+
   it("indexes short-lived CLI/MCP owners together without changing any journal or run directory", async () => {
     const runs = [await seed("write", "cli"), await seed("write", "mcp"), await seed("write", "relay")];
     const journals = await Promise.all(runs.map((run) => fs.promises.readFile(path.join(run.dir, "actions.jsonl"))));
@@ -297,14 +342,9 @@ describe("explicit evidence recovery", () => {
     expect(await fs.promises.readFile(path.join(run.dir, "actions.jsonl"))).toEqual(before);
   });
 
-  // Concurrent recovery carries a tolerated product race (#159): a process
-  // classifies a run's manifest before it takes that run's journal lock, and a
-  // peer that wins the lock replaces manifest.json by rename, so the loser's
-  // open descriptor lands on an unlinked inode and the run is reported as an
-  // invalid manifest. Recovering this fixture sequentially never produces that
-  // error, so it is tolerated here only as a transient view: the test pins the
-  // recovered state rather than each process's report of it, then requires a
-  // fresh recovery to find the run valid and to reproduce the same bytes.
+  // A peer that wins the journal lock replaces manifest.json by rename, so a
+  // loser's open descriptor lands on an unlinked inode; the parse reopens the
+  // name once (#159), so every process reports the same recovered state.
   it("serializes concurrent recovery processes to the same reports and index", async () => {
     const run = await seed();
     const runsRoot = path.dirname(run.dir);
@@ -322,12 +362,7 @@ describe("explicit evidence recovery", () => {
       expect(result.code).toBe(0);
       return JSON.parse(result.stdout) as EvidenceRecoveryResult;
     });
-    const recovered = outcomes.filter((outcome) => outcome.sessions.length > 0);
-    expect(recovered.length).toBeGreaterThan(0);
-    for (const outcome of recovered) expect(outcome).toEqual(expected);
-    for (const outcome of outcomes.filter((candidate) => candidate.sessions.length === 0)) {
-      expect(outcome.skipped).toEqual(skipped(run.runId, "invalid evidence manifest"));
-    }
+    for (const outcome of outcomes) expect(outcome).toEqual(expected);
     expect(await manifest(run.dir)).toMatchObject({
       runId: run.runId, sessionId: "brow-synthetic", status: "orphaned", evidenceRecovery: "complete",
     });
