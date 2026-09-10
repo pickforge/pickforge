@@ -2128,6 +2128,137 @@ export async function readActionsIn(
   }
 }
 
+/** Bytes read per step when scanning a journal backwards. */
+const JOURNAL_TAIL_CHUNK_BYTES = EVIDENCE_MAX_LINE_BYTES;
+/** Bytes one backward scan may read before giving up, so a listing stays bounded. */
+const JOURNAL_TAIL_MAX_BYTES = 16 * EVIDENCE_MAX_LINE_BYTES;
+
+/** Read up to `length` bytes at `position`, tolerating short reads. */
+async function readJournalChunk(
+  handle: fs.promises.FileHandle,
+  position: number,
+  length: number,
+): Promise<Buffer> {
+  const buffer = Buffer.alloc(length);
+  let filled = 0;
+  while (filled < length) {
+    const { bytesRead } = await handle.read(
+      buffer,
+      filled,
+      length - filled,
+      position + filled,
+    );
+    if (bytesRead === 0) break;
+    filled += bytesRead;
+  }
+  return buffer.subarray(0, filled);
+}
+
+/**
+ * Split a backwards window into the fragment still open on its left (it
+ * continues into the bytes before this window) and the complete lines after it.
+ * Splitting on the byte, not the decoded string, keeps a multi-byte character
+ * that straddles a chunk boundary intact.
+ */
+function splitJournalWindow(window: Buffer): { carry: Buffer; lines: string[] } {
+  const first = window.indexOf(0x0a);
+  if (first < 0) return { carry: window, lines: [] };
+  return {
+    carry: window.subarray(0, first),
+    lines: window.subarray(first + 1).toString("utf8").split("\n"),
+  };
+}
+
+/** Outcome of scanning one window: a hit, or the corruption that stopped it. */
+type TailHit = { record: EvidenceRecord } | { corrupt: true };
+
+/**
+ * Last line of the window that parses as a record `match` accepts. A line a
+ * full read would reject makes the journal corrupt, which stops the scan, so
+ * a corrupt journal still reports nothing rather than an older record.
+ */
+function lastMatchingLine(
+  lines: readonly string[],
+  match: (record: EvidenceRecord) => boolean,
+): TailHit | undefined {
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const parsed = parseJournalSegment(lines[index]!, index + 1);
+    if (!parsed.ok) return { corrupt: true };
+    if (parsed.record !== undefined && match(parsed.record)) {
+      return { record: parsed.record };
+    }
+  }
+  return undefined;
+}
+
+async function scanJournalTail(
+  handle: fs.promises.FileHandle,
+  size: number,
+  match: (record: EvidenceRecord) => boolean,
+): Promise<EvidenceRecord | undefined> {
+  let end = size;
+  let carry: Buffer = Buffer.alloc(0);
+  // The bytes after the final newline are either empty or a torn record, and a
+  // full read drops both, so the rightmost line of the first window goes too.
+  let dropTail = true;
+  let budget = JOURNAL_TAIL_MAX_BYTES;
+  while (end > 0 && budget > 0) {
+    const length = Math.min(JOURNAL_TAIL_CHUNK_BYTES, end, budget);
+    const start = end - length;
+    budget -= length;
+    end = start;
+    const window = splitJournalWindow(
+      Buffer.concat([await readJournalChunk(handle, start, length), carry]),
+    );
+    const lines = window.lines;
+    if (dropTail && lines.length > 0) {
+      lines.pop();
+      dropTail = false;
+    }
+    // At the file start the leading fragment is a whole line, unless the file
+    // never had a newline and that fragment is the torn tail itself.
+    if (start === 0 && !dropTail) lines.unshift(window.carry.toString("utf8"));
+    const hit = lastMatchingLine(lines, match);
+    if (hit !== undefined) return "corrupt" in hit ? undefined : hit.record;
+    carry = window.carry;
+  }
+  return undefined;
+}
+
+/**
+ * Last journal record `match` accepts, found by reading the journal's tail
+ * backwards in bounded chunks rather than parsing every line. Line validation
+ * is the one a full read uses: a torn final line is ignored, and a line a full
+ * read would reject makes the journal corrupt, which reports nothing. The scan
+ * stops at the file start or once `JOURNAL_TAIL_MAX_BYTES` have been read,
+ * which keeps a listing of many runs bounded; a record buried deeper than that
+ * is reported as absent.
+ */
+export async function findLastActionIn<T extends EvidenceRecord>(
+  runDir: DirHandle,
+  match: (record: EvidenceRecord) => record is T,
+): Promise<T | undefined> {
+  let handle: fs.promises.FileHandle;
+  try {
+    handle = await runDir.openFile(
+      EVIDENCE_ACTION_LOG,
+      fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) {
+      throw new Error(`Unsafe evidence journal in ${runDir.dir}: not a regular file`);
+    }
+    return (await scanJournalTail(handle, stat.size, match)) as T | undefined;
+  } finally {
+    await handle.close();
+  }
+}
+
 /**
  * Read the run's action journal deterministically. Records are returned in file
  * (append) order. A missing/empty journal yields `[]`. Only a torn final line
