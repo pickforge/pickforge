@@ -160,7 +160,10 @@ async function recoverRun(
   if (inspected.kind === "invalid") {
     return { kind: "skip", reason: "invalid evidence manifest" };
   }
-  if (isReadOnlyRecoveryInput(inspected.manifest, await reportIsMissing(dir))) {
+  // A peer recovery renames manifest.json more than once under the journal
+  // lock, so a reader can miss it repeatedly out here; take the lock and read
+  // what that peer left instead of calling the run invalid.
+  if (inspected.kind === "usable" && isReadOnlyRecoveryInput(inspected.manifest, await reportIsMissing(dir))) {
     return indexReadOnlyRun(dir, inspected.manifest);
   }
   return withJournalLock(dir, () => finalizeLockedRun(root, dir));

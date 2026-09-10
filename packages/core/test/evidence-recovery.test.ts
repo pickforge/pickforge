@@ -267,7 +267,8 @@ describe("explicit evidence recovery", () => {
     ) {
       const handle = await openFile.call(this, name, flags, mode);
       // Replace manifest.json by rename exactly between open and stat, the way
-      // a peer recovery that won the journal lock does.
+      // a peer recovery that won the journal lock does. The reopened manifest
+      // is finalized, so this run resolves read-only, before any lock.
       if (!replaced && name === "manifest.json") {
         replaced = true;
         const staged = path.join(run.dir, "manifest.staged.json");
@@ -285,6 +286,75 @@ describe("explicit evidence recovery", () => {
       skipped: [],
     });
     expect(replaced).toBe(true);
+    expect(await manifest(run.dir)).toEqual(peer);
+    expect(await fs.promises.readFile(path.join(run.dir, "report.html"), "utf8")).toBe("<html>peer</html>");
+  });
+
+  it("re-reads under the journal lock when a peer replaced the manifest twice", async () => {
+    const run = await seed();
+    const file = path.join(run.dir, "manifest.json");
+    const sealed: RunManifest = { ...(await manifest(run.dir)), status: "orphaned", evidenceRecovery: "complete" };
+    const rename = async () => {
+      const staged = path.join(run.dir, "manifest.staged.json");
+      await fs.promises.writeFile(staged, `${JSON.stringify(sealed, null, 2)}\n`);
+      await fs.promises.rename(staged, file);
+    };
+    const openFile = DirHandle.prototype.openFile;
+    let opens = 0;
+    vi.spyOn(DirHandle.prototype, "openFile").mockImplementation(async function (
+      this: DirHandle,
+      name: string,
+      flags: number | string,
+      mode?: number,
+    ) {
+      const handle = await openFile.call(this, name, flags, mode);
+      if (name !== "manifest.json") return handle;
+      opens += 1;
+      // A peer holding the lock renames manifest.json twice, to seal it and to
+      // publish it with the report; both land after this reader opened, so the
+      // bounded retry runs out and the run has to be re-read under the lock.
+      if (opens <= 2) await rename();
+      if (opens === 2) await fs.promises.writeFile(path.join(run.dir, "report.html"), "<html>peer</html>");
+      return handle;
+    });
+    expect(await finalizeOrphanedEvidenceRuns(project)).toEqual({
+      sessions: [{
+        sessionId: "brow-synthetic",
+        index: path.join(path.dirname(run.dir), "session-brow-synthetic.html"),
+        runs: [{ runId: run.runId, status: "orphaned", actions: 1, journal: "complete" }],
+      }],
+      skipped: [],
+    });
+    expect(opens).toBeGreaterThan(2);
+    expect(await manifest(run.dir)).toMatchObject({ status: "orphaned", evidenceRecovery: "complete" });
+  });
+
+  it("indexes a run a peer finalized between inspection and the journal lock", async () => {
+    const run = await seed();
+    const file = path.join(run.dir, "manifest.json");
+    const peer: RunManifest = { ...(await manifest(run.dir)), status: "completed" };
+    const openFile = DirHandle.prototype.openFile;
+    let finalized = false;
+    vi.spyOn(DirHandle.prototype, "openFile").mockImplementation(async function (
+      this: DirHandle,
+      name: string,
+      flags: number | string,
+      mode?: number,
+    ) {
+      // The lock is taken after inspection, so a peer finishing in that window
+      // leaves a finalized manifest and report for this process to index.
+      if (!finalized && name === ".evidence-journal.lock") {
+        finalized = true;
+        await fs.promises.writeFile(file, `${JSON.stringify(peer, null, 2)}\n`);
+        await fs.promises.writeFile(path.join(run.dir, "report.html"), "<html>peer</html>");
+      }
+      return openFile.call(this, name, flags, mode);
+    });
+    expect(await finalizeOrphanedEvidenceRuns(project)).toMatchObject({
+      sessions: [{ runs: [{ runId: run.runId, status: "completed", actions: 1, journal: "complete" }] }],
+      skipped: [],
+    });
+    expect(finalized).toBe(true);
     expect(await manifest(run.dir)).toEqual(peer);
     expect(await fs.promises.readFile(path.join(run.dir, "report.html"), "utf8")).toBe("<html>peer</html>");
   });

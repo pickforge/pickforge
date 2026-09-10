@@ -18,7 +18,7 @@
 
 - Concurrent evidence recovery no longer reports a run as an invalid manifest
   when a peer replaced `manifest.json` while it was being read; the read is
-  retried once against the new file and the run is indexed as the peer left it.
+  retried, and the run is reported consistently with the peer's result.
 
 ## Validation
 
