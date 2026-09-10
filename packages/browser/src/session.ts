@@ -41,7 +41,10 @@ import {
   buildBrowserEnv,
   type BrowserRuntimeLayout,
 } from "./env.js";
-import { waitForDevToolsPort } from "./devtools.js";
+import {
+  readDevToolsBrowserVersion,
+  waitForDevToolsPort,
+} from "./devtools.js";
 import { buildSupervisedBrowserCommand } from "./supervisor.js";
 import { asError, sleep } from "./util.js";
 
@@ -440,7 +443,18 @@ async function finishBrowserStartup(
         `check the log at ${browserDaemon.logPath}`,
     );
   }
-  const browser: BrowserSessionInfo = { ...startingBrowser, cdpPort };
+  // Capture the browser build once, while the endpoint is known ready, so run
+  // creation later reads it from the session record without any network call.
+  const browserVersion = await readDevToolsBrowserVersion(
+    cdpPort,
+    undefined,
+    ctx.opts.signal,
+  );
+  const browser: BrowserSessionInfo = {
+    ...startingBrowser,
+    cdpPort,
+    ...(browserVersion === undefined ? {} : { browserVersion }),
+  };
   assertNotAborted(ctx.opts.signal);
   await updateSession(
     ctx.record.id,

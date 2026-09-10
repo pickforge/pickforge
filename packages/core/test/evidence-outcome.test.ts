@@ -39,9 +39,68 @@ it("round trips device schema and derives only known session geometry", async ()
   for (const type of ["desktop", "browser", "android"] as const) {
     const session = await createSession({ type, projectDir: project, desktop: { display: ":99", width: 1280, height: 720 } });
     const { run: derived } = await beginEvidenceRun(project, session.id);
-    expect((await derived.readManifest()).device).toEqual(type === "android" ? { kind: "emulator" } : { kind: "desktop", viewport: { width: 1280, height: 720 } });
+    const desktop = { kind: "desktop", viewport: { width: 1280, height: 720 } };
+    const expected = type === "android"
+      ? { kind: "emulator" }
+      : type === "browser"
+        ? { ...desktop, platform: `${process.platform} ${process.arch}` }
+        : desktop;
+    expect((await derived.readManifest()).device).toEqual(expected);
   }
   expect((await run.readManifest()).device).toBeUndefined();
+});
+
+it("records the browser build of a browser session and leaves desktop runs untouched", async () => {
+  const browserInfo = {
+    browserPid: 4242,
+    browserStartTimeTicks: 7,
+    binaryPath: "/usr/bin/chrome",
+    profileMode: "ephemeral" as const,
+    profileDir: path.join(project, "profile"),
+    cdpPort: 45123,
+  };
+  const withVersion = await createSession({
+    type: "browser",
+    projectDir: project,
+    desktop: { display: ":200", width: 1280, height: 720 },
+    browser: { ...browserInfo, browserVersion: "Chrome/131.0.6778.85" },
+  });
+  const withoutVersion = await createSession({
+    type: "browser",
+    projectDir: project,
+    desktop: { display: ":201", width: 1280, height: 720 },
+    browser: browserInfo,
+  });
+  const pureDesktop = await createSession({
+    type: "desktop",
+    projectDir: project,
+    desktop: { display: ":99", width: 1280, height: 720 },
+  });
+  const platform = `${process.platform} ${process.arch}`;
+
+  const known = await beginEvidenceRun(project, withVersion.id);
+  expect((await known.run.readManifest()).device).toEqual({
+    kind: "desktop",
+    viewport: { width: 1280, height: 720 },
+    browser: "Chrome/131.0.6778.85",
+    platform,
+  });
+
+  // An unreadable browser build stays absent rather than guessed.
+  const unknown = await beginEvidenceRun(project, withoutVersion.id);
+  const unknownDevice = (await unknown.run.readManifest()).device;
+  expect(unknownDevice).toEqual({
+    kind: "desktop",
+    viewport: { width: 1280, height: 720 },
+    platform,
+  });
+  expect(unknownDevice).not.toHaveProperty("browser");
+
+  const plain = await beginEvidenceRun(project, pureDesktop.id);
+  expect((await plain.run.readManifest()).device).toEqual({
+    kind: "desktop",
+    viewport: { width: 1280, height: 720 },
+  });
 });
 
 it("sanitizes every text field and caps lists before persistence", async () => {
