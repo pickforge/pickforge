@@ -130,6 +130,16 @@ async function startFailure(
   throw new Error("expected startEmulator to reject");
 }
 
+/**
+ * A test-private console-port window, well away from the 5554-5562 ports a
+ * real emulator on this machine would hold. Every port in the two port groups
+ * below is derived from this base so the assertions keep their meaning.
+ */
+const BASE = 5670;
+const PORT_RANGE = { autoMin: BASE, max: BASE + 8 };
+/** Below the test range's auto-allocation floor, like 5554 is in production. */
+const EXPLICIT_PORT = BASE - 2;
+
 describe("console port reservation registry", () => {
   it("gives two concurrent allocations different ports", async () => {
     const sdk = makeFakeSdk(BOOTING_ADB_SCRIPT);
@@ -139,6 +149,7 @@ describe("console port reservation registry", () => {
       sdk,
       env: toolEnv,
       registryEnv,
+      portRange: PORT_RANGE,
       bootTimeoutMs: 5_000,
       bootPollIntervalMs: 20,
     };
@@ -151,10 +162,10 @@ describe("console port reservation registry", () => {
       ]);
       expect(first.consolePort).not.toBe(second.consolePort);
       expect([first.consolePort, second.consolePort].sort((a, b) => a - b)).toEqual(
-        [5556, 5558],
+        [BASE, BASE + 2],
       );
-      expect(fs.existsSync(consolePortLockPath(5556, registryEnv))).toBe(true);
-      expect(fs.existsSync(consolePortLockPath(5558, registryEnv))).toBe(true);
+      expect(fs.existsSync(consolePortLockPath(BASE, registryEnv))).toBe(true);
+      expect(fs.existsSync(consolePortLockPath(BASE + 2, registryEnv))).toBe(true);
     } finally {
       for (const handle of [first, second]) {
         if (handle !== undefined) {
@@ -162,14 +173,14 @@ describe("console port reservation registry", () => {
         }
       }
     }
-    expect(fs.existsSync(consolePortLockPath(5556, registryEnv))).toBe(false);
-    expect(fs.existsSync(consolePortLockPath(5558, registryEnv))).toBe(false);
+    expect(fs.existsSync(consolePortLockPath(BASE, registryEnv))).toBe(false);
+    expect(fs.existsSync(consolePortLockPath(BASE + 2, registryEnv))).toBe(false);
   }, 20_000);
 
   it("skips a live reservation even when adb does not list the port", async () => {
     const sdk = makeFakeSdk(BOOTING_ADB_SCRIPT);
     const registryEnv = makeRegistryEnv();
-    expect(tryReserveConsolePort(5556, registryEnv)).toBe(true);
+    expect(tryReserveConsolePort(BASE, registryEnv)).toBe(true);
     try {
       const handle = await startEmulator({
         avdName: "pickforge-avd",
@@ -177,29 +188,30 @@ describe("console port reservation registry", () => {
         logDir: path.join(tmpRoot, "emu-skip"),
         env: toolEnv,
         registryEnv,
+        portRange: PORT_RANGE,
         bootTimeoutMs: 5_000,
         bootPollIntervalMs: 20,
       });
       try {
-        expect(handle.consolePort).toBe(5558);
+        expect(handle.consolePort).toBe(BASE + 2);
       } finally {
         await stop(handle, sdk, registryEnv);
       }
     } finally {
-      releaseConsolePort(5556, registryEnv);
+      releaseConsolePort(BASE, registryEnv);
     }
   }, 20_000);
 
   it("refuses to start on an explicitly requested port that is reserved", async () => {
     const sdk = makeFakeSdk(BOOTING_ADB_SCRIPT);
     const registryEnv = makeRegistryEnv();
-    expect(tryReserveConsolePort(5560, registryEnv)).toBe(true);
+    expect(tryReserveConsolePort(BASE + 4, registryEnv)).toBe(true);
     try {
       await expect(
         startEmulator({
           avdName: "pickforge-avd",
           sdk,
-          port: 5560,
+          port: BASE + 4,
           logDir: path.join(tmpRoot, "emu-conflict"),
           env: toolEnv,
           registryEnv,
@@ -208,46 +220,47 @@ describe("console port reservation registry", () => {
         }),
       ).rejects.toThrow(/already reserved/);
     } finally {
-      releaseConsolePort(5560, registryEnv);
+      releaseConsolePort(BASE + 4, registryEnv);
     }
   });
 
-  it("accepts 5554 when explicitly requested", async () => {
+  it("accepts an explicit port below the auto-allocation floor", async () => {
     const sdk = makeFakeSdk(BOOTING_ADB_SCRIPT);
     const registryEnv = makeRegistryEnv();
     const handle = await startEmulator({
       avdName: "pickforge-avd",
       sdk,
-      port: 5554,
-      logDir: path.join(tmpRoot, "emu-explicit-5554"),
+      port: EXPLICIT_PORT,
+      logDir: path.join(tmpRoot, "emu-explicit-port"),
       env: toolEnv,
       registryEnv,
+      portRange: PORT_RANGE,
       bootTimeoutMs: 5_000,
       bootPollIntervalMs: 20,
     });
     try {
-      expect(handle.serial).toBe("emulator-5554");
-      expect(handle.consolePort).toBe(5554);
-      expect(fs.existsSync(consolePortLockPath(5554, registryEnv))).toBe(true);
+      expect(handle.serial).toBe(`emulator-${EXPLICIT_PORT}`);
+      expect(handle.consolePort).toBe(EXPLICIT_PORT);
+      expect(fs.existsSync(consolePortLockPath(EXPLICIT_PORT, registryEnv))).toBe(true);
     } finally {
       await stop(handle, sdk, registryEnv);
     }
-    expect(fs.existsSync(consolePortLockPath(5554, registryEnv))).toBe(false);
+    expect(fs.existsSync(consolePortLockPath(EXPLICIT_PORT, registryEnv))).toBe(false);
   }, 20_000);
 
   it("reclaims a stale reservation owned by a dead process", async () => {
     const registryEnv = makeRegistryEnv();
     const stale = await deadPid();
-    expect(tryReserveConsolePort(5562, registryEnv, stale)).toBe(true);
-    expect(tryReserveConsolePort(5562, registryEnv)).toBe(true);
+    expect(tryReserveConsolePort(BASE + 8, registryEnv, stale)).toBe(true);
+    expect(tryReserveConsolePort(BASE + 8, registryEnv)).toBe(true);
     expect(
-      fs.readFileSync(consolePortLockPath(5562, registryEnv), "utf8").trim(),
+      fs.readFileSync(consolePortLockPath(BASE + 8, registryEnv), "utf8").trim(),
     ).toBe(String(process.pid));
-    expect(tryReserveConsolePort(5562, registryEnv)).toBe(false);
-    releaseConsolePort(5562, registryEnv);
+    expect(tryReserveConsolePort(BASE + 8, registryEnv)).toBe(false);
+    releaseConsolePort(BASE + 8, registryEnv);
   });
 
-  it("propagates an adb devices failure instead of defaulting to 5554", async () => {
+  it("propagates an adb devices failure instead of allocating a port", async () => {
     const sdk = makeFakeSdk('case "$*" in devices) exit 1 ;; esac\nexit 0');
     const registryEnv = makeRegistryEnv();
     await expect(
@@ -257,11 +270,12 @@ describe("console port reservation registry", () => {
         logDir: path.join(tmpRoot, "emu-listfail"),
         env: toolEnv,
         registryEnv,
+        portRange: PORT_RANGE,
         bootTimeoutMs: 5_000,
         bootPollIntervalMs: 20,
       }),
     ).rejects.toThrow(/Failed to list adb devices/);
-    expect(fs.existsSync(consolePortLockPath(5554, registryEnv))).toBe(false);
+    expect(fs.existsSync(consolePortLockPath(BASE, registryEnv))).toBe(false);
   });
 });
 
@@ -270,7 +284,7 @@ describe("port collisions outside the reservation registry", () => {
     const sdk = makeFakeSdk(BOOTING_ADB_SCRIPT);
     const registryEnv = makeRegistryEnv();
     const progress: string[] = [];
-    const server = await listenOn(5556);
+    const server = await listenOn(BASE);
     try {
       const handle = await startEmulator({
         avdName: "pickforge-avd",
@@ -278,20 +292,23 @@ describe("port collisions outside the reservation registry", () => {
         logDir: path.join(tmpRoot, "emu-tcp-skip"),
         env: toolEnv,
         registryEnv,
+        portRange: PORT_RANGE,
         bootTimeoutMs: 5_000,
         bootPollIntervalMs: 20,
         onProgress: (message) => progress.push(message),
       });
       try {
-        expect(handle.consolePort).toBe(5558);
-        expect(progress.join("\n")).toMatch(/console port 5556 is bound/);
+        expect(handle.consolePort).toBe(BASE + 2);
+        expect(progress.join("\n")).toMatch(
+          new RegExp(`console port ${BASE} is bound`),
+        );
       } finally {
         await stop(handle, sdk, registryEnv);
       }
     } finally {
       await closeServer(server);
     }
-    expect(fs.existsSync(consolePortLockPath(5556, registryEnv))).toBe(false);
+    expect(fs.existsSync(consolePortLockPath(BASE, registryEnv))).toBe(false);
   }, 20_000);
 
   it("fails distinctly before spawning when an explicit port is bound", async () => {
@@ -301,13 +318,13 @@ describe("port collisions outside the reservation registry", () => {
       `#!/bin/sh\nPATH=/usr/bin:/bin\n: > ${JSON.stringify(marker)}\nexec sleep 60\n`,
     );
     const registryEnv = makeRegistryEnv();
-    const server = await listenOn(5570);
+    const server = await listenOn(BASE + 6);
     try {
       const error = await startFailure(
         startEmulator({
           avdName: "pickforge-avd",
           sdk,
-          port: 5570,
+          port: BASE + 6,
           logDir: path.join(tmpRoot, "emu-tcp-explicit"),
           env: toolEnv,
           registryEnv,
@@ -316,12 +333,16 @@ describe("port collisions outside the reservation registry", () => {
         }),
       );
       expect(error.kind).toBe("port-collision");
-      expect(error.message).toMatch(/Console port 5570 or adb port 5571[^\n]*\[port-collision\]/);
+      expect(error.message).toMatch(
+        new RegExp(
+          `Console port ${BASE + 6} or adb port ${BASE + 7}[^\n]*\\[port-collision\\]`,
+        ),
+      );
       expect(fs.existsSync(marker)).toBe(false);
     } finally {
       await closeServer(server);
     }
-    expect(fs.existsSync(consolePortLockPath(5570, registryEnv))).toBe(false);
+    expect(fs.existsSync(consolePortLockPath(BASE + 6, registryEnv))).toBe(false);
   });
 
   it("retries on a fresh port when the emulator itself reports a collision", async () => {
@@ -334,8 +355,8 @@ describe("port collisions outside the reservation registry", () => {
         'port=""',
         'while [ $# -gt 0 ]; do [ "$1" = "-port" ] && port="$2"; shift; done',
         `echo "$port" >> ${JSON.stringify(attempts)}`,
-        'if [ "$port" = "5556" ]; then',
-        '  echo "ERROR        | console port 5556 is already in use"',
+        `if [ "$port" = "${BASE}" ]; then`,
+        `  echo "ERROR        | console port ${BASE} is already in use"`,
         "  exit 1",
         "fi",
         "exec sleep 60",
@@ -350,21 +371,24 @@ describe("port collisions outside the reservation registry", () => {
       logDir: path.join(tmpRoot, "emu-collision-retry"),
       env: toolEnv,
       registryEnv,
+      portRange: PORT_RANGE,
       bootTimeoutMs: 5_000,
       bootPollIntervalMs: 20,
       onProgress: (message) => progress.push(message),
     });
     try {
-      expect(handle.consolePort).toBe(5558);
+      expect(handle.consolePort).toBe(BASE + 2);
       expect(fs.readFileSync(attempts, "utf8").trim().split("\n")).toEqual([
-        "5556",
-        "5558",
+        String(BASE),
+        String(BASE + 2),
       ]);
-      expect(progress.join("\n")).toMatch(/console port 5556 was taken[^\n]*retrying/);
+      expect(progress.join("\n")).toMatch(
+        new RegExp(`console port ${BASE} was taken[^\n]*retrying`),
+      );
     } finally {
       await stop(handle, sdk, registryEnv);
     }
-    expect(fs.existsSync(consolePortLockPath(5556, registryEnv))).toBe(false);
+    expect(fs.existsSync(consolePortLockPath(BASE, registryEnv))).toBe(false);
   }, 20_000);
 
   it("gives up after the bounded retries and keeps the collision diagnosis", async () => {
@@ -380,13 +404,14 @@ describe("port collisions outside the reservation registry", () => {
         logDir: path.join(tmpRoot, "emu-collision-giveup"),
         env: toolEnv,
         registryEnv,
+        portRange: PORT_RANGE,
         bootTimeoutMs: 5_000,
         bootPollIntervalMs: 20,
       }),
     );
     expect(error.kind).toBe("port-collision");
-    expect(error.diagnostics.consolePort).toBe(5560);
-    for (const port of [5556, 5558, 5560]) {
+    expect(error.diagnostics.consolePort).toBe(BASE + 4);
+    for (const port of [BASE, BASE + 2, BASE + 4]) {
       expect(fs.existsSync(consolePortLockPath(port, registryEnv))).toBe(false);
     }
   }, 20_000);
