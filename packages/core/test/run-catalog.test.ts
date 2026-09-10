@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   RunCatalog,
   createRun,
+  latestOutcomeStatus,
   openRunCatalog,
   projectId,
   type RunManifest,
@@ -109,12 +110,21 @@ describe("RunCatalog", () => {
     });
     await fs.promises.writeFile(
       path.join(run.dir, "actions.jsonl"),
-      '{"actionId":"replacement"}\n',
+      `${JSON.stringify({
+        kind: "outcome",
+        recordedAt: "2026-06-09T12:00:00.000Z",
+        scenario: "replacement",
+        status: "pass",
+        inspectedScreenshots: [],
+      })}\n`,
     );
 
     await expect(catalog.readRootText(entry, "actions.jsonl")).rejects.toThrow(
       /not found|changed/i,
     );
+    // The outcome lookup opens the run directory through the catalog too, so
+    // the replacement's journal never speaks for the original manifest.
+    expect(await latestOutcomeStatus(catalog, entry)).toBeNull();
   });
 
   it("does not classify a replacement directory's missing file as absent", async () => {

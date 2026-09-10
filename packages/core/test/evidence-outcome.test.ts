@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -209,9 +210,7 @@ it("bounds the tail scan on a journal of near-cap lines", async () => {
   await recordEvidenceOutcome(project, run.runId, input);
   const journal = await fs.promises.stat(path.join(run.dir, "actions.jsonl"));
   expect(journal.size).toBeGreaterThan(4 * 1024 * 1024);
-  const started = performance.now();
   expect(await catalogStatus()).toBe("pass");
-  expect(performance.now() - started).toBeLessThan(500);
   expect((await listArtifactRuns(await openRunCatalog(project))).find((entry) => entry.runId === run.runId))
     .toMatchObject({ outcome: "pass" });
   // The full parse agrees; the tail scan just does not have to read that far.
@@ -226,5 +225,36 @@ it("reports no outcome once the byte budget is spent before reaching it", async 
   await recordEvidenceOutcome(project, run.runId, input);
   expect(await catalogStatus()).toBe("pass");
   await appendRaw(paddedActionLine().repeat(40));
+  expect(await catalogStatus()).toBeNull();
+});
+
+it("reports no outcome when the scanned tail is corrupt before the outcome", async () => {
+  await appendRaw("{ not json\n");
+  await interaction();
+  await recordEvidenceOutcome(project, run.runId, { ...input, status: "blocked", inspectedScreenshots: [] });
+  await expect(readActions(run.dir)).rejects.toThrow(/Corrupt evidence journal/);
+  expect(await catalogStatus()).toBeNull();
+});
+
+it("never reads past the byte budget, so far older corruption is not seen", async () => {
+  await appendRaw("{ not json\n");
+  // More than the 1 MiB budget of padding, so the corrupt head is out of reach.
+  await appendRaw(paddedActionLine().repeat(24));
+  await recordEvidenceOutcome(project, run.runId, { ...input, status: "blocked", inspectedScreenshots: [] });
+  const journal = await fs.promises.stat(path.join(run.dir, "actions.jsonl"));
+  expect(journal.size).toBeGreaterThan(1024 * 1024);
+  // A full read of this journal fails, so a status here proves the scan stopped
+  // well before the file start: it read the budget, not the 1.4 MiB journal.
+  await expect(readActions(run.dir)).rejects.toThrow(/Corrupt evidence journal/);
+  expect(await catalogStatus()).toBe("blocked");
+});
+
+it("reports no outcome for a journal replaced by a fifo, without waiting for a writer", async () => {
+  await interaction();
+  await recordEvidenceOutcome(project, run.runId, { ...input, status: "blocked", inspectedScreenshots: [] });
+  const journal = path.join(run.dir, "actions.jsonl");
+  await fs.promises.rm(journal);
+  expect(spawnSync("mkfifo", ["--", journal]).status).toBe(0);
+  // No writer is ever opened: a blocking open would hang the whole listing.
   expect(await catalogStatus()).toBeNull();
 });

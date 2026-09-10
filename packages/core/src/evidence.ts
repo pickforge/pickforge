@@ -2169,26 +2169,30 @@ function splitJournalWindow(window: Buffer): { carry: Buffer; lines: string[] } 
   };
 }
 
-/** Outcome of scanning one window: a hit, or the corruption that stopped it. */
-type TailHit = { record: EvidenceRecord } | { corrupt: true };
+/** What one scanned window holds: a matching record, or corruption. */
+interface TailHit {
+  record?: EvidenceRecord;
+  corrupt?: true;
+}
 
 /**
- * Last line of the window that parses as a record `match` accepts. A line a
- * full read would reject makes the journal corrupt, which stops the scan, so
- * a corrupt journal still reports nothing rather than an older record.
+ * Last line of the window that parses as a record `match` accepts. Every line
+ * of the window is validated, not just the ones after the match, because a
+ * line a full read would reject makes the whole journal corrupt.
  */
-function lastMatchingLine(
+function scanWindowLines(
   lines: readonly string[],
   match: (record: EvidenceRecord) => boolean,
-): TailHit | undefined {
+): TailHit {
+  let record: EvidenceRecord | undefined;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     const parsed = parseJournalSegment(lines[index]!, index + 1);
     if (!parsed.ok) return { corrupt: true };
-    if (parsed.record !== undefined && match(parsed.record)) {
-      return { record: parsed.record };
+    if (record === undefined && parsed.record !== undefined && match(parsed.record)) {
+      record = parsed.record;
     }
   }
-  return undefined;
+  return { record };
 }
 
 async function scanJournalTail(
@@ -2202,6 +2206,7 @@ async function scanJournalTail(
   // full read drops both, so the rightmost line of the first window goes too.
   let dropTail = true;
   let budget = JOURNAL_TAIL_MAX_BYTES;
+  let candidate: EvidenceRecord | undefined;
   while (end > 0 && budget > 0) {
     const length = Math.min(JOURNAL_TAIL_CHUNK_BYTES, end, budget);
     const start = end - length;
@@ -2218,21 +2223,24 @@ async function scanJournalTail(
     // At the file start the leading fragment is a whole line, unless the file
     // never had a newline and that fragment is the torn tail itself.
     if (start === 0 && !dropTail) lines.unshift(window.carry.toString("utf8"));
-    const hit = lastMatchingLine(lines, match);
-    if (hit !== undefined) return "corrupt" in hit ? undefined : hit.record;
+    const hit = scanWindowLines(lines, match);
+    // Corruption anywhere in the scanned tail hides the record a full read
+    // would also refuse to report, however recent that record is.
+    if (hit.corrupt === true) return undefined;
+    candidate ??= hit.record;
     carry = window.carry;
   }
-  return undefined;
+  return candidate;
 }
 
 /**
  * Last journal record `match` accepts, found by reading the journal's tail
  * backwards in bounded chunks rather than parsing every line. Line validation
  * is the one a full read uses: a torn final line is ignored, and a line a full
- * read would reject makes the journal corrupt, which reports nothing. The scan
- * stops at the file start or once `JOURNAL_TAIL_MAX_BYTES` have been read,
- * which keeps a listing of many runs bounded; a record buried deeper than that
- * is reported as absent.
+ * read would reject anywhere in the scanned tail makes the journal corrupt,
+ * which reports nothing. The scan stops at the file start or once
+ * `JOURNAL_TAIL_MAX_BYTES` have been read, which keeps a listing of many runs
+ * bounded; corruption or a record buried deeper than that is not seen.
  */
 export async function findLastActionIn<T extends EvidenceRecord>(
   runDir: DirHandle,
@@ -2240,9 +2248,11 @@ export async function findLastActionIn<T extends EvidenceRecord>(
 ): Promise<T | undefined> {
   let handle: fs.promises.FileHandle;
   try {
+    // O_NONBLOCK so a FIFO left in place of the journal cannot make the open
+    // itself wait for a writer; the descriptor is type-checked below.
     handle = await runDir.openFile(
       EVIDENCE_ACTION_LOG,
-      fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+      fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
     );
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;

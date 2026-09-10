@@ -13,6 +13,7 @@ import {
   verifyExistingRoot,
   type RunStorageRoot,
 } from "./run-root.js";
+import { DirHandle, withDirHandle } from "./dir-handle.js";
 import type { RunManifest } from "./run.js";
 
 const SAFE_ENTRY_PATTERN = /^[A-Za-z0-9._-]+$/;
@@ -371,6 +372,12 @@ async function readBoundManifest(
  * lower-precedence roots are omitted. Ordering is newest-first with run-id and
  * root-precedence tie breakers, independent of filesystem enumeration order.
  */
+/** Whether the entry still names one safe directory under the root it came from. */
+function entryAddressesRoot(entry: RunCatalogEntry, root: RunCatalogRoot): boolean {
+  if (!isSafeEntryName(entry.dirName)) return false;
+  return entry.rootDir === root.dir && entry.dir === path.join(root.dir, entry.dirName);
+}
+
 function identityOf(entry: RunCatalogEntry): CatalogIdentity | undefined {
   return (entry as BoundRunCatalogEntry)[ENTRY_IDENTITY];
 }
@@ -460,6 +467,31 @@ export class RunCatalog {
       return undefined;
     }
     return (await readBoundManifest(root, entry.dirName, identity))?.manifest;
+  }
+
+  /**
+   * Open the entry's run directory as a pinned handle and run `fn` with it.
+   * Both identities recorded when the entry was listed are checked against the
+   * descriptors actually opened, so a root or run directory replaced after
+   * `list()` yields `undefined` instead of another directory's contents.
+   */
+  async withRunDir<T>(
+    entry: RunCatalogEntry,
+    fn: (dir: DirHandle) => Promise<T>,
+  ): Promise<T | undefined> {
+    const root = this.roots[entry.rootPrecedence];
+    const identity = identityOf(entry);
+    if (root === undefined || identity === undefined) return undefined;
+    if (!entryAddressesRoot(entry, root)) return undefined;
+    const opened = DirHandle.open(root.dir, {
+      expectedRealDir: root.expectedRealDir,
+      expectedIdentity: identity.root,
+    });
+    return withDirHandle(opened, (rootDir) =>
+      withDirHandle(rootDir.openChild(entry.dirName), async (runDir) =>
+        sameIdentity(runDir.stat, identity.run) ? fn(runDir) : undefined,
+      ),
+    );
   }
 
   async hasRootFile(entry: RunCatalogEntry, fileName: string): Promise<boolean> {
