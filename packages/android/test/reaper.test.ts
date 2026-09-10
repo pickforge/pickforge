@@ -48,6 +48,12 @@ fs.mkdirSync(avdHome, { recursive: true });
 fs.writeFileSync(path.join(avdHome, "pickforge-avd.ini"), "avd.ini.encoding=UTF-8\n");
 const toolEnv: EnvLike = { PATH: "", ANDROID_AVD_HOME: avdHome };
 
+/**
+ * A test-private console port, clear of the 5554-5562 ports a real emulator
+ * on this machine would hold and of the windows the other android tests use.
+ */
+const BASE = 5648;
+
 afterAll(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
@@ -69,7 +75,7 @@ function makeFakeSdk(): string {
       "#!/bin/sh",
       'case "$*" in',
       "  *getprop*) echo 1 ;;",
-      '  devices) printf "List of devices attached\\nemulator-5554\\tdevice\\n" ;;',
+      `  devices) printf "List of devices attached\\nemulator-${BASE}\\tdevice\\n" ;;`,
       '  *"emu kill"*) exit 0 ;;',
       "esac",
       "exit 0",
@@ -85,7 +91,7 @@ describe("android reaper tracking", () => {
       projectDir,
       registryEnv,
       sdk,
-      port: 5554,
+      port: BASE,
       env: toolEnv,
       bootPollIntervalMs: 20,
       bootTimeoutMs: 5_000,
