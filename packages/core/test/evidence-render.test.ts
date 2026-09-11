@@ -367,8 +367,9 @@ describe("evidence report script pinning", () => {
     expect(cspOf(html)).toBe(
       "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; " +
         `script-src 'sha256-${digest}'; ` +
-        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "base-uri 'none'; form-action 'none'",
     );
+    expect(cspOf(html)).not.toContain("frame-ancestors");
     expect(reportContentSecurityPolicy()).toBe(cspOf(html));
     expect(cspOf(html)).not.toContain("unsafe-eval");
     expect(cspOf(html)).not.toContain("script-src 'unsafe-inline'");
@@ -377,9 +378,10 @@ describe("evidence report script pinning", () => {
 
   it("keeps the session index CSP script-free", () => {
     const index = renderEvidenceSessionIndex("s1", []);
-    expect(index).toContain(
-      "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    expect(cspOf(index)).toBe(
+      "default-src 'none'; base-uri 'none'; form-action 'none'",
     );
+    expect(index).not.toContain("frame-ancestors");
     expect(index).not.toContain("<script");
     expect(index).not.toContain("sha256-");
   });
