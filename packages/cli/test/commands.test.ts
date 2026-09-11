@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +9,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createRun, recordEvidenceOutcome, writeEvidenceReport, isProcessGroupAlive } from "@pickforge/lab-core";
 import { ensureCliBuilt } from "./build-once.js";
 
+const require = createRequire(import.meta.url);
+const { version } = require("../package.json") as { version: string };
 const cliPath = fileURLToPath(new URL("../dist/pickforge-lab.js", import.meta.url));
 
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -2360,7 +2363,7 @@ describe("pickforge-lab mcp serve", () => {
     const init = responses.get(1);
     expect(init?.result?.serverInfo).toMatchObject({
       name: "pickforge-lab",
-      version: "0.4.0",
+      version,
     });
     const tools = responses.get(2)?.result?.tools as Array<{ name: string }>;
     const names = tools.map((tool) => tool.name);
