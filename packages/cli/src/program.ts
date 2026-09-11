@@ -791,7 +791,7 @@ or on enables it (case-insensitive; surrounding whitespace ignored). Any other
 value or unset disables it. Enabled reports send redacted error messages and
 stack traces (which may include command output), plus OS, Node.js, and app
 versions to Sentry. No product analytics, breadcrumbs, or performance tracing.
-For 0.4, PICKLAB_TELEMETRY is a fallback only when PICKFORGE_TELEMETRY is unset,
+For 0.5.0, PICKLAB_TELEMETRY is a fallback only when PICKFORGE_TELEMETRY is unset,
 with the same values and one deprecation warning per process.
 `);
 

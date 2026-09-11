@@ -20,13 +20,13 @@ smoke if reality drifts from this document in either direction.
   checksum.
 - **Why not sign yet.** Developer ID signing and notarization need a paid Apple
   Developer account, a distributable certificate, and secrets in CI. That is a
-  deliberate cost decision for the 0.4 train, not an oversight.
+  deliberate cost decision for the 0.4 and 0.5.0 trains, not an oversight.
 
-## Decision for 0.4.0
+## Decision for 0.4.0 and 0.5.0
 
-Ship unsigned and un-notarized for the whole 0.4 train, with checksums, npm
-provenance, and this document. Revisit before any release that advertises macOS
-as a first-class installed product rather than a verified CLI download.
+Ship unsigned and un-notarized for the 0.4 train and for 0.5.0, with checksums,
+npm provenance, and this document. Revisit before any release that advertises
+macOS as a first-class installed product rather than a verified CLI download.
 
 Changing the policy means changing three things in the same PR: this file, the
 assertions in `scripts/smoke/macos-asset-policy.sh`, and the signing steps in

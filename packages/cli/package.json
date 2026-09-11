@@ -1,6 +1,6 @@
 {
   "name": "pickforge",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Linux-only Xvfb desktop and Android APK/emulator lab with CLI and MCP for coding agents",
   "type": "module",
   "license": "MIT",

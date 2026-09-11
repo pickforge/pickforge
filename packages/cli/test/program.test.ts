@@ -1,11 +1,15 @@
+import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 import { buildProgram } from "../src/program.js";
+
+const require = createRequire(import.meta.url);
+const { version } = require("../package.json") as { version: string };
 
 describe("pickforge", () => {
   it("builds the pickforge-lab program", () => {
     const program = buildProgram();
     expect(program.name()).toBe("pickforge-lab");
-    expect(program.version()).toBe("0.4.0");
+    expect(program.version()).toBe(version);
   });
 
   it("prints the stable support boundaries in help", () => {

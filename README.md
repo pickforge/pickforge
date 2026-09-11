@@ -52,8 +52,8 @@ the MCP stdio binary is `pickforge-mcp`. Run `pickforge-lab agents link <agent>`
 to replace owned legacy `picklab` entries. `pickforge-lab init` does not change
 agent configuration.
 
-For one release, old `PICKLAB_*` environment names remain compatibility
-fallbacks with a deprecation warning. New TypeScript state goes under
+Old `PICKLAB_*` environment names remain compatibility fallbacks with a
+deprecation warning, retained through 0.5.0. New TypeScript state goes under
 `~/.pickforge/lab/` (override with `PICKFORGE_HOME`); legacy
 `~/.pickforge/picklab/`, `~/.picklab/` and project-local `.picklab/` state
 remain readable in place. Nothing is silently migrated or deleted.
@@ -587,7 +587,7 @@ not a unit-test assertion.
 
 Fatal-error telemetry in the `pickforge-lab` CLI and `pickforge-mcp` server is disabled by default: Sentry is not initialized and no telemetry is sent. Set `PICKFORGE_TELEMETRY=1` (also `true` or `on`, case-insensitive, with surrounding whitespace ignored) to enable reporting to Sentry. Any other value or unset disables it. Enabled reports contain the error message and stack trace, which can reference the failing command and its output, with secrets redacted, plus OS, Node.js, and app versions. This is fatal-error reporting, not product analytics; breadcrumbs and performance tracing are disabled.
 
-For the 0.4 train, `PICKLAB_TELEMETRY` is accepted only when `PICKFORGE_TELEMETRY` is unset, with the same values and one deprecation warning per process. The current name takes precedence, including when empty.
+For 0.5.0, `PICKLAB_TELEMETRY` is accepted only when `PICKFORGE_TELEMETRY` is unset, with the same values and one deprecation warning per process. The current name takes precedence, including when empty.
 
 ## Support matrix
 
