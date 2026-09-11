@@ -74,17 +74,44 @@ evidence recovery reports a run consistently when a peer recovers it first.
 - The later changes (browser metadata, journal tail lookup, report step
   numbering and the recovery fix) have automated coverage in the lab test suite
   and no device pass of their own at that revision.
-- The official release device pass for this candidate has not been run yet.
+- The official release device pass for this candidate ran at revision
+  [`54e56a2`](https://github.com/pickforge/pickforge/commit/54e56a25c373d05ffbe9e65f619c8b133de71858)
+  (tree `b52060ba4c10e9e64a9daf8bf00f84df2cb89869`) in an isolated
+  Linux environment with a private HOME, XDG, adb, AVD and cache layout, over a real long-lived MCP transport,
+  not CLI simulation or a host desktop session. A tool-enabled executor drove
+  a desktop counter from 0 to 1 to 2, made an intended Dart theme and label
+  edit, hot reloaded the running app with a genuine lowercase-r reload, and
+  showed the counter's 2 preserved before it reached 3. Viewer search and
+  clear, every device and scenario filter with its result counts, capture
+  inspection, arrow-key navigation, Actual size, Open original and Close, and
+  the same report over loopback HTTP and over `file://` were exercised, along
+  with recorded browser metadata and session indexes. An Android emulator
+  counter was driven from 0 to 1 to 2 through MCP. The recorded screenshots
+  passed an independent visual review with an explicit `PASS` on 37 initial
+  and 18 focused frames, and the 743 execution evidence files were
+  checksum-verified and archived.
+- A nonpublishing release workflow run
+  ([34641866591](https://github.com/pickforge/pickforge/actions/runs/34641866591))
+  for this candidate succeeded with publishing explicitly skipped. The npm
+  tarball, Linux binary and macOS binary it built have sha256 `f60ef7367ad66efd80e29285377f6cf5b7f562bac384194018480272a427f707`,
+  `8c415ce38b657f9d59f905dd3a7486c694d9d0027fbaa7c9bed5ab6dc79d1589` and
+  `7c8091c45d50f70a9f327fe62c320a927aab2cd20b52d75ba702ef513ab6b1bb`; the
+  artifact sidecars and the executed Linux and macOS candidate smokes match
+  those hashes, and both Rust binaries are byte-identical to the previous
+  candidate build. The CSP console error over HTTP is gone; a disposable
+  static server's favicon 404s over loopback remain.
 
 ## Known limits
 
-- The prior-revision passes used virtual X sessions and an emulator only. No
-  physical hardware or mobile emulation was exercised, and only the desktop
-  run's report was rendered in a browser, over loopback HTTP rather than
-  `file://`.
-- The viewer's search clear control, device and scenario filters, and the
-  Actual size, Open original and Close controls were rendered but not clicked
-  in those passes.
+- The device pass used a virtual Linux desktop, Chrome 153.0.8010.36 on
+  Linux, and an Android emulator. No physical Android device and no macOS or
+  Windows GUI was exercised. This is observed journey coverage, not universal
+  correctness. The Android pass reused an authorized synthetic fallback APK
+  because Java/Gradle 25.0.3 prevented building a fresh fixture; no system
+  Java or Android SDK setting was changed.
+- The visual review judged saved frames. Static frames show visual states,
+  not click or key events, and do not prove console cleanliness, DOM counts,
+  network receipts or host isolation.
 - Device scale factor and touch support are not recorded for desktop or
   browser runs, and the viewer shows them as unknown. Browser session runs keep
   the desktop device kind and are counted under Desktop.
@@ -95,6 +122,21 @@ evidence recovery reports a run consistently when a peer recovers it first.
   focus is outside the search box.
 - Rust evidence runs carry their result in `status` and always list `outcome`
   as null; no HTML viewer is generated for them.
+- The release pass ran under a predeclared host audit with a separate
+  baseline per phase. The full recheck covered 72216 entries and they were
+  unchanged. The later focused supplement had its own baseline of the same
+  72216 entries, which were unchanged, plus one added session-cue bookkeeping
+  file whose writer could not be identified. Source assessment identifies it
+  as agent reminder state, not settings or policy. This is not a claim that
+  the entire home was unchanged; the original audit result and its
+  predeclared exclusions stand.
+- The pass's terminal run hit a harness stdout-line cap after its evidence
+  was saved, so that run's exit status is failed; the saved files were
+  independently verified and are what the visual review judged.
 - The lab remains Linux-only. Symbolicated stack traces for fatal-error
   telemetry (#140) remain unverified; their verification is pending for the
   next release.
+- At qualification time nothing was published for 0.5.0: no tag, npm
+  package or GitHub release existed and the published version was 0.4.0.
+  Publication stays an owner gate: issue #165 holds the explicit publication
+  authorization decision.
