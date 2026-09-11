@@ -1918,20 +1918,36 @@ function validEvidenceManifest(manifest: RunManifest): boolean {
   return validEvidenceManifestFields(manifest) && isEvidenceRun(manifest);
 }
 
-async function parseEvidenceManifestFile(dir: DirHandle): Promise<RunManifest> {
+/** A cooperating writer replaced manifest.json by rename while it was open. */
+class EvidenceManifestReplacedError extends RunStorageAccessError {}
+
+/** Read manifest.json once, or nothing when the opened inode was already unlinked. */
+async function readEvidenceManifestFile(dir: DirHandle): Promise<string | undefined> {
   const handle = await dir.openFile(
     "manifest.json",
     fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
   );
   try {
     const stat = await handle.stat();
+    if (stat.isFile() && stat.nlink === 0) return undefined;
     if (!isSingletonRegularFile(stat)) {
       throw new RunStorageAccessError(`Unsafe evidence manifest in ${dir.dir}`);
     }
-    return JSON.parse(await handle.readFile("utf8")) as RunManifest;
+    return await handle.readFile("utf8");
   } finally {
     await handle.close();
   }
+}
+
+async function parseEvidenceManifestFile(dir: DirHandle): Promise<RunManifest> {
+  // A rename by a peer leaves this reader on the unlinked inode, so reopen the
+  // name once. Cooperating writers rename under the journal lock, where one
+  // retry is enough; outside it a caller re-reads under the lock instead.
+  const text = await readEvidenceManifestFile(dir) ?? await readEvidenceManifestFile(dir);
+  if (text === undefined) {
+    throw new EvidenceManifestReplacedError(`Evidence manifest replaced in ${dir.dir}`);
+  }
+  return JSON.parse(text) as RunManifest;
 }
 
 function manifestMatchesRunDir(manifest: RunManifest, dir: DirHandle): boolean {
@@ -1952,6 +1968,7 @@ export async function readEvidenceManifestIn(
 export type InspectedEvidenceManifest =
   | { kind: "usable"; manifest: RunManifest }
   | { kind: "foreign" }
+  | { kind: "replaced" }
   | { kind: "invalid" };
 
 function classifyParsedManifest(
@@ -1966,6 +1983,7 @@ function classifyParsedManifest(
 }
 
 function classifyManifestError(error: unknown): InspectedEvidenceManifest | undefined {
+  if (error instanceof EvidenceManifestReplacedError) return { kind: "replaced" };
   if (error instanceof SyntaxError) return { kind: "invalid" };
   if (error instanceof RunStorageAccessError) return { kind: "invalid" };
   const code = (error as NodeJS.ErrnoException).code;
