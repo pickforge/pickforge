@@ -52,6 +52,10 @@ evidence recovery reports a run consistently when a peer recovers it first.
   manifests are still refused.
 - The Markdown run report no longer leaves gaps in step numbers, or inflates
   the action count, when an acceptance outcome is recorded mid-run.
+- The report viewer's `<meta>` CSP no longer carries `frame-ancestors`, which
+  browsers ignore in meta-delivered policies and Chrome reported as a console
+  error when the report was viewed over HTTP. All other directives are
+  unchanged; anti-framing was never enforceable that way.
 - The lab test suite no longer depends on timing for concurrent recovery,
   emulator start and VNC readiness, and the Android emulator port tests pass
   on a machine that is running a real emulator.

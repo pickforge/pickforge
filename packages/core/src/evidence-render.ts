@@ -37,9 +37,11 @@ export function renderEvidenceSessionIndex(
       `<li><a href="${escapeHtml(run.runId)}/${EVIDENCE_REPORT}">${escapeHtml(run.runId)}</a>: ${escapeHtml(run.status)}, ${run.actions} records, journal ${escapeHtml(run.journal)}${run.warning === undefined ? "" : `, ${escapeHtml(run.warning)}`}</li>`,
     )
     .join("\n");
+  // The session index CSP is meta-delivered, so it must not carry
+  // frame-ancestors: browsers ignore that directive in <meta> policies.
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pickforge session ${escapeHtml(sessionId)}</title></head>
 <body><h1>Pickforge session ${escapeHtml(sessionId)}</h1>
@@ -809,7 +811,8 @@ function scenarioRadios(outcomes: readonly EvidenceOutcomeRecord[]): string {
 /** The exact CSP the report carries, with the pinned script hash. */
 export function reportContentSecurityPolicy(script: string = REPORT_SCRIPT): string {
   const digest = createHash("sha256").update(script, "utf8").digest("base64");
-  return `default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'sha256-${digest}'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
+  // frame-ancestors is ignored in <meta>-delivered CSP, so it is deliberately absent.
+  return `default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'sha256-${digest}'; base-uri 'none'; form-action 'none'`;
 }
 
 export function renderEvidenceHtml(
