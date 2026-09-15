@@ -190,7 +190,11 @@ the session directory) and its own D-Bus addresses, which point at socket paths
 Pickforge never creates. A toolkit or portal therefore fails to reach a bus
 instead of quietly routing work back through your real user session, and the
 whole directory is removed when the session is destroyed. Desktop
-screenshots report the visible client-window count and warn when it is zero.
+screenshots report display size, captured image size, scale 1, that input coordinates are image pixels, and the visible client-window count, and warn when the count is zero.
+Framebuffer dimensions come from the captured PNG, not cached session dimensions. Supported desktop capture commands read the full framebuffer without resizing. Inconsistent supplied geometry is an error, not a success with missing coordinate fields. Geometry updates preserve existing browser properties and do not relabel an Android device in a mixed run.
+
+Wait baselines are regular files capped at 64 MiB. MCP reads project files through held directories or directly verifies an owned run screenshot; symlink traversal is refused. CLI baseline paths remain unrestricted. Baseline reads share the observation deadline with captures and comparisons. Stability means equal sampled frames, not every intervening frame. Filesystem calls and subprocess termination can finish after the deadline; subprocess cleanup allows two seconds from SIGTERM to SIGKILL, then two more seconds before forced pipe closure and settlement (four seconds total, excluding filesystem and scheduling delays). Missing tools and display query failures remain errors, not evidence that no window exists.
+
 If `xdotool` is missing, capture still succeeds and warns that the count is
 unavailable instead of reporting a possible escape.
 
@@ -704,7 +708,7 @@ pickforge-lab agents add --name my-agent --mcp-command "pickforge-lab mcp serve"
 | Sessions | `session create`, `session status [id]`, `session destroy <id\|--all>`, `session prune --older-than <duration>\|--all-stopped` |
 | Watch | `watch [--session <id>] [--control]` |
 | Takeover | `takeover status [--session <id>]` |
-| Desktop | `desktop windows`, `desktop focus --id <id>` / `--name <name>`, `desktop launch <cmd>`, `desktop exec <cmd>`, `desktop env`, `desktop screenshot`, `desktop click <x> <y>`, `desktop move <x> <y>`, `desktop scroll <deltaX> <deltaY>`, `desktop drag <fromX> <fromY> <toX> <toY>`, `desktop double-click <x> <y>`, `desktop type <text>`, `desktop key <keys>` |
+| Desktop | `desktop windows`, `desktop focus --id <id>` / `--name <name>`, `desktop launch <cmd>`, `desktop exec <cmd>`, `desktop env`, `desktop screenshot`, `desktop wait`, `desktop click <x> <y>`, `desktop move <x> <y>`, `desktop scroll <deltaX> <deltaY>`, `desktop drag <fromX> <fromY> <toX> <toY>`, `desktop double-click <x> <y>`, `desktop type <text>`, `desktop key <keys>` |
 | Android | `android start`, `android install-apk <apk> [--wait-ready <s>]`, `android launch-app <pkg> [--wait-ready <s>]`, `android screenshot`, `android tap <x> <y>`, `android type <text>`, `android back`, `android home`, `android ui-tree`, `android logcat`, `android adb [args...]` |
 | Artifacts | `artifacts list`, `artifacts open <runId>`, `artifacts report [runId]` (HTML report path; JSON includes `reportPath`, `outcome`, `device`) |
 | Agents | `agents list`, `agents install <agent> [--browser]`, `agents link <agent> [--browser]`, `agents unlink <agent>`, `agents doctor`, `agents add` |
@@ -755,10 +759,10 @@ reported as suppressed for an explicitly writable `--vnc-control` session.
 
 ## MCP surface
 
-`pickforge-lab mcp serve` exposes 28 tools over stdio:
+`pickforge-lab mcp serve` exposes 29 tools over stdio:
 
 - Sessions: `session_create`, `session_status`, `session_destroy`
-- Desktop: `desktop_windows`, `desktop_focus`, `desktop_launch`, `desktop_exec`, `desktop_screenshot`, `desktop_click`, `desktop_move`, `desktop_scroll`, `desktop_drag`, `desktop_double_click`, `desktop_type`, `desktop_key` — all fail closed with a busy error while a human lease is active except `desktop_screenshot` and `desktop_windows` (read-only). `desktop_launch` and `desktop_exec` are gated too: a newly launched client can grab input focus on the shared display, which is exactly what the lease protects against. `desktop_exec` applies the isolated X11 environment and waits for a client window; `desktop_screenshot` reports the client-window count and warns when it is zero, or reports that the count is unavailable when `xdotool` is missing.
+- Desktop: `desktop_windows`, `desktop_focus`, `desktop_launch`, `desktop_exec`, `desktop_screenshot`, `desktop_wait`, `desktop_click`, `desktop_move`, `desktop_scroll`, `desktop_drag`, `desktop_double_click`, `desktop_type`, `desktop_key`. All fail closed with a busy error while a human lease is active except `desktop_screenshot`, `desktop_wait`, and `desktop_windows` (read-only observation). `desktop_launch` and `desktop_exec` are gated too: a newly launched client can grab input focus on the shared display, which is exactly what the lease protects against. `desktop_exec` applies the isolated X11 environment and waits for a client window; `desktop_launch` accepts `windowTimeoutMs` with the same 0-300000 ms bounds as `desktop_exec` when waiting for `waitWindow`. `desktop_screenshot` reports display size, image size, scale 1, image-pixel coordinates, and the client-window count, and warns when the count is zero or unavailable because `xdotool` is missing. `desktop_wait` polls until pixels differ from a baseline PNG, sampled pixels stay unchanged for N ms, or a window name substring appears, and records journal status `ok` or `timeout` from the reason it stopped. Pixel change and stability need ImageMagick `convert` or `magick` and compare 8-bit RGB plus dimensions, ignoring PNG timestamps. The wait budget covers captures, compares and window queries; a timed-out subprocess allows two seconds before SIGKILL and two more before forced pipe closure and settlement, up to four extra seconds excluding filesystem and scheduling delays.
 - Android: `android_start`, `android_install_apk`, `android_launch_app`, `android_screenshot`, `android_tap`, `android_type`, `android_back`, `android_home`, `android_get_ui_tree`, `android_logcat`, `android_run_adb`
 - Artifacts: `artifact_list`, `artifact_report`
 - Takeover: `takeover_status` — check whether a session is under human control (see [Supervised pause and human takeover](#supervised-pause-and-human-takeover)); read-only, always safe to call

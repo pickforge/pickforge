@@ -78,12 +78,33 @@ export {
 export {
   buildScreenshotCommand,
   detectScreenshotTool,
+  IMAGE_PIXEL_COORDINATES,
+  queryDisplaySize,
+  SCREENSHOT_SCALE,
   screenshot,
+  screenshotMetadata,
+  sessionDisplaySize,
+  type ScreenshotMetadata,
   type ScreenshotOptions,
   type ScreenshotResult,
   type ScreenshotStep,
   type ScreenshotTool,
 } from "./screenshot.js";
+
+export {
+  boundDesktopWaitTimeoutMs,
+  boundStableMs,
+  DEFAULT_DESKTOP_WAIT_TIMEOUT_MS,
+  DEFAULT_STABLE_MS,
+  desktopWait,
+  MAX_DESKTOP_WAIT_TIMEOUT_MS,
+  MAX_STABLE_MS,
+  WAIT_SUBPROCESS_KILL_GRACE_MS,
+  type DesktopWaitMode,
+  type DesktopWaitOptions,
+  type DesktopWaitReason,
+  type DesktopWaitResult,
+} from "./wait.js";
 
 export {
   buildClickArgs,

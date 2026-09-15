@@ -434,6 +434,7 @@ describe("evidence report device, outcome, and filters", () => {
 
     expect(html).toContain("<dt>Device</dt><dd>mobile-emulation</dd>");
     expect(html).toContain("<dt>Viewport</dt><dd>390x844</dd>");
+    expect(html).toContain("<dt>Image</dt><dd>unknown</dd>");
     expect(html).toContain("<dt>Scale</dt><dd>3</dd>");
     expect(html).toContain("<dt>Touch</dt><dd>yes</dd>");
     expect(html).toContain("<dt>Browser</dt><dd>Chromium 141</dd>");
@@ -808,6 +809,8 @@ describe("evidence report filtering and index hardening", () => {
       "<dt>Scale</dt><dd>unknown</dd>",
     ],
     ["a blank browser", { browser: "   " }, "<dt>Browser</dt><dd>unknown</dd>"],
+    ["a blank coordinate space", { coordinateSpace: " " }, "<dt>Coordinates</dt><dd>unknown</dd>"],
+    ["a partial image", { image: { width: 8 } }, "<dt>Image</dt><dd>unknown</dd>"],
     ["a numeric platform", { platform: 7 }, "<dt>Platform</dt><dd>unknown</dd>"],
     ["an unlisted kind", { kind: "toaster" }, "<dt>Device</dt><dd>unknown</dd>"],
     ["a null kind", { kind: null }, "<dt>Device</dt><dd>unknown</dd>"],

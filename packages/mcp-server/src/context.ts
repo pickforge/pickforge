@@ -2,6 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/server";
 import {
+  resolveRunStorage,
+  sanitizeErrorText,
+  readProjectFileBounded,
+  observationBudget,
+  readOwnedRunFile,
   readPickforgeEnv,
   resolveConfinedPath,
   resolveRunnableSession,
@@ -46,10 +51,11 @@ export interface ToolReport {
   data?: Record<string, unknown>;
   errors?: string[];
   extraContent?: CallToolResult["content"];
+  evidenceStatus?: "ok" | "error" | "timeout" | "cancelled";
 }
 
 export function reportResult(report: ToolReport): CallToolResult {
-  const errors = report.errors ?? [];
+  const errors = (report.errors ?? []).map((error) => sanitizeErrorText(error));
   const body: Record<string, unknown> = { ok: errors.length === 0 };
   for (const [key, value] of Object.entries(report.data ?? {})) {
     if (key !== "ok" && key !== "errors") {
@@ -161,4 +167,34 @@ export async function resolveScreenshotTarget(
     conflictError: 'Use either "out" or "runSlug", not both',
     env: ctx.env,
   });
+}
+
+function screenshotNameInRun(runDir: string, requestedPath: string): string | undefined {
+  const relative = path.relative(path.resolve(runDir, "screenshots"), path.resolve(requestedPath));
+  if (relative.startsWith("..") || path.isAbsolute(relative) || relative.includes(path.sep)) {
+    return undefined;
+  }
+  if (!/^[A-Za-z0-9._-]+\.png$/.test(relative)) return undefined;
+  return relative;
+}
+
+export async function resolveWaitBaseline(
+  ctx: ServerContext,
+  requestedPath: string,
+  deadline: number = Date.now() + 10_000,
+): Promise<Buffer> {
+  observationBudget(deadline);
+  const refusal =
+    `Refusing to read wait baseline outside the project directory or a verified run screenshot: ${requestedPath}`;
+  const resolved = path.resolve(ctx.projectDir, requestedPath);
+  const relative = path.relative(path.resolve(ctx.projectDir), resolved);
+  if (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) {
+    return readProjectFileBounded(ctx.projectDir, resolved, deadline);
+  }
+  const storage = await resolveRunStorage(ctx.projectDir, ctx.env);
+  observationBudget(deadline);
+  const runId = path.relative(storage.runsDir, resolved).split(path.sep)[0]!;
+  const name = screenshotNameInRun(path.join(storage.runsDir, runId), resolved);
+  if (runId === ".." || name === undefined) throw new Error(refusal);
+  return readOwnedRunFile(ctx.projectDir, runId, "screenshots", name, ctx.env, deadline);
 }

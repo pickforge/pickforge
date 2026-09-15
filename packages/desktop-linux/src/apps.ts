@@ -1,6 +1,8 @@
 import path from "node:path";
 import {
   buildContainedCommand,
+  ObservationTimeoutError,
+  observationBudget,
   isProcessGroupAlive,
   readProcessGroupLeaderIdentity,
   readProcessIdentity,
@@ -277,11 +279,12 @@ async function runXdotoolQuery(
   display: string,
   args: string[],
   env: EnvLike | undefined,
+  timeoutMs: number = XDOTOOL_TIMEOUT_MS,
 ): Promise<RunCommandResult> {
   try {
     return await runCommand("xdotool", args, {
       env: { ...env, DISPLAY: display },
-      timeoutMs: XDOTOOL_TIMEOUT_MS,
+      timeoutMs,
     });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -296,13 +299,20 @@ async function runXdotoolQuery(
 export async function listWindows(
   display: string,
   env?: EnvLike,
+  timeoutMs?: number,
 ): Promise<WindowInfo[]> {
   parseDisplayNumber(display);
+  // Legacy inventory has per-query bounds. Only explicit observation callers share a deadline.
+  const deadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs;
+  const budget = (): number => deadline === undefined ? XDOTOOL_TIMEOUT_MS : observationBudget(deadline);
+  const searchBudget = budget();
   const search = await runXdotoolQuery(
     display,
     ["search", "--onlyvisible", "--name", "."],
     env,
+    Math.min(XDOTOOL_TIMEOUT_MS, searchBudget),
   );
+  if (search.timedOut) throw new ObservationTimeoutError(`xdotool search timed out on ${display}`);
   if (!search.ok) {
     if (search.code === 1 && search.stderr.trim() === "") {
       return [];
@@ -317,11 +327,14 @@ export async function listWindows(
 
   const windows: WindowInfo[] = [];
   for (const id of ids) {
+    const left = budget();
     const nameResult = await runXdotoolQuery(
       display,
       ["getwindowname", id],
       env,
+      Math.min(XDOTOOL_TIMEOUT_MS, left),
     );
+    if (deadline !== undefined) assertObservedTitle(nameResult, display);
     windows.push({
       id,
       name: nameResult.ok ? nameResult.stdout.replace(/\n$/, "") : "",
@@ -330,10 +343,20 @@ export async function listWindows(
   return windows;
 }
 
+function assertObservedTitle(result: RunCommandResult, display: string): void {
+  if (result.timedOut) throw new ObservationTimeoutError(`xdotool title query timed out on ${display}`);
+  if (result.ok) return;
+  // The window may disappear between search and getwindowname. Other query failures
+  // (including loss of the X connection) are not successful observations.
+  if (/BadWindow \(invalid Window parameter\)/.test(result.stderr)) return;
+  throw new Error(`xdotool title query failed on ${display}: ${result.stderr.trim() || `exit code ${result.code}`}`);
+}
+
 export async function waitForWindow(
   display: string,
   namePattern: string | RegExp,
   timeoutMs: number = DEFAULT_WAIT_TIMEOUT_MS,
+  env?: EnvLike,
 ): Promise<WindowInfo> {
   const matches =
     typeof namePattern === "string"
@@ -346,7 +369,15 @@ export async function waitForWindow(
   const deadline = Date.now() + timeoutMs;
   let lastSeen: WindowInfo[] = [];
   for (;;) {
-    lastSeen = await listWindows(display);
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    try {
+      lastSeen = await listWindows(display, env, remaining);
+    } catch (error) {
+      if (error instanceof ObservationTimeoutError) break;
+      throw error;
+    }
+    if (Date.now() >= deadline) break;
     const match = lastSeen.find((win) => matches(win.name));
     if (match !== undefined) {
       return match;
@@ -354,7 +385,7 @@ export async function waitForWindow(
     if (Date.now() >= deadline) {
       break;
     }
-    await sleep(WINDOW_POLL_INTERVAL_MS);
+    await sleep(Math.min(WINDOW_POLL_INTERVAL_MS, Math.max(0, deadline - Date.now())));
   }
   const seen = lastSeen.map((win) => JSON.stringify(win.name)).join(", ");
   throw new Error(

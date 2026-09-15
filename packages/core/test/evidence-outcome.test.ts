@@ -39,12 +39,12 @@ it("round trips device schema and derives only known session geometry", async ()
   for (const type of ["desktop", "browser", "android"] as const) {
     const session = await createSession({ type, projectDir: project, desktop: { display: ":99", width: 1280, height: 720 } });
     const { run: derived } = await beginEvidenceRun(project, session.id);
-    const desktop = { kind: "desktop", viewport: { width: 1280, height: 720 } };
+    const viewport = { width: 1280, height: 720 };
     const expected = type === "android"
       ? { kind: "emulator" }
       : type === "browser"
-        ? { ...desktop, platform: `${process.platform} ${process.arch}` }
-        : desktop;
+        ? { kind: "desktop", viewport, platform: `${process.platform} ${process.arch}` }
+        : { kind: "desktop", viewport, scale: 1, coordinateSpace: "image-pixels" };
     expect((await derived.readManifest()).device).toEqual(expected);
   }
   expect((await run.readManifest()).device).toBeUndefined();
@@ -100,6 +100,8 @@ it("records the browser build of a browser session and leaves desktop runs untou
   expect((await plain.run.readManifest()).device).toEqual({
     kind: "desktop",
     viewport: { width: 1280, height: 720 },
+    scale: 1,
+    coordinateSpace: "image-pixels",
   });
 });
 
@@ -123,7 +125,7 @@ it("sanitizes every text field and caps lists before persistence", async () => {
   expect(parseRecoverableActionsJournal(raw).records).toEqual([outcome]);
 });
 
-it.each(["desktop_screenshot", "desktop_launch", "session_list", "evaluate_script", "desktop_move", "desktop_windows"])("refuses pass from recording alone: %s", async (tool) => {
+it.each(["desktop_screenshot", "desktop_wait", "desktop_launch", "session_list", "evaluate_script", "desktop_move", "desktop_windows"])("refuses pass from recording alone: %s", async (tool) => {
   await interaction(tool);
   await expect(recordEvidenceOutcome(project, run.runId, input)).rejects.toThrow(/Recording alone/);
 });

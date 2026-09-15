@@ -88,6 +88,10 @@ describe.skipIf(!hasDesktopStack)("desktop flow (real Xvfb)", () => {
       expect(shot.ok).toBe(true);
       expect(shot.sessionId).toBe(session.id);
       expect(shot.windowCount).toBe(0);
+      expect(shot.imageSize).toEqual({ width: 800, height: 600 });
+      expect(shot.displaySize).toEqual({ width: 800, height: 600 });
+      expect(shot.scale).toBe(1);
+      expect(shot.inputCoordinates).toBe("image-pixels");
       expect(shot.warnings).toEqual([
         expect.stringContaining("may have escaped the lab"),
       ]);

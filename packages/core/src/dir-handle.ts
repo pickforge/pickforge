@@ -372,6 +372,12 @@ export class DirHandle {
     }
   }
 
+  /** Remove only the known regular entry in this held directory. Substitutions are refused. */
+  async unlinkOwnedFile(name: string, expected: fs.Stats): Promise<void> {
+    await this.#assertFileIdentity(name, expected);
+    await this.unlinkChild(name);
+  }
+
   async #assertFileIdentity(name: string, expected: fs.Stats): Promise<void> {
     const current = await this.lstatChild(name);
     if (!current?.isFile() || current.dev !== expected.dev || current.ino !== expected.ino) {

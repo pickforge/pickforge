@@ -151,5 +151,13 @@ describe("desktop input tools fail closed under human control", () => {
     // Not gated: it fails only because there is no real display/screenshot
     // tool in this test environment, never because of the human lease.
     expect(result.errors.join("\n")).not.toContain("human control is active");
+
+    const waited = parseToolJson(
+      await lab.client.callTool({
+        name: "desktop_wait",
+        arguments: { session: id, window: "None", timeoutMs: 0 },
+      }),
+    );
+    expect(waited.errors.join("\n")).not.toContain("human control is active");
   });
 });

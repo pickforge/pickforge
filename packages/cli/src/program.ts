@@ -41,6 +41,7 @@ import {
   runDesktopScreenshot,
   runDesktopScroll,
   runDesktopType,
+  runDesktopWait,
 } from "./commands/desktop.js";
 import { runDoctor } from "./commands/doctor.js";
 import { runInit } from "./commands/init.js";
@@ -317,6 +318,10 @@ function registerDesktopLaunchCommands(desktop: Command): void {
         .option(
           "--wait-window <pattern>",
           "wait for a window whose name contains the pattern",
+        )
+        .option(
+          "--window-timeout <ms>",
+          "maximum time to wait for --wait-window (default 10000)",
         ),
     ),
   ).action(async (command, args, opts) => {
@@ -362,6 +367,34 @@ function registerDesktopLaunchCommands(desktop: Command): void {
     ),
   ).action(async (opts) => {
     process.exitCode = await runDesktopScreenshot(opts);
+  });
+
+  withJson(
+    withDesktopSession(
+      desktop
+        .command("wait")
+        .description(
+          "Wait for a screen pixel change, sampled stability, or window name",
+        )
+        .option(
+          "--changed-from <path>",
+          "wait until pixels differ from this PNG",
+        )
+        .option(
+          "--stable <ms>",
+          "wait until sampled pixels stay unchanged for this many ms",
+        )
+        .option(
+          "--window <pattern>",
+          "wait for a window whose name contains the pattern",
+        )
+        .option(
+          "--timeout <ms>",
+          "maximum wait including captures (default 10000, max 300000)",
+        ),
+    ),
+  ).action(async (opts) => {
+    process.exitCode = await runDesktopWait(opts);
   });
 }
 

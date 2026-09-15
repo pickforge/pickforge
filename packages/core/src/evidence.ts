@@ -1,4 +1,6 @@
 import { desktopHomePolicy, getSession } from "./session.js";
+import { withJournalLock, claimBackoff, unlinkIfMatchesIn, CLAIM_TOTAL_DEADLINE_MS, EMPTY_CLAIM_GRACE_ATTEMPTS, MAX_CLAIM_ATTEMPTS } from "./journal-lock.js";
+export { withJournalLock } from "./journal-lock.js";
 import { isOutcomeRecord, sanitizeOutcome, validateOutcomeIn, validOutcomeFields, type EvidenceOutcomeRecord } from "./evidence-outcome.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -25,6 +27,7 @@ import {
   RunHandle,
   adoptRunIn,
   createRun,
+  type EvidenceDevice,
   type RunManifest,
   type RunStatus,
 } from "./run.js";
@@ -57,25 +60,6 @@ export const EVIDENCE_MAX_LINE_BYTES = 64 * 1024;
 export const EVIDENCE_RETENTION_KEEP = 20;
 /** Filename of the truncation gate sentinel inside a run dir. */
 const TRUNCATION_SENTINEL = ".evidence-truncated";
-/** Recoverable cross-process lock that serializes journal repair and appends. */
-const JOURNAL_LOCK = ".evidence-journal.lock";
-
-/** Wall-clock budget for waiting on a live claimer before giving up (ms). */
-const CLAIM_TOTAL_DEADLINE_MS = 5_000;
-/** Base and max backoff between claim retries (ms). */
-const CLAIM_BACKOFF_MS = 5;
-const CLAIM_BACKOFF_MAX_MS = 50;
-/**
- * How many retries to tolerate an owner-unknown (empty) claim before assuming
- * the claimer died in the microscopic window between `wx` create and its
- * identity stamp, and reclaiming it. A live winner stamps its identity
- * synchronously right after the create, so this only ever fires for a genuinely
- * dead claimer. Shared by the active-run pointer and the truncation-marker
- * sentinel, which both use the same recoverable-claim protocol.
- */
-const EMPTY_CLAIM_GRACE_ATTEMPTS = 4;
-/** Hard cap on claim attempts as a spin guard alongside the wall-clock budget. */
-const MAX_CLAIM_ATTEMPTS = 10_000;
 const SAFE_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]*$/i;
 
 export type EvidenceActionStatus = "ok" | "error" | "cancelled" | "timeout";
@@ -458,149 +442,12 @@ async function clearActivePointerIn(
   return false;
 }
 
-/**
- * Unlink only if the file content still matches what we last read, closing the
- * window where a peer republishes a fresh pointer between our read and unlink.
- * Both the compare and the unlink resolve through the same directory
- * descriptor, so they always act on the same directory.
- */
-async function unlinkIfMatchesIn(
-  dir: DirHandle,
-  name: string,
-  expected: string,
-): Promise<boolean> {
-  const current = await dir.readFileIfPresent(name);
-  if (current === undefined) return false;
-  if (current !== expected) return false;
-  return dir.unlinkChild(name);
-}
-
 /** Raised internally when a winner discovers it no longer owns its claim. */
 class ClaimLostError extends Error {
   constructor() {
     super("evidence claim lost before publication");
     this.name = "ClaimLostError";
   }
-}
-
-function claimBackoff(attempt: number): number {
-  return Math.min(CLAIM_BACKOFF_MS * (attempt + 1), CLAIM_BACKOFF_MAX_MS);
-}
-
-interface JournalLockClaim {
-  evidenceVersion: typeof EVIDENCE_VERSION;
-  ownerPid: number;
-  ownerStartTicks?: number;
-  claimedAt: string;
-}
-
-function parseJournalLockClaim(raw: string): JournalLockClaim | undefined {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return undefined;
-  }
-  if (typeof parsed !== "object" || parsed === null) return undefined;
-  const candidate = parsed as Record<string, unknown>;
-  if (
-    candidate.evidenceVersion !== EVIDENCE_VERSION ||
-    typeof candidate.ownerPid !== "number" ||
-    typeof candidate.claimedAt !== "string"
-  ) {
-    return undefined;
-  }
-  const claim: JournalLockClaim = {
-    evidenceVersion: EVIDENCE_VERSION,
-    ownerPid: candidate.ownerPid,
-    claimedAt: candidate.claimedAt,
-  };
-  if (typeof candidate.ownerStartTicks === "number") {
-    claim.ownerStartTicks = candidate.ownerStartTicks;
-  }
-  return claim;
-}
-
-interface JournalLockHandle {
-  claimContent: string;
-}
-
-async function acquireJournalLock(dir: DirHandle): Promise<JournalLockHandle> {
-  const ownerPid = process.pid;
-  const ownerStartTicks = readProcessStartTicks(ownerPid);
-  const deadline = Date.now() + CLAIM_TOTAL_DEADLINE_MS;
-
-  for (let attempt = 0; attempt < MAX_CLAIM_ATTEMPTS; attempt += 1) {
-    let handle: fs.promises.FileHandle;
-    try {
-      handle = await dir.openFile(JOURNAL_LOCK, "wx");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const raw = await dir.readFileIfPresent(JOURNAL_LOCK);
-      if (raw === undefined) continue;
-      const claim = parseJournalLockClaim(raw);
-      if (
-        claim !== undefined &&
-        identityIsAlive(claim.ownerPid, claim.ownerStartTicks)
-      ) {
-        if (Date.now() >= deadline) break;
-        await delay(claimBackoff(attempt));
-        continue;
-      }
-      if (claim !== undefined || attempt >= EMPTY_CLAIM_GRACE_ATTEMPTS) {
-        await unlinkIfMatchesIn(dir, JOURNAL_LOCK, raw).catch(() => {});
-      }
-      if (Date.now() >= deadline) break;
-      await delay(claimBackoff(attempt));
-      continue;
-    }
-
-    const claim: JournalLockClaim = {
-      evidenceVersion: EVIDENCE_VERSION,
-      ownerPid,
-      claimedAt: new Date().toISOString(),
-    };
-    if (ownerStartTicks !== undefined) claim.ownerStartTicks = ownerStartTicks;
-    const claimContent = `${JSON.stringify(claim)}\n`;
-    try {
-      const buffer = Buffer.from(claimContent, "utf8");
-      const { bytesWritten } = await handle.write(buffer, 0, buffer.length, 0);
-      if (bytesWritten !== buffer.length) {
-        throw new Error(
-          `short journal lock write: ${bytesWritten}/${buffer.length} bytes`,
-        );
-      }
-    } catch (error) {
-      await handle.close().catch(() => {});
-      await dir.unlinkChild(JOURNAL_LOCK).catch(() => {});
-      throw error;
-    }
-    await handle.close();
-    return { claimContent };
-  }
-
-  throw new Error(`Timed out waiting for evidence journal lock in ${dir.dir}`);
-}
-
-/** @internal Serialize recovery/report snapshots with appenders. */
-export async function withJournalLock<T>(
-  dir: DirHandle,
-  operation: () => Promise<T>,
-): Promise<T> {
-  const lock = await acquireJournalLock(dir);
-  let result: T;
-  let operationError: unknown;
-  try {
-    result = await operation();
-  } catch (error) {
-    operationError = error;
-  }
-
-  // Never turn a successful append into a retryable error after its bytes landed.
-  // A release failure leaves a recoverable owner-stamped lock for a later process.
-  await unlinkIfMatchesIn(dir, JOURNAL_LOCK, lock.claimContent).catch(() => {});
-  if (operationError !== undefined) throw operationError;
-  return result!;
 }
 
 /**
@@ -862,6 +709,10 @@ async function sessionDevice(sessionId: string, env: EnvLike): Promise<RunManife
   const device: NonNullable<RunManifest["device"]> = { kind: "desktop" };
   const { width, height } = session.desktop ?? {};
   if (width !== undefined && height !== undefined) device.viewport = { width, height };
+  if (session.type === "desktop") {
+    device.scale = 1;
+    device.coordinateSpace = "image-pixels";
+  }
   // A browser session additionally knows which browser build it drives and
   // which host platform it runs on. A pure desktop session has neither, and a
   // browser build that could not be read stays absent rather than guessed.
@@ -871,6 +722,32 @@ async function sessionDevice(sessionId: string, env: EnvLike): Promise<RunManife
     device.platform = `${process.platform} ${process.arch}`;
   }
   return device;
+}
+
+/** Merge device metadata under the journal lock so concurrent writers keep artifacts and status. */
+export async function setRunDevice(
+  run: RunHandle,
+  device: EvidenceDevice,
+): Promise<void> {
+  if (!(run instanceof RunHandle)) {
+    throw new RunStorageAccessError(
+      "setRunDevice requires a verified RunHandle; run directory paths are refused",
+    );
+  }
+  await run.setDevice(device);
+}
+
+/** Apply only framebuffer fields against the fresh device under the shared journal lock. */
+export async function setRunCaptureGeometry(
+  run: RunHandle,
+  geometry: Required<Pick<EvidenceDevice, "viewport" | "image" | "scale" | "coordinateSpace">>,
+): Promise<void> {
+  if (!(run instanceof RunHandle)) throw new RunStorageAccessError("Capture geometry requires a verified RunHandle");
+  await run.updateDevice((current) => {
+    // A desktop observation must not relabel an Android device in a mixed run.
+    if (current?.kind === "physical" || current?.kind === "emulator") return current;
+    return { ...current, kind: current?.kind ?? "desktop", ...geometry };
+  });
 }
 
 /** Policy is an enum only, not home paths or caller environment values. */
@@ -996,10 +873,11 @@ async function finalizeUnderRoot(
 
     const { pointer, manifest } = step;
     const run = await adoptRunIn(ctx.root, pointer.runId, manifest);
-    if (manifest.status === "running") {
-      manifest.evidenceTruncated = await isEvidenceTruncatedIn(run.binding);
-      await run.finish(status);
-    }
+    await run.updateManifest(async (latest) => {
+      if (latest.status !== "running") return;
+      latest.evidenceTruncated = await isEvidenceTruncatedIn(run.binding);
+      latest.status = status;
+    });
     const cleared = await clearActivePointerIn(ctx.root, ctx.sessionId, {
       expectRaw: step.raw,
     });

@@ -42,6 +42,7 @@ import {
   waitForWindow,
   type DesktopSessionHandle,
 } from "../src/index.js";
+import { encodePng } from "./png-fixture.js";
 
 const hasXvfb = findOnPath("Xvfb") !== null;
 const hasXdotool = findOnPath("xdotool") !== null;
@@ -277,14 +278,16 @@ describe("screenshot output validation", () => {
         tool: "import",
         env: { PATH: fakeBin },
       }),
-    ).rejects.toThrow(/PNG signature/);
+    ).rejects.toThrow(/invalid PNG|PNG signature/);
   });
 
   it("captures without xdotool and warns that the window count is unavailable", async () => {
     const fakeBin = path.join(tmpRoot, "fake-import-without-xdotool");
+    const fixture = path.join(tmpRoot, "mini.png");
+    fs.writeFileSync(fixture, encodePng(1, 1, Buffer.from([0, 0, 0])));
     writeExecutable(
       path.join(fakeBin, "import"),
-      '#!/bin/sh\nfor a in "$@"; do out="$a"; done\nprintf "\\211PNG\\r\\n\\032\\n" > "$out"\n',
+      `#!/bin/sh\nfor a in "$@"; do out="$a"; done\n/bin/cp "${fixture}" "$out"\n`,
     );
 
     const result = await screenshot({

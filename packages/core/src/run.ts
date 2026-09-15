@@ -1,4 +1,7 @@
 import fs from "node:fs";
+import { readBoundedFileIn } from "./bounded-read.js";
+import { EVIDENCE_VERSION, withJournalLock } from "./journal-lock.js";
+export { EVIDENCE_VERSION } from "./journal-lock.js";
 import os from "node:os";
 import path from "node:path";
 import { type EnvLike } from "./paths.js";
@@ -24,7 +27,6 @@ export type ArtifactType = "screenshot" | "log" | "report" | "other";
  * avoiding an import cycle: `evidence.ts` depends on `run.ts`, never the
  * reverse.
  */
-export const EVIDENCE_VERSION = 1 as const;
 export const EVIDENCE_ACTION_LOG = "actions.jsonl";
 
 export interface RunArtifact {
@@ -37,7 +39,9 @@ export interface RunArtifact {
 export interface EvidenceDevice {
   kind: "desktop" | "mobile-emulation" | "physical" | "emulator" | "unknown";
   viewport?: { width: number; height: number };
+  image?: { width: number; height: number };
   scale?: number;
+  coordinateSpace?: "image-pixels";
   touch?: boolean;
   browser?: string;
   platform?: string;
@@ -216,13 +220,6 @@ export class RunHandle {
     return parsed as RunManifest;
   }
 
-  async #writeManifest(): Promise<void> {
-    const content = serializeManifest(this.manifest);
-    await withBoundRunDir(this.#binding, (runDir) =>
-      runDir.writeFileAtomic("manifest.json", content),
-    );
-  }
-
   get runId(): string {
     return this.manifest.runId;
   }
@@ -241,14 +238,43 @@ export class RunHandle {
       path: relative,
       createdAt: new Date().toISOString(),
     };
-    this.manifest.artifacts.push(artifact);
-    await this.#writeManifest();
+    await this.updateManifest((latest) => { latest.artifacts.push(artifact); });
     return artifact;
   }
 
   async setStatus(status: RunStatus): Promise<void> {
-    this.manifest.status = status;
-    await this.#writeManifest();
+    await this.updateManifest((latest) => { latest.status = status; });
+  }
+
+  async setDevice(device: EvidenceDevice): Promise<void> {
+    await this.updateDevice(() => device);
+  }
+
+  async updateDevice(update: (current: EvidenceDevice | undefined) => EvidenceDevice): Promise<void> {
+    await this.updateManifest((latest) => { latest.device = update(latest.device); });
+  }
+
+  /** @internal Fresh field-specific mutation under the existing interprocess journal lock.
+   * Callers must not already hold that lock or invoke another manifest mutation inside update. */
+  async updateManifest(update: (latest: RunManifest) => void | Promise<void>): Promise<void> {
+    await withBoundRunDir(this.#binding, (runDir) => withJournalLock(runDir, async () => {
+      const raw = await runDir.readFileIfPresent("manifest.json");
+      if (raw === undefined) {
+        throw new RunStorageAccessError(`Run manifest is missing: ${this.dir}`);
+      }
+      const parsed: unknown = JSON.parse(raw);
+      if (
+        typeof parsed !== "object" ||
+        parsed === null ||
+        (parsed as RunManifest).runId !== this.runId
+      ) {
+        throw new RunStorageAccessError(`Invalid run manifest: ${this.dir}`);
+      }
+      const latest = parsed as RunManifest;
+      await update(latest);
+      await runDir.writeFileAtomic("manifest.json", serializeManifest(latest));
+      Object.assign(this.manifest, latest);
+    }));
   }
 
   async finish(status: RunStatus = "completed"): Promise<void> {
@@ -403,6 +429,41 @@ export async function adoptRun(
   return withRunsRootDir(projectDir, env, (root) =>
     adoptRunIn(root, runId, manifest),
   );
+}
+
+/** Read a regular file through the verified run directory, refusing symlink dirs and files. */
+export async function readOwnedRunFile(
+  projectDir: string,
+  runId: string,
+  subdir: string,
+  name: string,
+  env: EnvLike = process.env,
+  deadline: number = Date.now() + 10_000,
+): Promise<Buffer> {
+  assertSafeEntryName(subdir, "artifact directory");
+  assertSafeEntryName(name, "artifact name");
+  return withRunsRootDir(projectDir, env, async (root) => {
+    const runDir = await openRunDirIn(root, runId);
+    try {
+      const subStat = await runDir.lstatChild(subdir);
+      if (subStat === undefined || subStat.isSymbolicLink() || !subStat.isDirectory()) {
+        throw new RunStorageAccessError(
+          `Refusing to read ${subdir}/${name}: ${subdir} is not a verified directory`,
+        );
+      }
+      const child = await runDir.openChild(subdir);
+      try {
+        if (child.stat.dev !== subStat.dev || child.stat.ino !== subStat.ino) {
+          throw new RunStorageAccessError("Artifact directory was replaced before reading");
+        }
+        return await readBoundedFileIn(child, name, deadline);
+      } finally {
+        await child.close();
+      }
+    } finally {
+      await runDir.close();
+    }
+  });
 }
 
 export { listRuns } from "./run-catalog.js";
