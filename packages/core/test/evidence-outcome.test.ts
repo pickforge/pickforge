@@ -123,17 +123,17 @@ it("sanitizes every text field and caps lists before persistence", async () => {
   expect(parseRecoverableActionsJournal(raw).records).toEqual([outcome]);
 });
 
-it.each(["desktop_screenshot", "desktop_launch", "session_list", "evaluate_script", "desktop_move"])("refuses pass from recording alone: %s", async (tool) => {
+it.each(["desktop_screenshot", "desktop_launch", "session_list", "evaluate_script", "desktop_move", "desktop_windows"])("refuses pass from recording alone: %s", async (tool) => {
   await interaction(tool);
   await expect(recordEvidenceOutcome(project, run.runId, input)).rejects.toThrow(/Recording alone/);
 });
-it("refuses failed interactions and missing inspected screenshots", async () => {
-  await interaction("desktop_click", "error");
+it.each(["desktop_click", "desktop_focus"])("refuses failed %s and missing inspected screenshots", async (tool) => {
+  await interaction(tool, "error");
   await expect(recordEvidenceOutcome(project, run.runId, input)).rejects.toThrow(/successful interaction/);
   await interaction();
   await expect(recordEvidenceOutcome(project, run.runId, { ...input, inspectedScreenshots: [] })).rejects.toThrow(/Recording alone/);
 });
-it.each(["desktop_click", "android_tap", "android_back", "chrome_devtools/fill", "chrome_devtools/press_key"])("accepts pass with %s and an inspected screenshot", async (tool) => {
+it.each(["desktop_focus", "desktop_click", "android_tap", "android_back", "chrome_devtools/fill", "chrome_devtools/press_key"])("accepts pass with %s and an inspected screenshot", async (tool) => {
   await interaction(tool);
   expect((await recordEvidenceOutcome(project, run.runId, input)).status).toBe("pass");
 });

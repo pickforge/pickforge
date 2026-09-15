@@ -28,6 +28,8 @@ import {
 } from "./commands/agents.js";
 import { runBrowserDevtoolsMcp } from "./commands/browser.js";
 import {
+  runDesktopWindows,
+  runDesktopFocus,
   runDesktopClick,
   runDesktopDoubleClick,
   runDesktopDrag,
@@ -291,6 +293,18 @@ function registerWatchAndBrowserCommands(program: Command): void {
     });
 }
 
+function registerDesktopWindowCommands(desktop: Command): void {
+  withJson(withDesktopSession(desktop.command("windows")
+    .description("List visible windows with identity, geometry and input focus")))
+    .action(async (opts) => { process.exitCode = await runDesktopWindows(opts); });
+  withJson(withDesktopSession(desktop.command("focus")
+    .description("Focus a window by id or exact name; reject ambiguous names")
+    .option("--id <id>", "positive decimal X11 window id")
+    .option("--name <name>", "exact window name")
+    .option("--timeout <ms>", "focus confirmation deadline (1-10000ms, default 2000)")))
+    .action(async (opts) => { process.exitCode = await runDesktopFocus(opts); });
+}
+
 function registerDesktopLaunchCommands(desktop: Command): void {
   withJson(
     withDesktopSession(
@@ -452,6 +466,7 @@ function registerDesktopCommands(program: Command): void {
   const desktop = program
     .command("desktop")
     .description("Drive the desktop (X11) lab session");
+  registerDesktopWindowCommands(desktop);
   registerDesktopLaunchCommands(desktop);
   registerDesktopPointerCommands(desktop);
   registerDesktopInputCommands(desktop);

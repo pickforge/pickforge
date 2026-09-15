@@ -3,6 +3,10 @@ import { z } from "zod";
 import { withAgentPermit } from "@pickforge/lab-core";
 import {
   click,
+  desktopWindows,
+  focusWindow,
+  selectDesktopWindow,
+  MAX_FOCUS_TIMEOUT_MS,
   desktopSessionLogDir,
   doubleClick,
   drag,
@@ -639,10 +643,50 @@ function registerKeyTool(server: McpServer, ctx: ServerContext): void {
   );
 }
 
+function registerWindowsTools(server: McpServer, ctx: ServerContext): void {
+  server.registerTool("desktop_windows", {
+    title: "Desktop windows",
+    description: "List visible named X11 windows with id, name, class, geometry and input focus state.",
+    inputSchema: sessionArg,
+  }, (args) => runTool(async () => {
+    const { id, display } = await resolveDesktop(ctx, args.session);
+    return { data: { sessionId: id, display, windows: await desktopWindows(display, ctx.env) } };
+  }));
+  server.registerTool("desktop_focus", {
+    title: "Focus desktop window",
+    description: "Focus by decimal window id or exact name (exactly one). Ambiguous names are rejected. Confirms X input focus without requiring a window manager.",
+    inputSchema: {
+      ...sessionArg,
+      id: z.string().regex(/^[1-9]\d*$/).optional(),
+      name: z.string().min(1).optional(),
+      timeoutMs: z.number().int().min(1).max(MAX_FOCUS_TIMEOUT_MS).optional(),
+    },
+  }, (args) => runTool(async () => {
+    const { id, display } = await resolveDesktop(ctx, args.session);
+    let window;
+    try {
+      window = await selectDesktopWindow(display, args, ctx.env);
+    } catch (error) {
+      return withMcpEvidence(ctx, {
+        sessionId: id, tool: "desktop_focus",
+        target: { role: "window", name: args.name, selector: args.id },
+      }, async () => { throw error; });
+    }
+    return withMcpEvidence(ctx, {
+      sessionId: id, tool: "desktop_focus",
+      target: { role: "window", name: window.name, selector: window.id },
+    }, async () => ({ data: {
+      sessionId: id, display,
+      window: await focusWindow({ display, sessionId: id, window, env: ctx.env, timeoutMs: args.timeoutMs }),
+    } }));
+  }));
+}
+
 export function registerDesktopTools(
   server: McpServer,
   ctx: ServerContext,
 ): void {
+  registerWindowsTools(server, ctx);
   registerLaunchTool(server, ctx);
   registerExecTool(server, ctx);
   registerScreenshotTool(server, ctx);

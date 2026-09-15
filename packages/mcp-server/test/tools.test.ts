@@ -23,6 +23,8 @@ const EXPECTED_TOOLS = [
   "session_create",
   "session_status",
   "session_destroy",
+  "desktop_windows",
+  "desktop_focus",
   "desktop_launch",
   "desktop_exec",
   "desktop_screenshot",
