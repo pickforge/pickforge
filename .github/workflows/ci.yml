@@ -111,6 +111,7 @@ jobs:
       # default (Chrome's sandbox stays on outside CI).
       - run: bun run test
         env:
+          PICKFORGE_REQUIRE_DESKTOP_CAPTURES: "1"
           PICKFORGE_REQUIRE_DESKTOP_WINDOWS: "1"
           PICKFORGE_REQUIRE_DESKTOP_WAIT: "1"
           PICKFORGE_REQUIRE_BROWSER: "1"
@@ -118,6 +119,7 @@ jobs:
 
       - run: bun run test:coverage
         env:
+          PICKFORGE_REQUIRE_DESKTOP_CAPTURES: "1"
           PICKFORGE_REQUIRE_DESKTOP_WINDOWS: "1"
           PICKFORGE_REQUIRE_DESKTOP_WAIT: "1"
           PICKFORGE_REQUIRE_BROWSER: "1"

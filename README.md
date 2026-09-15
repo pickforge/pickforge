@@ -477,8 +477,35 @@ acceptance. Appending to a finalized run refreshes its report.
 Typed values are stored only as length and input type. Network failures keep
 only allowlisted method, URL origin/path without its query, status, resource
 type, timing, and sanitized error metadata; headers and bodies are never kept.
-Pickforge does not take implicit screenshots for input actions. Explicit
-screenshot tools still capture the screen exactly as displayed.
+Pickforge does not take implicit screenshots for input actions. MCP
+`desktop_click`, `desktop_double_click`, `desktop_drag`, `desktop_scroll`,
+`desktop_type`, `desktop_key` and `desktop_focus` accept optional
+`capture: "after"` or `capture: "both"`. Omit it for no screenshots. `both`
+saves a before PNG, attempts input once, then saves an after PNG; `after`
+attempts input once before capturing. These explicit captures require enabled,
+available evidence and join that same action's active run under `screenshots/`,
+with action-id-based before/after names. Results expose `capture`, `captures`
+(with phase, path and geometry), `artifacts` and `inputState`.
+
+If a required before capture fails or the run is already marked capped, input
+is not attempted. If input or an after capture fails, the result reports the
+failed stage and whether input was attempted or completed. Already saved PNGs
+remain linked to the failed action when recording permits. If the recording
+cap drops the attachment record, the tool returns an error with
+`captureRecording: "capped"`, retained paths and the input state, and attempts a
+bounded metadata-only error record. A storage failure instead reports
+`captureRecording: "unconfirmed"` without retrying an uncertain journal append.
+Neither result claims the images were linked.
+An attempted input may have partially executed or been refused by its existing
+permit check; it is never retried automatically. Captures and input are not an
+exclusive transaction. The viewer links the pair to the same step. Capturing
+does not mark images inspected or establish a pass: list the images you actually
+inspect in `evidence_outcome.inspectedScreenshots` under the existing pass rule.
+
+Typed metadata remains length and input type only, but explicit screenshots
+store the screen exactly as displayed, including visible typed text. Pixels
+cannot be redacted and no OCR redaction is promised. Never request capture on
+sensitive screens.
 
 The journal and associated artifacts have a 100 MiB recording threshold per
 run. The record that crosses the threshold may exceed it; Pickforge then writes a
@@ -497,7 +524,9 @@ project in `.picklab/config.json`:
 }
 ```
 
-This does not block an explicitly requested screenshot command. Screenshot
+This does not block an explicitly requested standalone screenshot command.
+Input tools with `capture` instead fail before input when evidence is disabled.
+Screenshot
 pixels cannot be redacted; see [SECURITY.md](SECURITY.md#recorded-evidence-and-screenshots).
 
 ### Supervised pause and human takeover
