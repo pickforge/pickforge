@@ -12,6 +12,7 @@ import {
   parseToolJson,
   PLANTED_TOKEN,
   removeLabDirs,
+  MINI_PNG,
   writeDesktopSessionRecord,
   writeScript,
   writeSyntheticRun,
@@ -28,6 +29,7 @@ const EXPECTED_TOOLS = [
   "desktop_launch",
   "desktop_exec",
   "desktop_screenshot",
+  "desktop_wait",
   "desktop_click",
   "desktop_move",
   "desktop_scroll",
@@ -401,9 +403,11 @@ describe("desktop isolation tools", () => {
 
   it("screenshots without xdotool and returns only the missing-tool warning", async () => {
     const id = writeDesktopSessionRecord(dirs.home, dirs.projectDir);
+    const fixture = path.join(dirs.root, "mini.png");
+    fs.writeFileSync(fixture, MINI_PNG);
     writeScript(
       path.join(dirs.binDir, "import"),
-      'for arg in "$@"; do out="$arg"; done\nprintf "\\211PNG\\r\\n\\032\\n" > "$out"',
+      `for arg in "$@"; do out="$arg"; done\n/bin/cp "${fixture}" "$out"`,
     );
 
     const result = await lab.client.callTool({
@@ -413,6 +417,10 @@ describe("desktop isolation tools", () => {
     const report = parseToolJson(result);
     expect(report.ok).toBe(true);
     expect(report.windowCount).toBeUndefined();
+    expect(report.imageSize).toEqual({ width: 1, height: 1 });
+    expect(report.displaySize).toEqual({ width: 1, height: 1 });
+    expect(report.scale).toBe(1);
+    expect(report.inputCoordinates).toBe("image-pixels");
     expect(report.warnings).toEqual([expect.stringContaining("xdotool")]);
     expect(report.warnings[0]).toContain("missing");
     expect(report.warnings[0]).not.toContain("escaped the lab");
@@ -420,10 +428,12 @@ describe("desktop isolation tools", () => {
 
   it("reports a zero-window screenshot with the shared escape warning", async () => {
     const id = writeDesktopSessionRecord(dirs.home, dirs.projectDir);
+    const fixture = path.join(dirs.root, "mini.png");
+    fs.writeFileSync(fixture, MINI_PNG);
     writeScript(path.join(dirs.binDir, "xdotool"), "exit 1");
     writeScript(
       path.join(dirs.binDir, "import"),
-      'for arg in "$@"; do out="$arg"; done\nprintf "\\211PNG\\r\\n\\032\\n" > "$out"',
+      `for arg in "$@"; do out="$arg"; done\n/bin/cp "${fixture}" "$out"`,
     );
 
     const result = await lab.client.callTool({
@@ -433,10 +443,71 @@ describe("desktop isolation tools", () => {
     const report = parseToolJson(result);
     expect(report.ok).toBe(true);
     expect(report.windowCount).toBe(0);
+    expect(report.imageSize).toEqual({ width: 1, height: 1 });
     expect(report.warnings).toEqual([
       expect.stringContaining("may have escaped the lab"),
     ]);
     expect(report.warnings[0]).toContain("opened on your real desktop");
+  });
+
+  it("waits for a named window and times out a pixel wait", async () => {
+    const id = writeDesktopSessionRecord(dirs.home, dirs.projectDir);
+    const baseline = path.join(dirs.projectDir, "base.png");
+    fs.writeFileSync(baseline, MINI_PNG);
+    writeScript(
+      path.join(dirs.binDir, "import"),
+      `for arg in "$@"; do out="$arg"; done\n/bin/cp "${baseline}" "$out"`,
+    );
+    writeScript(
+      path.join(dirs.binDir, "maim"),
+      `for arg in "$@"; do out="$arg"; done\n/bin/cp "${baseline}" "$out"`,
+    );
+    writeScript(
+      path.join(dirs.binDir, "xdotool"),
+      'case "$1" in\n  search) echo 7 ;;\n  getwindowname) echo Ready Window ;;\nesac',
+    );
+    writeScript(path.join(dirs.binDir, "convert"), 'exec /usr/bin/convert "$@"');
+    writeScript(path.join(dirs.binDir, "magick"), 'exec /usr/bin/magick "$@"');
+
+    const named = parseToolJson(
+      await lab.client.callTool({
+        name: "desktop_wait",
+        arguments: { session: id, window: "Ready", timeoutMs: 1000 },
+      }),
+    );
+    expect(named.ok).toBe(true);
+    expect(named.reason).toBe("window");
+    expect(named.window).toEqual({ id: "7", name: "Ready Window" });
+    expect(named.sampled).toBe(true);
+
+    const timed = parseToolJson(
+      await lab.client.callTool({
+        name: "desktop_wait",
+        arguments: { session: id, baseline: "base.png", timeoutMs: 200 },
+      }),
+    );
+    expect(timed.ok).toBe(true);
+    expect(timed.reason).toBe("timeout");
+
+    const outside = await lab.client.callTool({
+      name: "desktop_wait",
+      arguments: { session: id, baseline: "/tmp/not-a-lab-screenshot.png" },
+    });
+    expect(outside.isError).toBe(true);
+    expect(parseToolJson(outside).errors.join("\n")).toMatch(/project directory|verified run/);
+
+    writeScript(
+      path.join(dirs.binDir, "xdotool"),
+      `case "$1" in\n  search) echo 8 ;;\n  getwindowname) echo token=${PLANTED_TOKEN} ;;\nesac`,
+    );
+    const leaked = parseToolJson(
+      await lab.client.callTool({
+        name: "desktop_wait",
+        arguments: { session: id, window: "token", timeoutMs: 1000 },
+      }),
+    );
+    expect(leaked.ok).toBe(true);
+    expect(JSON.stringify(leaked)).not.toContain(PLANTED_TOKEN);
   });
 });
 

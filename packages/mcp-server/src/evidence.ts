@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   appendAction,
+  ObservationTimeoutError,
   beginEvidenceRun,
   isEvidenceEnabled,
   isEvidenceRun,
@@ -178,7 +179,10 @@ async function successAction<T extends ToolReport>(
   run: RunHandle,
 ): Promise<EvidenceAction> {
   const errors = result.errors ?? [];
-  const action = baseAction(attempt, errors.length === 0 ? "ok" : "error");
+  const action = baseAction(
+    attempt,
+    result.evidenceStatus ?? (errors.length === 0 ? "ok" : "error"),
+  );
   const artifacts =
     options.artifacts === undefined
       ? []
@@ -223,7 +227,10 @@ async function recordFailure(
   const run = attempt.run;
   if (run === undefined) return;
   await recordBestEffort(attempt.tool, async () => {
-    const action = baseAction(attempt, evidenceStatus(error));
+    const status = attempt.tool === "desktop_wait"
+      ? (error instanceof ObservationTimeoutError ? "timeout" : "error")
+      : evidenceStatus(error);
+    const action = baseAction(attempt, status);
     action.error = sanitizeErrorText(
       error instanceof Error ? error.message : String(error),
     );

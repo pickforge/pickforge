@@ -505,7 +505,9 @@ function deviceRows(device: EvidenceDevice | undefined): string {
   return [
     renderMetadata("Device", deviceKind(fields.kind)),
     renderMetadata("Viewport", viewportText(fields.viewport)),
+    renderMetadata("Image", viewportText(fields.image)),
     renderMetadata("Scale", numberText(fields.scale)),
+    renderMetadata("Coordinates", stringText(fields.coordinateSpace)),
     renderMetadata("Touch", booleanText(fields.touch)),
     renderMetadata("Browser", stringText(fields.browser)),
     renderMetadata("Platform", stringText(fields.platform)),

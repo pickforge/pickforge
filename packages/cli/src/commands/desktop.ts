@@ -1,10 +1,13 @@
+import path from "node:path";
 import {
-  appendAction, beginEvidenceRun, isEvidenceEnabled, loadConfig,
-  sanitizeActionTarget, sanitizeErrorText, withAgentPermit,
-  type EvidenceAction,
+  appendAction, beginEvidenceRun, isEvidenceEnabled, loadConfig, ObservationTimeoutError,
+  sanitizeActionTarget, sanitizeErrorText, setRunCaptureGeometry, withAgentPermit,
+  type EvidenceAction, type RunHandle, type SessionType,
 } from "@pickforge/lab-core";
 import {
   click,
+  DEFAULT_DESKTOP_WAIT_TIMEOUT_MS,
+  desktopWait,
   desktopWindows,
   focusWindow,
   selectDesktopWindow,
@@ -19,14 +22,18 @@ import {
   launchApp,
   MAX_DOUBLE_CLICK_INTERVAL_MS,
   MAX_DRAG_DURATION_MS,
+  MAX_DESKTOP_WAIT_TIMEOUT_MS,
   MAX_SCROLL_STEPS,
+  MAX_STABLE_MS,
   move,
   noClientWindowsWarning,
   pressKey,
   screenshot,
+  screenshotMetadata,
   scroll,
   typeText,
   waitForWindow,
+  type ScreenshotMetadata,
 } from "@pickforge/lab-desktop-linux";
 import {
   captureToTarget,
@@ -49,9 +56,33 @@ export interface DesktopCommandOptions extends BaseCliOptions {
 
 async function resolveDesktop(
   opts: DesktopCommandOptions,
-): Promise<{ id: string; display: string }> {
+): Promise<{
+  id: string;
+  display: string;
+  type: SessionType;
+  desktop?: { width?: number; height?: number };
+}> {
   const record = await resolveSessionRecord("desktop", opts);
-  return { id: record.id, display: requireDisplay(record) };
+  return {
+    id: record.id,
+    display: requireDisplay(record),
+    type: record.type,
+    desktop: record.desktop,
+  };
+}
+
+async function recordCaptureDevice(
+  run: RunHandle | undefined,
+  metadata: ScreenshotMetadata,
+  sessionType: SessionType,
+): Promise<void> {
+  if (run === undefined || sessionType === "android") return;
+  await setRunCaptureGeometry(run, {
+    image: metadata.imageSize,
+    viewport: metadata.displaySize,
+    scale: metadata.scale,
+    coordinateSpace: metadata.inputCoordinates,
+  });
 }
 
 export async function runDesktopWindows(opts: DesktopCommandOptions): Promise<number> {
@@ -115,6 +146,7 @@ export async function runDesktopFocus(opts: DesktopFocusOptions): Promise<number
 export interface DesktopLaunchOptions extends DesktopCommandOptions {
   cwd?: string;
   waitWindow?: string;
+  windowTimeout?: string;
 }
 
 export async function runDesktopLaunch(
@@ -151,7 +183,15 @@ export async function runDesktopLaunch(
       `log: ${app.logPath}`,
     ];
     if (opts.waitWindow !== undefined) {
-      const window = await waitForWindow(display, opts.waitWindow);
+      const window = await waitForWindow(
+        display,
+        opts.waitWindow,
+        parseBoundedMsOption(
+          opts.windowTimeout,
+          "--window-timeout",
+          MAX_EXEC_WINDOW_TIMEOUT_MS,
+        ) ?? DEFAULT_DESKTOP_WAIT_TIMEOUT_MS,
+      );
       data.window = window;
       lines.push(`window appeared: ${JSON.stringify(window.name)} (id ${window.id})`);
     }
@@ -240,21 +280,34 @@ export async function runDesktopScreenshot(
   opts: DesktopScreenshotOptions,
 ): Promise<number> {
   return runReported(opts, async () => {
-    const { id, display } = await resolveDesktop(opts);
+    const { id, display, type } = await resolveDesktop(opts);
     const target = await resolveScreenshotTarget(opts, "desktop", id);
     let tool: string | undefined;
     let windowCount: number | undefined;
     let warnings: string[] = [];
+    let imageSize: ScreenshotMetadata["imageSize"] | undefined;
+    let liveDisplay: ScreenshotMetadata["displaySize"] | undefined;
     const data = await captureToTarget(target, async (outPath) => {
       const result = await screenshot({ display, outPath });
       tool = result.tool;
       windowCount = result.windowCount;
       warnings = result.warnings;
+      imageSize = result.imageSize;
+      liveDisplay = result.displaySize;
     });
     data.sessionId = id;
     data.display = display;
     data.tool = tool;
     data.windowCount = windowCount;
+    if (imageSize === undefined) {
+      throw new Error("Screenshot succeeded without readable image dimensions");
+    }
+    const metadata = screenshotMetadata(
+      imageSize,
+      liveDisplay ?? imageSize,
+    );
+    Object.assign(data, metadata);
+    await recordCaptureDevice(target.run, metadata, type);
     const lines = [`screenshot saved to ${target.outPath}`];
     if (windowCount !== undefined) {
       lines.push(`client windows: ${windowCount}`);
@@ -270,6 +323,86 @@ export async function runDesktopScreenshot(
       lines.push(`run: ${data.runId}`);
     }
     return { data, lines };
+  });
+}
+
+export interface DesktopWaitOptions extends DesktopCommandOptions {
+  changedFrom?: string;
+  stable?: string;
+  window?: string;
+  timeout?: string;
+}
+
+export async function runDesktopWait(opts: DesktopWaitOptions): Promise<number> {
+  return runReported(opts, async () => {
+    const { id, display } = await resolveDesktop(opts);
+    const selected = [opts.changedFrom, opts.stable, opts.window].filter(
+      (value) => value !== undefined,
+    );
+    if (selected.length !== 1) {
+      throw new Error(
+        "desktop wait requires exactly one of --changed-from, --stable, or --window",
+      );
+    }
+    const timeoutMs = parseBoundedMsOption(
+      opts.timeout,
+      "--timeout",
+      MAX_DESKTOP_WAIT_TIMEOUT_MS,
+    );
+    const mode =
+      opts.changedFrom !== undefined
+        ? { type: "changed" as const, baselinePath: path.resolve(opts.changedFrom) }
+        : opts.stable !== undefined
+          ? {
+              type: "stable" as const,
+              stableMs: parseBoundedMsOption(opts.stable, "--stable", MAX_STABLE_MS) ?? 0,
+            }
+          : { type: "window" as const, name: opts.window! };
+    if (mode.type === "stable" && mode.stableMs < 1) {
+      throw new Error(`Invalid --stable "${opts.stable}": expected an integer between 1 and ${MAX_STABLE_MS}`);
+    }
+    const projectDir = resolveProjectDir(opts);
+    const config = await loadConfig(projectDir);
+    const run = isEvidenceEnabled(config)
+      ? (await beginEvidenceRun(projectDir, id)).run
+      : undefined;
+    const startedAt = new Date();
+    const action: EvidenceAction = {
+      actionId: crypto.randomUUID(),
+      source: "cli",
+      tool: "desktop_wait",
+      sessionId: id,
+      startedAt: startedAt.toISOString(),
+      status: "ok",
+    };
+    try {
+      const waited = await desktopWait({ display, mode, timeoutMs });
+      action.status = waited.reason === "timeout" ? "timeout" : "ok";
+      const data: Record<string, unknown> = {
+        sessionId: id,
+        display,
+        reason: waited.reason,
+        elapsedMs: waited.elapsedMs,
+        samples: waited.samples,
+        sampled: true,
+      };
+      if (waited.window !== undefined) data.window = waited.window;
+      const lines = [
+        `wait ${waited.reason} after ${waited.elapsedMs}ms` +
+          ` (${waited.samples} sampled observation(s))`,
+      ];
+      if (waited.window !== undefined) {
+        lines.push(`window: ${JSON.stringify(waited.window.name)} (id ${waited.window.id})`);
+      }
+      return { data, lines };
+    } catch (error) {
+      action.error = sanitizeErrorText(error instanceof Error ? error.message : String(error));
+      action.status = error instanceof ObservationTimeoutError ? "timeout" : "error";
+      throw error;
+    } finally {
+      action.durationMs = Date.now() - startedAt.getTime();
+      if (run !== undefined) await appendAction(run, action);
+    }
   });
 }
 

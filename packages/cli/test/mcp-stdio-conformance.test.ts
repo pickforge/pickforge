@@ -54,6 +54,7 @@ const EXPECTED_TOOLS = [
   "desktop_screenshot",
   "desktop_scroll",
   "desktop_type",
+  "desktop_wait",
   "desktop_windows",
   "evidence_outcome",
   "request_user_input",

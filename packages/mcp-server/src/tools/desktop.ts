@@ -1,8 +1,12 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { withAgentPermit } from "@pickforge/lab-core";
+import type { RunHandle, SessionType } from "@pickforge/lab-core";
+import { setRunCaptureGeometry } from "@pickforge/lab-core";
 import {
   click,
+  DEFAULT_DESKTOP_WAIT_TIMEOUT_MS,
+  desktopWait,
   desktopWindows,
   focusWindow,
   selectDesktopWindow,
@@ -15,14 +19,18 @@ import {
   launchApp,
   MAX_DOUBLE_CLICK_INTERVAL_MS,
   MAX_DRAG_DURATION_MS,
+  MAX_DESKTOP_WAIT_TIMEOUT_MS,
   MAX_SCROLL_STEPS,
+  MAX_STABLE_MS,
   move,
   noClientWindowsWarning,
   pressKey,
   screenshot,
+  screenshotMetadata,
   scroll,
   typeText,
   waitForWindow,
+  type ScreenshotMetadata,
 } from "@pickforge/lab-desktop-linux";
 import {
   captureRunArtifact,
@@ -32,6 +40,7 @@ import {
   resolveProjectPath,
   resolveScreenshotTarget,
   resolveSessionRecord,
+  resolveWaitBaseline,
   runTool,
   type ServerContext,
 } from "../context.js";
@@ -62,9 +71,33 @@ const scrollDelta = z
 async function resolveDesktop(
   ctx: ServerContext,
   session: string | undefined,
-): Promise<{ id: string; display: string }> {
+): Promise<{
+  id: string;
+  display: string;
+  type: SessionType;
+  desktop?: { width?: number; height?: number };
+}> {
   const record = await resolveSessionRecord(ctx, "desktop", session);
-  return { id: record.id, display: requireDisplay(record) };
+  return {
+    id: record.id,
+    display: requireDisplay(record),
+    type: record.type,
+    desktop: record.desktop,
+  };
+}
+
+async function recordCaptureDevice(
+  run: RunHandle | undefined,
+  metadata: ScreenshotMetadata,
+  sessionType: SessionType,
+): Promise<void> {
+  if (run === undefined || sessionType === "android") return;
+  await setRunCaptureGeometry(run, {
+    image: metadata.imageSize,
+    viewport: metadata.displaySize,
+    scale: metadata.scale,
+    coordinateSpace: metadata.inputCoordinates,
+  });
 }
 
 function registerLaunchTool(server: McpServer, ctx: ServerContext): void {
@@ -93,6 +126,13 @@ function registerLaunchTool(server: McpServer, ctx: ServerContext): void {
           .min(1)
           .optional()
           .describe("Wait for a window whose name contains this pattern"),
+        windowTimeoutMs: z
+          .number()
+          .int()
+          .min(0)
+          .max(300_000)
+          .optional()
+          .describe("Maximum time to wait for waitWindow (default 10000)"),
       },
     },
     (args) =>
@@ -133,7 +173,12 @@ function registerLaunchTool(server: McpServer, ctx: ServerContext): void {
               containment: app.containment,
             };
             if (args.waitWindow !== undefined) {
-              data.window = await waitForWindow(display, args.waitWindow);
+              data.window = await waitForWindow(
+                display,
+                args.waitWindow,
+                args.windowTimeoutMs ?? DEFAULT_DESKTOP_WAIT_TIMEOUT_MS,
+                ctx.env,
+              );
             }
             return { data };
           },
@@ -214,6 +259,81 @@ function registerExecTool(server: McpServer, ctx: ServerContext): void {
   );
 }
 
+async function captureDesktopScreenshot(opts: {
+  ctx: ServerContext;
+  id: string;
+  display: string;
+  type: SessionType;
+  desktop?: { width?: number; height?: number };
+  actionId: string;
+  run?: RunHandle;
+  out?: string;
+  runSlug?: string;
+}): Promise<{ data: Record<string, unknown>; extraContent: Awaited<ReturnType<typeof imageContent>>["content"] }> {
+  let tool: string | undefined;
+  let windowCount: number | undefined;
+  let warnings: string[] = [];
+  let imageSize: ScreenshotMetadata["imageSize"] | undefined;
+  let liveDisplay: ScreenshotMetadata["displaySize"] | undefined;
+  const capture = async (outPath: string): Promise<void> => {
+    const result = await screenshot({
+      display: opts.display,
+      outPath,
+      env: opts.ctx.env,
+    });
+    tool = result.tool;
+    windowCount = result.windowCount;
+    warnings = result.warnings;
+    imageSize = result.imageSize;
+    liveDisplay = result.displaySize;
+  };
+  const intoEvidenceRun =
+    opts.run !== undefined && opts.out === undefined && opts.runSlug === undefined;
+  let data: Record<string, unknown>;
+  let outPath: string;
+  let capturedRun = opts.run;
+  if (intoEvidenceRun && opts.run !== undefined) {
+    outPath = await captureRunArtifact(
+      opts.run,
+      "screenshots",
+      `${opts.actionId}.png`,
+      capture,
+    );
+    data = { path: outPath, runId: opts.run.runId, runDir: opts.run.dir };
+  } else {
+    const target = await resolveScreenshotTarget(
+      opts.ctx,
+      { out: opts.out, runSlug: opts.runSlug },
+      "desktop",
+      opts.id,
+    );
+    data = await captureToTarget(target, capture);
+    outPath = target.outPath;
+    capturedRun = target.run;
+  }
+  data.sessionId = opts.id;
+  data.display = opts.display;
+  data.tool = tool;
+  data.windowCount = windowCount;
+  if (imageSize === undefined) {
+    throw new Error("Screenshot succeeded without readable image dimensions");
+  }
+  const metadata = screenshotMetadata(
+    imageSize,
+    liveDisplay ?? imageSize,
+  );
+  Object.assign(data, metadata);
+  await recordCaptureDevice(opts.run, metadata, opts.type);
+  if (capturedRun !== undefined && capturedRun.runId !== opts.run?.runId) {
+    await recordCaptureDevice(capturedRun, metadata, opts.type);
+  }
+  if (windowCount === 0) warnings.push(noClientWindowsWarning(opts.display, opts.id));
+  if (warnings.length > 0) data.warnings = warnings;
+  const image = await imageContent(outPath);
+  Object.assign(data, image.meta);
+  return { data, extraContent: image.content };
+}
+
 function registerScreenshotTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "desktop_screenshot",
@@ -239,7 +359,7 @@ function registerScreenshotTool(server: McpServer, ctx: ServerContext): void {
     },
     (args) =>
       runTool(async () => {
-        const { id, display } = await resolveDesktop(ctx, args.session);
+        const { id, display, desktop, type } = await resolveDesktop(ctx, args.session);
         return withMcpEvidence(
           ctx,
           {
@@ -248,61 +368,18 @@ function registerScreenshotTool(server: McpServer, ctx: ServerContext): void {
             artifacts: (result) =>
               typeof result.data?.path === "string" ? [result.data.path] : [],
           },
-          async ({ actionId, run }) => {
-            let tool: string | undefined;
-            let windowCount: number | undefined;
-            let warnings: string[] = [];
-            const capture = async (outPath: string): Promise<void> => {
-              const result = await screenshot({
-                display,
-                outPath,
-                env: ctx.env,
-              });
-              tool = result.tool;
-              windowCount = result.windowCount;
-              warnings = result.warnings;
-            };
-            const intoEvidenceRun =
-              run !== undefined &&
-              args.out === undefined &&
-              args.runSlug === undefined;
-            let data: Record<string, unknown>;
-            let outPath: string;
-            if (intoEvidenceRun && run !== undefined) {
-              // Bound to the evidence run's verified directory. `captureToTarget`
-              // is not used here because it finalizes its run, and the evidence
-              // run stays open for later actions.
-              outPath = await captureRunArtifact(
-                run,
-                "screenshots",
-                `${actionId}.png`,
-                capture,
-              );
-              data = { path: outPath, runId: run.runId, runDir: run.dir };
-            } else {
-              const target = await resolveScreenshotTarget(
-                ctx,
-                args,
-                "desktop",
-                id,
-              );
-              data = await captureToTarget(target, capture);
-              outPath = target.outPath;
-            }
-            data.sessionId = id;
-            data.display = display;
-            data.tool = tool;
-            data.windowCount = windowCount;
-            if (windowCount === 0) {
-              warnings.push(noClientWindowsWarning(display, id));
-            }
-            if (warnings.length > 0) {
-              data.warnings = warnings;
-            }
-            const image = await imageContent(outPath);
-            Object.assign(data, image.meta);
-            return { data, extraContent: image.content };
-          },
+          async ({ actionId, run }) =>
+            captureDesktopScreenshot({
+              ctx,
+              id,
+              display,
+              type,
+              desktop,
+              actionId,
+              run,
+              out: args.out,
+              runSlug: args.runSlug,
+            }),
         );
       }),
   );
@@ -682,6 +759,92 @@ function registerWindowsTools(server: McpServer, ctx: ServerContext): void {
   }));
 }
 
+function waitMode(args: {
+  baseline?: string;
+  stableMs?: number;
+  window?: string;
+}): { type: "changed"; baselinePath: string } | { type: "stable"; stableMs: number } | { type: "window"; name: string } {
+  const selected = [args.baseline, args.stableMs, args.window].filter((value) => value !== undefined);
+  if (selected.length !== 1) {
+    throw new Error("desktop_wait requires exactly one of baseline, stableMs, or window");
+  }
+  if (args.baseline !== undefined) return { type: "changed", baselinePath: args.baseline };
+  if (args.stableMs !== undefined) return { type: "stable", stableMs: args.stableMs };
+  return { type: "window", name: args.window! };
+}
+
+function registerWaitTool(server: McpServer, ctx: ServerContext): void {
+  server.registerTool(
+    "desktop_wait",
+    {
+      title: "Wait for desktop change",
+      description:
+        "Wait until the screen pixels differ from a baseline PNG, sampled " +
+        "pixels stay unchanged for stableMs, or a window name substring appears. " +
+        "Stability is sampled, not every frame. Observation only; not an input action.",
+      inputSchema: {
+        ...sessionArg,
+        baseline: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Existing PNG to wait for a pixel change against"),
+        stableMs: z
+          .number()
+          .int()
+          .min(1)
+          .max(MAX_STABLE_MS)
+          .optional()
+          .describe("Require sampled unchanged pixels for this many milliseconds"),
+        window: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Wait for a window whose name contains this substring"),
+        timeoutMs: z
+          .number()
+          .int()
+          .min(0)
+          .max(MAX_DESKTOP_WAIT_TIMEOUT_MS)
+          .optional()
+          .describe("Maximum wait including capture and window queries (default 10000)"),
+      },
+    },
+    (args) =>
+      runTool(async () => {
+        const { id, display } = await resolveDesktop(ctx, args.session);
+        const selected = waitMode(args);
+        const mode = selected;
+        return withMcpEvidence(
+          ctx,
+          { sessionId: id, tool: "desktop_wait" },
+          async () => {
+            const waited = await desktopWait({
+              display,
+              mode,
+              readBaseline: (file, deadline) => resolveWaitBaseline(ctx, file, deadline),
+              timeoutMs: args.timeoutMs,
+              env: ctx.env,
+            });
+            const data: Record<string, unknown> = {
+              sessionId: id,
+              display,
+              reason: waited.reason,
+              elapsedMs: waited.elapsedMs,
+              samples: waited.samples,
+              sampled: true,
+            };
+            if (waited.window !== undefined) data.window = waited.window;
+            return {
+              data,
+              evidenceStatus: waited.reason === "timeout" ? "timeout" : "ok",
+            };
+          },
+        );
+      }),
+  );
+}
+
 export function registerDesktopTools(
   server: McpServer,
   ctx: ServerContext,
@@ -690,6 +853,7 @@ export function registerDesktopTools(
   registerLaunchTool(server, ctx);
   registerExecTool(server, ctx);
   registerScreenshotTool(server, ctx);
+  registerWaitTool(server, ctx);
   registerClickTool(server, ctx);
   registerMoveTool(server, ctx);
   registerScrollTool(server, ctx);

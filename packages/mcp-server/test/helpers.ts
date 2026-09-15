@@ -10,6 +10,10 @@ export const PLANTED_TOKEN = `ghp_${"a".repeat(36)}`;
 export const PNG_MAGIC = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
 ]);
+export const MINI_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+  "base64",
+);
 
 export interface LabDirs {
   root: string;
@@ -203,7 +207,7 @@ export function writeDesktopSessionRecord(
     createdAt: new Date().toISOString(),
     status: "running",
     projectDir,
-    desktop: { display: ":987", homePolicy: "private", xvfbPid: 999999999 },
+    desktop: { display: ":987", homePolicy: "private", xvfbPid: 999999999, width: 1280, height: 800 },
   };
   const dir = path.join(home, "sessions");
   fs.mkdirSync(dir, { recursive: true });

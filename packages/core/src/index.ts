@@ -69,6 +69,7 @@ export {
   createRun,
   EVIDENCE_ACTION_LOG,
   EVIDENCE_VERSION,
+  readOwnedRunFile,
   RunHandle,
   type ArtifactType,
   type CreateRunOptions,
@@ -122,6 +123,8 @@ export {
   pruneFinalizedEvidenceRuns,
   readActions,
   resolveActivePointer,
+  setRunDevice,
+  setRunCaptureGeometry,
   type ActiveEvidenceClaim,
   type ActiveEvidencePointer,
   type AppendActionOptions,
@@ -271,6 +274,7 @@ export {
 } from "./takeover.js";
 
 export { DirHandle } from "./dir-handle.js";
+export { MAX_BASELINE_BYTES, ObservationTimeoutError, observationBudget, readBaselineFile, readBoundedFileIn, readProjectFileBounded } from "./bounded-read.js";
 
 export {
   REAPER_CLEANUP_PENDING_META_KEY,

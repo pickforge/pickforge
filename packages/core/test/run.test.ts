@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createRun, listRuns } from "../src/run.js";
+import { adoptRun, createRun, listRuns, readOwnedRunFile } from "../src/run.js";
+import { setRunCaptureGeometry, setRunDevice } from "../src/evidence.js";
 
 let project: string;
 
@@ -82,6 +83,82 @@ describe("createRun", () => {
     expect(manifest.artifacts[0].type).toBe("screenshot");
     expect(manifest.artifacts[0].name).toBe("home");
     expect(manifest.artifacts[0].path).toBe(path.join("screenshots", "home.png"));
+  });
+
+  it("updates device metadata through the run handle", async () => {
+    const run = await createRun(project, "device");
+    await run.setDevice({
+      kind: "desktop",
+      viewport: { width: 320, height: 240 },
+      image: { width: 320, height: 240 },
+      scale: 1,
+      coordinateSpace: "image-pixels",
+    });
+    expect((await run.readManifest()).device).toEqual({
+      kind: "desktop",
+      viewport: { width: 320, height: 240 },
+      image: { width: 320, height: 240 },
+      scale: 1,
+      coordinateSpace: "image-pixels",
+    });
+  });
+
+  it("keeps another writer's artifacts and status when device metadata is saved", async () => {
+    const run = await createRun(project, "merge");
+    const peer = await adoptRun(project, run.runId, await run.readManifest());
+    const shot = path.join(peer.dir, "screenshots", "kept.png");
+    await fs.promises.writeFile(shot, "png");
+    await peer.addArtifact("screenshot", "kept", shot);
+    await peer.setStatus("completed");
+    await run.setDevice({
+      kind: "desktop",
+      image: { width: 8, height: 8 },
+      scale: 1,
+      coordinateSpace: "image-pixels",
+    });
+    const manifest = await run.readManifest();
+    expect(manifest.status).toBe("completed");
+    expect(manifest.artifacts).toEqual([
+      expect.objectContaining({ name: "kept", path: path.join("screenshots", "kept.png") }),
+    ]);
+    expect(manifest.device).toEqual({
+      kind: "desktop",
+      image: { width: 8, height: 8 },
+      scale: 1,
+      coordinateSpace: "image-pixels",
+    });
+  });
+
+  it("merges only geometry with intervening device, artifact and status updates", async () => {
+    const run = await createRun(project, "geometry", { device: { kind: "desktop", browser: "old" } });
+    const peer = await adoptRun(project, run.runId, await run.readManifest());
+    await setRunDevice(peer, { kind: "desktop", browser: "new", platform: "preserved", touch: true });
+    await peer.addArtifact("log", "kept", "logs/kept.log");
+    await peer.setStatus("completed");
+    await setRunCaptureGeometry(run, { viewport: { width: 8, height: 8 }, image: { width: 8, height: 8 }, scale: 1, coordinateSpace: "image-pixels" });
+    const fresh = await run.readManifest();
+    expect(fresh.device).toMatchObject({ kind: "desktop", browser: "new", platform: "preserved", touch: true, scale: 1 });
+    expect(fresh.artifacts).toHaveLength(1);
+    expect(fresh.status).toBe("completed");
+    await setRunDevice(peer, { kind: "emulator", platform: "Android" });
+    await setRunCaptureGeometry(run, { viewport: { width: 8, height: 8 }, image: { width: 8, height: 8 }, scale: 1, coordinateSpace: "image-pixels" });
+    expect((await run.readManifest()).device).toEqual({ kind: "emulator", platform: "Android" });
+  });
+
+  it("reads owned screenshots and refuses a substituted screenshots directory", async () => {
+    const run = await createRun(project, "owned");
+    const name = "shot.png";
+    await fs.promises.writeFile(path.join(run.dir, "screenshots", name), "owned-bytes");
+    expect(await readOwnedRunFile(project, run.runId, "screenshots", name)).toEqual(
+      Buffer.from("owned-bytes"),
+    );
+    const outside = path.join(project, "outside.png");
+    await fs.promises.writeFile(outside, "leaked");
+    await fs.promises.rm(path.join(run.dir, "screenshots"), { recursive: true });
+    await fs.promises.symlink(path.dirname(outside), path.join(run.dir, "screenshots"));
+    await expect(
+      readOwnedRunFile(project, run.runId, "screenshots", "outside.png"),
+    ).rejects.toThrow(/verified directory|regular owned file|symlink/i);
   });
 
   it("accepts relative artifact paths", async () => {

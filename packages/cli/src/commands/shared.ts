@@ -1,6 +1,7 @@
 import path from "node:path";
 import {
   resolveRunnableSession,
+  sanitizeErrorText,
   resolveScreenshotTarget as resolveTarget,
   type EnvLike,
   type RunnableSessionType,
@@ -58,7 +59,7 @@ export async function runReported(
       errors: [error instanceof Error ? error.message : String(error)],
     };
   }
-  const errors = result.errors ?? [];
+  const errors = (result.errors ?? []).map((error) => sanitizeErrorText(error));
   const report: Record<string, unknown> = { ok: errors.length === 0 };
   for (const [key, value] of Object.entries(result.data ?? {})) {
     if (key !== "ok" && key !== "errors") {

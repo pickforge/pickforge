@@ -6,14 +6,19 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createRun, recordEvidenceOutcome, writeEvidenceReport, isProcessGroupAlive } from "@pickforge/lab-core";
+import { createRun, recordEvidenceOutcome, writeEvidenceReport, isProcessGroupAlive, readActions, listRuns } from "@pickforge/lab-core";
 import { ensureCliBuilt } from "./build-once.js";
+import { encodePng } from "../../desktop-linux/test/png-fixture.js";
 
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json") as { version: string };
 const cliPath = fileURLToPath(new URL("../dist/pickforge-lab.js", import.meta.url));
 
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const MINI_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+  "base64",
+);
 const FAKE_SERIAL = "emulator-5554";
 const AUTO_ALLOCATED_SERIAL = "emulator-5556";
 const PLANTED_TOKEN = `ghp_${"a".repeat(36)}`;
@@ -117,7 +122,7 @@ function writeDesktopSessionRecord(
       createdAt: "2026-06-09T12:00:00.000Z",
       status: "running",
       projectDir,
-      desktop: { display, homePolicy: "private", xvfbPid: 999_999_999 },
+      desktop: { display, homePolicy: "private", xvfbPid: 999_999_999, width: 1280, height: 800 },
     })}\n`,
   );
   return id;
@@ -884,10 +889,12 @@ describe("pickforge-lab desktop", () => {
 
   it("screenshots without xdotool and reports that window counting is unavailable", async () => {
     const projectDir = makeProjectDir();
+    const fixture = path.join(tmpDir, "mini.png");
+    fs.writeFileSync(fixture, MINI_PNG);
     const env = makeEnv({
       bins: {
         import:
-          'for arg in "$@"; do out="$arg"; done\nprintf "\\211PNG\\r\\n\\032\\n" > "$out"',
+          `for arg in "$@"; do out="$arg"; done\n/bin/cp "${fixture}" "$out"`,
       },
     });
     const id = writeDesktopSessionRecord(env, projectDir, ":95");
@@ -901,6 +908,10 @@ describe("pickforge-lab desktop", () => {
     expect(json.code).toBe(0);
     const report = parseJson(json);
     expect(report.windowCount).toBeUndefined();
+    expect(report.imageSize).toEqual({ width: 1, height: 1 });
+    expect(report.displaySize).toEqual({ width: 1, height: 1 });
+    expect(report.scale).toBe(1);
+    expect(report.inputCoordinates).toBe("image-pixels");
     expect(report.warnings).toEqual([expect.stringContaining("xdotool")]);
     expect(report.warnings[0]).toContain("missing");
     expect(report.warnings[0]).not.toContain("escaped the lab");
@@ -913,6 +924,84 @@ describe("pickforge-lab desktop", () => {
     expect(text.code).toBe(0);
     expect(text.stdout).toContain("warning: xdotool is missing");
     expect(text.stdout).not.toContain("escaped the lab");
+  });
+
+  it.each(["query", "capture", "baseline", "raster"])("redacts failed %s observations in text, JSON and journals", async (kind) => {
+    const projectDir = makeProjectDir();
+    const fixture = path.join(tmpDir, "redaction-frame.png");
+    fs.writeFileSync(fixture, encodePng(16, 16, Buffer.alloc(768)));
+    const fail = `echo "actionable ${PLANTED_TOKEN}" >&2; exit 1`;
+    const capture = `for arg in "$@"; do out="$arg"; done\n/bin/cp "${fixture}" "$out"`;
+    const env = makeEnv({ realPath: true, bins: {
+      xdotool: fail,
+      import: kind === "capture" ? fail : capture,
+      maim: kind === "capture" ? fail : capture,
+      convert: fail,
+      magick: fail,
+    } });
+    const id = writeDesktopSessionRecord(env, projectDir, ":94");
+    const mode = kind === "query" ? ["--window", "Never"] : kind === "baseline"
+      ? ["--changed-from", path.join(projectDir, `missing-${PLANTED_TOKEN}.png`)] : ["--stable", "100"];
+    for (const format of [[], ["--json"]]) {
+      const result = await runCli(["desktop", "wait", "--session", id, ...mode, "--timeout", "2000", ...format], env, projectDir);
+      expect(result.code).toBe(1);
+      const output = result.stdout + result.stderr;
+      expect(output).not.toContain(PLANTED_TOKEN);
+      expect(output).toContain(kind === "baseline" ? "ENOENT" : "actionable");
+    }
+    const runs = await listRuns(projectDir, env);
+    const journals = await Promise.all(runs.map((run) => readActions(path.join(projectDir, ".picklab", "runs", run.runId))));
+    const waits = journals.flat().filter((record) => "tool" in record && record.tool === "desktop_wait");
+    expect(waits).toHaveLength(2);
+    expect(waits).toEqual([expect.objectContaining({ status: "error" }), expect.objectContaining({ status: "error" })]);
+    expect(JSON.stringify(waits)).not.toContain(PLANTED_TOKEN);
+  });
+
+  it("waits for a window name and times out an unchanged baseline", async () => {
+    const projectDir = makeProjectDir();
+    const fixture = path.join(tmpDir, "wait-base.png");
+    fs.writeFileSync(fixture, MINI_PNG);
+    const env = makeEnv({
+      realPath: true,
+      bins: {
+        import: `for arg in "$@"; do out="$arg"; done\n/bin/cp "${fixture}" "$out"`,
+        maim: `for arg in "$@"; do out="$arg"; done\n/bin/cp "${fixture}" "$out"`,
+        xdotool:
+          'case "$1" in\n  search) echo 9 ;;\n  getwindowname) echo Demo App ;;\nesac',
+      },
+    });
+    const id = writeDesktopSessionRecord(env, projectDir, ":94");
+    const named = await runCli(
+      ["desktop", "wait", "--session", id, "--window", "Demo", "--timeout", "1000", "--json"],
+      env,
+      projectDir,
+    );
+    expect(named.code).toBe(0);
+    expect(parseJson(named).reason).toBe("window");
+    const timed = await runCli(
+      ["desktop", "wait", "--session", id, "--changed-from", fixture, "--timeout", "200", "--json"],
+      env,
+      projectDir,
+    );
+    expect(timed.code).toBe(0);
+    expect(parseJson(timed).reason).toBe("timeout");
+    expect(parseJson(timed).sampled).toBe(true);
+
+    const secretEnv = makeEnv({
+      bins: {
+        xdotool:
+          `case "$1" in\n  search) echo 3 ;;\n  getwindowname) echo token=${PLANTED_TOKEN} ;;\nesac`,
+      },
+    });
+    const secretId = writeDesktopSessionRecord(secretEnv, projectDir, ":93");
+    const redacted = await runCli(
+      ["desktop", "wait", "--session", secretId, "--window", "token", "--timeout", "1000", "--json"],
+      secretEnv,
+      projectDir,
+    );
+    expect(redacted.code).toBe(0);
+    expect(redacted.stdout).not.toContain(PLANTED_TOKEN);
+    expect(parseJson(redacted).window.name).not.toContain(PLANTED_TOKEN);
   });
 
   it(

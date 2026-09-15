@@ -106,6 +106,18 @@ describe("MCP evidence producer", () => {
     expect((await evidenceRecords())[0]).toMatchObject({ status });
   });
 
+  it("records timeout when a wait returns normally with reason timeout", async () => {
+    await withMcpEvidence(
+      { projectDir: dirs.projectDir, env: { PICKFORGE_HOME: dirs.home } },
+      { sessionId, tool: "desktop_wait" },
+      async () => ({ data: { reason: "timeout" }, evidenceStatus: "timeout" as const }),
+    );
+    expect((await evidenceRecords())[0]).toMatchObject({
+      tool: "desktop_wait",
+      status: "timeout",
+    });
+  });
+
   it("associates only confined regular artifacts", async () => {
     const outside = path.join(dirs.root, "outside.png");
     fs.writeFileSync(outside, "outside");
