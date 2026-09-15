@@ -21,13 +21,21 @@ const [command, id] = args;
 if (state.hang === command) { setInterval(() => {}, 1000); }
 else if (command === 'search') console.log('11\\n22');
 else if (command === 'getwindowname') console.log(state.names[id === '11' ? 0 : 1]);
-else if (command === 'getwindowclassname') console.log('Zenity');
 else if (command === 'getwindowgeometry') console.log('X=-4\\nY=12\\nWIDTH=300\\nHEIGHT=200');
 else if (command === 'getwindowfocus') console.log(state.focused);
 else if (command === 'windowfocus') {
   if (!state.ignore) state.focused = id;
   fs.writeFileSync(statePath, JSON.stringify(state));
 } else process.exit(23);
+`, { mode: 0o700 });
+  fs.writeFileSync(path.join(bin, "xprop"), `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(['xprop', ...args]) + '\\n');
+const state = JSON.parse(fs.readFileSync(${JSON.stringify(state)}, 'utf8'));
+if (state.hang === 'xprop') { setInterval(() => {}, 1000); }
+else if (state.classError) { console.error(state.classError); process.exit(1); }
+else console.log(state.classOutput ?? 'WM_CLASS(STRING) = "instance", "Zenity"');
 `, { mode: 0o700 });
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, PICKFORGE_HOME: path.join(root, "home"), PICKFORGE_STORAGE_MODE: "project-local" };
   const session = await createSession({ type: "desktop", projectDir: root, status: "running", desktop: { display: ":42", homePolicy: "private" } }, env);

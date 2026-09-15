@@ -9,9 +9,9 @@ import {
   selectDesktopWindow,
 } from "../src/index.js";
 
-const available = ["Xvfb", "xdotool", "zenity"].every((command) => findOnPath(command) !== null);
+const available = ["Xvfb", "xdotool", "xprop", "zenity"].every((command) => findOnPath(command) !== null);
 if (process.env.PICKFORGE_REQUIRE_DESKTOP_WINDOWS === "1" && !available) {
-  throw new Error("Required desktop windows integration needs Xvfb, xdotool and zenity");
+  throw new Error("Required desktop windows integration needs Xvfb, xdotool, xprop and zenity");
 }
 
 it.skipIf(!available)("inventories and focuses two zenity windows on managed bare Xvfb", async () => {

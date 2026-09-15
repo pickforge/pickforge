@@ -15,10 +15,10 @@ export interface WindowSelector {
 
 export const MAX_FOCUS_TIMEOUT_MS = 10_000;
 
-async function query(display: string, args: string[], env?: EnvLike, timeoutMs = 2_000): Promise<string> {
+async function query(display: string, args: string[], env?: EnvLike, timeoutMs = 2_000, command = "xdotool"): Promise<string> {
   parseDisplayNumber(display);
   try {
-    const result = await runCommand("xdotool", args, {
+    const result = await runCommand(command, args, {
       env: { ...env, DISPLAY: display }, timeoutMs, check: true,
     });
     return result.stdout.replace(/\n$/, "");
@@ -49,6 +49,19 @@ function geometryFromShell(output: string): DesktopWindow["geometry"] {
   return geometry;
 }
 
+async function windowClass(display: string, id: string, env?: EnvLike): Promise<string> {
+  // Ubuntu's xdotool 3 has no getwindowclassname. Read the standard WM_CLASS
+  // resource class (second string) with xprop; C locale makes byte escaping stable.
+  const output = await query(display, ["-id", id, "WM_CLASS"], { ...env, LC_ALL: "C" }, 2_000, "xprop");
+  const match = /^WM_CLASS\(STRING\) = "(?:[^"\\]|\\(?:[0-7]{3}|["\\nt]))*", "((?:[^"\\]|\\(?:[0-7]{3}|["\\nt]))*)"$/.exec(output);
+  if (match === null) throw new Error("Invalid or missing xprop WM_CLASS string pair");
+  const escapes: Record<string, string> = { n: "\n", t: "\t", '"': '"', "\\": "\\" };
+  const bytes = match[1]!.replace(/\\([0-7]{3}|["\\nt])/g, (_, value: string) =>
+    escapes[value] ?? String.fromCharCode(Number.parseInt(value, 8)),
+  );
+  return Buffer.from(bytes, "latin1").toString("utf8");
+}
+
 /** Opt-in details; screenshot and execApp retain the lightweight listWindows API. */
 export async function desktopWindows(display: string, env?: EnvLike): Promise<DesktopWindow[]> {
   const windows = await listWindows(display, env);
@@ -56,7 +69,7 @@ export async function desktopWindows(display: string, env?: EnvLike): Promise<De
   const focused = await focusedWindow(display, env);
   const result: DesktopWindow[] = [];
   for (const window of windows) {
-    const className = await query(display, ["getwindowclassname", window.id], env);
+    const className = await windowClass(display, window.id, env);
     const geometry = geometryFromShell(await query(display, ["getwindowgeometry", "--shell", window.id], env));
     result.push({ id: window.id, name: redactSecrets(window.name), class: redactSecrets(className), geometry, focused: window.id === focused });
   }
