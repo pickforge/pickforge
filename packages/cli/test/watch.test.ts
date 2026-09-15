@@ -52,7 +52,7 @@ async function createDesktop(
     type: "desktop",
     projectDir: root,
     status: "running",
-    desktop: { display, ...desktop },
+    desktop: { display, homePolicy: "private", ...desktop },
   });
   return record.id;
 }

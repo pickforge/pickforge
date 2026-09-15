@@ -30,6 +30,7 @@ export interface StartVncOptions {
   viewOnly?: boolean;
   /** Per-session runtime dir and D-Bus endpoints (#86). */
   runtime?: DesktopRuntimeLayout;
+  homePolicy?: "private" | "inherit";
 }
 
 export interface VncHandle {
@@ -103,11 +104,12 @@ export function buildVncEnv(
   display: string,
   source: EnvLike = process.env,
   runtime?: DesktopRuntimeLayout,
+  homePolicy?: "private" | "inherit",
 ): EnvLike {
   const env = createIsolatedDesktopEnvironment(
     display,
     source,
-    runtime === undefined ? {} : { runtime },
+    { runtime, homePolicy },
   );
   // x11vnc treats any WAYLAND_DISPLAY value as a Wayland session, including
   // the sentinel used to keep GUI toolkits away from the host compositor.
@@ -167,6 +169,7 @@ export async function startVnc(opts: StartVncOptions): Promise<VncHandle> {
     opts.display,
     { ...process.env, ...opts.env },
     opts.runtime,
+    opts.homePolicy,
   );
   const binary = detectVncBinary(env);
   if (binary === null) {

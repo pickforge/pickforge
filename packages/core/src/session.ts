@@ -21,6 +21,8 @@ export interface DesktopSessionInfo {
   display: string;
   /** Per-session `XDG_RUNTIME_DIR` root and D-Bus endpoints (#86). */
   runtimeDir?: string;
+  /** Immutable policy selected when the managed desktop was created. */
+  homePolicy?: "private" | "inherit";
   /** Scope holding every app the session launched, including escapees (#85). */
   containment?: ContainmentScope;
   xvfbPid?: number;
@@ -31,6 +33,16 @@ export interface DesktopSessionInfo {
   vncViewOnly?: boolean;
   width?: number;
   height?: number;
+}
+
+export type DesktopHomePolicy = "private" | "inherit" | "legacy-inherit" | "unknown";
+
+/** Missing policy predates private homes; invalid policy never grants inheritance. */
+export function desktopHomePolicy(desktop: DesktopSessionInfo | undefined): DesktopHomePolicy {
+  const policy = desktop?.homePolicy;
+  if (policy === undefined) return "legacy-inherit";
+  if (policy === "private" || policy === "inherit") return policy;
+  return "unknown";
 }
 
 export interface AndroidSessionInfo {

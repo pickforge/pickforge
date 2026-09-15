@@ -40,8 +40,18 @@ const describeWithXvfb = hasXvfb ? describe : describe.skip;
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-isolation-"));
 const projectDir = path.join(tmpRoot, "project");
 fs.mkdirSync(projectDir, { recursive: true });
+const hostHome = path.join(tmpRoot, "host-home");
+const hostRuntime = path.join(tmpRoot, "host-runtime");
+fs.mkdirSync(hostHome);
+fs.mkdirSync(hostRuntime);
 const env: EnvLike = {
   ...process.env,
+  HOME: hostHome,
+  XDG_CONFIG_HOME: path.join(hostHome, "config"),
+  XDG_DATA_HOME: path.join(hostHome, "data"),
+  XDG_CACHE_HOME: path.join(hostHome, "cache"),
+  XDG_STATE_HOME: path.join(hostHome, "state"),
+  XDG_RUNTIME_DIR: hostRuntime,
   PICKFORGE_HOME: path.join(tmpRoot, "state"),
 };
 
@@ -111,7 +121,12 @@ describeWithXvfb("desktop session runtime isolation", () => {
 
     expect(handle.runtimeDir).toBe(path.join(sessionDir, "runtime"));
     expect(fs.statSync(handle.runtimeDir).mode & 0o777).toBe(0o700);
-    expect(handle.runtimeDir).not.toBe(process.env.XDG_RUNTIME_DIR);
+    expect(handle.runtimeDir).not.toBe(hostRuntime);
+    expect((await getSession(handle.id, env))?.desktop?.homePolicy).toBe("private");
+    const home = path.join(handle.runtimeDir, "home");
+    for (const dir of [home, ...["config", "data", "cache", "state"].map((name) => path.join(home, name))]) {
+      expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
+    }
   }, 60_000);
 
   it("hands a launched app the session runtime dir, not the caller's", async () => {
@@ -119,7 +134,7 @@ describeWithXvfb("desktop session runtime isolation", () => {
     const dump = path.join(tmpRoot, "app-env.txt");
     const command = writeExecutable(
       "dump-env.sh",
-      `env > "${dump}"\nexec /bin/sleep 300`,
+      `for name in HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS DBUS_SYSTEM_BUS_ADDRESS DISPLAY WAYLAND_DISPLAY PICKFORGE_CONTAINMENT_TOKEN; do printf '%s=' "$name"; printenv "$name"; done > "${dump}"\nexec /bin/sleep 300`,
     );
 
     const isolation = await ensureDesktopSessionIsolation(handle.id, env);
@@ -143,6 +158,12 @@ describeWithXvfb("desktop session runtime isolation", () => {
           return [line.slice(0, index), line.slice(index + 1)] as const;
         }),
     );
+    const home = path.join(handle.runtimeDir, "home");
+    expect(appEnv.get("HOME")).toBe(home);
+    for (const name of ["CONFIG", "DATA", "CACHE", "STATE"]) {
+      expect(appEnv.get(`XDG_${name}_HOME`)).toBe(path.join(home, name.toLowerCase()));
+    }
+    expect(appEnv.get("WAYLAND_DISPLAY")).toBe("pickforge-no-wayland");
     expect(appEnv.get("XDG_RUNTIME_DIR")).toBe(handle.runtimeDir);
     expect(appEnv.get("DBUS_SESSION_BUS_ADDRESS")).toBe(
       `unix:path=${path.join(handle.runtimeDir, "bus")}`,
@@ -154,6 +175,30 @@ describeWithXvfb("desktop session runtime isolation", () => {
     expect(appEnv.get("PICKFORGE_CONTAINMENT_TOKEN")).toBe(
       handle.containment.token,
     );
+  }, 60_000);
+});
+
+describeWithXvfb("desktop home policy launches", () => {
+  it.each([false, true])("applies create-time inheritHome=%s to actual child writes", async (inheritHome) => {
+    const handle = await createDesktopSession({ projectDir, registryEnv: env, env, inheritHome });
+    sessions.add(handle.id);
+    const isolation = await ensureDesktopSessionIsolation(handle.id, env);
+    const marker = `probe-${handle.id}`;
+    const app = await launchApp({
+      display: handle.display,
+      command: "/bin/sh",
+      args: ["-c", `printf 'synthetic' > "$HOME/${marker}"; exec /bin/sleep 300`],
+      logDir: desktopSessionLogDir(handle.id, env), env, ...isolation,
+    });
+    strays.add(app.pid);
+    const expectedHome = inheritHome ? hostHome : path.join(handle.runtimeDir, "home");
+    expect(await waitUntil(() => fs.existsSync(path.join(expectedHome, marker)))).toBe(true);
+    expect((await getSession(handle.id, env))?.desktop?.homePolicy).toBe(inheritHome ? "inherit" : "private");
+    const other = await createSessionHandle();
+    expect(fs.existsSync(path.join(other.runtimeDir, "home", marker))).toBe(false);
+    await destroyDesktopSession(handle.id, env);
+    sessions.delete(handle.id);
+    expect(fs.existsSync(path.join(hostHome, marker))).toBe(inheritHome);
   }, 60_000);
 });
 
@@ -325,7 +370,7 @@ describeWithXvfb("desktop session containment", () => {
   }, 120_000);
 
   it("never touches the caller's real runtime dir", async () => {
-    const realRuntimeDir = process.env.XDG_RUNTIME_DIR;
+    const realRuntimeDir = hostRuntime;
     const handle = await createSessionHandle();
     const before =
       realRuntimeDir === undefined ? [] : fs.readdirSync(realRuntimeDir).sort();

@@ -73,6 +73,11 @@ async function installFakeVnc(): Promise<void> {
     "const args = process.argv.slice(2);",
     "fs.appendFileSync(process.env.ARGV_LOG, JSON.stringify(args) + '\\n');",
     "if (process.env.ENV_LOG) fs.appendFileSync(process.env.ENV_LOG, JSON.stringify({",
+    "  HOME: process.env.HOME,",
+    "  XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,",
+    "  XDG_DATA_HOME: process.env.XDG_DATA_HOME,",
+    "  XDG_CACHE_HOME: process.env.XDG_CACHE_HOME,",
+    "  XDG_STATE_HOME: process.env.XDG_STATE_HOME,",
     "  XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,",
     "  DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS,",
     "  DBUS_SYSTEM_BUS_ADDRESS: process.env.DBUS_SYSTEM_BUS_ADDRESS,",
@@ -96,6 +101,11 @@ async function readArgvLog(): Promise<string[][]> {
 }
 
 interface SeenVncEnv {
+  HOME?: string;
+  XDG_CONFIG_HOME?: string;
+  XDG_DATA_HOME?: string;
+  XDG_CACHE_HOME?: string;
+  XDG_STATE_HOME?: string;
   XDG_RUNTIME_DIR?: string;
   DBUS_SESSION_BUS_ADDRESS?: string;
   DBUS_SYSTEM_BUS_ADDRESS?: string;
@@ -123,6 +133,11 @@ function hostileCallerEnv(): EnvLike {
 
 function expectSessionRuntime(seen: SeenVncEnv, id: string): void {
   const runtimeDir = path.join(sessionDataDir(id, env), "runtime");
+  expect(seen.HOME).toBe(path.join(runtimeDir, "home"));
+  expect(seen.XDG_CONFIG_HOME).toBe(path.join(runtimeDir, "home", "config"));
+  expect(seen.XDG_DATA_HOME).toBe(path.join(runtimeDir, "home", "data"));
+  expect(seen.XDG_CACHE_HOME).toBe(path.join(runtimeDir, "home", "cache"));
+  expect(seen.XDG_STATE_HOME).toBe(path.join(runtimeDir, "home", "state"));
   expect(seen.XDG_RUNTIME_DIR).toBe(runtimeDir);
   expect(seen.DBUS_SESSION_BUS_ADDRESS).toBe(`unix:path=${path.join(runtimeDir, "bus")}`);
   expect(seen.DBUS_SYSTEM_BUS_ADDRESS).toBe(
@@ -138,7 +153,7 @@ async function createDesktop(desktop: Record<string, unknown> = {}): Promise<str
       type: "desktop",
       projectDir: root,
       status: "running",
-      desktop: { display: ":42", ...desktop },
+      desktop: { display: ":42", homePolicy: "private", ...desktop },
     },
     env,
   );
@@ -154,6 +169,7 @@ beforeEach(async () => {
   env = {
     ...process.env,
     PICKFORGE_HOME: path.join(root, "home"),
+    HOME: path.join(root, "synthetic-host-home"),
     PATH: binDir,
     ARGV_LOG: argvLogPath,
     ENV_LOG: envLogPath,
@@ -180,8 +196,8 @@ afterEach(async () => {
 });
 
 describe("startHumanTakeover / endHumanTakeover", () => {
-  it("switches VNC writable on start and back to read-only on return, releasing the lease", async () => {
-    const id = await createDesktop({ vncPort: nextPort() });
+  it.each(["private", "inherit"])("switches %s VNC writable and back without changing application policy", async (homePolicy) => {
+    const id = await createDesktop({ vncPort: nextPort(), homePolicy });
 
     const handle = await startHumanTakeover(id, {
       registryEnv: env,
@@ -217,6 +233,8 @@ describe("startHumanTakeover / endHumanTakeover", () => {
     const fullArgv = await readArgvLog();
     expect(fullArgv).toHaveLength(2);
     expect(fullArgv[1]).toContain("-viewonly");
+    expect(afterEnd?.desktop?.homePolicy).toBe(homePolicy);
+    for (const seen of await readEnvLog()) expectSessionRuntime(seen, id);
   });
 
   it("records a takeover_start and takeover_<reason> evidence transition, and reverts VNC to read-only on the cancelled path", async () => {

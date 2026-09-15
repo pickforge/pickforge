@@ -203,7 +203,7 @@ export function writeDesktopSessionRecord(
     createdAt: new Date().toISOString(),
     status: "running",
     projectDir,
-    desktop: { display: ":987", xvfbPid: 999999999 },
+    desktop: { display: ":987", homePolicy: "private", xvfbPid: 999999999 },
   };
   const dir = path.join(home, "sessions");
   fs.mkdirSync(dir, { recursive: true });

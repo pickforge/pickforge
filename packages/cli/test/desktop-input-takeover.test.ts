@@ -11,6 +11,7 @@ import {
 import {
   runDesktopClick,
   runDesktopExec,
+  runDesktopEnv,
   runDesktopLaunch,
   runDesktopScreenshot,
   runDesktopType,
@@ -45,7 +46,7 @@ function lastReport(): Record<string, any> {
 
 async function createDesktop(): Promise<string> {
   const record = await createSession(
-    { type: "desktop", projectDir: root, status: "running", desktop: { display: ":42" } },
+    { type: "desktop", projectDir: root, status: "running", desktop: { display: ":42", homePolicy: "private" } },
     env,
   );
   return record.id;
@@ -93,6 +94,29 @@ describe("desktop input commands fail closed under human control", () => {
     expect(lastReport().errors[0]).toContain("human control is active");
 
     await releaseHumanLease(id, lease.leaseId, env);
+  });
+
+  it("refuses env export and leaves private-home state untouched during the lease", async () => {
+    const id = await createDesktop();
+    const lease = await acquireHumanLease(id, env);
+    expect(await runDesktopEnv({ session: id, projectDir: root, json: true })).toBe(1);
+    expect(lastReport().errors[0]).toContain("human control is active");
+    expect(fs.existsSync(path.join(env.PICKFORGE_HOME!, "sessions", id, "runtime"))).toBe(false);
+    await releaseHumanLease(id, lease.leaseId, env);
+  });
+
+  it("refuses a planted session symlink before permit writes reach an outside home", async () => {
+    const id = await createDesktop();
+    const outside = path.join(root, "synthetic-outside-home");
+    fs.mkdirSync(outside, { mode: 0o755 });
+    fs.chmodSync(outside, 0o755);
+    expect(fs.statSync(outside).mode & 0o777).toBe(0o755);
+    fs.writeFileSync(path.join(outside, "keep"), "unchanged");
+    fs.symlinkSync(outside, path.join(env.PICKFORGE_HOME!, "sessions", id));
+    expect(await runDesktopEnv({ session: id, projectDir: root, json: true })).toBe(1);
+    expect(fs.statSync(outside).mode & 0o777).toBe(0o755);
+    expect(fs.readdirSync(outside)).toEqual(["keep"]);
+    expect(fs.readFileSync(path.join(outside, "keep"), "utf8")).toBe("unchanged");
   });
 
   it("does not gate desktop screenshot (read-only)", async () => {

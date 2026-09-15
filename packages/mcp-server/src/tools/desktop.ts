@@ -109,9 +109,9 @@ function registerLaunchTool(server: McpServer, ctx: ServerContext): void {
               args.cwd === undefined
                 ? undefined
                 : await resolveProjectPath(ctx, args.cwd);
-            const isolation = await ensureDesktopSessionIsolation(id, ctx.env);
-            const app = await withAgentPermit(id, ctx.env, () =>
-              launchApp({
+            const app = await withAgentPermit(id, ctx.env, async () => {
+              const isolation = await ensureDesktopSessionIsolation(id, ctx.env);
+              return launchApp({
                 display,
                 command: args.command,
                 args: args.args ?? [],
@@ -119,8 +119,8 @@ function registerLaunchTool(server: McpServer, ctx: ServerContext): void {
                 logDir: desktopSessionLogDir(id, ctx.env),
                 cwd,
                 ...isolation,
-              }),
-            );
+              });
+            });
             const data: Record<string, unknown> = {
               sessionId: id,
               display,
@@ -179,9 +179,9 @@ function registerExecTool(server: McpServer, ctx: ServerContext): void {
               args.cwd === undefined
                 ? undefined
                 : await resolveProjectPath(ctx, args.cwd);
-            const isolation = await ensureDesktopSessionIsolation(id, ctx.env);
-            const app = await withAgentPermit(id, ctx.env, () =>
-              execApp({
+            const app = await withAgentPermit(id, ctx.env, async () => {
+              const isolation = await ensureDesktopSessionIsolation(id, ctx.env);
+              return execApp({
                 display,
                 command: args.command,
                 args: args.args ?? [],
@@ -190,8 +190,8 @@ function registerExecTool(server: McpServer, ctx: ServerContext): void {
                 cwd,
                 windowTimeoutMs: args.windowTimeoutMs,
                 ...isolation,
-              }),
-            );
+              });
+            });
             return {
               data: {
                 sessionId: id,

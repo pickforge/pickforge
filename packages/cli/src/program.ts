@@ -181,6 +181,7 @@ function registerSessionCommands(program: Command): void {
         )
         .option("--width <pixels>", "desktop display width")
         .option("--height <pixels>", "desktop display height")
+        .option("--inherit-home", "desktop: consent to caller HOME/XDG homes for this session (immutable); human takeover pauses agent actions")
         .option("--vnc", "expose the desktop display over read-only VNC")
         .option(
           "--vnc-control",

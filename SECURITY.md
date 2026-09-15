@@ -123,6 +123,34 @@ filesystem and network access. Pickforge provisions a dedicated locked
 yet run under that user — uid isolation is planned. Until then, launch only apps
 you trust, and prefer a throwaway user or VM for untrusted binaries.
 
+New managed desktops use a fresh session-local `HOME` and config, data, cache
+and state XDG home directories under `<session>/runtime/home`. This keeps normal
+app configuration writes away from the caller's home; it does not prevent an
+app from reading or writing other paths, reaching the network, or using other
+inherited environment variables. Desktop environments are not a secret-variable
+allowlist. Do not launch untrusted applications.
+
+The explicit creation-time opt-in is CLI `--inherit-home` or MCP
+`session_create.inheritHome`. It preserves the caller's HOME/XDG home values,
+including absent or empty XDG values, for subsequent managed launches. The
+session's stored `desktop.homePolicy` is immutable through the CLI and MCP;
+status reports it and new evidence manifests record `meta.desktopHomePolicy`
+as an enum, not host paths. Inherited-home sessions allow human takeover without
+relabeling their apps private. No inherited-home process is started while a human
+lease is live. VNC control processes always use private home storage; takeover
+starts require the matching human lease authority instead of an agent permit.
+The runtime, dead D-Bus endpoints and other desktop guards still apply.
+
+Legacy sessions without policy are reported as `legacy-inherit`. Their running
+apps are neither changed nor claimed private. New managed processes require
+recreation; invalid policy fails closed. Old evidence remains unchanged.
+Private home creation refuses symlinks, checks ownership before tightening mode
+`0700`, and binds writes and chmod to verified directory descriptors. Teardown
+removes the private home with the runtime only after ownership and process
+cleanup are confirmed. Pickforge never migrates or copies the caller's home.
+The shell recipe from `desktop env` cannot revoke a shell's environment later;
+do not reuse it during human takeover.
+
 ## Desktop session containment and runtime isolation
 
 A desktop session owns everything it starts, and cleanup is confirmed rather

@@ -183,7 +183,7 @@ describe("ensureSessionVnc", () => {
         type: "desktop",
         projectDir: root,
         status: "running",
-        desktop: { display: syntheticDisplay() },
+        desktop: { display: syntheticDisplay(), homePolicy: "private" },
       },
       registryEnv,
     );
@@ -364,7 +364,7 @@ describe("ensureSessionVnc", () => {
         type: "desktop",
         projectDir: root,
         status: "running",
-        desktop: { display: syntheticDisplay() },
+        desktop: { display: syntheticDisplay(), homePolicy: "private" },
       },
       registryEnv,
     );
@@ -374,6 +374,7 @@ describe("ensureSessionVnc", () => {
     ).rejects.toThrow(/already in use; refusing to claim ownership/);
     expect((await getSession(record.id, registryEnv))?.desktop).toEqual({
       display: syntheticDisplay(),
+      homePolicy: "private",
     });
 
     const closed = once(server, "close");

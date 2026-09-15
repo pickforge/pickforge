@@ -117,7 +117,7 @@ function writeDesktopSessionRecord(
       createdAt: "2026-06-09T12:00:00.000Z",
       status: "running",
       projectDir,
-      desktop: { display, xvfbPid: 999_999_999 },
+      desktop: { display, homePolicy: "private", xvfbPid: 999_999_999 },
     })}\n`,
   );
   return id;
@@ -279,14 +279,23 @@ afterEach(async () => {
 }, 60_000);
 
 describe("pickforge-lab session (desktop)", () => {
-  it(
-    "creates, reports, and destroys a desktop session",
-    async () => {
+  it("describes immutable inherited-home consent without disabling takeover", async () => {
+    const result = await runCli(["session", "create", "--help"], makeEnv());
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("--inherit-home");
+    expect(result.stdout).toContain("immutable");
+    expect(result.stdout.replace(/\s+/g, " ")).toContain("human takeover pauses agent actions");
+    expect(result.stdout).not.toContain("disables takeover");
+  });
+
+  it.each([false, true])(
+    "creates, reports, and destroys a desktop session with inheritHome=%s",
+    async (inheritHome) => {
       const env = makeEnv({ realPath: true });
       cleanupEnvs.push(env);
 
       const created = await runCli(
-        ["session", "create", "--type", "desktop", "--json"],
+        ["session", "create", "--type", "desktop", "--json", ...(inheritHome ? ["--inherit-home"] : [])],
         env,
         tmpDir,
       );
@@ -307,6 +316,7 @@ describe("pickforge-lab session (desktop)", () => {
       expect(status.code).toBe(0);
       const statusReport = parseJson(status);
       expect(statusReport.sessions[0].status).toBe("running");
+      expect(statusReport.sessions[0].desktop.homePolicy).toBe(inheritHome ? "inherit" : "private");
       expect(statusReport.sessions[0].desktop.display).toBe(session.display);
       expect(statusReport.sessions[0].desktop.xvfbAlive).toBe(true);
       expect(statusReport.sessions[0].desktop.displayAlive).toBe(true);
@@ -722,6 +732,11 @@ describe("pickforge-lab desktop", () => {
     );
     expect(report.exports).toEqual({
       DISPLAY: ":98",
+      HOME: path.join(runtimeDir, "home"),
+      XDG_CONFIG_HOME: path.join(runtimeDir, "home", "config"),
+      XDG_DATA_HOME: path.join(runtimeDir, "home", "data"),
+      XDG_CACHE_HOME: path.join(runtimeDir, "home", "cache"),
+      XDG_STATE_HOME: path.join(runtimeDir, "home", "state"),
       XDG_RUNTIME_DIR: runtimeDir,
       DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(runtimeDir, "bus")}`,
       DBUS_SYSTEM_BUS_ADDRESS: `unix:path=${path.join(
@@ -737,6 +752,7 @@ describe("pickforge-lab desktop", () => {
       WINIT_UNIX_BACKEND: "x11",
       XDG_SESSION_TYPE: "x11",
     });
+    expect(report.homePolicy).toBe("private");
     expect(report.script).not.toContain("do-not-print");
 
     const text = await runCli(
@@ -787,6 +803,7 @@ describe("pickforge-lab desktop", () => {
       "printf 'DISPLAY=%s\\nWAYLAND_DISPLAY=%s\\nWAYLAND_SOCKET=%s\\nELECTRON_OZONE_PLATFORM_HINT=%s\\nGDK_BACKEND=%s\\nGLFW_PLATFORM=%s\\nQT_QPA_PLATFORM=%s\\nSDL_VIDEODRIVER=%s\\nWINIT_UNIX_BACKEND=%s\\nXDG_SESSION_TYPE=%s\\n' " +
         '"$DISPLAY" "${WAYLAND_DISPLAY-unset}" "${WAYLAND_SOCKET-unset}" "$ELECTRON_OZONE_PLATFORM_HINT" "$GDK_BACKEND" "$GLFW_PLATFORM" "$QT_QPA_PLATFORM" "$SDL_VIDEODRIVER" "$WINIT_UNIX_BACKEND" "$XDG_SESSION_TYPE" ' +
         `> "${capture}"\n` +
+        `printf 'HOME=%s\\n' "$HOME" >> "${capture}"\n` +
         `printf 'ARG=%s\\n' "$@" >> "${capture}"\n` +
         "exec /bin/sleep 30",
     );
@@ -823,6 +840,7 @@ describe("pickforge-lab desktop", () => {
           "GLFW_PLATFORM=x11\nQT_QPA_PLATFORM=xcb\n" +
           "SDL_VIDEODRIVER=x11\nWINIT_UNIX_BACKEND=x11\n" +
           "XDG_SESSION_TYPE=x11\n" +
+          `HOME=${path.join(env.PICKFORGE_HOME, "sessions", id, "runtime", "home")}\n` +
           "ARG=hello world\nARG=$(not-expanded)\n",
       );
     } finally {

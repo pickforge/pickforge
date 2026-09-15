@@ -71,6 +71,7 @@ function createRuntime(
     height?: number;
     vnc?: boolean;
     vncControl?: boolean;
+    inheritHome?: boolean;
     avdName?: string;
     coldBoot?: boolean;
     readOnly?: boolean;
@@ -88,6 +89,7 @@ function createRuntime(
           height: args.height,
           vnc: args.vnc,
           vncControl: args.vncControl,
+          inheritHome: args.inheritHome,
         }),
       destroy: (id) => destroyDesktopSession(id, ctx.env),
     },
@@ -166,6 +168,7 @@ export async function createSessions(
     height?: number;
     vnc?: boolean;
     vncControl?: boolean;
+    inheritHome?: boolean;
     avdName?: string;
     coldBoot?: boolean;
     readOnly?: boolean;
@@ -247,6 +250,9 @@ function registerSessionCreateTool(
           .describe(
             "Expose writable VNC for explicit manual secret entry; input is not coordinated with the agent",
           ),
+        inheritHome: z.boolean().optional().describe(
+          "Desktop only: consent to the caller's HOME/XDG homes for this session (immutable). Default is private. Human takeover remains available and pauses agent actions.",
+        ),
         avdName: z.string().min(1).optional().describe("Android AVD name"),
         coldBoot: z
           .boolean()

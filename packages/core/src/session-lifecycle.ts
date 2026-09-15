@@ -2,6 +2,7 @@ import type { EnvLike } from "./paths.js";
 import {
   REAPER_CLEANUP_PENDING_META_KEY,
   destroySessionRecord,
+  desktopHomePolicy,
   isSessionProcessAlive,
   listSessions,
   updateSession,
@@ -286,6 +287,7 @@ export async function localSessionStatusEntry(
     }
     entry.desktop = {
       ...record.desktop,
+      homePolicy: desktopHomePolicy(record.desktop),
       xvfbAlive: status.xvfbAlive,
       vncAlive: status.vncAlive,
       displayAlive: status.displayAlive,
