@@ -81,9 +81,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             imagemagick \
+            x11-utils \
             x11vnc \
             xdotool \
             xterm \
+            zenity \
             xvfb
 
       - name: Ensure a headed browser is available
@@ -109,11 +111,13 @@ jobs:
       # default (Chrome's sandbox stays on outside CI).
       - run: bun run test
         env:
+          PICKFORGE_REQUIRE_DESKTOP_WINDOWS: "1"
           PICKFORGE_REQUIRE_BROWSER: "1"
           PICKFORGE_CHROME_NO_SANDBOX: "1"
 
       - run: bun run test:coverage
         env:
+          PICKFORGE_REQUIRE_DESKTOP_WINDOWS: "1"
           PICKFORGE_REQUIRE_BROWSER: "1"
           PICKFORGE_CHROME_NO_SANDBOX: "1"
 

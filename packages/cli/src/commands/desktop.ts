@@ -1,6 +1,15 @@
-import { withAgentPermit } from "@pickforge/lab-core";
+import {
+  appendAction, beginEvidenceRun, isEvidenceEnabled, loadConfig,
+  sanitizeActionTarget, sanitizeErrorText, withAgentPermit,
+  type EvidenceAction,
+} from "@pickforge/lab-core";
 import {
   click,
+  desktopWindows,
+  focusWindow,
+  selectDesktopWindow,
+  MAX_FOCUS_TIMEOUT_MS,
+  type WindowInfo,
   desktopEnvironmentRecipe,
   desktopSessionLogDir,
   doubleClick,
@@ -24,6 +33,7 @@ import {
   parseIntArg,
   parseSignedIntArg,
   requireDisplay,
+  resolveProjectDir,
   resolveScreenshotTarget,
   resolveSessionRecord,
   runReported,
@@ -42,6 +52,64 @@ async function resolveDesktop(
 ): Promise<{ id: string; display: string }> {
   const record = await resolveSessionRecord("desktop", opts);
   return { id: record.id, display: requireDisplay(record) };
+}
+
+export async function runDesktopWindows(opts: DesktopCommandOptions): Promise<number> {
+  return runReported(opts, async () => {
+    const { id, display } = await resolveDesktop(opts);
+    const windows = await desktopWindows(display);
+    return {
+      data: { sessionId: id, display, windows },
+      lines: windows.map((window) => JSON.stringify(window)),
+    };
+  });
+}
+
+export interface DesktopFocusOptions extends DesktopCommandOptions {
+  id?: string;
+  name?: string;
+  timeout?: string;
+}
+
+async function focusWithEvidence(
+  opts: DesktopFocusOptions, sessionId: string, display: string,
+): Promise<WindowInfo & { focused: true }> {
+  const projectDir = resolveProjectDir(opts);
+  const config = await loadConfig(projectDir);
+  const run = isEvidenceEnabled(config)
+    ? (await beginEvidenceRun(projectDir, sessionId)).run : undefined;
+  const startedAt = new Date();
+  const action: EvidenceAction = {
+    actionId: crypto.randomUUID(), source: "cli", tool: "desktop_focus", sessionId,
+    startedAt: startedAt.toISOString(), status: "ok",
+    target: { ...sanitizeActionTarget({ role: "window", name: opts.name, selector: opts.id }) },
+  };
+  try {
+    const window = await selectDesktopWindow(display, opts);
+    action.target = { ...sanitizeActionTarget({ role: "window", name: window.name, selector: window.id }) };
+    return await focusWindow({
+      display, sessionId, window,
+      timeoutMs: parseBoundedMsOption(opts.timeout, "--timeout", MAX_FOCUS_TIMEOUT_MS),
+    });
+  } catch (error) {
+    action.error = sanitizeErrorText(error instanceof Error ? error.message : String(error));
+    action.status = /timed out/i.test(action.error) ? "timeout" : "error";
+    throw error;
+  } finally {
+    action.durationMs = Date.now() - startedAt.getTime();
+    if (run !== undefined) await appendAction(run, action);
+  }
+}
+
+export async function runDesktopFocus(opts: DesktopFocusOptions): Promise<number> {
+  return runReported(opts, async () => {
+    const { id, display } = await resolveDesktop(opts);
+    const focused = await focusWithEvidence(opts, id, display);
+    return {
+      data: { sessionId: id, display, window: focused },
+      lines: [`focused window ${focused.id}`],
+    };
+  });
 }
 
 export interface DesktopLaunchOptions extends DesktopCommandOptions {
