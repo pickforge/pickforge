@@ -4,7 +4,8 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { isEvidenceEnabled, loadConfig } from "./config.js";
 import { appendAction, beginEvidenceRun } from "./evidence.js";
-import { ensureDir, writeFileAtomic, type EnvLike } from "./paths.js";
+import { ensureDir, type EnvLike } from "./paths.js";
+import { DirHandle, withDirHandle } from "./dir-handle.js";
 import { identityIsAlive, readProcessStartTicks } from "./proc.js";
 import { sessionDataDir } from "./session.js";
 
@@ -54,13 +55,96 @@ function assertSafeSessionId(sessionId: string): void {
   }
 }
 
-function humanLeasePath(sessionId: string, env: EnvLike): string {
-  return path.join(sessionDataDir(sessionId, env), HUMAN_LEASE_FILE);
+type SessionDirectoryAction<T> = (
+  session: DirHandle,
+  permits: DirHandle | undefined,
+  verify: () => Promise<void>,
+) => Promise<T>;
+
+function withSessionDirectory<T>(sessionId: string, env: EnvLike, create: true,
+  action: SessionDirectoryAction<T>): Promise<T>;
+function withSessionDirectory<T>(sessionId: string, env: EnvLike, create: false,
+  action: SessionDirectoryAction<T>): Promise<T | undefined>;
+async function withSessionDirectory<T>(
+  sessionId: string,
+  env: EnvLike,
+  create: boolean,
+  action: SessionDirectoryAction<T>,
+): Promise<T | undefined> {
+  const sessionPath = sessionDataDir(sessionId, env);
+  const parentPath = path.dirname(sessionPath);
+  if (create) await ensureDir(parentPath);
+  else if (!fs.existsSync(parentPath)) return undefined;
+  return withDirHandle(DirHandle.open(parentPath), async (parent) => {
+    // Outside the replaceable session tree, shared by every process. Never
+    // refresh this binding to a new inode or silently recreate bound storage.
+    const marker = `.${sessionId}.takeover-identity`;
+    const raw = await readTextIfPresent(parent.resolve(marker));
+    if (!create && raw === undefined && await parent.lstatChild(sessionId) === undefined) return undefined;
+    return withDirHandle(
+      create && raw === undefined ? parent.ensureChildDir(sessionId, 0o700) : parent.openChild(sessionId),
+      (session) => withCoordinationIdentity(parent, session, marker, raw, create, action),
+    );
+  });
 }
 
-function agentPermitsDir(sessionId: string, env: EnvLike): string {
-  return path.join(sessionDataDir(sessionId, env), AGENT_PERMITS_DIR);
+async function publishCoordinationIdentity(parent: DirHandle, marker: string, raw: string): Promise<void> {
+  const tmp = `.takeover-identity-${crypto.randomUUID()}`;
+  await parent.writeFileAtomic(tmp, raw);
+  try {
+    // Publish complete bytes at most once, using the existing storage primitive.
+    await parent.linkChild(tmp, marker).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "EEXIST") throw error;
+    });
+  } finally {
+    await parent.unlinkChild(tmp);
+  }
 }
+
+async function assertDirectoryIdentity(parent: DirHandle, name: string, dir: DirHandle): Promise<void> {
+  const current = await parent.lstatChild(name);
+  if (!current?.isDirectory() || current.dev !== dir.stat.dev || current.ino !== dir.stat.ino) {
+    throw new Error(`Takeover coordination directory was replaced: ${parent.dir}/${name}`);
+  }
+}
+
+async function withCoordinationIdentity<T>(
+  parent: DirHandle, session: DirHandle, marker: string, raw: string | undefined,
+  create: boolean, action: SessionDirectoryAction<T>,
+): Promise<T> {
+  const permits = create && raw === undefined
+    ? await session.ensureChildDir(AGENT_PERMITS_DIR, 0o700)
+    : await session.lstatChild(AGENT_PERMITS_DIR) === undefined
+      ? undefined : await session.openChild(AGENT_PERMITS_DIR);
+  try {
+    const expected = JSON.stringify([
+      session.stat.dev, session.stat.ino,
+      permits === undefined ? null : [permits.stat.dev, permits.stat.ino],
+    ]);
+    if (create && raw === undefined) await publishCoordinationIdentity(parent, marker, expected);
+    const verify = async () => {
+      await assertDirectoryIdentity(parent, path.basename(session.dir), session);
+      if (permits !== undefined) await assertDirectoryIdentity(session, AGENT_PERMITS_DIR, permits);
+      if ((create || raw !== undefined) && await readTextIfPresent(parent.resolve(marker)) !== expected) {
+        throw new Error(`Takeover coordination identity changed: ${session.dir}`);
+      }
+    };
+    await verify();
+    return await action(session, permits, verify);
+  } finally {
+    await permits?.close();
+  }
+}
+
+async function readVerifiedLease(dir: DirHandle, verify: () => Promise<void>): Promise<string | undefined> {
+  const raw = await readTextIfPresent(dir.resolve(HUMAN_LEASE_FILE));
+  await verify();
+  return raw;
+}
+
+// This map owns release descriptors only. The on-disk binding above, not this
+// process-local map, enforces the shared lease/permit coordination identity.
+const permitDirectories = new WeakMap<AgentPermit, { dir: DirHandle; name: string; raw: string }>();
 
 /** Atomically-published record of who holds human control of a session. */
 export interface HumanLease {
@@ -158,7 +242,12 @@ export class HumanLeaseDrainTimeoutError extends Error {
 
 async function readTextIfPresent(target: string): Promise<string | undefined> {
   try {
-    return await fs.promises.readFile(target, "utf8");
+    const file = await fs.promises.open(target, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    try {
+      return await file.readFile("utf8");
+    } finally {
+      await file.close();
+    }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw error;
@@ -252,7 +341,8 @@ export async function readHumanLease(
   env: EnvLike = process.env,
 ): Promise<HumanLease | undefined> {
   assertSafeSessionId(sessionId);
-  const raw = await readTextIfPresent(humanLeasePath(sessionId, env));
+  const raw = await withSessionDirectory(sessionId, env, false,
+    (dir, _permits, verify) => readVerifiedLease(dir, verify));
   return raw === undefined ? undefined : parseHumanLease(raw);
 }
 
@@ -276,7 +366,8 @@ export async function readHumanLeaseRaw(
   env: EnvLike = process.env,
 ): Promise<HumanLeaseSnapshot | undefined> {
   assertSafeSessionId(sessionId);
-  const raw = await readTextIfPresent(humanLeasePath(sessionId, env));
+  const raw = await withSessionDirectory(sessionId, env, false,
+    (dir, _permits, verify) => readVerifiedLease(dir, verify));
   if (raw === undefined) return undefined;
   const lease = parseHumanLease(raw);
   return lease === undefined ? { raw } : { raw, lease };
@@ -385,24 +476,22 @@ export async function acquireHumanLease(
   opts: AcquireHumanLeaseOptions = {},
 ): Promise<HumanLease> {
   assertSafeSessionId(sessionId);
-  const dir = await ensureDir(sessionDataDir(sessionId, env));
-  const leasePath = path.join(dir, HUMAN_LEASE_FILE);
-  const now = opts.now ?? new Date();
-  const lease = buildHumanLease(sessionId, now, opts);
-  await createExclusiveHumanLeaseFile(leasePath, lease, sessionId, now);
-  if (opts._afterCreate !== undefined) await opts._afterCreate();
-
-  try {
-    await drainAgentPermits(
-      sessionId,
-      env,
-      opts.drainTimeoutMs ?? HUMAN_LEASE_DRAIN_TIMEOUT_MS,
-    );
-  } catch (error) {
-    await unlinkIfMatches(leasePath, `${JSON.stringify(lease)}\n`).catch(() => {});
-    throw error;
-  }
-  return lease;
+  return withSessionDirectory(sessionId, env, true, async (dir, permits, verify) => {
+    const leasePath = dir.resolve(HUMAN_LEASE_FILE);
+    const now = opts.now ?? new Date();
+    const lease = buildHumanLease(sessionId, now, opts);
+    await createExclusiveHumanLeaseFile(leasePath, lease, sessionId, now);
+    try {
+      if (opts._afterCreate !== undefined) await opts._afterCreate();
+      if (permits === undefined) throw new Error("Takeover permit directory is missing");
+      await drainAgentPermits(permits, opts.drainTimeoutMs ?? HUMAN_LEASE_DRAIN_TIMEOUT_MS);
+      await verify();
+    } catch (error) {
+      await unlinkIfMatches(leasePath, `${JSON.stringify(lease)}\n`).catch(() => {});
+      throw error;
+    }
+    return lease;
+  });
 }
 
 /**
@@ -417,7 +506,8 @@ export async function clearStaleHumanLease(
   env: EnvLike = process.env,
 ): Promise<boolean> {
   assertSafeSessionId(sessionId);
-  return unlinkIfMatches(humanLeasePath(sessionId, env), expectedRaw);
+  return await withSessionDirectory(sessionId, env, false,
+    (dir) => unlinkIfMatches(dir.resolve(HUMAN_LEASE_FILE), expectedRaw)) ?? false;
 }
 
 /**
@@ -435,25 +525,26 @@ export async function renewHumanLease(
   now: Date = new Date(),
 ): Promise<HumanLease | undefined> {
   assertSafeSessionId(sessionId);
-  const leasePath = humanLeasePath(sessionId, env);
-  const current = await readHumanLease(sessionId, env);
-  if (current === undefined || current.leaseId !== leaseId) return undefined;
-  // A lease that has already gone stale (TTL elapsed, or its recorded owner
-  // no longer matches this call's identity — e.g. reaped and reused) must
-  // never be resurrected by a late renewal: the owner lost the lease the
-  // instant it went stale, and a straggling renew must not extend it back to
-  // life out from under a recovery that may already be in flight.
-  if (isHumanLeaseStale(current, now)) return undefined;
-  const updated: HumanLease = {
-    ...current,
-    expiresAt: new Date(now.getTime() + current.ttlMs).toISOString(),
-  };
-  if (patch.vncPid !== undefined) updated.vncPid = patch.vncPid;
-  if (patch.vncStartTimeTicks !== undefined) updated.vncStartTimeTicks = patch.vncStartTimeTicks;
-  if (patch.vncPort !== undefined) updated.vncPort = patch.vncPort;
-  await writeFileAtomic(leasePath, `${JSON.stringify(updated)}\n`);
-  const confirmed = await readHumanLease(sessionId, env);
-  return confirmed?.leaseId === leaseId ? confirmed : undefined;
+  return withSessionDirectory(sessionId, env, false, async (dir, _permits, verify) => {
+    const leasePath = dir.resolve(HUMAN_LEASE_FILE);
+    const raw = await readTextIfPresent(leasePath);
+    const current = raw === undefined ? undefined : parseHumanLease(raw);
+    if (current === undefined || current.leaseId !== leaseId) return undefined;
+    // A late renewal must not resurrect a lease after its TTL or process
+    // identity expired, including while stale-lease recovery is in flight.
+    if (isHumanLeaseStale(current, now)) return undefined;
+    const updated: HumanLease = {
+      ...current,
+      expiresAt: new Date(now.getTime() + current.ttlMs).toISOString(),
+    };
+    if (patch.vncPid !== undefined) updated.vncPid = patch.vncPid;
+    if (patch.vncStartTimeTicks !== undefined) updated.vncStartTimeTicks = patch.vncStartTimeTicks;
+    if (patch.vncPort !== undefined) updated.vncPort = patch.vncPort;
+    await dir.writeFileAtomic(HUMAN_LEASE_FILE, `${JSON.stringify(updated)}\n`);
+    const confirmedRaw = await readVerifiedLease(dir, verify);
+    const confirmed = confirmedRaw === undefined ? undefined : parseHumanLease(confirmedRaw);
+    return confirmed?.leaseId === leaseId ? confirmed : undefined;
+  });
 }
 
 /** Release a held lease by id (compare-and-delete). Best-effort/idempotent. */
@@ -463,12 +554,14 @@ export async function releaseHumanLease(
   env: EnvLike = process.env,
 ): Promise<boolean> {
   assertSafeSessionId(sessionId);
-  const leasePath = humanLeasePath(sessionId, env);
-  const raw = await readTextIfPresent(leasePath);
-  if (raw === undefined) return false;
-  const current = parseHumanLease(raw);
-  if (current?.leaseId !== leaseId) return false;
-  return unlinkIfMatches(leasePath, raw);
+  return await withSessionDirectory(sessionId, env, false, async (dir) => {
+    const leasePath = dir.resolve(HUMAN_LEASE_FILE);
+    const raw = await readTextIfPresent(leasePath);
+    if (raw === undefined) return false;
+    const current = parseHumanLease(raw);
+    if (current?.leaseId !== leaseId) return false;
+    return unlinkIfMatches(leasePath, raw);
+  }) ?? false;
 }
 
 export interface RecordTakeoverEvidenceOptions {
@@ -553,49 +646,63 @@ export async function acquireAgentPermit(
   env: EnvLike = process.env,
 ): Promise<AgentPermit> {
   assertSafeSessionId(sessionId);
-  const dir = await ensureDir(agentPermitsDir(sessionId, env));
-  const ownerPid = process.pid;
-  const ownerStartTicks = readProcessStartTicks(ownerPid);
-  const permitId = crypto.randomUUID();
-  const record: Omit<AgentPermit, "path"> = {
-    permitId,
-    sessionId,
-    ownerPid,
-    createdAt: new Date().toISOString(),
-  };
-  if (ownerStartTicks !== undefined) record.ownerStartTicks = ownerStartTicks;
-  const permitPath = path.join(dir, `${permitId}.json`);
-  await fs.promises.writeFile(permitPath, `${JSON.stringify(record)}\n`, {
-    encoding: "utf8",
-    flag: "wx",
+  return withSessionDirectory(sessionId, env, true, async (session, permits, verify) => {
+    if (permits === undefined) throw new Error("Takeover permit directory is missing");
+    const dir = await DirHandle.open(permits.resolve(), { followFinal: true });
+    try {
+      const ownerPid = process.pid;
+      const ownerStartTicks = readProcessStartTicks(ownerPid);
+      const permitId = crypto.randomUUID();
+      const record: Omit<AgentPermit, "path"> = {
+        permitId,
+        sessionId,
+        ownerPid,
+        createdAt: new Date().toISOString(),
+      };
+      if (ownerStartTicks !== undefined) record.ownerStartTicks = ownerStartTicks;
+      const name = `${permitId}.json`;
+      const raw = `${JSON.stringify(record)}\n`;
+      await fs.promises.writeFile(dir.resolve(name), raw, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      await verify().catch(async (error: unknown) => {
+        await unlinkIfMatches(dir.resolve(name), raw).catch(() => {});
+        throw error;
+      });
+      const permit = { ...record, path: path.join(session.dir, AGENT_PERMITS_DIR, name) };
+      permitDirectories.set(permit, { dir, name, raw });
+      return permit;
+    } catch (error) {
+      await dir.close();
+      throw error;
+    }
   });
-  return { ...record, path: permitPath };
 }
 
 /** Release a previously-acquired agent permit. Best-effort/idempotent. */
 export async function releaseAgentPermit(permit: AgentPermit): Promise<void> {
-  await unlinkIfPresent(permit.path);
+  const held = permitDirectories.get(permit);
+  if (held === undefined) return;
+  permitDirectories.delete(permit);
+  try {
+    await unlinkIfMatches(held.dir.resolve(held.name), held.raw);
+  } finally {
+    await held.dir.close();
+  }
 }
 
 async function drainAgentPermits(
-  sessionId: string,
-  env: EnvLike,
+  dir: DirHandle,
   timeoutMs: number,
 ): Promise<void> {
-  const dir = agentPermitsDir(sessionId, env);
-  let entries: string[];
-  try {
-    entries = (await fs.promises.readdir(dir)).filter((name) => name.endsWith(".json"));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw error;
-  }
+  const entries = (await dir.readEntryNames()).filter((name) => name.endsWith(".json"));
   const pending = new Set(entries);
   const deadline = Date.now() + timeoutMs;
 
   while (pending.size > 0) {
     for (const name of Array.from(pending)) {
-      const full = path.join(dir, name);
+      const full = dir.resolve(name);
       const raw = await readTextIfPresent(full);
       if (raw === undefined) {
         pending.delete(name);
@@ -603,8 +710,7 @@ async function drainAgentPermits(
       }
       const record = parseAgentPermitRecord(raw);
       if (record === undefined || !identityIsAlive(record.ownerPid, record.ownerStartTicks)) {
-        // Corrupt, or owned by a dead process (crashed mid-action): sweep it
-        // so a crash never permanently blocks a takeover.
+        // Sweep corrupt records and permits whose owning process died.
         await unlinkIfPresent(full).catch(() => {});
         pending.delete(name);
       }

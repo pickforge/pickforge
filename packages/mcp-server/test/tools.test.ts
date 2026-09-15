@@ -339,7 +339,7 @@ describe("desktop isolation tools", () => {
     const capture = path.join(dirs.root, "mcp-exec.txt");
     writeScript(
       command,
-      `printf 'DISPLAY=%s\\nGDK_BACKEND=%s\\nARG=%s\\n' "$DISPLAY" "$GDK_BACKEND" "$1" > "${capture}"\nexec /bin/sleep 30`,
+      `printf 'DISPLAY=%s\\nGDK_BACKEND=%s\\nARG=%s\\nHOME=%s\\n' "$DISPLAY" "$GDK_BACKEND" "$1" "$HOME" > "${capture}"\nexec /bin/sleep 30`,
     );
 
     const result = await lab.client.callTool({
@@ -360,7 +360,7 @@ describe("desktop isolation tools", () => {
         { id: "4242", name: "pickforge-mcp-window" },
       ]);
       expect(fs.readFileSync(capture, "utf8")).toBe(
-        "DISPLAY=:987\nGDK_BACKEND=x11\nARG=hello world\n",
+        `DISPLAY=:987\nGDK_BACKEND=x11\nARG=hello world\nHOME=${path.join(dirs.home, "sessions", id, "runtime", "home")}\n`,
       );
     } finally {
       if (typeof report.pid === "number") {

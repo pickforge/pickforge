@@ -34,6 +34,7 @@ export interface LaunchAppOptions {
   cwd?: string;
   /** Per-session `XDG_RUNTIME_DIR` and D-Bus endpoints (#86). */
   runtime?: DesktopRuntimeLayout;
+  homePolicy?: "private" | "inherit";
   /**
    * Session containment scope (#85). When given, the app is started through a
    * supervisor that joins the scope before spawning it, so a double-forked or
@@ -155,6 +156,7 @@ async function startApp(opts: LaunchAppOptions): Promise<StartedApp> {
       opts.display,
       { ...process.env, ...opts.env },
       {
+        homePolicy: opts.homePolicy,
         ...(opts.runtime === undefined ? {} : { runtime: opts.runtime }),
         ...(opts.containment === undefined
           ? {}

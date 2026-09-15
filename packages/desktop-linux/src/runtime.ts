@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { isPathConfined } from "@pickforge/lab-core";
+import { DirHandle, isPathConfined } from "@pickforge/lab-core";
 
 /**
  * Per-session runtime layout for desktop sessions (pickforge/pickforge#86).
@@ -47,8 +47,50 @@ export function desktopRuntimeLayout(sessionDir: string): DesktopRuntimeLayout {
 export async function createDesktopRuntimeDir(
   layout: DesktopRuntimeLayout,
 ): Promise<void> {
-  await fs.promises.mkdir(layout.runtimeDir, { recursive: true, mode: 0o700 });
-  await fs.promises.chmod(layout.runtimeDir, 0o700);
+  const sessionDir = path.dirname(layout.runtimeDir);
+  const parent = await DirHandle.open(path.dirname(sessionDir));
+  try {
+    const session = await parent.ensureChildDir(path.basename(sessionDir), 0o700);
+    try {
+      await tightenOwnedDirectory(session);
+      await createPrivateRuntime(session, path.basename(layout.runtimeDir));
+    } finally {
+      await session.close();
+    }
+  } finally {
+    await parent.close();
+  }
+}
+
+async function tightenOwnedDirectory(dir: DirHandle): Promise<void> {
+  if (dir.stat.uid !== process.getuid?.()) {
+    throw new Error(`Refusing to chmod a directory with uncertain ownership: ${dir.dir}`);
+  }
+  // This resolves through the verified descriptor, never a replaceable pathname.
+  await fs.promises.chmod(dir.resolve(), 0o700);
+}
+
+async function createPrivateRuntime(session: DirHandle, name: string): Promise<void> {
+  const runtime = await session.ensureChildDir(name, 0o700);
+  try {
+    await tightenOwnedDirectory(runtime);
+    const home = await runtime.ensureChildDir("home", 0o700);
+    try {
+      await tightenOwnedDirectory(home);
+      for (const name of ["config", "data", "cache", "state"]) {
+        const child = await home.ensureChildDir(name, 0o700);
+        try {
+          await tightenOwnedDirectory(child);
+        } finally {
+          await child.close();
+        }
+      }
+    } finally {
+      await home.close();
+    }
+  } finally {
+    await runtime.close();
+  }
 }
 
 export interface RuntimeDirRemoval {
@@ -56,11 +98,39 @@ export interface RuntimeDirRemoval {
   error?: Error;
 }
 
-/**
- * Delete a session's runtime directory, refusing any path that is not confined
- * to the session directory. The confinement check follows symlinks so a planted
- * link cannot redirect the delete out of the session tree.
- */
+async function assertOwnedEntry(parent: DirHandle, name: string, expected: fs.Stats): Promise<void> {
+  const current = await parent.lstatChild(name);
+  if (current?.dev !== expected.dev || current?.ino !== expected.ino) {
+    throw new Error(`Refusing to delete a replaced runtime entry: ${parent.dir}/${name}`);
+  }
+}
+
+/** Descend only through verified handles; never give recursive rm a pathname. */
+async function removeOwnedEntry(parent: DirHandle, name: string): Promise<void> {
+  const stat = await parent.lstatChild(name);
+  if (stat === undefined) return;
+  if (stat.isSymbolicLink() || stat.uid !== process.getuid?.()) {
+    throw new Error(`Refusing to delete a runtime entry with uncertain ownership: ${parent.dir}/${name}`);
+  }
+  if (!stat.isDirectory()) {
+    await assertOwnedEntry(parent, name, stat);
+    await parent.unlinkChild(name);
+    return;
+  }
+  const child = await DirHandle.open(parent.resolve(name), { expectedIdentity: stat });
+  try {
+    await assertOwnedEntry(parent, name, child.stat);
+    for (const entry of await child.readEntryNames()) {
+      await removeOwnedEntry(child, entry);
+    }
+    await assertOwnedEntry(parent, name, child.stat);
+    await fs.promises.rmdir(parent.resolve(name));
+  } finally {
+    await child.close();
+  }
+}
+
+/** Delete only the owned runtime tree. Refusals can leave a partially cleaned tree. */
 export async function removeDesktopRuntimeDir(
   sessionDir: string,
   runtimeDir: string,
@@ -74,7 +144,24 @@ export async function removeDesktopRuntimeDir(
     };
   }
   try {
-    await fs.promises.rm(runtimeDir, { recursive: true, force: true });
+    if (path.resolve(runtimeDir) !== path.resolve(sessionDir, DESKTOP_RUNTIME_DIR_NAME)) {
+      throw new Error(`Refusing to delete an unexpected runtime directory: ${runtimeDir}`);
+    }
+    const parent = await DirHandle.open(path.dirname(sessionDir));
+    try {
+      const session = await parent.openChild(path.basename(sessionDir));
+      try {
+        const stat = await session.lstatChild(DESKTOP_RUNTIME_DIR_NAME);
+        if (stat !== undefined && (!stat.isDirectory() || stat.uid !== process.getuid?.())) {
+          throw new Error(`Refusing to delete a runtime directory with uncertain ownership: ${runtimeDir}`);
+        }
+        await removeOwnedEntry(session, DESKTOP_RUNTIME_DIR_NAME);
+      } finally {
+        await session.close();
+      }
+    } finally {
+      await parent.close();
+    }
     return { removed: true };
   } catch (error) {
     return {

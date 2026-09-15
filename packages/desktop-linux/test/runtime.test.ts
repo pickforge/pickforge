@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, afterEach, describe, expect, it } from "vitest";
-import { createContainmentScope } from "@pickforge/lab-core";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { createContainmentScope, DirHandle } from "@pickforge/lab-core";
 import {
   createDesktopRuntimeDir,
   desktopRuntimeLayout,
@@ -17,6 +17,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-runtime-"));
 let savedUmask: number | undefined;
 
 afterEach(() => {
+  vi.restoreAllMocks();
   if (savedUmask !== undefined) {
     process.umask(savedUmask);
     savedUmask = undefined;
@@ -68,6 +69,137 @@ describe("desktop runtime layout", () => {
   });
 });
 
+describe("runtime descriptor ownership", () => {
+  it.each(["create", "remove"])("keeps %s on the pinned session after a path swap", async (operation) => {
+    const dir = sessionDir(`swap-${operation}`);
+    const outside = sessionDir(`outside-${operation}`);
+    const layout = desktopRuntimeLayout(dir);
+    const outsideRuntime = path.join(outside, "runtime");
+    fs.mkdirSync(outsideRuntime);
+    fs.writeFileSync(path.join(outsideRuntime, "keep"), "unchanged");
+    fs.chmodSync(outside, 0o755);
+    if (operation === "remove") await createDesktopRuntimeDir(layout);
+    const openChild = DirHandle.prototype.openChild;
+    vi.spyOn(DirHandle.prototype, "openChild").mockImplementation(async function(this: DirHandle, name) {
+      const handle = await openChild.call(this, name);
+      if (name === path.basename(dir)) {
+        fs.renameSync(dir, `${dir}-original`);
+        fs.symlinkSync(outside, dir);
+      }
+      return handle;
+    });
+    if (operation === "create") {
+      await createDesktopRuntimeDir(layout);
+      expect(fs.existsSync(path.join(`${dir}-original`, "runtime", "home", "config"))).toBe(true);
+    } else {
+      expect((await removeDesktopRuntimeDir(dir, layout.runtimeDir)).removed).toBe(true);
+      expect(fs.existsSync(path.join(`${dir}-original`, "runtime"))).toBe(false);
+    }
+    expect(fs.statSync(outside).mode & 0o777).toBe(0o755);
+    expect(fs.readdirSync(outsideRuntime)).toEqual(["keep"]);
+    expect(fs.readFileSync(path.join(outsideRuntime, "keep"), "utf8")).toBe("unchanged");
+  });
+});
+
+describe("runtime descendant ownership", () => {
+  it.each(["symlink", "directory"])("refuses a descendant replaced by a %s after opening it", async (kind) => {
+    const dir = sessionDir(`descendant-${kind}`);
+    const layout = desktopRuntimeLayout(dir);
+    await createDesktopRuntimeDir(layout);
+    const config = path.join(layout.runtimeDir, "home", "config");
+    fs.writeFileSync(path.join(config, "owned"), "original");
+    const outside = sessionDir(`descendant-outside-${kind}`);
+    fs.chmodSync(outside, 0o755);
+    fs.writeFileSync(path.join(outside, "keep"), "untouched");
+    const open = DirHandle.open;
+    vi.spyOn(DirHandle, "open").mockImplementation(async (target, options) => {
+      const handle = await open(target, options);
+      if (path.basename(target) === "config") {
+        fs.renameSync(config, `${config}-original`);
+        if (kind === "symlink") fs.symlinkSync(outside, config);
+        else {
+          fs.mkdirSync(config);
+          fs.chmodSync(config, 0o755);
+          fs.writeFileSync(path.join(config, "replacement"), "untouched");
+        }
+      }
+      return handle;
+    });
+    const removal = await removeDesktopRuntimeDir(dir, layout.runtimeDir);
+    expect(removal.removed).toBe(false);
+    expect(removal.error?.message).toMatch(/replaced/);
+    expect(fs.readFileSync(path.join(`${config}-original`, "owned"), "utf8")).toBe("original");
+    expect(fs.statSync(outside).mode & 0o777).toBe(0o755);
+    expect(fs.readdirSync(outside)).toEqual(["keep"]);
+    expect(fs.readFileSync(path.join(outside, "keep"), "utf8")).toBe("untouched");
+    if (kind === "directory") {
+      expect(fs.statSync(config).mode & 0o777).toBe(0o755);
+      expect(fs.readFileSync(path.join(config, "replacement"), "utf8")).toBe("untouched");
+    }
+  });
+
+  it("reports partial cleanup and leaves an unexpected nested link untouched", async () => {
+    const dir = sessionDir("nested-link-removal");
+    const layout = desktopRuntimeLayout(dir);
+    await createDesktopRuntimeDir(layout);
+    const outside = sessionDir("nested-link-outside");
+    fs.chmodSync(outside, 0o755);
+    fs.writeFileSync(path.join(outside, "keep"), "untouched");
+    const link = path.join(layout.runtimeDir, "home", "config", "linked-data");
+    fs.symlinkSync(outside, link);
+    const removal = await removeDesktopRuntimeDir(dir, layout.runtimeDir);
+    expect(removal.removed).toBe(false);
+    expect(removal.error?.message).toMatch(/uncertain ownership/);
+    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(fs.statSync(outside).mode & 0o777).toBe(0o755);
+    expect(fs.readFileSync(path.join(outside, "keep"), "utf8")).toBe("untouched");
+  });
+});
+
+describe("private home creation", () => {
+  it.each(["runtime", "runtime/home", "runtime/home/config", "runtime/home/data", "runtime/home/cache", "runtime/home/state"])(
+    "refuses a planted %s symlink without writing or chmodding the outside home",
+    async (entry) => {
+      const dir = sessionDir(`link-${entry.replaceAll("/", "-")}`);
+      const outside = fs.mkdtempSync(path.join(root, "synthetic-host-"));
+      fs.chmodSync(outside, 0o755);
+      fs.writeFileSync(path.join(outside, "keep"), "unchanged");
+      const link = path.join(dir, entry);
+      fs.mkdirSync(path.dirname(link), { recursive: true });
+      fs.symlinkSync(outside, link);
+      await expect(createDesktopRuntimeDir(desktopRuntimeLayout(dir))).rejects.toThrow(/symlink/);
+      expect(fs.statSync(outside).mode & 0o777).toBe(0o755);
+      expect(fs.readdirSync(outside)).toEqual(["keep"]);
+      expect(fs.readFileSync(path.join(outside, "keep"), "utf8")).toBe("unchanged");
+    },
+  );
+
+  it("refuses a symlink at the session root before creating the runtime", async () => {
+    const outside = sessionDir("synthetic-host-root");
+    fs.chmodSync(outside, 0o755);
+    const link = path.join(root, "sessions", "linked-session-root");
+    fs.symlinkSync(outside, link);
+    await expect(createDesktopRuntimeDir(desktopRuntimeLayout(link))).rejects.toThrow(/symlink/);
+    expect(fs.statSync(outside).mode & 0o777).toBe(0o755);
+    expect(fs.readdirSync(outside)).toEqual([]);
+  });
+
+  it("creates fresh restrictive home and XDG directories per session", async () => {
+    const first = desktopRuntimeLayout(sessionDir("private-one"));
+    const second = desktopRuntimeLayout(sessionDir("private-two"));
+    await createDesktopRuntimeDir(first);
+    await createDesktopRuntimeDir(second);
+    for (const layout of [first, second]) {
+      for (const suffix of ["", "home", "home/config", "home/data", "home/cache", "home/state"]) {
+        expect(fs.statSync(path.join(layout.runtimeDir, suffix)).mode & 0o777).toBe(0o700);
+      }
+      expect(fs.statSync(path.dirname(layout.runtimeDir)).mode & 0o777).toBe(0o700);
+    }
+    fs.writeFileSync(path.join(first.runtimeDir, "home", "only-first"), "private");
+    expect(fs.existsSync(path.join(second.runtimeDir, "home", "only-first"))).toBe(false);
+  });
+});
+
 describe("desktop runtime removal", () => {
   it("removes a confined runtime dir with its contents", async () => {
     const dir = sessionDir("desk-remove");
@@ -79,6 +211,7 @@ describe("desktop runtime removal", () => {
     expect(removal.removed).toBe(true);
     expect(fs.existsSync(layout.runtimeDir)).toBe(false);
     expect(fs.existsSync(dir)).toBe(true);
+    expect(await removeDesktopRuntimeDir(dir, layout.runtimeDir)).toEqual({ removed: true });
   });
 
   it("treats an already-missing runtime dir as removed", async () => {

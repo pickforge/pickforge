@@ -18,14 +18,18 @@ vi.mock("../src/display.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/display.js")>();
   return {
     ...actual,
-    startXvfb: vi.fn(async () => ({
-      display: ":241",
-      pid: XVFB_PID,
-      startTimeTicks: 321,
-      logPath: "/tmp/fake-xvfb.log",
-      width: 1280,
-      height: 800,
-    })),
+    startXvfb: vi.fn(async (opts: Parameters<typeof actual.startXvfb>[0]) => {
+      const handle = {
+        display: ":241",
+        pid: XVFB_PID,
+        startTimeTicks: 321,
+        logPath: "/tmp/fake-xvfb.log",
+        width: 1280,
+        height: 800,
+      };
+      await opts.onSpawn?.({ ...handle, cleanupConfirmed: false });
+      return handle;
+    }),
   };
 });
 

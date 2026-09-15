@@ -7,6 +7,7 @@ import {
   beginEvidenceRun,
   isEvidenceEnabled,
   getSession,
+  desktopHomePolicy,
   loadConfig,
   recordTakeoverEvidence,
   releaseHumanLease,
@@ -74,6 +75,10 @@ async function requireRunningDesktopSession(
   if (record.status !== "running") {
     throw new Error(`Session ${id} is not running`);
   }
+  const policy = record.type === "browser" ? "private" : desktopHomePolicy(record.desktop);
+  if (policy !== "private" && policy !== "inherit") {
+    throw new Error(`Human takeover requires a known home policy; recreate ${id}`);
+  }
   return { record, desktop: record.desktop };
 }
 
@@ -140,6 +145,7 @@ export async function startHumanTakeover(
         await stopOwnedSessionVnc(id, desktop);
       }
       vnc = await startSessionVnc(id, registryEnv, {
+        humanLeaseId: lease.leaseId,
         display: desktop.display,
         port: desktop.vncPort,
         env: opts.env,
@@ -256,6 +262,7 @@ export async function endHumanTakeover(
       await stopOwnedSessionVnc(handle.sessionId, desktop).catch(() => {});
       try {
         const readOnly = await startSessionVnc(handle.sessionId, registryEnv, {
+          humanLeaseId: handle.leaseId,
           display: handle.display,
           port: handle.vncPort,
           env: opts.env,

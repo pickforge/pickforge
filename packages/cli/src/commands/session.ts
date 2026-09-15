@@ -49,6 +49,7 @@ export interface SessionCreateOptions extends BaseCliOptions {
   height?: string;
   vnc?: boolean;
   vncControl?: boolean;
+  inheritHome?: boolean;
   avdName?: string;
   coldBoot?: boolean;
   readOnly?: boolean;
@@ -72,6 +73,7 @@ function createRuntime(opts: SessionCreateOptions): LocalSessionCreateRuntime {
               : parseIntArg(opts.height, "--height"),
           vnc: opts.vnc,
           vncControl: opts.vncControl,
+          inheritHome: opts.inheritHome,
         }),
       destroy: (id) => destroyDesktopSession(id),
     },
@@ -226,6 +228,7 @@ function statusLine(entry: LocalSessionStatusEntry): string {
       `display=${desktop.display}`,
       `xvfb=${desktop.xvfbAlive === true ? "alive" : "dead"}`,
     );
+    if (desktop.homePolicy !== undefined) parts.push(`home=${desktop.homePolicy}`);
     if (desktop.vncPort !== undefined) {
       parts.push(`vnc=${desktop.vncAlive === true ? "alive" : "dead"}`);
     }

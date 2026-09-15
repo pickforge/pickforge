@@ -270,10 +270,14 @@ export {
   type TakeoverStatusResult,
 } from "./takeover.js";
 
+export { DirHandle } from "./dir-handle.js";
+
 export {
   REAPER_CLEANUP_PENDING_META_KEY,
   createSession,
   destroySessionRecord,
+  desktopHomePolicy,
+  type DesktopHomePolicy,
   getSession,
   isDisplaySocketAlive,
   isSessionProcessAlive,

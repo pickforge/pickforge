@@ -1,3 +1,4 @@
+import path from "node:path";
 import {
   CONTAINMENT_TOKEN_ENV,
   containmentEnv,
@@ -59,6 +60,8 @@ export interface DesktopEnvironmentOptions {
   runtime?: DesktopRuntimeLayout;
   /** Containment scope every launched process must carry (#85). */
   containment?: ContainmentScope;
+  /** Session-wide choice, never a per-launch override for a managed session. */
+  homePolicy?: "private" | "inherit";
 }
 
 function runtimeIsolationEntries(
@@ -69,6 +72,21 @@ function runtimeIsolationEntries(
     XDG_RUNTIME_DIR: runtime.runtimeDir,
     DBUS_SESSION_BUS_ADDRESS: `unix:path=${runtime.dbusSessionPath}`,
     DBUS_SYSTEM_BUS_ADDRESS: `unix:path=${runtime.dbusSystemPath}`,
+  };
+}
+
+function homeIsolationEntries(opts: DesktopEnvironmentOptions): Record<string, string> {
+  if (opts.homePolicy !== undefined && opts.homePolicy !== "private" && opts.homePolicy !== "inherit") {
+    throw new Error("Invalid desktop home policy");
+  }
+  if (opts.homePolicy === "inherit" || opts.runtime === undefined) return {};
+  const home = path.join(opts.runtime.runtimeDir, "home");
+  return {
+    HOME: home,
+    XDG_CONFIG_HOME: path.join(home, "config"),
+    XDG_DATA_HOME: path.join(home, "data"),
+    XDG_CACHE_HOME: path.join(home, "cache"),
+    XDG_STATE_HOME: path.join(home, "state"),
   };
 }
 
@@ -98,6 +116,7 @@ export function createIsolatedDesktopEnvironment(
     // cannot exist to force the X11 fallback.
     WAYLAND_DISPLAY: WAYLAND_DISPLAY_POISON,
     ...runtimeIsolationEntries(opts.runtime),
+    ...homeIsolationEntries(opts),
     ...(opts.containment === undefined
       ? {}
       : containmentEnv(opts.containment)),
@@ -120,6 +139,7 @@ function recipeExportNames(opts: DesktopEnvironmentOptions): string[] {
     "WAYLAND_DISPLAY",
     ...Object.keys(X11_BACKEND_HINTS),
     ...Object.keys(runtimeIsolationEntries(opts.runtime)),
+    ...Object.keys(homeIsolationEntries(opts)),
     ...(opts.containment === undefined ? [] : [CONTAINMENT_TOKEN_ENV]),
   ];
 }

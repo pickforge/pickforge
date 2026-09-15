@@ -158,6 +158,31 @@ without including unrelated environment variables or secrets. It also carries
 the session's containment token, so an app you start by hand from that shell is
 torn down with the session rather than surviving it.
 
+New managed desktop sessions default to a fresh `HOME` at
+`<session>/runtime/home`, with `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
+`XDG_CACHE_HOME` and `XDG_STATE_HOME` in its `config`, `data`, `cache` and
+`state` directories. These directories and the session root have mode `0700`.
+Launch, exec and env exports use the session policy. Managed VNC always uses
+private home storage, including during human takeover.
+No files are copied from your real home.
+
+To opt in to the caller's home and XDG home values, create the session with
+`pickforge-lab session create --type desktop --inherit-home`, or MCP
+`session_create` with `inheritHome: true`. The choice cannot be changed on a
+running session. `session status` reports `desktop.homePolicy`; new evidence
+manifests record `meta.desktopHomePolicy`. Inherited-home sessions can enter
+human takeover without changing that policy. Inherited-home process starts
+are refused while a human lease is live. Launch, exec and env export are also gated by the agent permit.
+An exported shell recipe is not a revocable permit: do not reuse it during a
+later human takeover.
+
+Sessions created before this policy remain `legacy-inherit`, not private.
+Their existing processes are left alone; observation and teardown still work.
+Recreate them before new managed launches or takeover. Unknown or corrupt policy
+also refuses new managed processes. Existing evidence is not retroactively
+relabeled. This is environment isolation, not an OS filesystem or network
+sandbox: trusted apps can still access paths outside their private home.
+
 Each desktop session also gets its own `XDG_RUNTIME_DIR` (mode `0700`, inside
 the session directory) and its own D-Bus addresses, which point at socket paths
 Pickforge never creates. A toolkit or portal therefore fails to reach a bus

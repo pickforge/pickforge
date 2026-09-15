@@ -59,17 +59,17 @@ export async function runDesktopLaunch(
     // A newly launched client on the shared display can grab input focus —
     // gated the same as direct input, so it can never land while a human
     // holds the takeover lease (pickforge/pickforge#21 P1-E).
-    const isolation = await ensureDesktopSessionIsolation(id);
-    const app = await withAgentPermit(id, process.env, () =>
-      launchApp({
+    const app = await withAgentPermit(id, process.env, async () => {
+      const isolation = await ensureDesktopSessionIsolation(id);
+      return launchApp({
         display,
         command,
         args,
         logDir: desktopSessionLogDir(id),
         cwd: opts.cwd,
         ...isolation,
-      }),
-    );
+      });
+    });
     const data: Record<string, unknown> = {
       sessionId: id,
       display,
@@ -108,9 +108,9 @@ export async function runDesktopExec(
       "--window-timeout",
       MAX_EXEC_WINDOW_TIMEOUT_MS,
     );
-    const isolation = await ensureDesktopSessionIsolation(id);
-    const app = await withAgentPermit(id, process.env, () =>
-      execApp({
+    const app = await withAgentPermit(id, process.env, async () => {
+      const isolation = await ensureDesktopSessionIsolation(id);
+      return execApp({
         display,
         command,
         args,
@@ -118,8 +118,8 @@ export async function runDesktopExec(
         cwd: opts.cwd,
         windowTimeoutMs,
         ...isolation,
-      }),
-    );
+      });
+    });
     return {
       data: {
         sessionId: id,
@@ -146,12 +146,15 @@ export async function runDesktopEnv(
 ): Promise<number> {
   return runReported(opts, async () => {
     const { id, display } = await resolveDesktop(opts);
-    const isolation = await ensureDesktopSessionIsolation(id);
-    const recipe = desktopEnvironmentRecipe(display, process.env, isolation);
+    const { isolation, recipe } = await withAgentPermit(id, process.env, async () => {
+      const isolation = await ensureDesktopSessionIsolation(id);
+      return { isolation, recipe: desktopEnvironmentRecipe(display, process.env, isolation) };
+    });
     return {
       data: {
         sessionId: id,
         display,
+        homePolicy: isolation.homePolicy,
         exports: recipe.exports,
         unset: recipe.unset,
         script: recipe.lines.join("\n"),

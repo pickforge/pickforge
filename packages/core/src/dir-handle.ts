@@ -351,17 +351,31 @@ export class DirHandle {
         ? existing.mode & 0o777
         : undefined;
     const tmpPath = this.resolve(tmp);
+    const file = await this.openFile(tmp, "wx", mode);
+    let stat: fs.Stats | undefined;
     try {
-      await fs.promises.writeFile(tmpPath, content, {
-        encoding: "utf8",
-        flag: "wx",
-        mode,
-      });
-      if (mode !== undefined) await fs.promises.chmod(tmpPath, mode);
+      stat = await file.stat();
+      await file.writeFile(content, "utf8");
+      // Preserve the destination mode despite umask, on the file we opened.
+      // A replaced temp pathname must never redirect chmod to another file.
+      if (mode !== undefined) await file.chmod(mode);
+      await this.#assertFileIdentity(tmp, stat);
       await fs.promises.rename(tmpPath, this.resolve(name));
-    } catch (error) {
-      await fs.promises.rm(tmpPath, { force: true }).catch(() => {});
-      throw error;
+      await this.#assertFileIdentity(name, stat);
+    } finally {
+      // Only our own temp entry is eligible for cleanup, including on errors.
+      if (stat !== undefined) {
+        await this.#assertFileIdentity(tmp, stat)
+          .then(() => this.unlinkChild(tmp)).catch(() => {});
+      }
+      await file.close();
+    }
+  }
+
+  async #assertFileIdentity(name: string, expected: fs.Stats): Promise<void> {
+    const current = await this.lstatChild(name);
+    if (!current?.isFile() || current.dev !== expected.dev || current.ino !== expected.ino) {
+      throw new RunStorageAccessError(`Atomic write entry was replaced: ${this.dir}/${name}`);
     }
   }
 

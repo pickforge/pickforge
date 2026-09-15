@@ -5,6 +5,9 @@ import path from "node:path";
 import {
   REAPER_CLEANUP_PENDING_META_KEY,
   clearStaleHumanLease,
+  checkHumanLeaseBusy,
+  desktopHomePolicy,
+  HumanControlActiveError,
   createContainmentScope,
   createSession,
   destroyContainmentScope,
@@ -23,12 +26,15 @@ import {
   stopPid,
   stopProcessGroupVerified,
   updateSession,
+  withAgentPermit,
   type ContainmentScope,
   type DesktopSessionInfo,
+  type DesktopHomePolicy,
   type EnvLike,
   type LocalSessionTeardownFinalizer,
   type SessionRecord,
 } from "@pickforge/lab-core";
+import { createIsolatedDesktopEnvironment } from "./environment.js";
 import {
   XvfbStartError,
   inspectDisplayRelease,
@@ -59,6 +65,8 @@ export interface CreateDesktopSessionOptions {
   height?: number;
   vnc?: boolean;
   vncControl?: boolean;
+  /** Opt in once, at creation. Running sessions never change policy. */
+  inheritHome?: boolean;
 }
 
 export interface DesktopSessionHandle {
@@ -76,6 +84,7 @@ export interface DesktopSessionHandle {
 
 export interface DesktopSessionStatus {
   record: SessionRecord;
+  homePolicy?: DesktopHomePolicy;
   xvfbAlive: boolean;
   vncAlive: boolean;
   displayAlive: boolean;
@@ -100,6 +109,7 @@ export function desktopSessionLogDir(
 }
 
 interface DesktopStartupState {
+  homePolicy: "private" | "inherit";
   runtime: DesktopRuntimeLayout;
   containment: ContainmentScope;
   xvfb?: XvfbHandle;
@@ -109,6 +119,8 @@ interface DesktopStartupState {
 }
 
 export interface StartSessionVncOptions {
+  /** Internal takeover authority for private control infrastructure only. */
+  humanLeaseId?: string;
   display: string;
   port?: number;
   env?: EnvLike;
@@ -128,17 +140,38 @@ export async function startSessionVnc(
   registryEnv: EnvLike,
   opts: StartSessionVncOptions,
 ): Promise<VncHandle> {
-  const logDir = desktopSessionLogDir(id, registryEnv);
-  const runtime = desktopRuntimeLayout(logDir);
-  await createDesktopRuntimeDir(runtime);
-  return startVnc({
-    display: opts.display,
-    port: opts.port,
-    logDir,
-    env: opts.env,
-    viewOnly: opts.viewOnly,
-    runtime,
-  });
+  const record = await getSession(id, registryEnv);
+  const policy = record?.type === "browser" ? "private" : desktopHomePolicy(record?.desktop);
+  if (policy !== "private" && policy !== "inherit") {
+    throw new Error(`Session ${id} has ${policy} home policy; recreate it before starting managed processes`);
+  }
+  const start = async () => {
+    const logDir = desktopSessionLogDir(id, registryEnv);
+    const runtime = desktopRuntimeLayout(logDir);
+    await createDesktopRuntimeDir(runtime);
+    // VNC is control infrastructure, not an inherited application. It always
+    // uses private storage, including during a human lease. The session's
+    // immutable application policy is unchanged; app starts retain permits.
+    return startVnc({
+      display: opts.display,
+      port: opts.port,
+      logDir,
+      env: opts.env,
+      viewOnly: opts.viewOnly,
+      runtime,
+      homePolicy: "private",
+    });
+  };
+  if (opts.humanLeaseId !== undefined) {
+    const lease = opts.viewOnly
+      ? await readHumanLease(id, registryEnv)
+      : await checkHumanLeaseBusy(id, registryEnv);
+    if (lease?.leaseId !== opts.humanLeaseId || lease.ownerPid !== process.pid) {
+      throw new Error(`Human lease authority lost for session ${id}`);
+    }
+    return start();
+  }
+  return policy === "inherit" ? withAgentPermit(id, registryEnv, start) : start();
 }
 
 function requireVncBinary(opts: CreateDesktopSessionOptions): void {
@@ -158,6 +191,7 @@ function runningDesktopInfo(
     display: xvfb.display,
     xvfbPid: xvfb.pid,
     xvfbStartTimeTicks: xvfb.startTimeTicks,
+    homePolicy: state.homePolicy,
     runtimeDir: state.runtime.runtimeDir,
     containment: state.containment,
     width: xvfb.width,
@@ -183,7 +217,10 @@ async function startSessionXvfb(
       width: opts.width,
       height: opts.height,
       logDir: desktopSessionLogDir(recordId, registryEnv),
-      env: opts.env,
+      env: createIsolatedDesktopEnvironment(":0", { ...process.env, ...opts.env }, {
+        runtime: state.runtime,
+        homePolicy: state.homePolicy,
+      }),
       onSpawn: async (partial) => {
         state.xvfbPartial = partial;
         await updateSession(
@@ -193,6 +230,7 @@ async function startSessionXvfb(
               display: partial.display,
               xvfbPid: partial.pid,
               xvfbStartTimeTicks: partial.startTimeTicks,
+              homePolicy: state.homePolicy,
               runtimeDir: state.runtime.runtimeDir,
               containment: state.containment,
               width: partial.width,
@@ -285,6 +323,7 @@ function pendingDesktopInfo(
     xvfbPid: known.pid,
     ...(startTicks === undefined ? {} : { xvfbStartTimeTicks: startTicks }),
     ...pendingVncInfo(state),
+    homePolicy: state.homePolicy,
     runtimeDir: state.runtime.runtimeDir,
     containment: state.containment,
     width: known.width,
@@ -355,13 +394,19 @@ export async function createDesktopSession(
   );
   const logDir = desktopSessionLogDir(record.id, registryEnv);
   const state: DesktopStartupState = {
+    homePolicy: opts.inheritHome === true ? "inherit" : "private",
     runtime: desktopRuntimeLayout(logDir),
     containment: createContainmentScope({ id: record.id }),
   };
 
   try {
-    await createDesktopRuntimeDir(state.runtime);
-    const xvfb = await startSessionXvfb(record.id, opts, state, registryEnv);
+    const start = async () => {
+      await createDesktopRuntimeDir(state.runtime);
+      return startSessionXvfb(record.id, opts, state, registryEnv);
+    };
+    const xvfb = state.homePolicy === "inherit"
+      ? await withAgentPermit(record.id, registryEnv, start)
+      : await start();
     state.xvfb = xvfb;
     const viewOnly = opts.vncControl !== true;
     if (wantsVnc) {
@@ -874,6 +919,7 @@ async function removeSessionRuntime(
 }
 
 export interface DesktopSessionIsolation {
+  homePolicy?: "private" | "inherit";
   runtime: DesktopRuntimeLayout;
   /** Absent for sessions created before containment existed (#85). */
   containment?: ContainmentScope;
@@ -894,14 +940,24 @@ export async function ensureDesktopSessionIsolation(
   if (record === undefined) {
     throw new Error(`Desktop session not found: ${id}`);
   }
+  // Browser sessions have their own ephemeral profile policy. New auxiliary
+  // desktop processes still get a private home without relabeling that profile.
+  const homePolicy = record.type === "browser" ? "private" : desktopHomePolicy(record.desktop);
+  if (homePolicy !== "private" && homePolicy !== "inherit") {
+    throw new Error(`Session ${id} has ${homePolicy} home policy; recreate it before starting managed processes`);
+  }
+  if (homePolicy === "inherit") {
+    const lease = await checkHumanLeaseBusy(id, registryEnv);
+    if (lease !== undefined) throw new HumanControlActiveError(lease);
+  }
   const runtime = desktopRuntimeLayout(
     desktopSessionLogDir(id, registryEnv),
   );
   await createDesktopRuntimeDir(runtime);
   const containment = record.desktop?.containment;
   return containment === undefined
-    ? { runtime }
-    : { runtime, containment: ensureContainmentScope(containment) };
+    ? { runtime, homePolicy }
+    : { runtime, homePolicy, containment: ensureContainmentScope(containment) };
 }
 
 export async function teardownDesktopSession(
@@ -980,6 +1036,7 @@ export async function getDesktopSessionStatus(
   const desktop = record.desktop;
   return {
     record,
+    homePolicy: record.type === "browser" ? undefined : desktopHomePolicy(desktop),
     xvfbAlive:
       desktop?.xvfbPid !== undefined &&
       (desktop.xvfbStartTimeTicks === undefined

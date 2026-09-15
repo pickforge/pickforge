@@ -18,10 +18,9 @@ import { captureToTarget, resolveScreenshotTarget } from "../src/target.js";
 // Every test here swaps a *verified ancestor* for a symlink pointing outside
 // the project at the exact moment a sensitive write is in flight — the window
 // a re-check before the write cannot close, because the re-check and the write
-// are two separate pathname lookups. They are written against the public API
-// and plain `fs` patching only, so they also run against the pre-fix head:
-// there, manifests, screenshots, takeover journals, and reports leak outside,
-// while a traversing artifact name writes outside its staging directory.
+// are two separate pathname lookups. They use public APIs and plain `fs`
+// patching. The manifest/report hooks pause the open file's writeFile call,
+// after the temporary file is opened but before its contents are written.
 
 let root: string;
 let project: string;
@@ -87,26 +86,27 @@ afterEach(async () => {
 
 describe("ancestor swapped while a manifest write is in flight", () => {
   it("writes the manifest into the verified run directory, never outside", async () => {
-    // Fire at the manifest's temp write — after the run directory has been
-    // created and verified, and after any re-check a pathname write could do.
-    const realWriteFile = fs.promises.writeFile.bind(fs.promises);
+    // Pause the manifest write after the verified directory and temporary
+    // file are open, but before any content is written through that file.
+    const realOpen = fs.promises.open.bind(fs.promises);
     let moved: string | undefined;
-    vi.spyOn(fs.promises, "writeFile").mockImplementation((async (
-      target: Parameters<typeof fs.promises.writeFile>[0],
-      data: Parameters<typeof fs.promises.writeFile>[1],
-      options?: Parameters<typeof fs.promises.writeFile>[2],
-    ) => {
+    vi.spyOn(fs.promises, "open").mockImplementation(async (target, flags, mode) => {
+      const file = await realOpen(target, flags, mode);
       if (
-        moved === undefined &&
         typeof target === "string" &&
         path.basename(target).startsWith(".manifest.json.tmp-")
       ) {
-        moved = await swapPicklabForOutsideLink(
-          path.basename(path.dirname(target)),
-        );
+        const realWriteFile = file.writeFile.bind(file);
+        vi.spyOn(file, "writeFile").mockImplementation(async (...args) => {
+          if (moved === undefined) {
+            const runDir = await fs.promises.realpath(path.dirname(target));
+            moved = await swapPicklabForOutsideLink(path.basename(runDir));
+          }
+          return realWriteFile(...args);
+        });
       }
-      return realWriteFile(target, data, options);
-    }) as typeof fs.promises.writeFile);
+      return file;
+    });
 
     const run = await createRun(project, "swap");
     expect(moved).toBeDefined();
@@ -326,22 +326,25 @@ describe("ancestor swapped around evidence writes", () => {
       startedAt: new Date().toISOString(),
       status: "ok",
     });
-    const realWriteFile = fs.promises.writeFile.bind(fs.promises);
+    // Pause at the same open-file boundary as the manifest test above.
+    const realOpen = fs.promises.open.bind(fs.promises);
     let moved: string | undefined;
-    vi.spyOn(fs.promises, "writeFile").mockImplementation((async (
-      target: Parameters<typeof fs.promises.writeFile>[0],
-      data: Parameters<typeof fs.promises.writeFile>[1],
-      options?: Parameters<typeof fs.promises.writeFile>[2],
-    ) => {
+    vi.spyOn(fs.promises, "open").mockImplementation(async (target, flags, mode) => {
+      const file = await realOpen(target, flags, mode);
       if (
-        moved === undefined &&
         typeof target === "string" &&
         path.basename(target).startsWith(".report.html.tmp-")
       ) {
-        moved = await swapPicklabForOutsideLink(run.runId);
+        const realWriteFile = file.writeFile.bind(file);
+        vi.spyOn(file, "writeFile").mockImplementation(async (...args) => {
+          if (moved === undefined) {
+            moved = await swapPicklabForOutsideLink(run.runId);
+          }
+          return realWriteFile(...args);
+        });
       }
-      return realWriteFile(target, data, options);
-    }) as typeof fs.promises.writeFile);
+      return file;
+    });
     const writeAtEitherHead = writeEvidenceReport as unknown as (
       target: typeof run | string,
       manifest?: RunManifest,

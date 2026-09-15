@@ -1,4 +1,4 @@
-import { getSession } from "./session.js";
+import { desktopHomePolicy, getSession } from "./session.js";
 import { isOutcomeRecord, sanitizeOutcome, validateOutcomeIn, validOutcomeFields, type EvidenceOutcomeRecord } from "./evidence-outcome.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -873,6 +873,17 @@ async function sessionDevice(sessionId: string, env: EnvLike): Promise<RunManife
   return device;
 }
 
+/** Policy is an enum only, not home paths or caller environment values. */
+async function sessionPolicyMeta(ctx: ClaimContext, meta: BeginEvidenceRunOptions["meta"]): Promise<BeginEvidenceRunOptions["meta"]> {
+  const result = { ...meta };
+  delete result.desktopHomePolicy;
+  const session = await getSession(ctx.sessionId, ctx.env).catch(() => undefined);
+  if (session?.type === "desktop" || session?.type === "desktop+android") {
+    result.desktopHomePolicy = desktopHomePolicy(session.desktop);
+  }
+  return meta === undefined && Object.keys(result).length === 0 ? undefined : result;
+}
+
 /**
  * Create the run, then publish the pointer over our claim. If publication or
  * verification fails, the just-created run is finalized (`failed`) so it is
@@ -893,7 +904,7 @@ async function createAndPublishRun(
       {
         now: opts.now,
         sessionId: ctx.sessionId,
-        meta: opts.meta,
+        meta: await sessionPolicyMeta(ctx, opts.meta),
         evidence: true,
         device: opts.device ?? await sessionDevice(ctx.sessionId, ctx.env),
       },
