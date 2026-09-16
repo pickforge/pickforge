@@ -62,6 +62,21 @@ function evidenceManifest(overrides: Partial<RunManifest> = {}): RunManifest {
   };
 }
 
+it("keeps explicit before and after captures on the same input step without implying inspection", () => {
+  const artifacts = ["screenshots/input-before.png", "screenshots/input-after.png"];
+  const html = renderEvidenceHtml(evidenceManifest(), [action({
+    actionId: "input", tool: "desktop_type", target: { length: 12, inputType: "text" }, artifacts,
+  })], new Set(artifacts));
+  expect(html).toContain('href="#cap-1-1"');
+  expect(html).toContain('href="#cap-1-2"');
+  expect(html).not.toContain('id="cap-2-1"');
+  for (const file of artifacts) expect(html).toContain(`src="${file}"`);
+  expect(html).toContain("Recording alone does not establish a pass");
+  const step = html.match(/<article class="step[\s\S]*?<\/article>/)?.[0];
+  expect(step).toContain('href="#cap-1-1"');
+  expect(step).toContain('href="#cap-1-2"');
+});
+
 describe("sortEvidenceRecords", () => {
   it("orders by timestamp then action id without mutating append order", () => {
     const appended: EvidenceRecord[] = [

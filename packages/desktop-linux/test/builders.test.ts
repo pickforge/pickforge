@@ -217,7 +217,6 @@ describe("buildClickArgs", () => {
   it("builds a left click by default", () => {
     expect(buildClickArgs({ x: 10, y: 20 })).toEqual([
       "mousemove",
-      "--sync",
       "10",
       "20",
       "click",
@@ -228,7 +227,6 @@ describe("buildClickArgs", () => {
   it("supports other buttons", () => {
     expect(buildClickArgs({ x: 0, y: 0, button: 3 })).toEqual([
       "mousemove",
-      "--sync",
       "0",
       "0",
       "click",
@@ -248,16 +246,14 @@ describe("buildClickArgs", () => {
 });
 
 describe("buildMoveArgs", () => {
-  it("builds a synced mousemove", () => {
+  it("builds a mousemove without waiting for motion", () => {
     expect(buildMoveArgs({ x: 15, y: 25 })).toEqual([
       "mousemove",
-      "--sync",
       "15",
       "25",
     ]);
     expect(buildMoveArgs({ x: 0, y: 0 })).toEqual([
       "mousemove",
-      "--sync",
       "0",
       "0",
     ]);
@@ -320,7 +316,6 @@ describe("buildScrollArgs", () => {
   it("moves to the position first when x and y are given", () => {
     expect(buildScrollArgs({ deltaX: 0, deltaY: 1, x: 40, y: 50 })).toEqual([
       "mousemove",
-      "--sync",
       "40",
       "50",
       "click",
@@ -362,7 +357,6 @@ describe("buildDragArgs", () => {
       buildDragArgs({ fromX: 10, fromY: 20, toX: 110, toY: 120 }),
     ).toEqual([
       "mousemove",
-      "--sync",
       "10",
       "20",
       "mousedown",
@@ -370,7 +364,6 @@ describe("buildDragArgs", () => {
       "sleep",
       "0.15",
       "mousemove",
-      "--sync",
       "110",
       "120",
       "sleep",
@@ -392,7 +385,6 @@ describe("buildDragArgs", () => {
       }),
     ).toEqual([
       "mousemove",
-      "--sync",
       "0",
       "0",
       "mousedown",
@@ -400,7 +392,6 @@ describe("buildDragArgs", () => {
       "sleep",
       "0.5",
       "mousemove",
-      "--sync",
       "5",
       "5",
       "sleep",
@@ -415,7 +406,6 @@ describe("buildDragArgs", () => {
       buildDragArgs({ fromX: 1, fromY: 2, toX: 3, toY: 4, durationMs: 0 }),
     ).toEqual([
       "mousemove",
-      "--sync",
       "1",
       "2",
       "mousedown",
@@ -423,7 +413,6 @@ describe("buildDragArgs", () => {
       "sleep",
       "0",
       "mousemove",
-      "--sync",
       "3",
       "4",
       "sleep",
@@ -468,7 +457,6 @@ describe("buildDoubleClickArgs", () => {
   it("builds a repeated click with the default interval", () => {
     expect(buildDoubleClickArgs({ x: 30, y: 40 })).toEqual([
       "mousemove",
-      "--sync",
       "30",
       "40",
       "click",
@@ -485,7 +473,6 @@ describe("buildDoubleClickArgs", () => {
       buildDoubleClickArgs({ x: 0, y: 0, button: 2, intervalMs: 250 }),
     ).toEqual([
       "mousemove",
-      "--sync",
       "0",
       "0",
       "click",

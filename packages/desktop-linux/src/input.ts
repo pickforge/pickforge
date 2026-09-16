@@ -124,6 +124,9 @@ function msToSeconds(ms: number): string {
   return String(ms / 1000);
 }
 
+// Avoid mousemove --sync: older xdotool waits forever for an already-reached
+// position. Chained movement and button requests use one X connection, so the
+// server still processes them in order without waiting for pointer motion.
 export function buildClickArgs(opts: ClickArgsOptions): string[] {
   assertCoordinate(opts.x, "x");
   assertCoordinate(opts.y, "y");
@@ -131,7 +134,6 @@ export function buildClickArgs(opts: ClickArgsOptions): string[] {
   assertButton(button);
   return [
     "mousemove",
-    "--sync",
     String(opts.x),
     String(opts.y),
     "click",
@@ -142,7 +144,7 @@ export function buildClickArgs(opts: ClickArgsOptions): string[] {
 export function buildMoveArgs(opts: MoveArgsOptions): string[] {
   assertCoordinate(opts.x, "x");
   assertCoordinate(opts.y, "y");
-  return ["mousemove", "--sync", String(opts.x), String(opts.y)];
+  return ["mousemove", String(opts.x), String(opts.y)];
 }
 
 function scrollClickArgs(steps: number, button: number): string[] {
@@ -171,7 +173,7 @@ export function buildScrollArgs(opts: ScrollArgsOptions): string[] {
   if (opts.x !== undefined && opts.y !== undefined) {
     assertCoordinate(opts.x, "x");
     assertCoordinate(opts.y, "y");
-    args.push("mousemove", "--sync", String(opts.x), String(opts.y));
+    args.push("mousemove", String(opts.x), String(opts.y));
   }
   if (opts.deltaX !== 0) {
     args.push(
@@ -212,7 +214,6 @@ export function buildDragArgs(opts: DragArgsOptions): string[] {
   const halfSleep = msToSeconds(durationMs / 2);
   return [
     "mousemove",
-    "--sync",
     String(opts.fromX),
     String(opts.fromY),
     "mousedown",
@@ -220,7 +221,6 @@ export function buildDragArgs(opts: DragArgsOptions): string[] {
     "sleep",
     halfSleep,
     "mousemove",
-    "--sync",
     String(opts.toX),
     String(opts.toY),
     "sleep",
@@ -248,7 +248,6 @@ export function buildDoubleClickArgs(opts: DoubleClickArgsOptions): string[] {
   }
   return [
     "mousemove",
-    "--sync",
     String(opts.x),
     String(opts.y),
     "click",

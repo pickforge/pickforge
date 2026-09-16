@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { withAgentPermit } from "@pickforge/lab-core";
+import { isEvidenceTruncated, withAgentPermit } from "@pickforge/lab-core";
 import type { RunHandle, SessionType } from "@pickforge/lab-core";
 import { setRunCaptureGeometry } from "@pickforge/lab-core";
 import {
@@ -43,8 +43,9 @@ import {
   resolveWaitBaseline,
   runTool,
   type ServerContext,
+  type ToolReport,
 } from "../context.js";
-import { withMcpEvidence } from "../evidence.js";
+import { evidenceStatus, withMcpEvidence, type McpEvidenceOptions } from "../evidence.js";
 
 const sessionArg = {
   session: z
@@ -52,6 +53,11 @@ const sessionArg = {
     .min(1)
     .optional()
     .describe("Desktop session id (default: the single running session)"),
+};
+
+const captureDescription = " Optional capture: after or both (before and after) saves explicit PNGs on this action's evidence run. Default off; requires enabled evidence. Never capture sensitive screens; pixels are not redacted.";
+const captureArg = {
+  capture: z.enum(["after", "both"]).optional().describe(captureDescription.trim()),
 };
 
 const buttonArg = z
@@ -269,6 +275,7 @@ async function captureDesktopScreenshot(opts: {
   run?: RunHandle;
   out?: string;
   runSlug?: string;
+  onCaptured?: (path: string) => void;
 }): Promise<{ data: Record<string, unknown>; extraContent: Awaited<ReturnType<typeof imageContent>>["content"] }> {
   let tool: string | undefined;
   let windowCount: number | undefined;
@@ -299,6 +306,7 @@ async function captureDesktopScreenshot(opts: {
       `${opts.actionId}.png`,
       capture,
     );
+    opts.onCaptured?.(outPath);
     data = { path: outPath, runId: opts.run.runId, runDir: opts.run.dir };
   } else {
     const target = await resolveScreenshotTarget(
@@ -385,14 +393,84 @@ function registerScreenshotTool(server: McpServer, ctx: ServerContext): void {
   );
 }
 
+function failedCaptureRecording(
+  result: ToolReport,
+  reason: "capped" | "unconfirmed",
+): ToolReport {
+  const linkage = reason === "capped" ? "not linked (recording cap reached)" : "not confirmed";
+  return {
+    ...result,
+    data: { ...result.data, captureRecording: reason },
+    errors: [...(result.errors ?? []), `Capture evidence ${linkage}; input ${result.data?.inputState}. Input is never retried automatically`],
+    evidenceStatus: "error",
+  };
+}
+
+async function withInputCapture(
+  ctx: ServerContext,
+  options: McpEvidenceOptions<ToolReport>,
+  display: string,
+  capture: "after" | "both" | undefined,
+  input: () => Promise<ToolReport>,
+): Promise<ToolReport> {
+  if (capture === undefined) return withMcpEvidence(ctx, options, input);
+  const artifacts: string[] = [];
+  return withMcpEvidence(ctx, {
+    ...options, artifacts: () => artifacts, onRecordingFailure: failedCaptureRecording,
+  }, async ({ actionId, run }) => {
+    if (run === undefined) throw new Error("Explicit input capture requires available, enabled evidence; input was not attempted");
+    const captures: Record<string, unknown>[] = [];
+    let inputState = "not-attempted";
+    let stage = "capture recording preflight";
+    const take = async (phase: "before" | "after") => {
+      const shot = await captureDesktopScreenshot({
+        ctx, id: options.sessionId!, display, type: "desktop", run,
+        actionId: `${actionId}-${phase}`,
+        onCaptured: (file) => artifacts.push(file),
+      });
+      captures.push({ phase, ...shot.data });
+    };
+    try {
+      if (await isEvidenceTruncated(run)) {
+        return {
+          data: { sessionId: options.sessionId, capture, captures, inputState, artifacts },
+          errors: ["Capture recording cap reached; input not-attempted"],
+          evidenceStatus: "error",
+        };
+      }
+      stage = "before capture";
+      if (capture === "both") await take("before");
+      stage = "input";
+      inputState = "attempted";
+      const result = await input();
+      if ((result.errors?.length ?? 0) > 0) return { ...result, data: { ...result.data, capture, captures, inputState, artifacts } };
+      inputState = "completed";
+      stage = "after capture";
+      await take("after");
+      return { ...result, data: { ...result.data, capture, captures, inputState, artifacts } };
+    } catch (error) {
+      // Typed values must not reappear through subprocess diagnostics. Keep the
+      // existing length/type target, and report only the failed stage here.
+      const detail = options.typedValue === undefined
+        ? `: ${error instanceof Error ? error.message : String(error)}` : "";
+      return {
+        data: { sessionId: options.sessionId, capture, captures, inputState, artifacts },
+        errors: [`${stage} failed; input ${inputState}. Input is never retried automatically${detail}`],
+        evidenceStatus: evidenceStatus(error),
+      };
+    }
+  });
+}
+
 function registerClickTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "desktop_click",
     {
       title: "Desktop click",
-      description: "Click at the given desktop coordinates.",
+      description: "Click at the given desktop coordinates." + captureDescription,
       inputSchema: {
         ...sessionArg,
+        ...captureArg,
         x: z.number().int().nonnegative().describe("X coordinate"),
         y: z.number().int().nonnegative().describe("Y coordinate"),
         button: buttonArg,
@@ -401,13 +479,14 @@ function registerClickTool(server: McpServer, ctx: ServerContext): void {
     (args) =>
       runTool(async () => {
         const { id, display } = await resolveDesktop(ctx, args.session);
-        return withMcpEvidence(
+        return withInputCapture(
           ctx,
           {
             sessionId: id,
             tool: "desktop_click",
             target: { x: args.x, y: args.y },
           },
+          display, args.capture,
           async () => {
             await click({
               display,
@@ -475,9 +554,10 @@ function registerScrollTool(server: McpServer, ctx: ServerContext): void {
       description:
         "Scroll the mouse wheel by integer steps. Positive deltaY scrolls " +
         "down, negative up; positive deltaX scrolls right, negative left. " +
-        "Optionally move the pointer to (x, y) first.",
+        "Optionally move the pointer to (x, y) first." + captureDescription,
       inputSchema: {
         ...sessionArg,
+        ...captureArg,
         deltaX: scrollDelta.describe(
           "Horizontal wheel steps (positive: right, negative: left)",
         ),
@@ -501,7 +581,7 @@ function registerScrollTool(server: McpServer, ctx: ServerContext): void {
     (args) =>
       runTool(async () => {
         const { id, display } = await resolveDesktop(ctx, args.session);
-        return withMcpEvidence(
+        return withInputCapture(
           ctx,
           {
             sessionId: id,
@@ -511,6 +591,7 @@ function registerScrollTool(server: McpServer, ctx: ServerContext): void {
                 ? undefined
                 : { x: args.x, y: args.y },
           },
+          display, args.capture,
           async () => {
             await scroll({
               display,
@@ -545,9 +626,10 @@ function registerDragTool(server: McpServer, ctx: ServerContext): void {
       title: "Desktop drag",
       description:
         "Press the mouse button at (fromX, fromY), move to (toX, toY), " +
-        "and release.",
+        "and release." + captureDescription,
       inputSchema: {
         ...sessionArg,
+        ...captureArg,
         fromX: z.number().int().nonnegative().describe("Start X coordinate"),
         fromY: z.number().int().nonnegative().describe("Start Y coordinate"),
         toX: z.number().int().nonnegative().describe("End X coordinate"),
@@ -565,13 +647,14 @@ function registerDragTool(server: McpServer, ctx: ServerContext): void {
     (args) =>
       runTool(async () => {
         const { id, display } = await resolveDesktop(ctx, args.session);
-        return withMcpEvidence(
+        return withInputCapture(
           ctx,
           {
             sessionId: id,
             tool: "desktop_drag",
             target: { x: args.toX, y: args.toY },
           },
+          display, args.capture,
           async () => {
             await drag({
               display,
@@ -606,9 +689,10 @@ function registerDoubleClickTool(server: McpServer, ctx: ServerContext): void {
     "desktop_double_click",
     {
       title: "Desktop double click",
-      description: "Double-click at the given desktop coordinates.",
+      description: "Double-click at the given desktop coordinates." + captureDescription,
       inputSchema: {
         ...sessionArg,
+        ...captureArg,
         x: z.number().int().nonnegative().describe("X coordinate"),
         y: z.number().int().nonnegative().describe("Y coordinate"),
         button: buttonArg,
@@ -624,13 +708,14 @@ function registerDoubleClickTool(server: McpServer, ctx: ServerContext): void {
     (args) =>
       runTool(async () => {
         const { id, display } = await resolveDesktop(ctx, args.session);
-        return withMcpEvidence(
+        return withInputCapture(
           ctx,
           {
             sessionId: id,
             tool: "desktop_double_click",
             target: { x: args.x, y: args.y },
           },
+          display, args.capture,
           async () => {
             await doubleClick({
               display,
@@ -661,22 +746,24 @@ function registerTypeTool(server: McpServer, ctx: ServerContext): void {
     "desktop_type",
     {
       title: "Desktop type",
-      description: "Type text into the focused desktop window.",
+      description: "Type text into the focused desktop window." + captureDescription,
       inputSchema: {
         ...sessionArg,
+        ...captureArg,
         text: z.string().min(1).describe("Text to type"),
       },
     },
     (args) =>
       runTool(async () => {
         const { id, display } = await resolveDesktop(ctx, args.session);
-        return withMcpEvidence(
+        return withInputCapture(
           ctx,
           {
             sessionId: id,
             tool: "desktop_type",
             typedValue: { value: args.text, inputType: "text" },
           },
+          display, args.capture,
           async () => {
             await typeText({ display, sessionId: id, env: ctx.env, text: args.text });
             return {
@@ -695,22 +782,24 @@ function registerKeyTool(server: McpServer, ctx: ServerContext): void {
       title: "Desktop key press",
       description:
         'Press a key or chord (e.g. "Return", "Tab", "ctrl+s") in the ' +
-        "desktop session.",
+        "desktop session." + captureDescription,
       inputSchema: {
         ...sessionArg,
+        ...captureArg,
         key: z.string().min(1).describe("Key or chord to press"),
       },
     },
     (args) =>
       runTool(async () => {
         const { id, display } = await resolveDesktop(ctx, args.session);
-        return withMcpEvidence(
+        return withInputCapture(
           ctx,
           {
             sessionId: id,
             tool: "desktop_key",
             typedValue: { value: args.key },
           },
+          display, args.capture,
           async () => {
             await pressKey({ display, sessionId: id, env: ctx.env, key: args.key });
             return { data: { sessionId: id, display, key: args.key } };
@@ -731,9 +820,10 @@ function registerWindowsTools(server: McpServer, ctx: ServerContext): void {
   }));
   server.registerTool("desktop_focus", {
     title: "Focus desktop window",
-    description: "Focus by decimal window id or exact name (exactly one). Ambiguous names are rejected. Confirms X input focus without requiring a window manager.",
+    description: "Focus by decimal window id or exact name (exactly one). Ambiguous names are rejected. Confirms X input focus without requiring a window manager." + captureDescription,
     inputSchema: {
       ...sessionArg,
+      ...captureArg,
       id: z.string().regex(/^[1-9]\d*$/).optional(),
       name: z.string().min(1).optional(),
       timeoutMs: z.number().int().min(1).max(MAX_FOCUS_TIMEOUT_MS).optional(),
@@ -749,10 +839,10 @@ function registerWindowsTools(server: McpServer, ctx: ServerContext): void {
         target: { role: "window", name: args.name, selector: args.id },
       }, async () => { throw error; });
     }
-    return withMcpEvidence(ctx, {
+    return withInputCapture(ctx, {
       sessionId: id, tool: "desktop_focus",
       target: { role: "window", name: window.name, selector: window.id },
-    }, async () => ({ data: {
+    }, display, args.capture, async () => ({ data: {
       sessionId: id, display,
       window: await focusWindow({ display, sessionId: id, window, env: ctx.env, timeoutMs: args.timeoutMs }),
     } }));

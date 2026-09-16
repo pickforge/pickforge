@@ -30,9 +30,11 @@ export interface McpEvidenceOptions<T> {
   typedValue?: { value: string; inputType?: string };
   artifacts?: (result: T, run: RunHandle) => readonly string[];
   refreshReportAfterRecord?: boolean;
+  /** Opt-in: report dropped or unconfirmed attachments without losing input results. */
+  onRecordingFailure?: (result: T, reason: "capped" | "unconfirmed") => T;
 }
 
-function evidenceStatus(error: unknown): EvidenceAction["status"] {
+export function evidenceStatus(error: unknown): EvidenceAction["status"] {
   const name = error instanceof Error ? error.name.toLowerCase() : "";
   const message = error instanceof Error ? error.message.toLowerCase() : "";
   if (name.includes("abort") || message.includes("cancel")) return "cancelled";
@@ -209,15 +211,34 @@ async function recordSuccess<T extends ToolReport>(
   attempt: EvidenceAttempt,
   options: McpEvidenceOptions<T>,
   result: T,
-): Promise<void> {
+): Promise<T> {
   const run = attempt.run;
-  if (run === undefined) return;
-  await recordBestEffort(options.tool, async () => {
-    await appendAction(run, await successAction(attempt, options, result, run));
-    if (options.refreshReportAfterRecord === true) {
-      await refreshFinalizedReport(run);
+  if (run === undefined) return result;
+  try {
+    const action = await successAction(attempt, options, result, run);
+    if (options.onRecordingFailure !== undefined &&
+        (action.artifacts?.length ?? 0) !== (options.artifacts?.(result, run).length ?? 0)) {
+      throw new Error("Requested evidence attachments could not be verified");
     }
-  });
+    const appended = await appendAction(run, action);
+    if (appended.outcome === "capped" && options.onRecordingFailure !== undefined) {
+      const failed = options.onRecordingFailure(result, "capped");
+      // Capped means the caller record was dropped. The ordinary bounded
+      // metadata path can retain the input's partial effect, without artifacts.
+      await recordFailure(attempt, new Error(failed.errors?.join("; ")));
+      return failed;
+    }
+    // Both appended and truncated mean the caller record was written.
+  } catch (error) {
+    reportEvidenceFailure(options.tool, error);
+    // A thrown append can have an uncertain write result. Do not retry it or
+    // create a duplicate record, and do not discard the operation's result.
+    return options.onRecordingFailure?.(result, "unconfirmed") ?? result;
+  }
+  if (options.refreshReportAfterRecord === true) {
+    await recordBestEffort(options.tool, () => refreshFinalizedReport(run));
+  }
+  return result;
 }
 
 async function recordFailure(
@@ -249,8 +270,7 @@ export async function withMcpEvidence<T extends ToolReport>(
       actionId: attempt.actionId,
       run: attempt.run,
     });
-    await recordSuccess(attempt, options, result);
-    return result;
+    return await recordSuccess(attempt, options, result);
   } catch (error) {
     await recordFailure(attempt, error);
     throw error;
