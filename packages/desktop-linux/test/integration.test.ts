@@ -856,6 +856,38 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
   );
 
   it.skipIf(!hasVnc)(
+    "completes repeated-coordinate input and a zero-distance drag",
+    async () => {
+      // The managed VNC client keeps Xvfb from resetting between input calls.
+      const session = await createDesktopSession({ projectDir, registryEnv: env, vnc: true });
+      try {
+        const repeated = { display: session.display, sessionId: session.id, env, x: 45, y: 45 };
+        await move(repeated);
+        expect(await pointerLocation(session.display)).toEqual({ x: 45, y: 45 });
+        await move(repeated);
+        await click(repeated);
+        await click(repeated);
+        await doubleClick(repeated);
+        await scroll({ ...repeated, deltaX: 1, deltaY: -1 });
+        await drag({
+          display: session.display,
+          sessionId: session.id,
+          env,
+          fromX: 45,
+          fromY: 45,
+          toX: 45,
+          toY: 45,
+          durationMs: 0,
+        });
+        expect(await pointerLocation(session.display)).toEqual({ x: 45, y: 45 });
+      } finally {
+        await destroyDesktopSession(session.id, env);
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it.skipIf(!hasVnc)(
     "attaches x11vnc to the session display",
     async () => {
       const session = await createDesktopSession({
