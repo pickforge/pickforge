@@ -195,6 +195,137 @@ function waitSyncUntilExited(pid: number, realRead: typeof fs.readFileSync): voi
   throw new Error(`pid ${pid} did not exit in time`);
 }
 
+// Temporary #179 diagnostics, not a containment repair. Observe only values
+// already read for this fixture; never retain raw environ or use spy call logs.
+function markerStat(value: string | Buffer): Record<string, unknown> {
+  const text = String(value);
+  const fields = text.slice(text.lastIndexOf(")") + 1).trim().split(/\s+/);
+  return { state: fields[0], startTicks: fields[19], pgid: fields[2], sid: fields[3] };
+}
+
+class MarkerEscapeTrace {
+  leader?: number;
+  escapee?: number;
+  phase = "readiness";
+  private events: Record<string, unknown>[] = [];
+  private overflow = 0;
+  private observationErrors = 0;
+  private read = fs.readFileSync;
+  private readdir = fs.readdirSync;
+  private kill = process.kill;
+
+  constructor(private token: string) {}
+
+  private record(event: () => Record<string, unknown>): void {
+    if (this.events.length >= 256) {
+      this.overflow += 1;
+      return;
+    }
+    try {
+      this.events.push({ phase: this.phase, ...event() });
+    } catch {
+      this.observationErrors += 1;
+    }
+  }
+
+  private observe<T>(
+    event: Record<string, unknown>,
+    operation: () => T,
+    summarize: (value: T) => Record<string, unknown>,
+  ): T {
+    let value: T;
+    try {
+      value = operation();
+    } catch (error) {
+      this.record(() => ({ ...event, errorCode: (error as NodeJS.ErrnoException).code }));
+      throw error;
+    }
+    this.record(() => ({ ...event, ...summarize(value) }));
+    return value;
+  }
+
+  install(): void {
+    fs.readFileSync = ((file, ...args) => {
+      const match = typeof file === "string" && /^\/proc\/(\d+)\/(stat|environ)$/.exec(file);
+      const pid = match ? Number(match[1]) : undefined;
+      if (!match || (pid !== this.leader && pid !== this.escapee)) {
+        return this.read.call(fs, file, ...args);
+      }
+      return this.observe(
+        { op: `read:${match[2]}`, pid },
+        () => this.read.call(fs, file, ...args),
+        (value) => match[2] === "stat"
+          ? markerStat(value)
+          : { exactToken: String(value).split("\0").includes(`${CONTAINMENT_TOKEN_ENV}=${this.token}`) },
+      );
+    }) as typeof fs.readFileSync;
+    fs.readdirSync = ((directory, ...args) => {
+      if (directory !== "/proc") return Reflect.apply(this.readdir, fs, [directory, ...args]);
+      return this.observe(
+        { op: "proc-census" },
+        () => Reflect.apply(this.readdir, fs, [directory, ...args]),
+        (entries: unknown[]) => ({
+          // Directory inclusion, not an inferred listContainedIdentities verdict.
+          leaderIncluded: entries.includes(String(this.leader)),
+          escapeeIncluded: entries.includes(String(this.escapee)),
+        }),
+      );
+    }) as typeof fs.readdirSync;
+    process.kill = (pid, signal) => {
+      if (pid !== this.leader && pid !== this.escapee) return this.kill.call(process, pid, signal);
+      return this.observe(
+        { op: "signal", pid, signal },
+        () => this.kill.call(process, pid, signal),
+        (returned) => ({ returned }),
+      );
+    };
+  }
+
+  restore(): void {
+    fs.readFileSync = this.read;
+    fs.readdirSync = this.readdir;
+    process.kill = this.kill;
+  }
+
+  private snapshot(pid: number | undefined): Record<string, unknown> {
+    const observed = this.events.find((event) =>
+      event.op === "read:stat" && event.pid === pid && typeof event.startTicks === "string");
+    if (!observed) return { pid, identifiable: false };
+    let current: Record<string, unknown> = { pid };
+    try {
+      const stat = markerStat(this.read.call(fs, `/proc/${pid}/stat`, "utf8"));
+      const uid = fs.statSync(`/proc/${pid}`).uid;
+      if (stat.startTicks !== observed.startTicks || uid !== process.getuid?.()) {
+        return { pid, identifiable: false };
+      }
+      current = { pid, ...stat, uid };
+      const exactToken = String(this.read.call(fs, `/proc/${pid}/environ`, "latin1"))
+        .split("\0").includes(`${CONTAINMENT_TOKEN_ENV}=${this.token}`);
+      current.exactToken = exactToken;
+      const executable = exactToken ? fs.readlinkSync(`/proc/${pid}/exe`) : undefined;
+      const after = markerStat(this.read.call(fs, `/proc/${pid}/stat`, "utf8"));
+      if (after.startTicks !== observed.startTicks) return { pid, identifiable: false };
+      return { ...current, executable };
+    } catch (error) {
+      return { ...current, errorCode: (error as NodeJS.ErrnoException).code };
+    }
+  }
+
+  report(scopeId: string, result: Awaited<ReturnType<typeof destroyContainmentScope>> | undefined): void {
+    // Called only after restoring hooks, on failure and before afterEach kills.
+    try {
+      console.error("[containment marker diagnostic #179]", JSON.stringify({
+        scopeId, leader: this.leader, escapee: this.escapee, result,
+        trace: this.events, overflow: this.overflow, observationErrors: this.observationErrors,
+        current: { leader: this.snapshot(this.leader), escapee: this.snapshot(this.escapee) },
+        stderr: "not captured: fixture launch retains stdio: ignore",
+      }));
+    } catch {
+      // Reporting must not replace the original assertion/operation failure.
+    }
+  }
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   for (const pid of strays) {
@@ -244,27 +375,47 @@ describe("containment scope creation", () => {
 });
 
 describe("containment cleanup of daemonising descendants", () => {
-  it("kills a setsid escapee that left the process group (marker)", async () => {
-    const scope = createContainmentScope({ id: "desk-esc01", useCgroup: false });
-    const pidFile = path.join(root, "escapee-marker.pid");
-    const leader = spawnInScope(scope, writeEscapingScript("escape-marker.sh", pidFile));
+  // Fixed independent CI samples for #179 evidence, not retries or a fix.
+  it.each(Array.from({ length: 50 }, (_, index) => index + 1))(
+    "kills a setsid escapee that left the process group (marker diagnostic sample %i/50)",
+    async (sample) => {
+      const scope = createContainmentScope({ id: `desk-esc01-${sample}`, useCgroup: false });
+      const pidFile = path.join(root, `escapee-marker-${sample}.pid`);
+      const trace = new MarkerEscapeTrace(scope.token);
+      let result: Awaited<ReturnType<typeof destroyContainmentScope>> | undefined;
+      try {
+        trace.install();
+        const leader = spawnInScope(scope, writeEscapingScript(`escape-marker-${sample}.sh`, pidFile));
+        trace.leader = leader;
 
-    expect(await waitFor(() => readPidFile(pidFile) !== undefined)).toBe(true);
-    const escapee = readPidFile(pidFile) as number;
-    strays.add(escapee);
-    // The escapee really is outside the launched process group: this is the
-    // hole a group kill alone leaves open.
-    expect(await waitFor(() => isPidAlive(escapee))).toBe(true);
-    expect(listProcessGroupMembers(leader)).not.toContain(escapee);
+        expect(await waitFor(() => readPidFile(pidFile) !== undefined)).toBe(true);
+        const escapee = readPidFile(pidFile) as number;
+        trace.escapee = escapee;
+        strays.add(escapee);
+        // The escapee really is outside the launched process group: this is the
+        // hole a group kill alone leaves open.
+        expect(await waitFor(() => isPidAlive(escapee))).toBe(true);
+        expect(listProcessGroupMembers(leader)).not.toContain(escapee);
 
-    const result = await destroyContainmentScope(scope);
-    expect(result.confirmed).toBe(true);
-    expect(result.survivors).toEqual([]);
-    expect(result.signaled).toContain(escapee);
-    expect(isPidAlive(escapee)).toBe(false);
-    expect(isPidAlive(leader)).toBe(false);
-    expect(listContainedProcesses(scope.token)).toEqual([]);
-  }, 30_000);
+        trace.phase = "destroy";
+        result = await destroyContainmentScope(scope);
+        trace.phase = "assertions";
+        expect(result.confirmed).toBe(true);
+        expect(result.survivors).toEqual([]);
+        expect(result.signaled).toContain(escapee);
+        expect(isPidAlive(escapee)).toBe(false);
+        expect(isPidAlive(leader)).toBe(false);
+        expect(listContainedProcesses(scope.token)).toEqual([]);
+      } catch (error) {
+        trace.restore();
+        trace.report(scope.id, result);
+        throw error;
+      } finally {
+        trace.restore();
+      }
+    },
+    30_000,
+  );
 
   itWithCgroup("kills a setsid escapee through the cgroup", async () => {
     const scope = createContainmentScope({ id: "desk-esc02" });
