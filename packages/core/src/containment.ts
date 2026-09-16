@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { readPickforgeEnv } from "./env-compat.js";
-import { readProcessStartTicks, type ProcessIdentity } from "./proc.js";
+import { parseProcStat, readProcessStartTicks, type ProcessIdentity } from "./proc.js";
 
 /**
  * Containment for apps launched into a lab session.
@@ -30,8 +30,8 @@ import { readProcessStartTicks, type ProcessIdentity } from "./proc.js";
  *   on a re-read immediately before `kill(2)` of both the token and the start
  *   time recorded when the scan found the process: a PID that exited in
  *   between is treated as gone, a PID whose start time changed belongs to an
- *   unrelated process and is refused, never killed, and the same process
- *   whose token is unreadable (dying, mid-exec) is decided on a later pass.
+ *   unrelated process and is refused, never killed, and an identity whose
+ *   start time or token is unreadable is decided on a later pass.
  *   Ownership, once a scan has established it, is kept until the process is
  *   seen to be gone: a scope with an identity that never becomes readable
  *   again fails cleanup instead of being reported empty.
@@ -394,7 +394,7 @@ export function processCarriesToken(pid: number, token: string): boolean {
   return read.kind === "entries" && read.entries.includes(`${TOKEN_ENV}=${token}`);
 }
 
-type TokenProbe = "match" | "gone" | "mismatch" | "same-process";
+type TokenProbe = "match" | "gone" | "mismatch" | "unverified";
 
 /**
  * Re-verify, immediately before a signal, that `identity` (a PID and the
@@ -405,23 +405,30 @@ type TokenProbe = "match" | "gone" | "mismatch" | "same-process";
  * - `gone`: `/proc/<pid>` is missing or the process is a zombie. Skip.
  * - `mismatch`: the PID is alive with a *different* start time: the number
  *   was recycled by an unrelated process. Refused, never signalled.
- * - `same-process`: the same start time, but the token is not readable. A
+ * - `unverified`: the start identity is unavailable, or the same start time
+ *   has a token that is not readable. Neither proves disappearance. A
  *   process that is dying reads like this for a moment (its address space is
  *   already released while it is still in state R, and the kernel then
  *   refuses the environ read with EACCES); so does one mid-`execve`, one
- *   that wiped its own environment, or one that exec'd a setuid image. It is
- *   the process the scan saw, so it is never refused; it is also not
- *   signalled on this pass. The sweep decides it later, by which time a dying
- *   process is gone and an exec'ing one carries the token again.
+ *   that wiped its own environment, or one that exec'd a setuid image. The
+ *   recorded identity stays pending without being signalled until a later
+ *   pass can verify ownership or disappearance.
  */
 function probeToken(identity: ProcessIdentity, token: string): TokenProbe {
   const read = readEnviron(identity.pid);
   if (read.kind === "gone") return "gone";
-  const startTicks = readProcessStartTicks(identity.pid);
-  if (startTicks === undefined) return "gone";
-  if (startTicks !== identity.startTicks) return "mismatch";
-  if (read.kind !== "entries") return "same-process";
-  return read.entries.includes(`${TOKEN_ENV}=${token}`) ? "match" : "same-process";
+  let stat: ReturnType<typeof parseProcStat>;
+  try {
+    stat = parseProcStat(fs.readFileSync(`/proc/${identity.pid}/stat`, "utf8"));
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ESRCH" ? "gone" : "unverified";
+  }
+  if (stat === undefined) return "unverified";
+  if (stat.state === "Z") return "gone";
+  if (stat.startTicks !== identity.startTicks) return "mismatch";
+  if (read.kind !== "entries") return "unverified";
+  return read.entries.includes(`${TOKEN_ENV}=${token}`) ? "match" : "unverified";
 }
 
 function readParentPid(pid: number): number | undefined {
@@ -774,7 +781,7 @@ interface SweepState {
    * comes back and is reported as an unconfirmed survivor if it never does.
    */
   pending: Map<string, ProcessIdentity>;
-  /** Pending identities whose token could not be re-read on the last pass. */
+  /** Pending identities whose ownership could not be re-read on the last pass. */
   unverified: Set<number>;
 }
 
@@ -785,8 +792,8 @@ function identityKey(identity: ProcessIdentity): string {
 /**
  * Decide one pending identity: `gone` and `mismatch` settle it for good,
  * `match` signals it (once per sweep) and keeps it pending until it exits, and
- * `same-process` — the same process with an unreadable, empty or tokenless
- * environment — leaves it pending, marked unverified, for a later pass.
+ * `unverified` — an unavailable start identity or unreadable, empty or
+ * tokenless environment — leaves it pending for a later pass.
  */
 function decidePending(
   identity: ProcessIdentity,
@@ -809,7 +816,7 @@ function decidePending(
     settled.add(key);
     return;
   }
-  if (probe === "same-process") {
+  if (probe === "unverified") {
     state.unverified.add(identity.pid);
     return;
   }
@@ -946,7 +953,7 @@ export async function destroyContainmentScope(
       ? `${survivors.length} contained process(es) survived SIGKILL: ${survivors.join(", ")}` +
         (unverified.length === 0
           ? ""
-          : ` (${unverified.join(", ")} still had this scope's start identity with an unreadable containment token)`)
+          : ` (${unverified.join(", ")} had an unreadable containment token or process identity)`)
       : state.refused.size > 0
         ? `refused to signal ${state.refused.size} live PID(s) that no longer carry the session token: ${[...state.refused].join(", ")}`
         : cgroupReason;
