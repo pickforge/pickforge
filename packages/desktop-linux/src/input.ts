@@ -1,5 +1,9 @@
 import { runCommand, withAgentPermit, type EnvLike } from "@pickforge/lab-core";
 import { parseDisplayNumber } from "./display.js";
+import { performance } from "node:perf_hooks";
+import { prepareText, typingEnvironment } from "./x11-prebind.js";
+import { remaining } from "./x11-wire.js";
+import { validateTypingTarget } from "./x11-target.js";
 
 const TYPE_DELAY_MS = 50;
 const SCROLL_STEP_DELAY_MS = 25;
@@ -362,9 +366,30 @@ export async function doubleClick(opts: DoubleClickOptions): Promise<void> {
 }
 
 export async function typeText(opts: TypeTextOptions): Promise<void> {
-  await withAgentPermit(opts.sessionId, opts.env ?? process.env, () =>
-    runXdotool(opts.display, buildTypeArgs(opts.text), TYPE_TIMEOUT_MS),
-  );
+  const deadline = performance.now() + TYPE_TIMEOUT_MS;
+  await withAgentPermit(opts.sessionId, opts.env ?? process.env, async () => {
+    const anchor = await prepareText(opts.sessionId, opts.display, opts.text, opts.env ?? process.env, deadline);
+    try {
+      await validateTypingTarget(opts.sessionId, opts.display, opts.env ?? process.env, deadline);
+      const args = buildTypeArgs(opts.text);
+      const commandOptions = {
+        cleanEnv: true, env: typingEnvironment(opts.display), signal: anchor.signal,
+        timeoutMs: remaining(deadline), killGraceMs: 0, check: true,
+      };
+      anchor.check();
+      try {
+        const result = await runCommand("xdotool", args, commandOptions);
+        anchor.check();
+        if (!result.ok) throw new Error("dispatch failed");
+      } catch {
+        // Cancellation is best effort, not atomic input. Never expose argv,
+        // abort reasons, output or parser data, and never replay a dispatch.
+        throw new Error("Desktop text dispatch failed; text may have been partially sent");
+      }
+    } finally {
+      anchor.close();
+    }
+  });
 }
 
 export async function pressKey(opts: PressKeyOptions): Promise<void> {

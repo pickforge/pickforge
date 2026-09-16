@@ -45,6 +45,15 @@ evidence recovery reports a run consistently when a peer recovers it first.
 
 ## Fixes
 
+Desktop typing prepares stable Unicode bindings on owned Xvfb sessions and keeps
+a passive connection through dispatch, without changing literal text or xdotool
+cadence. Every call preflights the current server generation, including after a
+last-client reset. Preparation fails closed on ownership, protocol, capacity or
+lookup failures. Anchor loss cancels owned dispatch without replay and reports
+possible partial input; errors do not echo text or server payloads.
+See [desktop typing limits](../desktop-typing.md). Native application validation
+for this change remains pending; the regression tests use a simulated X server.
+
 - Concurrent evidence recovery no longer reports a run as an invalid manifest
   when a peer replaced `manifest.json` while it was being read; recovery
   re-reads the manifest under the run's journal lock, and the run is reported
