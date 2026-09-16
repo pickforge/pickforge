@@ -287,6 +287,104 @@ describe("private home creation", () => {
   });
 });
 
+describe("runtime root validation", () => {
+  it.each(["symlink", "directory"])("refuses a %s root replacement between validation and removal", async (kind) => {
+    const dir = sessionDir(`pre-open-root-${kind}`);
+    const layout = desktopRuntimeLayout(dir);
+    await createDesktopRuntimeDir(layout);
+    const original = `${layout.runtimeDir}-original`;
+    fs.writeFileSync(path.join(layout.runtimeDir, "owned"), "original data");
+    const originalStat = fs.lstatSync(layout.runtimeDir);
+    const outside = sessionDir(`pre-open-outside-${kind}`);
+    const target = path.join(outside, "keep");
+    fs.chmodSync(outside, 0o755);
+    fs.writeFileSync(target, "outside data");
+    fs.chmodSync(target, 0o640);
+    const before = [fs.lstatSync(outside), fs.lstatSync(target)];
+    const lstat = DirHandle.prototype.lstatChild;
+    let replacement: fs.Stats | undefined;
+    vi.spyOn(DirHandle.prototype, "lstatChild").mockImplementation(async function(this: DirHandle, name) {
+      const stat = await lstat.call(this, name);
+      if (name === "runtime" && replacement === undefined) {
+        fs.renameSync(layout.runtimeDir, original);
+        if (kind === "symlink") fs.symlinkSync(outside, layout.runtimeDir);
+        else {
+          fs.mkdirSync(layout.runtimeDir);
+          fs.writeFileSync(path.join(layout.runtimeDir, "replacement"), "replacement data");
+        }
+        replacement = fs.lstatSync(layout.runtimeDir);
+      }
+      return stat;
+    });
+    const removal = await removeDesktopRuntimeDir(dir, layout.runtimeDir);
+    expect(removal.removed).toBe(false);
+    expect(removal.error?.message).toMatch(/replaced/);
+    expect(fs.lstatSync(layout.runtimeDir)).toMatchObject({ dev: replacement!.dev, ino: replacement!.ino, mode: replacement!.mode });
+    expect(fs.lstatSync(original)).toMatchObject({ dev: originalStat.dev, ino: originalStat.ino, mode: originalStat.mode });
+    expect(fs.readFileSync(path.join(original, "owned"), "utf8")).toBe("original data");
+    expect(fs.readdirSync(original)).toEqual(["home", "owned"]);
+    for (const [index, entry] of [outside, target].entries()) {
+      const after = fs.lstatSync(entry);
+      for (const key of ["dev", "ino", "uid", "gid", "mode", "nlink", "size", "mtimeMs", "ctimeMs"] as const) {
+        expect(after[key]).toBe(before[index]![key]);
+      }
+    }
+    expect(fs.readdirSync(outside)).toEqual(["keep"]);
+    expect(fs.readFileSync(target, "utf8")).toBe("outside data");
+    if (kind === "symlink") expect(fs.readlinkSync(layout.runtimeDir)).toBe(outside);
+    else expect(fs.readFileSync(path.join(layout.runtimeDir, "replacement"), "utf8")).toBe("replacement data");
+  });
+
+  it("treats a validated runtime removed before cleanup as already missing", async () => {
+    const dir = sessionDir("root-disappears-before-removal");
+    const layout = desktopRuntimeLayout(dir);
+    fs.mkdirSync(layout.runtimeDir);
+    const lstat = DirHandle.prototype.lstatChild;
+    vi.spyOn(DirHandle.prototype, "lstatChild").mockImplementation(async function(this: DirHandle, name) {
+      const stat = await lstat.call(this, name);
+      if (name === "runtime" && stat !== undefined) fs.rmdirSync(layout.runtimeDir);
+      return stat;
+    });
+    expect(await removeDesktopRuntimeDir(dir, layout.runtimeDir)).toEqual({ removed: true });
+    expect(fs.existsSync(layout.runtimeDir)).toBe(false);
+  });
+
+  it("rechecks root ownership after initial validation", async () => {
+    const dir = sessionDir("root-owner-changes-before-removal");
+    const layout = desktopRuntimeLayout(dir);
+    await createDesktopRuntimeDir(layout);
+    const lstat = DirHandle.prototype.lstatChild;
+    let observations = 0;
+    vi.spyOn(DirHandle.prototype, "lstatChild").mockImplementation(async function(this: DirHandle, name) {
+      const stat = await lstat.call(this, name);
+      if (name === "runtime" && stat !== undefined && ++observations > 1) {
+        stat.uid = (process.getuid?.() ?? 0) + 1;
+      }
+      return stat;
+    });
+    const removal = await removeDesktopRuntimeDir(dir, layout.runtimeDir);
+    expect(removal.removed).toBe(false);
+    expect(removal.error?.message).toMatch(/uncertain ownership/);
+    expect(fs.readdirSync(layout.runtimeDir)).toEqual(["home"]);
+  });
+
+  it("does not remove a runtime arriving after an absent-root observation", async () => {
+    const dir = sessionDir("root-arrives-after-absence");
+    const layout = desktopRuntimeLayout(dir);
+    const lstat = DirHandle.prototype.lstatChild;
+    vi.spyOn(DirHandle.prototype, "lstatChild").mockImplementation(async function(this: DirHandle, name) {
+      const stat = await lstat.call(this, name);
+      if (name === "runtime" && stat === undefined) {
+        fs.mkdirSync(layout.runtimeDir);
+        fs.writeFileSync(path.join(layout.runtimeDir, "new"), "unvalidated data");
+      }
+      return stat;
+    });
+    expect(await removeDesktopRuntimeDir(dir, layout.runtimeDir)).toEqual({ removed: true });
+    expect(fs.readFileSync(path.join(layout.runtimeDir, "new"), "utf8")).toBe("unvalidated data");
+  });
+});
+
 describe("desktop runtime removal", () => {
   it("removes a confined runtime dir with its contents", async () => {
     const dir = sessionDir("desk-remove");
