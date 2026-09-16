@@ -53,7 +53,7 @@ to replace owned legacy `picklab` entries. `pickforge-lab init` does not change
 agent configuration.
 
 Old `PICKLAB_*` environment names remain compatibility fallbacks with a
-deprecation warning, retained through 0.5.0. New TypeScript state goes under
+deprecation warning, and are still accepted in 0.6.0. New TypeScript state goes under
 `~/.pickforge/lab/` (override with `PICKFORGE_HOME`); legacy
 `~/.pickforge/picklab/`, `~/.picklab/` and project-local `.picklab/` state
 remain readable in place. Nothing is silently migrated or deleted.
@@ -666,7 +666,7 @@ not a unit-test assertion.
 
 Fatal-error telemetry in the `pickforge-lab` CLI and `pickforge-mcp` server is disabled by default: Sentry is not initialized and no telemetry is sent. Set `PICKFORGE_TELEMETRY=1` (also `true` or `on`, case-insensitive, with surrounding whitespace ignored) to enable reporting to Sentry. Any other value or unset disables it. Enabled reports contain the error message and stack trace, which can reference the failing command and its output, with secrets redacted, plus OS, Node.js, and app versions. This is fatal-error reporting, not product analytics; breadcrumbs and performance tracing are disabled.
 
-For 0.5.0, `PICKLAB_TELEMETRY` is accepted only when `PICKFORGE_TELEMETRY` is unset, with the same values and one deprecation warning per process. The current name takes precedence, including when empty.
+In 0.6.0, `PICKLAB_TELEMETRY` is still accepted only when `PICKFORGE_TELEMETRY` is unset, with the same values and one deprecation warning per process. The current name takes precedence, including when empty.
 
 ## Support matrix
 
@@ -807,7 +807,7 @@ reported as suppressed for an explicitly writable `--vnc-control` session.
 
 ## MCP surface
 
-`pickforge-lab mcp serve` exposes 29 tools over stdio:
+`pickforge-lab mcp serve` exposes tools over stdio, including:
 
 - Sessions: `session_create`, `session_status`, `session_destroy`
 - Desktop: `desktop_windows`, `desktop_focus`, `desktop_launch`, `desktop_exec`, `desktop_screenshot`, `desktop_wait`, `desktop_click`, `desktop_move`, `desktop_scroll`, `desktop_drag`, `desktop_double_click`, `desktop_type`, `desktop_key`. All fail closed with a busy error while a human lease is active except `desktop_screenshot`, `desktop_wait`, and `desktop_windows` (read-only observation). `desktop_launch` and `desktop_exec` are gated too: a newly launched client can grab input focus on the shared display, which is exactly what the lease protects against. `desktop_exec` applies the isolated X11 environment and waits for a client window; `desktop_launch` accepts `windowTimeoutMs` with the same 0-300000 ms bounds as `desktop_exec` when waiting for `waitWindow`. `desktop_screenshot` reports display size, image size, scale 1, image-pixel coordinates, and the client-window count, and warns when the count is zero or unavailable because `xdotool` is missing. `desktop_wait` polls until pixels differ from a baseline PNG, sampled pixels stay unchanged for N ms, or a window name substring appears, and records journal status `ok` or `timeout` from the reason it stopped. Pixel change and stability need ImageMagick `convert` or `magick` and compare 8-bit RGB plus dimensions, ignoring PNG timestamps. The wait budget covers captures, compares and window queries; a timed-out subprocess allows two seconds before SIGKILL and two more before forced pipe closure and settlement, up to four extra seconds excluding filesystem and scheduling delays.
