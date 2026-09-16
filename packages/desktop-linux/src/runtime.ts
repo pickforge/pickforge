@@ -109,10 +109,11 @@ async function assertOwnedEntry(parent: DirHandle, name: string, expected: fs.St
 async function removeOwnedEntry(parent: DirHandle, name: string): Promise<void> {
   const stat = await parent.lstatChild(name);
   if (stat === undefined) return;
-  if (stat.isSymbolicLink() || stat.uid !== process.getuid?.()) {
+  if (stat.uid !== process.getuid?.()) {
     throw new Error(`Refusing to delete a runtime entry with uncertain ownership: ${parent.dir}/${name}`);
   }
   if (!stat.isDirectory()) {
+    // lstat proves ownership of the leaf, including a symlink, not its target.
     await assertOwnedEntry(parent, name, stat);
     await parent.unlinkChild(name);
     return;
