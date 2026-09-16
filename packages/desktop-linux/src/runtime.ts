@@ -106,13 +106,18 @@ async function assertOwnedEntry(parent: DirHandle, name: string, expected: fs.St
 }
 
 /** Descend only through verified handles; never give recursive rm a pathname. */
-async function removeOwnedEntry(parent: DirHandle, name: string): Promise<void> {
+async function removeOwnedEntry(parent: DirHandle, name: string, expectedRoot?: fs.Stats): Promise<void> {
   const stat = await parent.lstatChild(name);
   if (stat === undefined) return;
-  if (stat.isSymbolicLink() || stat.uid !== process.getuid?.()) {
+  if (expectedRoot !== undefined &&
+      (!stat.isDirectory() || stat.dev !== expectedRoot.dev || stat.ino !== expectedRoot.ino)) {
+    throw new Error(`Refusing to delete a replaced runtime entry: ${parent.dir}/${name}`);
+  }
+  if (stat.uid !== process.getuid?.()) {
     throw new Error(`Refusing to delete a runtime entry with uncertain ownership: ${parent.dir}/${name}`);
   }
   if (!stat.isDirectory()) {
+    // lstat proves ownership of the leaf, including a symlink, not its target.
     await assertOwnedEntry(parent, name, stat);
     await parent.unlinkChild(name);
     return;
@@ -155,7 +160,8 @@ export async function removeDesktopRuntimeDir(
         if (stat !== undefined && (!stat.isDirectory() || stat.uid !== process.getuid?.())) {
           throw new Error(`Refusing to delete a runtime directory with uncertain ownership: ${runtimeDir}`);
         }
-        await removeOwnedEntry(session, DESKTOP_RUNTIME_DIR_NAME);
+        // An absent root needs no cleanup; never adopt an entry arriving afterward.
+        if (stat !== undefined) await removeOwnedEntry(session, DESKTOP_RUNTIME_DIR_NAME, stat);
       } finally {
         await session.close();
       }

@@ -16,9 +16,11 @@ import {
   listProcessGroupMembers,
   processCarriesToken,
   readOwnCgroupPath,
+  readProcessStartTicks,
   scopeCgroupProblem,
   type ContainmentScope,
 } from "../src/index.js";
+import { parseProcStat } from "../src/proc.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 // The repo's test runtime; workers are TypeScript run directly.
@@ -193,6 +195,49 @@ function waitSyncUntilExited(pid: number, realRead: typeof fs.readFileSync): voi
     Atomics.wait(cell, 0, 0, 5);
   }
   throw new Error(`pid ${pid} did not exit in time`);
+}
+
+interface OwnedStatFixture {
+  scope: ContainmentScope;
+  pid: number;
+  startTicks: number;
+  uid: number;
+  read: typeof fs.readFileSync;
+  kill: typeof process.kill;
+}
+
+async function withOwnedStatFixture(
+  id: string,
+  test: (fixture: OwnedStatFixture) => Promise<void>,
+): Promise<void> {
+  const scope = createContainmentScope({ id, useCgroup: false });
+  const pid = spawnInScope(scope, "/bin/sleep", ["300"]);
+  strays.delete(pid); // These fixtures use pinned cleanup, not afterEach group kills.
+  const read = fs.readFileSync;
+  const kill = process.kill;
+  let startTicks: number | undefined;
+  try {
+    expect(await waitFor(() => processCarriesToken(pid, scope.token)
+      && readProcessStartTicks(pid) !== undefined && isPidAlive(pid))).toBe(true);
+    startTicks = readProcessStartTicks(pid);
+    const uid = fs.statSync(`/proc/${pid}`).uid;
+    expect(startTicks).toBeDefined();
+    expect(uid).toBe(process.getuid?.());
+    await test({ scope, pid, startTicks: startTicks as number, uid, read, kill });
+  } finally {
+    fs.readFileSync = read;
+    process.kill = kill;
+    if (isPidAlive(pid)) {
+      const currentStart = readProcessStartTicks(pid);
+      expect(currentStart).toBeDefined();
+      if (startTicks !== undefined) expect(currentStart).toBe(startTicks);
+      expect(fs.statSync(`/proc/${pid}`).uid).toBe(process.getuid?.());
+      expect(processCarriesToken(pid, scope.token)).toBe(true);
+      expect(readProcessStartTicks(pid)).toBe(currentStart);
+      process.kill(pid, "SIGKILL");
+      expect(await waitFor(() => !isPidAlive(pid))).toBe(true);
+    }
+  }
 }
 
 afterEach(() => {
@@ -716,6 +761,163 @@ describe("containment identity safety", () => {
     expect(result.survivors).toContain(pid);
     expect(result.reason).toMatch(/unreadable containment token/);
     expect(isPidAlive(pid)).toBe(true);
+  }, 20_000);
+
+  it("never confirms cleanup while an identified process has unreadable stat", async () => {
+    await withOwnedStatFixture("desk-stat-unreadable", async ({ scope, pid, startTicks, uid, read, kill }) => {
+      const stat = `/proc/${pid}/stat`;
+      let statReads = 0;
+      let initialStartTicks: number | undefined;
+      const terminatingSignals: Parameters<typeof process.kill>[1][] = [];
+      fs.readFileSync = ((file, ...args) => {
+        if (file !== stat) return read.call(fs, file, ...args);
+        statReads += 1;
+        if (statReads > 1) {
+          throw Object.assign(new Error("controlled stat read failure"), { code: "EACCES" });
+        }
+        const value = read.call(fs, file, ...args);
+        initialStartTicks = parseProcStat(String(value))?.startTicks;
+        return value;
+      }) as typeof fs.readFileSync;
+      process.kill = (target, signal) => {
+        if (target === pid && signal !== 0) terminatingSignals.push(signal);
+        return kill.call(process, target, signal);
+      };
+
+      const result = await destroyContainmentScope(scope, {
+        termTimeoutMs: 300,
+        killTimeoutMs: 300,
+      });
+      console.log("[controlled stat EACCES]", JSON.stringify({
+        pid, startTicks, uid, initialStartTicks, statReads, result,
+        terminatingSignals, alive: isPidAlive(pid),
+      }));
+      expect(initialStartTicks).toBe(startTicks);
+      expect(statReads).toBeGreaterThanOrEqual(2);
+      expect.soft(result.confirmed).toBe(false);
+      expect.soft(result.survivors).toContain(pid);
+      expect.soft(result.signaled).not.toContain(pid);
+      expect.soft(terminatingSignals).toEqual([]);
+      expect.soft(result.refused).toEqual([]);
+      expect.soft(isPidAlive(pid)).toBe(true);
+    });
+  }, 20_000);
+
+  it("signals an identified process only after its stat becomes readable again", async () => {
+    await withOwnedStatFixture("desk-stat-recovers", async ({ scope, pid, startTicks, read, kill }) => {
+      let statReads = 0;
+      let initialStartTicks: number | undefined;
+      const signaledAtReads: number[] = [];
+      fs.readFileSync = ((file, ...args) => {
+        if (file !== `/proc/${pid}/stat`) return read.call(fs, file, ...args);
+        statReads += 1;
+        if (statReads === 2 || statReads === 3) {
+          throw Object.assign(new Error("controlled stat read failure"), { code: "EACCES" });
+        }
+        const value = read.call(fs, file, ...args);
+        if (statReads === 1) initialStartTicks = parseProcStat(String(value))?.startTicks;
+        return value;
+      }) as typeof fs.readFileSync;
+      process.kill = (target, signal) => {
+        if (target === pid && signal !== 0) signaledAtReads.push(statReads);
+        return kill.call(process, target, signal);
+      };
+      const result = await destroyContainmentScope(scope, {
+        termTimeoutMs: 300,
+        killTimeoutMs: 300,
+      });
+      expect(initialStartTicks).toBe(startTicks);
+      expect(statReads).toBeGreaterThanOrEqual(4);
+      expect(result.confirmed).toBe(true);
+      expect(result.survivors).toEqual([]);
+      expect(result.refused).toEqual([]);
+      expect(result.signaled).toContain(pid);
+      expect(signaledAtReads.length).toBeGreaterThan(0);
+      expect(signaledAtReads.every((count) => count >= 4)).toBe(true);
+      expect(isPidAlive(pid)).toBe(false);
+    });
+  }, 20_000);
+
+  it("refuses a changed start identity after stat unreadability instead of signaling it", async () => {
+    await withOwnedStatFixture("desk-stat-reused", async ({ scope, pid, startTicks, read, kill }) => {
+      let statReads = 0;
+      let initialStartTicks: number | undefined;
+      const terminatingSignals: Parameters<typeof process.kill>[1][] = [];
+      fs.readFileSync = ((file, ...args) => {
+        if (file === `/proc/${pid}/environ` && statReads >= 3) return "PATH=/usr/bin\0";
+        if (file !== `/proc/${pid}/stat`) return read.call(fs, file, ...args);
+        statReads += 1;
+        if (statReads === 2 || statReads === 3) {
+          throw Object.assign(new Error("controlled stat read failure"), { code: "EACCES" });
+        }
+        const value = String(read.call(fs, file, ...args));
+        if (statReads === 1) {
+          initialStartTicks = parseProcStat(value)?.startTicks;
+          return value;
+        }
+        const close = value.lastIndexOf(")");
+        const fields = value.slice(close + 1).trim().split(/\s+/);
+        fields[22 - 3] = String(startTicks + 1);
+        return `${value.slice(0, close + 1)} ${fields.join(" ")}\n`;
+      }) as typeof fs.readFileSync;
+      process.kill = (target, signal) => {
+        if (target === pid && signal !== 0) terminatingSignals.push(signal);
+        return kill.call(process, target, signal);
+      };
+      const result = await destroyContainmentScope(scope, {
+        termTimeoutMs: 300,
+        killTimeoutMs: 300,
+      });
+      expect(initialStartTicks).toBe(startTicks);
+      expect(statReads).toBeGreaterThanOrEqual(4);
+      expect(result.confirmed).toBe(false);
+      expect(result.refused).toEqual([pid]);
+      expect(result.survivors).toEqual([]);
+      expect(result.signaled).not.toContain(pid);
+      expect(terminatingSignals).toEqual([]);
+      expect(isPidAlive(pid)).toBe(true);
+    });
+  }, 20_000);
+
+  it("settles a real zombie seen by the stat probe without signaling it", async () => {
+    await withOwnedStatFixture("desk-stat-zombie", async ({ scope, pid, startTicks, uid, read, kill }) => {
+      let statReads = 0;
+      let zombieSeen = false;
+      let initialStartTicks: number | undefined;
+      const terminatingSignals: Parameters<typeof process.kill>[1][] = [];
+      fs.readFileSync = ((file, ...args) => {
+        if (file !== `/proc/${pid}/stat`) return read.call(fs, file, ...args);
+        statReads += 1;
+        if (statReads === 2) {
+          expect(parseProcStat(String(read.call(fs, file, "utf8")))?.startTicks).toBe(startTicks);
+          expect(fs.statSync(`/proc/${pid}`).uid).toBe(uid);
+          expect(processCarriesToken(pid, scope.token)).toBe(true);
+          kill.call(process, pid, "SIGKILL"); // Fixture exit, not a product signal.
+          waitSyncUntilExited(pid, read);
+        }
+        const value = read.call(fs, file, ...args);
+        const stat = parseProcStat(String(value));
+        if (statReads === 1) initialStartTicks = stat?.startTicks;
+        if (statReads === 2) zombieSeen = stat?.state === "Z";
+        return value;
+      }) as typeof fs.readFileSync;
+      process.kill = (target, signal) => {
+        if (target === pid && signal !== 0) terminatingSignals.push(signal);
+        return kill.call(process, target, signal);
+      };
+      const result = await destroyContainmentScope(scope, {
+        termTimeoutMs: 300,
+        killTimeoutMs: 300,
+      });
+      expect(initialStartTicks).toBe(startTicks);
+      expect(zombieSeen).toBe(true);
+      expect(result.confirmed).toBe(true);
+      expect(result.survivors).toEqual([]);
+      expect(result.refused).toEqual([]);
+      expect(result.signaled).not.toContain(pid);
+      expect(terminatingSignals).toEqual([]);
+      expect(isPidAlive(pid)).toBe(false);
+    });
   }, 20_000);
 
   it("keeps an identified process that becomes tokenless at the same start time", async () => {
