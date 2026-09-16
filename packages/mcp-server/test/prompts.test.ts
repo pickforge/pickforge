@@ -90,6 +90,46 @@ describe("prompts", () => {
     await expect(lab.client.getPrompt({ name: "device_pass" })).rejects.toThrow();
   });
 
+  it("carries the native desktop loop in the device pass prompt", async () => {
+    const result = await lab.client.getPrompt({
+      name: "device_pass",
+      arguments: { scenario: "Settings dialog" },
+    });
+    const text = promptText(result);
+    expect(text).toMatch(
+      /desktop_screenshot.*inspect the image.*act.*bounded desktop_wait.*recapture/,
+    );
+    expect(text).toMatch(/Recapture after every launch or focus change/);
+    expect(text).toMatch(/image pixels and reported scale/);
+    expect(text).toMatch(/Before typing.*desktop_windows.*desktop_focus/);
+    expect(text).toMatch(/black or empty capture as a possible escape/);
+    expect(text).toMatch(/Never continue blind clicking/);
+  });
+
+  it("scopes the device pass prompt to the managed display and honest waits", async () => {
+    const result = await lab.client.getPrompt({
+      name: "device_pass",
+      arguments: { scenario: "Settings dialog" },
+    });
+    const text = promptText(result);
+    expect(text).toMatch(/managed X11 Xvfb display with a private HOME/);
+    expect(text).toMatch(/never on the real desktop or a Wayland session/);
+    expect(text).toMatch(/bounded observation, not proof of success/);
+    expect(text).toMatch(/stays off unless you ask for it/);
+    expect(text).toMatch(/not OCR-redacted/);
+    expect(text).toMatch(/only watch --control holds the pausing lease/);
+    expect(text).toMatch(/not an OS filesystem or network sandbox/);
+  });
+
+  it("repeats the desktop essentials in the short server instructions", () => {
+    const instructions = lab.client.getInstructions() ?? "";
+    expect(instructions).toContain("desktop_windows");
+    expect(instructions).toContain("desktop_focus");
+    expect(instructions).toMatch(/black or empty capture/);
+    expect(instructions).toMatch(/instead of clicking blind/);
+    expect(instructions.length).toBeLessThan(DEVICE_PASS_WORKFLOW.length);
+  });
+
   it("guides a desktop visual test workflow", async () => {
     const result = await lab.client.getPrompt({
       name: "test-flutter-desktop-visually",
