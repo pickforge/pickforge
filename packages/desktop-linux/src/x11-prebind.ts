@@ -1,8 +1,9 @@
+import { performance } from "node:perf_hooks";
 import { runCommand, type EnvLike } from "@pickforge/lab-core";
 import { bindingSymbols, keysymToCodepoint, textCodepoints } from "./x11-keysyms.js";
 import { negotiateXkb, readKeyboard, usableCodepoints, type Keyboard, type XdotoolFamily } from "./x11-keymap.js";
 import { validateTypingTarget } from "./x11-target.js";
-import { remaining, request, typingFailure, X11Wire } from "./x11-wire.js";
+import { remaining, request, typingFailure, X11_SETUP_MS, X11Wire } from "./x11-wire.js";
 
 export function typingEnvironment(display?: string): Record<string, string | undefined> {
   return { PATH: process.env.PATH, LANG: "C.UTF-8", LC_ALL: "C.UTF-8", DISPLAY: display, XAUTHORITY: "/dev/null" };
@@ -72,19 +73,20 @@ function verifyBindings(keyboard: Keyboard, bindings: Binding[], points: Set<num
  * may still reference them. The live map is the only allocation ledger.
  */
 export async function prepareText(sessionId: string, display: string, text: string, env: EnvLike, deadline: number): Promise<X11Wire> {
+  const preparationDeadline = Math.min(deadline, performance.now() + X11_SETUP_MS);
   const points = textCodepoints(text);
   const desired = bindingSymbols(points);
-  await validateTypingTarget(sessionId, display, env, deadline);
-  const family = await clientFamily(deadline);
-  // A slow version process must not make socket ownership evidence stale.
-  const target = await validateTypingTarget(sessionId, display, env, deadline);
-  remaining(deadline);
+  await validateTypingTarget(sessionId, display, env, preparationDeadline);
+  const family = await clientFamily(preparationDeadline);
+  // Ownership, version and protocol work share one preparation expiry.
+  const target = await validateTypingTarget(sessionId, display, env, preparationDeadline);
+  remaining(preparationDeadline);
   if (!target.alive()) throw typingFailure();
-  const wire = new X11Wire(target.path, deadline, target.alive);
+  const wire = new X11Wire(target.path, deadline, target.alive, preparationDeadline);
   try {
     const { min, max } = await wire.hello();
     const opcode = await negotiateXkb(wire);
-    wire.boundGrab(deadline);
+    wire.boundGrab(preparationDeadline);
     wire.send(request(36));
     const keyboard = await readKeyboard(wire, opcode, min, max);
     const bindings = planBindings(keyboard, desired, family, points, () => wire.check());

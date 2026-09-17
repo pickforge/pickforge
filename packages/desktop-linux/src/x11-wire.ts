@@ -55,9 +55,9 @@ export class X11Wire {
 
   get signal(): AbortSignal { return this.loss.signal; }
 
-  constructor(socketPath: string, deadline: number, private readonly alive: () => boolean) {
+  constructor(socketPath: string, deadline: number, private readonly alive: () => boolean, preparationDeadline = performance.now() + X11_SETUP_MS) {
     this.overallDeadline = deadline;
-    this.deadline = Math.min(deadline, performance.now() + X11_SETUP_MS);
+    this.deadline = Math.min(deadline, preparationDeadline);
     const timeout = remaining(this.deadline);
     if (!alive()) throw typingFailure();
     this.socket = net.createConnection({ path: socketPath });
@@ -113,7 +113,7 @@ export class X11Wire {
 
   boundGrab(totalDeadline: number): void {
     this.active();
-    this.deadline = Math.min(this.overallDeadline, totalDeadline, performance.now() + X11_GRAB_MS);
+    this.deadline = Math.min(this.deadline, this.overallDeadline, totalDeadline, performance.now() + X11_GRAB_MS);
     clearTimeout(this.timer);
     this.timer = setTimeout(() => this.fail(), remaining(this.deadline));
   }

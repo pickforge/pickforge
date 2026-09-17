@@ -52,6 +52,44 @@ it("passive anchor survives old grab/setup caps but expires at the original idle
   expect([...server.wires].every((s) => s.destroyed)).toBe(true);
 });
 
+it("slow version cannot obtain a fresh preparation budget", async () => {
+  vi.mocked(runCommand).mockImplementation(async (_cmd, args) => {
+    if (args[0] === "--version") now += 3001;
+    return success;
+  });
+  await expect(type()).rejects.toThrow(/^Desktop text preparation failed; no text was sent$/);
+  expect(vi.mocked(runCommand).mock.calls).toHaveLength(1);
+  expect(vi.mocked(runCommand).mock.calls[0]![2]?.timeoutMs).toBe(3000);
+  expect(server.connections).toBe(0);
+});
+
+it("elapsed initial ownership work is charged to the same preparation budget", async () => {
+  const lstat = vi.mocked(fs.lstatSync).getMockImplementation()!;
+  let validations = 0;
+  vi.mocked(fs.lstatSync).mockImplementation(((...args: Parameters<typeof fs.lstatSync>) => {
+    if (String(args[0]) === "/tmp/.X11-unix/X190" && ++validations === 1) now += 2500;
+    return Reflect.apply(lstat, fs, args);
+  }) as typeof fs.lstatSync);
+  vi.mocked(runCommand).mockImplementation(async () => { now += 600; return success; });
+  await expect(type()).rejects.toThrow(/^Desktop text preparation failed; no text was sent$/);
+  expect(vi.mocked(runCommand).mock.calls).toHaveLength(1);
+  expect(vi.mocked(runCommand).mock.calls[0]![2]?.timeoutMs).toBe(500);
+  expect(server.connections).toBe(0);
+});
+
+it("near-expiry negotiation cannot extend preparation by starting a grab", async () => {
+  let replies = 0;
+  server.fault = (opcode, reply) => {
+    if (opcode === 135 && ++replies === 1) now += 2990;
+    if (opcode === 119) now += 11;
+    return reply;
+  };
+  await expect(type()).rejects.toThrow(/^Desktop text preparation failed; no text was sent$/);
+  expect(vi.mocked(runCommand).mock.calls.map(([, args]) => args)).toEqual([["--version"]]);
+  expect([...server.wires].every((s) => s.destroyed)).toBe(true);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
 it("normal dispatch can outlive three seconds without a grab", async () => {
   vi.mocked(runCommand).mockImplementation(async (_cmd, args, options) => {
     if (args[0] === "type") {

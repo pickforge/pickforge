@@ -46,13 +46,48 @@ function keyboard(type: KeyType, symbols: number[]): Keyboard {
   };
 }
 
-it("uses XKB groups and legacy equivalence rather than counting core membership", () => {
-  const map = keyboard({ mask: 1, levels: 2, entries: [{ active: true, mask: 1, level: 1 }] }, [0x61, 0x41]);
-  map.keys[1]!.groups.push([0x7e1, 0x7c1]);
-  map.keys[1]!.types.push(0);
-  expect(usableCodepoints(map, "2016")).toEqual(new Set([0x61, 0x41, 0x3b1, 0x391]));
-  expect(usableCodepoints(map, "2026")).toEqual(new Set([0x61, 0x41, 0x3b1, 0x391]));
+function twoGroups(): Keyboard {
+  const fixture = new FakeXServer("unused-no-socket-started");
+  fixture.rows.set(150, [0x61, 0x41, 0x7e1, 0x7c1]);
+  return { min: 8, max: 255, rows: Array.from({ length: 248 }, (_, i) => fixture.rows.get(i + 8) ?? []), modifiers: new Map([[200, 1]]), modifierMask: 1, ...parseXkbMap(fixture.xkbReply(), 8, 255) };
+}
+
+it("compares group-zero translation with the enumerated group symbol", () => {
+  const map = twoGroups();
+  expect(usableCodepoints(map, "2016").has(0x3b1)).toBe(true);
+  expect(usableCodepoints(map, "2026").has(0x3b1)).toBe(false);
+  expect(usableCodepoints(map, "2026").has(0x391)).toBe(true); // Explicit Shift entry survives.
+  expect(planBindings(map, [[0x010003b1, 0x010003b1]], "2026")).toEqual([{ code: 255, symbols: [0x010003b1, 0x010003b1] }]);
+});
+
+it("uses group-zero's own type and selected level, preserving equal symbols and explicit entries", () => {
+  const map = twoGroups();
+  map.types.push({ mask: 1, levels: 2, entries: [{ active: true, mask: 0, level: 1 }, { active: true, mask: 1, level: 0 }] });
+  const key = map.keys[150 - 8]!;
+  key.types[0] = 2; // At state zero this group produces A, not a or alpha.
+  expect(usableCodepoints(map, "2026").has(0x3b1)).toBe(false);
+  key.groups[1]![0] = 0x41; // Equality is by keysym, not group or level number.
+  expect(usableCodepoints(map, "2026").has(0x41)).toBe(true);
+  key.groups[1]![0] = 0x7e1;
+  map.types[key.types[1]!]!.entries.push({ active: true, mask: 0, level: 0 });
+  expect(usableCodepoints(map, "2026").has(0x3b1)).toBe(true);
   expect(planBindings(map, [[0x010003b1, 0x010003b1]], "2026")).toEqual([]);
+});
+
+it("preserves equal symbols when group zero selects a nonzero level", () => {
+  const map = twoGroups();
+  map.keys[150 - 8] = { code: 150, types: [], groups: [] };
+  map.rows[150 - 8] = [];
+  map.types.push({ mask: 1, levels: 2, entries: [{ active: true, mask: 0, level: 1 }] });
+  // Two valid groups with a common padded width: TWO_LEVEL then ONE_LEVEL.
+  // Only alpha has an entry in group zero. The equal group-one entry keeps
+  // that first entry from becoming the pinned client's excluded final entry.
+  map.keys[255 - 8] = { code: 255, types: [2, 0], groups: [[0x61, 0x7e1], [0x7e1, 0]] };
+  map.rows[255 - 8] = [0x61, 0x7e1, 0x7e1, 0];
+  expect(usableCodepoints(map, "2026").has(0x3b1)).toBe(true);
+  expect(planBindings(map, [[0x010003b1, 0x010003b1]], "2026")).toEqual([]);
+  map.keys[255 - 8]!.groups[1] = [0, 0];
+  expect(usableCodepoints(map, "2026").has(0x3b1)).toBe(false);
 });
 
 it("does not mistake an unreachable level for an available character", () => {

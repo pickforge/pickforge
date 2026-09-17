@@ -207,16 +207,16 @@ it("closes a short-read stream when its absolute helper deadline expires", async
   expect(state.active.size).toBe(0);
 });
 
-it("uses the original typing deadline across repeated ownership reads", async () => {
+it("uses one preparation deadline across repeated ownership reads", async () => {
   const start = performance.now();
   let now = start;
   let afterVersion = false;
   vi.spyOn(performance, "now").mockImplementation(() => now);
-  const state = shortReads({ size: 1, onRead: () => { if (afterVersion) now += 400; } });
+  const state = shortReads({ size: 1, onRead: () => { if (afterVersion) now += 200; } });
   const normal = vi.mocked(runCommand).getMockImplementation()!;
   vi.mocked(runCommand).mockImplementation(async (command, args, options) => {
     const result = await normal(command, args, options);
-    now += 59000;
+    now += 2500;
     afterVersion = true;
     return result;
   });

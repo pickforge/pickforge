@@ -146,10 +146,13 @@ interface LookupEntry { symbol: number; usable: boolean }
 function groupEntries(keyboard: Keyboard, key: XkbKey, group: number, family: XdotoolFamily): LookupEntry[] {
   const type = keyboard.types[key.types[group]!]!;
   const symbols = key.groups[group]!;
+  // XkbTranslateKeyCode with state 0 selects group zero, using its own type.
+  const zeroType = keyboard.types[key.types[0]!]!;
+  const zeroSymbol = key.groups[0]![translatedLevel(zeroType, 0)];
   const result: LookupEntry[] = [];
   for (let level = 0; level < type.levels; level++) {
     const entry = type.entries.find((item) => item.active && item.level === level);
-    const zero = level === 0 && translatedLevel(type, 0) === 0;
+    const zero = level === 0 && zeroSymbol === symbols[level];
     if (family === "2026" && (symbols[0] === 0 || (!zero && !entry))) continue;
     let mask = (family === "2026" && zero ? 0 : entry?.mask ?? 0) | (keyboard.modifiers.get(key.code) ?? 0);
     const symbol = symbols[level]!;

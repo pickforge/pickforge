@@ -154,6 +154,24 @@ it("preserves occupied, modifier and reserved minimum codes", async () => {
   expect(server.rows.get(8)).toEqual([]);
 });
 
+it.each([true, false])("preflights alpha missing from genuine 2026 group-zero lookup (capacity %s)", async (capacity) => {
+  version = "xdotool version 4.20260303.1";
+  server.rows.set(150, [0x61, 0x41, 0x7e1, 0x7c1]);
+  if (!capacity) for (let code = 9; code <= 255; code++) {
+    if (!server.rows.has(code)) server.rows.set(code, [0xffe1]);
+  }
+  if (capacity) {
+    await type("α");
+    expect(server.changes).toEqual([255]);
+    expect(server.rows.get(255)?.[0]).toBe(0x010003b1);
+    expect(server.inputCalls).toBe(1);
+  } else {
+    await expect(type("α")).rejects.toThrow("capacity exhausted");
+    expect(server.changes).toEqual([]);
+    expect(server.inputCalls).toBe(0);
+  }
+});
+
 it("checks full capacity before mutation or dispatch", async () => {
   for (let code = 9; code <= 255; code++) server.rows.set(code, [0xffe1]);
   server.rows.delete(254);
