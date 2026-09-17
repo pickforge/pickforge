@@ -370,13 +370,14 @@ export async function typeText(opts: TypeTextOptions): Promise<void> {
   await withAgentPermit(opts.sessionId, opts.env ?? process.env, async () => {
     const anchor = await prepareText(opts.sessionId, opts.display, opts.text, opts.env ?? process.env, deadline);
     try {
-      await validateTypingTarget(opts.sessionId, opts.display, opts.env ?? process.env, deadline);
+      await validateTypingTarget(opts.sessionId, opts.display, opts.env ?? process.env, anchor.preparationDeadline);
       const args = buildTypeArgs(opts.text);
       const commandOptions = {
         cleanEnv: true, env: typingEnvironment(opts.display), signal: anchor.signal,
         timeoutMs: remaining(deadline), killGraceMs: 0, check: true,
       };
       anchor.check();
+      remaining(anchor.preparationDeadline);
       try {
         const result = await runCommand("xdotool", args, commandOptions);
         anchor.check();

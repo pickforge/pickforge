@@ -47,6 +47,7 @@ export class X11Wire {
   private failed = false;
   private deadline: number;
   private readonly overallDeadline: number;
+  readonly preparationDeadline: number;
   private readonly loss = new AbortController();
   private healthTimer?: ReturnType<typeof setInterval>;
   private passive = false;
@@ -58,6 +59,7 @@ export class X11Wire {
   constructor(socketPath: string, deadline: number, private readonly alive: () => boolean, preparationDeadline = performance.now() + X11_SETUP_MS) {
     this.overallDeadline = deadline;
     this.deadline = Math.min(deadline, preparationDeadline);
+    this.preparationDeadline = this.deadline;
     const timeout = remaining(this.deadline);
     if (!alive()) throw typingFailure();
     this.socket = net.createConnection({ path: socketPath });

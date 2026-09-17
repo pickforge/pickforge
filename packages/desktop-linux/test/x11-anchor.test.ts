@@ -9,10 +9,11 @@ vi.mock("@pickforge/lab-core", async (original) => {
   const actual = await original<typeof import("@pickforge/lab-core")>();
   return { ...actual, runCommand: vi.fn(), processIdentityMatches: vi.fn(() => true) };
 });
-import { createSession, runCommand, processIdentityMatches, type EnvLike } from "@pickforge/lab-core";
+import { AGENT_PERMITS_DIR, sessionDataDir, createSession, runCommand, processIdentityMatches, type EnvLike } from "@pickforge/lab-core";
 import { typeText } from "../src/input.js";
 import { prepareText } from "../src/x11-prebind.js";
 import { request, X11Wire } from "../src/x11-wire.js";
+import * as target from "../src/x11-target.js";
 let root: string;
 let env: EnvLike;
 let server: FakeXServer;
@@ -87,6 +88,55 @@ it("near-expiry negotiation cannot extend preparation by starting a grab", async
   await expect(type()).rejects.toThrow(/^Desktop text preparation failed; no text was sent$/);
   expect(vi.mocked(runCommand).mock.calls.map(([, args]) => args)).toEqual([["--version"]]);
   expect([...server.wires].every((s) => s.destroyed)).toBe(true);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it.each(["during", "after", "at-expiry"])("final validation shares preparation expiry: %s", async (phase) => {
+  const start = now;
+  const validate = target.validateTypingTarget;
+  const expiries: number[] = [];
+  vi.spyOn(target, "validateTypingTarget").mockImplementation(async (...args) => {
+    expiries.push(args[3]!);
+    if (expiries.length === 1) now += 200;
+    if (expiries.length === 3 && phase === "during") now = start + 3001;
+    const result = await validate(...args);
+    if (expiries.length === 3 && phase !== "during") now = start + (phase === "after" ? 3001 : 3000);
+    return result;
+  });
+  // Deliberate clock injection, not a readiness wait. In the 'after' case
+  // the real validator has returned successfully before the window expires.
+  await expect(type()).rejects.toThrow(/^Desktop text preparation failed; no text was sent$/);
+  expect(expiries).toEqual([start + 3000, start + 3000, start + 3000]);
+  expect(vi.mocked(runCommand).mock.calls.map(([, args]) => args)).toEqual([["--version"]]);
+  expect([...server.wires].every((s) => s.destroyed)).toBe(true);
+  expect(vi.getTimerCount()).toBe(0);
+  expect(fs.readdirSync(path.join(sessionDataDir(id, env), AGENT_PERMITS_DIR))).toEqual([]);
+});
+
+it("final validation near expiry still leaves the original budget for dispatch", async () => {
+  const start = now;
+  const validate = target.validateTypingTarget;
+  const expiries: number[] = [];
+  vi.spyOn(target, "validateTypingTarget").mockImplementation(async (...args) => {
+    expiries.push(args[3]!);
+    if (expiries.length === 1) now += 200;
+    const result = await validate(...args);
+    if (expiries.length === 3) now = start + 2999;
+    return result;
+  });
+  vi.mocked(runCommand).mockImplementation(async (_cmd, args, options) => {
+    if (args[0] === "type") {
+      expect(options?.timeoutMs).toBe(57001);
+      now += 4000; await vi.advanceTimersByTimeAsync(4000);
+      expect(options?.signal?.aborted).toBe(false);
+      expect(server.grab).toBeUndefined();
+      expect([...server.wires].some((s) => !s.destroyed)).toBe(true);
+    }
+    return success;
+  });
+  await type();
+  expect(expiries).toEqual([start + 3000, start + 3000, start + 3000]);
+  expect(vi.mocked(runCommand).mock.calls.filter(([, args]) => args[0] === "type")).toHaveLength(1);
   expect(vi.getTimerCount()).toBe(0);
 });
 
