@@ -17,6 +17,7 @@ export interface RunCommandOptions {
   check?: boolean;
   input?: string;
   binary?: boolean;
+  signal?: AbortSignal;
 }
 
 export interface RunCommandResult {
@@ -73,6 +74,12 @@ export function runCommand(
   args: readonly string[],
   opts: RunCommandOptions = {},
 ): Promise<RunCommandResult> {
+  if (opts.signal?.aborted) {
+    const state = createCommandRunState();
+    state.aborted = true;
+    const result = buildCommandResult(state, opts, opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES, null, null);
+    return opts.check ? Promise.reject(new Error("Command cancelled")) : Promise.resolve(result);
+  }
   const child = spawn(cmd, args, {
     cwd: opts.cwd,
     env: resolveEnv(opts),
@@ -123,6 +130,9 @@ interface CommandRunState {
   stdoutBytes: number;
   stderrBytes: number;
   timedOut: boolean;
+  aborted: boolean;
+  stopping: boolean;
+  removeAbort?: () => void;
   settled: boolean;
   exited: boolean;
   exitCode: number | null;
@@ -137,6 +147,8 @@ function createCommandRunState(): CommandRunState {
     stdoutBytes: 0,
     stderrBytes: 0,
     timedOut: false,
+    aborted: false,
+    stopping: false,
     settled: false,
     exited: false,
     exitCode: null,
@@ -154,7 +166,7 @@ function buildCommandResult(
 ): RunCommandResult {
   const stdoutBuffer = Buffer.concat(state.stdoutChunks);
   const result: RunCommandResult = {
-    ok: code === 0 && !state.timedOut,
+    ok: code === 0 && !state.timedOut && !state.aborted,
     code,
     signal,
     stdout: opts.binary ? "" : stdoutBuffer.toString("utf8"),
@@ -185,42 +197,37 @@ function settleCommand(
   if (state.settled) return;
   state.settled = true;
   for (const timer of state.timers) clearTimeout(timer);
+  state.removeAbort?.();
   if (settlement.opts.check && !result.ok) {
-    settlement.reject(new CommandError(settlement.cmd, settlement.args, result));
+    settlement.reject(state.aborted ? new Error("Command cancelled") : new CommandError(settlement.cmd, settlement.args, result));
     return;
   }
   settlement.resolve(result);
 }
 
-function scheduleCommandTimeout(
+function terminateCommand(
   child: PipedChild,
   state: CommandRunState,
   killGraceMs: number,
-  timeoutMs: number,
   settle: (result: RunCommandResult) => void,
   build: (code: number | null, signal: NodeJS.Signals | null) => RunCommandResult,
 ): void {
-  state.timers.push(
-    setTimeout(() => {
-      state.timedOut = true;
-      killProcessTree(child, "SIGTERM");
-      state.timers.push(
-        setTimeout(() => {
-          killProcessTree(child, "SIGKILL");
-          state.timers.push(
-            setTimeout(() => {
-              child.stdout.destroy();
-              child.stderr.destroy();
-              child.stdin.destroy();
-              settle(
-                build(state.exitCode, state.exited ? state.exitSignal : "SIGKILL"),
-              );
-            }, killGraceMs),
-          );
-        }, killGraceMs),
-      );
-    }, timeoutMs),
-  );
+  if (state.stopping || state.settled) return;
+  state.stopping = true;
+  killProcessTree(child, "SIGTERM");
+  if (state.settled) return;
+  state.timers.push(setTimeout(() => {
+    if (state.settled) return;
+    killProcessTree(child, "SIGKILL");
+    if (state.settled) return;
+    state.timers.push(setTimeout(() => {
+      if (state.settled) return;
+      child.stdout.destroy();
+      child.stderr.destroy();
+      child.stdin.destroy();
+      settle(build(state.exitCode, state.exited ? state.exitSignal : "SIGKILL"));
+    }, killGraceMs));
+  }, killGraceMs));
 }
 
 function observeSpawnedCommand(
@@ -259,21 +266,19 @@ function observeSpawnedCommand(
     });
 
     if (opts.timeoutMs !== undefined) {
-      scheduleCommandTimeout(
-        child,
-        state,
-        killGraceMs,
-        opts.timeoutMs,
-        settle,
-        build,
-      );
+      state.timers.push(setTimeout(() => {
+        if (state.settled) return;
+        state.timedOut = true;
+        terminateCommand(child, state, killGraceMs, settle, build);
+      }, opts.timeoutMs));
     }
 
     child.on("error", (error) => {
       if (state.settled) return;
       state.settled = true;
       for (const timer of state.timers) clearTimeout(timer);
-      reject(error);
+      state.removeAbort?.();
+      reject(state.aborted ? new Error("Command cancelled") : error);
     });
     child.on("exit", (code, signal) => {
       state.exited = true;
@@ -286,7 +291,18 @@ function observeSpawnedCommand(
     child.stdin.on("error", () => {
       // child exited before consuming stdin (EPIPE); output collection continues
     });
-    if (opts.input !== undefined) {
+    if (opts.signal) {
+      const signal = opts.signal;
+      const abort = (): void => {
+        if (state.settled) return;
+        state.aborted = true;
+        terminateCommand(child, state, killGraceMs, settle, build);
+      };
+      state.removeAbort = () => signal.removeEventListener("abort", abort);
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) abort();
+    }
+    if (opts.input !== undefined && !state.aborted) {
       child.stdin.write(opts.input);
     }
     child.stdin.end();

@@ -4,9 +4,9 @@ Pickforge 0.6.0 is for driving native Linux apps on a managed X11 desktop.
 New managed desktop sessions get a private home, agents can list and focus
 windows, screenshots report the geometry that input coordinates use, waits are
 bounded, input tools can save before and after captures, and the device-pass
-workflow describes the inspection loop. Desktop teardown no longer fails on
-owned symlinks in the private home, and process cleanup no longer confirms a
-process it can no longer verify.
+workflow describes the inspection loop. Desktop typing prepares stable Unicode
+key bindings, desktop teardown no longer fails on owned symlinks in the private
+home, and process cleanup no longer confirms a process it can no longer verify.
 
 ## Changes
 
@@ -62,6 +62,13 @@ process it can no longer verify.
   process is still alive but its `/proc` stat cannot be read. Such a process
   is kept as unconfirmed and is not signalled until its identity can be
   verified again; gone, zombie and reused PIDs are handled as before. (#180)
+- Desktop typing prepares stable Unicode bindings on owned Xvfb sessions and
+  keeps a passive connection through dispatch, without changing literal text or
+  xdotool cadence. Every call preflights the current server generation,
+  including after a last-client reset. Preparation fails closed on ownership,
+  protocol, capacity or lookup failures. Anchor loss cancels owned dispatch
+  without replay and reports possible partial input; errors do not echo text or
+  server payloads. See [desktop typing limits](../desktop-typing.md). (#185)
 
 ## Validation
 
@@ -78,8 +85,22 @@ process it can no longer verify.
   review assessed 57 preview images.
 - The CI run for the merged commit `64c6fd4`
   ([35096758039](https://github.com/pickforge/pickforge/actions/runs/35096758039))
-  passed. Device validation and published-package validation of 0.6.0 have not
-  run yet.
+  passed.
+- Qualification of an earlier 0.6.0 candidate (`1adcab9`, built on `64c6fd4`)
+  stopped after its first native journey failed: typing `Olá café 日本` into a
+  form returned `Ol café 日本`. The cause was not established, the remaining
+  journeys and Flutter checks did not run, and the failed attempt is retained.
+- The Unicode typing fix merged as `bc55ce0` (#185). Besides simulated X server
+  tests, source tests on its final code ran on real managed Xvfb sessions with
+  real target validation and xdotool: preparation that finished after its
+  deadline was refused without typing, and an 80-character ASCII dispatch
+  lasting about 4 seconds reached a native form exactly. Those tests drove the
+  typing code directly, not through an installed MCP server. Before the final
+  deadline repair, installed-MCP typing into a native form returned exactly
+  `Olá café 日本`, `áéáé` and plain ASCII; that covers mapping behavior left
+  unchanged by the repair, not a run of the final code.
+- The repaired 0.6.0 candidate and the published 0.6.0 package have not been
+  qualified yet.
 
 ## Known limits
 
@@ -100,6 +121,9 @@ process it can no longer verify.
 - A wait that ends is a bounded observation, not proof of success. Stability
   compares sampled frames, not every intervening frame, and subprocess cleanup
   can finish up to four seconds after the deadline.
+- Typing removes Pickforge's transient text mappings, not every delivery race.
+  Shared X clients, including x11vnc, can add and later remove key mappings.
+  Anchor-loss cancellation cannot retract input that was already delivered.
 - `PICKFORGE_*` variables take precedence over their `PICKLAB_*` fallbacks,
   including when set to an empty value.
 - The macOS asset stays ad-hoc signed, not notarized and without a Developer
