@@ -388,6 +388,25 @@ function readEnviron(pid: number): EnvironRead {
   }
 }
 
+const PF_KTHREAD = 0x00200000;
+
+/**
+ * execve can block on image I/O after switching address spaces but before
+ * setting env_end (stat field 51). Its environment then reads as zero bytes,
+ * possibly across many scans. Do not declare the scope empty until it settles.
+ * This is not proof of ownership and never authorizes a signal.
+ */
+function readMidExecIdentity(pid: number, entries: string[]): ProcessIdentity | undefined {
+  if (entries.length !== 1 || entries[0] !== "") return undefined;
+  const fields = readProcStatFields(pid);
+  if (fields === undefined || fields[0] === "Z") return undefined;
+  if ((Number(fields[9 - 3]) & PF_KTHREAD) !== 0) return undefined;
+  // A completed exec with an empty environment still has a nonzero env_end.
+  if (fields[51 - 3] !== "0") return undefined;
+  const startTicks = Number(fields[22 - 3]);
+  return Number.isFinite(startTicks) ? { pid, startTicks } : undefined;
+}
+
 /** Whether a live process carries this scope's exact token entry. */
 export function processCarriesToken(pid: number, token: string): boolean {
   const read = readEnviron(pid);
@@ -457,11 +476,22 @@ function readParentAndStart(
  * pre-signal re-check. A process that exits between the environ read and the
  * start-time read is not listed.
  */
-function listContainedIdentities(token: string): ProcessIdentity[] {
+function listContainedIdentities(
+  token: string,
+  midExec?: Map<string, ProcessIdentity>,
+): ProcessIdentity[] {
   const excluded = selfAndAncestorIdentities();
   const found: ProcessIdentity[] = [];
   for (const pid of listProcPids()) {
-    if (!processCarriesToken(pid, token)) continue;
+    const read = readEnviron(pid);
+    if (read.kind !== "entries") continue;
+    if (!read.entries.includes(`${TOKEN_ENV}=${token}`)) {
+      const identity = midExec === undefined ? undefined : readMidExecIdentity(pid, read.entries);
+      if (identity !== undefined && excluded.get(pid) !== identity.startTicks) {
+        midExec?.set(identityKey(identity), identity);
+      }
+      continue;
+    }
     const startTicks = readProcessStartTicks(pid);
     if (startTicks === undefined) continue;
     if (excluded.get(pid) === startTicks) continue;
@@ -783,6 +813,10 @@ interface SweepState {
   pending: Map<string, ProcessIdentity>;
   /** Pending identities whose ownership could not be re-read on the last pass. */
   unverified: Set<number>;
+  /** Unresolved initial exec identities, never sufficient to authorize signals. */
+  midExec: Map<string, ProcessIdentity>;
+  /** The last sweep actually observed two consecutive empty scans. */
+  emptyConfirmed: boolean;
 }
 
 function identityKey(identity: ProcessIdentity): string {
@@ -836,6 +870,32 @@ function decidePending(
   }
 }
 
+/** Require the pinned identity and a populated environment address range. */
+function hasExecEnvironment(identity: ProcessIdentity): boolean {
+  const fields = readProcStatFields(identity.pid);
+  return fields !== undefined &&
+    Number(fields[22 - 3]) === identity.startTicks && Number(fields[51 - 3]) > 0;
+}
+
+function settledWithoutToken(identity: ProcessIdentity, token: string): boolean {
+  if (!hasExecEnvironment(identity)) return false;
+  const read = readEnviron(identity.pid);
+  return read.kind === "entries" &&
+    !read.entries.includes(`${TOKEN_ENV}=${token}`) && hasExecEnvironment(identity);
+}
+
+/** Retain unknown execs across unreadable scans without treating them as owned. */
+function settleInitialExecs(token: string, state: SweepState): void {
+  for (const [key, identity] of state.midExec) {
+    const verdict = probeToken(identity, token);
+    if (verdict === "unverified" && !settledWithoutToken(identity, token)) continue;
+    if (verdict === "match") state.pending.set(key, identity);
+    // Gone/recycled identities, or a readable completed foreign image, settle
+    // the uncertainty. A matching token transfers it to normal signal guards.
+    state.midExec.delete(key);
+  }
+}
+
 /**
  * Signal every contained process once, then wait for the scope to empty. New
  * PIDs that appear while waiting (a descendant forked mid-shutdown) are
@@ -853,17 +913,23 @@ async function sweepUntilEmpty(
   const deadline = Date.now() + timeoutMs;
   const settled = new Set<string>();
   let emptyPasses = 0;
+  state.emptyConfirmed = false;
   for (;;) {
-    for (const identity of listContainedIdentities(token)) {
-      state.pending.set(identityKey(identity), identity);
+    for (const identity of listContainedIdentities(token, state.midExec)) {
+      const key = identityKey(identity);
+      state.pending.set(key, identity);
+      state.midExec.delete(key);
     }
+    settleInitialExecs(token, state);
     for (const identity of Array.from(state.pending.values())) {
       decidePending(identity, token, signal, state, settled);
     }
-    // A process mid-exec is invisible to one scan; only two consecutive passes
-    // with nothing pending, a poll apart, mean the scope is empty.
-    emptyPasses = state.pending.size === 0 ? emptyPasses + 1 : 0;
-    if (emptyPasses >= 2 || Date.now() >= deadline) return;
+    // A stalled exec can hide a token across many scans. Require two passes
+    // with neither pending identities nor unresolved execs before confirming.
+    emptyPasses =
+      state.pending.size === 0 && state.midExec.size === 0 ? emptyPasses + 1 : 0;
+    state.emptyConfirmed = emptyPasses >= 2;
+    if (state.emptyConfirmed || Date.now() >= deadline) return;
     await sleep(POLL_INTERVAL_MS);
   }
 }
@@ -935,6 +1001,8 @@ export async function destroyContainmentScope(
     refused: new Set(),
     pending: new Map(),
     unverified: new Set(),
+    midExec: new Map(),
+    emptyConfirmed: false,
   };
   const cgroupReason =
     scope.mechanism === "cgroup"
@@ -942,7 +1010,7 @@ export async function destroyContainmentScope(
       : undefined;
 
   await sweepUntilEmpty(scope.token, "SIGTERM", termTimeoutMs, state);
-  if (state.pending.size > 0) {
+  if (!state.emptyConfirmed) {
     await sweepUntilEmpty(scope.token, "SIGKILL", killTimeoutMs, state);
   }
   const survivors = pendingSurvivors(state);
@@ -956,7 +1024,11 @@ export async function destroyContainmentScope(
           : ` (${unverified.join(", ")} had an unreadable containment token or process identity)`)
       : state.refused.size > 0
         ? `refused to signal ${state.refused.size} live PID(s) that no longer carry the session token: ${[...state.refused].join(", ")}`
-        : cgroupReason;
+        : state.midExec.size > 0
+          ? `cleanup could not be confirmed: process(es) ${[...state.midExec.values()].map((identity) => identity.pid).join(", ")} may still be mid-exec with an unreadable environment`
+          : !state.emptyConfirmed
+            ? "cleanup could not be confirmed: did not observe two empty containment scans before the deadline"
+            : cgroupReason;
   return {
     mechanism: scope.mechanism,
     confirmed: reason === undefined,
