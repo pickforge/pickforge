@@ -950,7 +950,7 @@ export async function destroyContainmentScope(
 
   const reason =
     survivors.length > 0
-      ? `${survivors.length} contained process(es) survived SIGKILL: ${survivors.join(", ")}` +
+      ? `cleanup could not be confirmed for ${survivors.length} contained process(es): ${survivors.join(", ")}` +
         (unverified.length === 0
           ? ""
           : ` (${unverified.join(", ")} had an unreadable containment token or process identity)`)
