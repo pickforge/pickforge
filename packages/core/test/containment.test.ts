@@ -758,9 +758,61 @@ describe("containment identity safety", () => {
       killTimeoutMs: 300,
     });
     expect(result.confirmed).toBe(false);
-    expect(result.survivors).toContain(pid);
-    expect(result.reason).toMatch(/unreadable containment token/);
+    expect(result.survivors).toEqual([pid]);
+    expect(result.signaled).toEqual([]);
+    expect(result.refused).toEqual([]);
+    expect(result.reason).toBe(
+      `cleanup could not be confirmed for 1 contained process(es): ${pid}` +
+        ` (${pid} had an unreadable containment token or process identity)`,
+    );
     expect(isPidAlive(pid)).toBe(true);
+  }, 20_000);
+
+  it.each([false, true])("reports mixed survivors neutrally (unreadable after SIGTERM: %s)", async (afterTerm) => {
+    const scope = createContainmentScope({ id: "desk-mixed", useCgroup: false });
+    const opaque = spawnInScope(scope, "/bin/sleep", ["300"]);
+    const verified = spawnInScope(scope, "/bin/sleep", ["300"]);
+    expect(await waitFor(() =>
+      processCarriesToken(opaque, scope.token) && processCarriesToken(verified, scope.token),
+    )).toBe(true);
+
+    const read = fs.readFileSync;
+    const kill = process.kill;
+    const signals = new Map<number, Parameters<typeof process.kill>[1][]>();
+    let environReads = 0;
+    vi.spyOn(fs, "readFileSync").mockImplementation(((file, ...args) => {
+      if (file === `/proc/${opaque}/environ`) {
+        environReads += 1;
+        if (afterTerm ? signals.has(opaque) : environReads >= 2) {
+          throw Object.assign(new Error("controlled environ read failure"), { code: "EACCES" });
+        }
+      }
+      return read.call(fs, file, ...args);
+    }) as typeof fs.readFileSync);
+    vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+      if ((pid === opaque || pid === verified) && signal !== 0) {
+        signals.set(pid, [...(signals.get(pid) ?? []), signal]);
+        // Keep these owned fixtures alive to simulate pending survivors.
+        return true;
+      }
+      return kill.call(process, pid, signal);
+    });
+
+    const result = await destroyContainmentScope(scope, {
+      termTimeoutMs: 50,
+      killTimeoutMs: 50,
+    });
+    expect(result.confirmed).toBe(false);
+    expect(result.mechanism).toBe("marker");
+    expect([...result.survivors].sort()).toEqual([opaque, verified].sort());
+    expect([...result.signaled].sort()).toEqual((afterTerm ? [opaque, verified] : [verified]).sort());
+    expect(result.refused).toEqual([]);
+    expect(signals.get(opaque) ?? []).toEqual(afterTerm ? ["SIGTERM"] : []);
+    expect(signals.get(verified)).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(result.reason).toBe(
+      `cleanup could not be confirmed for 2 contained process(es): ${result.survivors.join(", ")}` +
+        ` (${opaque} had an unreadable containment token or process identity)`,
+    );
   }, 20_000);
 
   it("never confirms cleanup while an identified process has unreadable stat", async () => {
@@ -797,6 +849,10 @@ describe("containment identity safety", () => {
       expect.soft(result.confirmed).toBe(false);
       expect.soft(result.survivors).toContain(pid);
       expect.soft(result.signaled).not.toContain(pid);
+      expect.soft(result.reason).toBe(
+        `cleanup could not be confirmed for 1 contained process(es): ${pid}` +
+          ` (${pid} had an unreadable containment token or process identity)`,
+      );
       expect.soft(terminatingSignals).toEqual([]);
       expect.soft(result.refused).toEqual([]);
       expect.soft(isPidAlive(pid)).toBe(true);
