@@ -1005,6 +1005,36 @@ describe("containment identity safety", () => {
     expect(isPidAlive(pid)).toBe(true);
   }, 20_000);
 
+  it("discovers a process whose exec hides its token across multiple empty scans", async () => {
+    await withOwnedStatFixture("desk-exec-discovery", async ({ scope, pid, read, kill }) => {
+      let scans = 0;
+      const signaledAt: number[] = [];
+      fs.readFileSync = ((file, ...args) => {
+        if (file === `/proc/${pid}/environ` && ++scans <= 4) return "";
+        const value = read.call(fs, file, ...args);
+        if (file !== `/proc/${pid}/stat` || scans > 4) return value;
+        const content = String(value);
+        const close = content.lastIndexOf(")");
+        const fields = content.slice(close + 1).trim().split(/\s+/);
+        // execve has switched address spaces but has not populated env_end.
+        fields[51 - 3] = "0";
+        return `${content.slice(0, close + 1)} ${fields.join(" ")}\n`;
+      }) as typeof fs.readFileSync;
+      process.kill = (target, signal) => {
+        if (target === pid && signal !== 0) signaledAt.push(scans);
+        return kill.call(process, target, signal);
+      };
+      const result = await destroyContainmentScope(scope);
+      expect(result.confirmed).toBe(true);
+      expect(result.survivors).toEqual([]);
+      expect(result.signaled).toContain(pid);
+      expect(signaledAt.length).toBeGreaterThan(0);
+      expect(signaledAt.every((scan) => scan > 4)).toBe(true);
+      expect(isPidAlive(pid)).toBe(false);
+      expect(listContainedProcesses(scope.token)).toEqual([]);
+    });
+  }, 20_000);
+
   it("does not match a process whose token is only a prefix", async () => {
     const scope = createContainmentScope({ id: "desk-id02", useCgroup: false });
     const child = spawn("/bin/sleep", ["300"], {
@@ -1025,6 +1055,166 @@ describe("containment identity safety", () => {
     expect(result.signaled).not.toContain(pid);
     expect(isPidAlive(pid)).toBe(true);
   }, 20_000);
+});
+
+describe("containment initial exec discovery", () => {
+  interface ExecOptions {
+    settleAfter?: number;
+    state?: string;
+    flags?: string;
+    envEnd?: string;
+    statError?: string;
+    unreadableAfter?: number;
+    statUnreadableAfter?: number;
+    completeEmptyAfter?: number;
+  }
+
+  function execStat(content: string, scans: number, options: ExecOptions): string {
+    if (options.statError !== undefined || scans > (options.statUnreadableAfter ?? Infinity)) {
+      throw Object.assign(new Error("controlled stat failure"), { code: options.statError ?? "EACCES" });
+    }
+    const close = content.lastIndexOf(")");
+    const fields = content.slice(close + 1).trim().split(/\s+/);
+    if (scans <= (options.completeEmptyAfter ?? Infinity)) fields[51 - 3] = options.envEnd ?? "0";
+    if (options.state !== undefined) fields[0] = options.state;
+    if (options.flags !== undefined) fields[9 - 3] = options.flags;
+    return `${content.slice(0, close + 1)} ${fields.join(" ")}\n`;
+  }
+
+  function hideEnvironment(
+    pid: number,
+    read: typeof fs.readFileSync,
+    options: ExecOptions = {},
+  ): () => number {
+    let scans = 0;
+    fs.readFileSync = ((file, ...args) => {
+      if (file === `/proc/${pid}/environ`) {
+        scans += 1;
+        if (options.unreadableAfter !== undefined && scans > options.unreadableAfter) {
+          throw Object.assign(new Error("controlled environ failure"), { code: "EACCES" });
+        }
+        if (scans <= (options.settleAfter ?? Infinity)) return "";
+      }
+      if (file !== `/proc/${pid}/stat` || scans > (options.settleAfter ?? Infinity)) {
+        return read.call(fs, file, ...args);
+      }
+      return execStat(String(read.call(fs, file, ...args)), scans, options);
+    }) as typeof fs.readFileSync;
+    return () => scans;
+  }
+
+  it("fails closed at the existing deadlines without signaling an unowned exec", async () => {
+    await withOwnedStatFixture("desk-exec-stalled", async ({ scope, pid, read, kill }) => {
+      const scans = hideEnvironment(pid, read);
+      const terminatingSignals: Parameters<typeof process.kill>[1][] = [];
+      process.kill = (target, signal) => {
+        if (target === pid && signal !== 0) terminatingSignals.push(signal);
+        return kill.call(process, target, signal);
+      };
+      const result = await destroyContainmentScope(scope, { termTimeoutMs: 60, killTimeoutMs: 60 });
+      expect(scans()).toBeGreaterThan(2);
+      expect(result.confirmed).toBe(false);
+      expect(result.reason).toContain("mid-exec");
+      expect(result.reason).toContain(String(pid));
+      // Unknown ownership must not be reported as an established survivor.
+      expect(result.survivors).toEqual([]);
+      expect(result.refused).toEqual([]);
+      expect(result.signaled).toEqual([]);
+      expect(terminatingSignals).toEqual([]);
+      expect(isPidAlive(pid)).toBe(true);
+    });
+  });
+
+  it.each([
+    { name: "environment", unreadableAfter: 1 },
+    { name: "identity", statUnreadableAfter: 1 },
+  ])("retains an unresolved exec whose $name becomes unreadable", async (options) => {
+    await withOwnedStatFixture("desk-exec-unreadable", async ({ scope, pid, read }) => {
+      const scans = hideEnvironment(pid, read, options);
+      const result = await destroyContainmentScope(scope, { termTimeoutMs: 60, killTimeoutMs: 60 });
+      expect(scans()).toBeGreaterThan(2);
+      expect(result.confirmed).toBe(false);
+      expect(result.reason).toContain("mid-exec");
+      expect(result.signaled).toEqual([]);
+      expect(result.survivors).toEqual([]);
+      expect(isPidAlive(pid)).toBe(true);
+    });
+  });
+
+  it("does not confirm on a single empty observation at either sweep deadline", async () => {
+    await withOwnedStatFixture("desk-exec-deadline", async ({ scope, pid, read }) => {
+      // Exec finishes between environ and stat: the environment read was
+      // empty, but stat already has the completed image's nonzero env_end.
+      hideEnvironment(pid, read, { envEnd: "4096" });
+      const result = await destroyContainmentScope(scope, { termTimeoutMs: 0, killTimeoutMs: 0 });
+      expect(result.confirmed).toBe(false);
+      expect(result.reason).toContain("two empty");
+      expect(result.signaled).toEqual([]);
+      expect(isPidAlive(pid)).toBe(true);
+    });
+  });
+
+  it("settles an exec that finishes with an empty environment without signaling it", async () => {
+    await withOwnedStatFixture("desk-exec-empty", async ({ pid, read }) => {
+      const scope = createContainmentScope({ id: "desk-exec-empty-other", useCgroup: false });
+      const scans = hideEnvironment(pid, read, { completeEmptyAfter: 2 });
+      const result = await destroyContainmentScope(scope);
+      expect(scans()).toBeGreaterThan(2);
+      expect(result.confirmed).toBe(true);
+      expect(result.signaled).toEqual([]);
+      expect(isPidAlive(pid)).toBe(true);
+    });
+  });
+
+  it("continues discovery in the kill sweep when exec settles at the term deadline", async () => {
+    await withOwnedStatFixture("desk-exec-term-deadline", async ({ scope, pid, read }) => {
+      hideEnvironment(pid, read, { settleAfter: 1, envEnd: "4096" });
+      const result = await destroyContainmentScope(scope, { termTimeoutMs: 0, killTimeoutMs: 300 });
+      expect(result.confirmed).toBe(true);
+      expect(result.signaled).toContain(pid);
+      expect(result.survivors).toEqual([]);
+      expect(isPidAlive(pid)).toBe(false);
+    });
+  });
+
+  it("waits for an unrelated exec to settle without claiming or signaling it", async () => {
+    await withOwnedStatFixture("desk-exec-foreign", async ({ pid, read, kill }) => {
+      const scope = createContainmentScope({ id: "desk-exec-other", useCgroup: false });
+      const scans = hideEnvironment(pid, read, { settleAfter: 4 });
+      const terminatingSignals: Parameters<typeof process.kill>[1][] = [];
+      process.kill = (target, signal) => {
+        if (target === pid && signal !== 0) terminatingSignals.push(signal);
+        return kill.call(process, target, signal);
+      };
+      const result = await destroyContainmentScope(scope);
+      expect(scans()).toBeGreaterThan(4);
+      expect(result.confirmed).toBe(true);
+      expect(result.survivors).toEqual([]);
+      expect(result.refused).toEqual([]);
+      expect(result.signaled).toEqual([]);
+      expect(terminatingSignals).toEqual([]);
+      expect(isPidAlive(pid)).toBe(true);
+    });
+  });
+
+  it.each([
+    { name: "completed empty environment", envEnd: "4096" },
+    { name: "kernel thread", flags: String(0x00200000) },
+    { name: "zombie", state: "Z" },
+    { name: "unreadable stat", statError: "EACCES" },
+    { name: "missing stat", statError: "ENOENT" },
+  ])("does not classify $name as an unresolved exec", async (options) => {
+    await withOwnedStatFixture("desk-exec-filter", async ({ pid, read }) => {
+      const scope = createContainmentScope({ id: "desk-exec-filter-other", useCgroup: false });
+      hideEnvironment(pid, read, options);
+      const result = await destroyContainmentScope(scope, { termTimeoutMs: 60, killTimeoutMs: 60 });
+      expect(result.confirmed).toBe(true);
+      expect(result.signaled).toEqual([]);
+      expect(result.survivors).toEqual([]);
+      expect(result.refused).toEqual([]);
+      expect(isPidAlive(pid)).toBe(true);
+    });
+  });
 });
 
 describe("containment cleanup failure reporting", () => {
