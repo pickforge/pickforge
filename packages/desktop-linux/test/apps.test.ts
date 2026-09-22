@@ -164,6 +164,74 @@ describe("app wait cleanup", () => {
     }
   });
 
+  it("does not count supervisor startup against the launch grace window", async () => {
+    // A supervisor whose own startup outlasts the grace window (#191). The
+    // wrapper delays with a builtin, so nothing but the app ever joins the
+    // group, and then becomes the real Node by exec, keeping the leader pid.
+    const fifo = path.join(root, "slow-supervisor.fifo");
+    expect(spawnSync("mkfifo", [fifo]).status).toBe(0);
+    const realNode = process.execPath;
+    const slowNode = path.join(root, "slow-node");
+    writeExecutable(
+      slowNode,
+      `#!/bin/bash\nread -t 1 _ <>'${fifo}'\nexec '${realNode}' "$@"\n`,
+    );
+    const command = path.join(root, "exits-at-once");
+    writeExecutable(command, "#!/bin/sh\nexit 0\n");
+    const scope = createContainmentScope({ id: "desk-slow-supervisor", useCgroup: false });
+    const startedAt = Date.now();
+    process.execPath = slowNode;
+    try {
+      await expect(
+        launchApp({
+          display: DISPLAY,
+          command,
+          logDir: path.join(root, "slow-supervisor-logs"),
+          containment: scope,
+        }),
+      ).rejects.toThrow(
+        /exited immediately.*still held by the session's marker containment/,
+      );
+      // The launch really did wait through the delayed supervisor start.
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(1_000);
+    } finally {
+      process.execPath = realNode;
+      await destroyContainmentScope(scope, { termTimeoutMs: 500, killTimeoutMs: 500 });
+    }
+  });
+
+  it("fails the launch and stops a supervisor that never spawns the app", async () => {
+    // A supervisor stuck before its spawn must not be reported as a launched
+    // app once the bounded wait expires; the failure path stops its group.
+    const fifo = path.join(root, "stuck-supervisor.fifo");
+    expect(spawnSync("mkfifo", [fifo]).status).toBe(0);
+    const realNode = process.execPath;
+    const stuckNode = path.join(root, "stuck-node");
+    writeExecutable(
+      stuckNode,
+      `#!/bin/bash\necho $$ > '${stuckNode}.pid'\nread _ <>'${fifo}'\nexec '${realNode}' "$@"\n`,
+    );
+    const command = path.join(root, "never-started");
+    writeExecutable(command, `#!/bin/sh\ntouch '${command}.ran'\nexec /bin/sleep 30\n`);
+    const scope = createContainmentScope({ id: "desk-stuck-supervisor", useCgroup: false });
+    process.execPath = stuckNode;
+    try {
+      await expect(
+        launchApp({
+          display: DISPLAY,
+          command,
+          logDir: path.join(root, "stuck-supervisor-logs"),
+          containment: scope,
+        }),
+      ).rejects.toThrow(/containment supervisor did not start .*never-started/);
+      expect(fs.existsSync(`${command}.ran`)).toBe(false);
+      await expectGroupGone(readStartedGroup(`${stuckNode}.pid`));
+    } finally {
+      process.execPath = realNode;
+      await destroyContainmentScope(scope, { termTimeoutMs: 500, killTimeoutMs: 500 });
+    }
+  }, 20_000);
+
   it("stops the process group when the window wait times out", async () => {
     const { command, pidFile } = makeLongRunningCommand("window-timeout");
     const binDir = makeXdotool("window-timeout-bin", "exit 1");
