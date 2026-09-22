@@ -43,6 +43,37 @@ interface FakeCgroup {
   migrateError?: NodeJS.ErrnoException;
   /** Where a migrated pid claims to be afterwards. */
   migratedPath: string;
+  /** Filesystem magic `statfs` reports for the scope directory. */
+  statfsType: number;
+  /**
+   * Which kernel access removes the directory first, simulating a concurrent
+   * session create pruning this (empty) scope during destroy.
+   */
+  pruneAt?: "statfs" | "cgroup.procs" | "cgroup.kill";
+  /** Error code the pruned directory's files fail with. */
+  pruneCode: string;
+  /** How long the pruned directory stays visible to `existsSync`. */
+  lingerMs: number;
+  removedAt?: number;
+}
+
+const CGROUP2_SUPER_MAGIC = 0x63677270;
+const TMPFS_MAGIC = 0x01021994;
+
+function pruned(fake: FakeCgroup, target: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(`${fake.pruneCode}: ${target}`), {
+    code: fake.pruneCode,
+  });
+}
+
+function prune(fake: FakeCgroup): void {
+  fake.removed = true;
+  fake.removedAt = Date.now();
+}
+
+function visible(fake: FakeCgroup): boolean {
+  if (!fake.removed) return true;
+  return Date.now() < (fake.removedAt ?? 0) + fake.lingerMs;
 }
 
 const strays = new Set<number>();
@@ -57,6 +88,9 @@ function newFake(overrides: Partial<FakeCgroup> = {}): FakeCgroup {
     pathOf: new Map(),
     unreadable: new Set(),
     migratedPath: "/",
+    statfsType: CGROUP2_SUPER_MAGIC,
+    pruneCode: "ENOENT",
+    lingerMs: 0,
     ...overrides,
   };
 }
@@ -67,16 +101,19 @@ function installFakeCgroup(fake: FakeCgroup): void {
   const realWrite = fs.writeFileSync;
 
   vi.spyOn(fs, "existsSync").mockImplementation(((target: fs.PathLike) =>
-    target === SCOPE_DIR ? !fake.removed : realExists(target)) as typeof fs.existsSync);
+    target === SCOPE_DIR ? visible(fake) : realExists(target)) as typeof fs.existsSync);
 
   vi.spyOn(fs, "statfsSync").mockImplementation(((target: fs.PathLike) => {
     if (target !== SCOPE_DIR) throw new Error(`unexpected statfs ${String(target)}`);
-    // CGROUP2_SUPER_MAGIC
-    return { type: 0x63677270 } as ReturnType<typeof fs.statfsSync>;
+    if (fake.pruneAt === "statfs") prune(fake);
+    if (fake.removed) throw pruned(fake, SCOPE_DIR);
+    return { type: fake.statfsType } as ReturnType<typeof fs.statfsSync>;
   }) as typeof fs.statfsSync);
 
   vi.spyOn(fs, "readFileSync").mockImplementation(((file, ...rest) => {
     if (file === path.join(SCOPE_DIR, "cgroup.procs")) {
+      if (fake.pruneAt === "cgroup.procs") prune(fake);
+      if (fake.removed) throw pruned(fake, String(file));
       return `${fake.members.join("\n")}\n`;
     }
     if (file === "/proc/self/cgroup") return `0::${fake.ownPath}\n`;
@@ -97,6 +134,8 @@ function installFakeCgroup(fake: FakeCgroup): void {
 
   vi.spyOn(fs, "writeFileSync").mockImplementation(((file, data, ...rest) => {
     if (file === path.join(SCOPE_DIR, "cgroup.kill")) {
+      if (fake.pruneAt === "cgroup.kill") prune(fake);
+      if (fake.removed) throw pruned(fake, String(file));
       fake.killed = true;
       fake.members = [];
       return;
@@ -306,6 +345,56 @@ describe("cgroup cleanup guards (simulated cgroup)", () => {
     expect(fake.killed).toBe(false);
     expect(result.confirmed).toBe(false);
     expect(result.reason).toMatch(/after being moved out/);
+  }, 20_000);
+
+  it.each(["statfs", "cgroup.procs", "cgroup.kill"] as const)(
+    "confirms a scope that a concurrent create pruned during destroy, at %s, without killing or signalling",
+    async (pruneAt) => {
+      // The scope exists when destroy starts and vanishes before the next
+      // kernel access: a sibling session's create-time prune removed the
+      // still-empty cgroup. Nothing is left to kill, so cleanup is confirmed
+      // by the marker sweep alone.
+      const fake = newFake({ members: [], pruneAt });
+      installFakeCgroup(fake);
+
+      const result = await destroy();
+
+      expect(fake.removed).toBe(true);
+      expect(fake.killed).toBe(false);
+      expect(result.confirmed).toBe(true);
+      expect(result.reason).toBeUndefined();
+      expect(result.signaled).toEqual([]);
+    },
+    20_000,
+  );
+
+  it("waits out a pruned directory that is still visible while its rmdir completes", async () => {
+    // Observed on a real kernel: `cgroup.procs` already fails with ENODEV
+    // while the directory entry lingers for under a millisecond.
+    const fake = newFake({
+      members: [],
+      pruneAt: "cgroup.procs",
+      pruneCode: "ENODEV",
+      lingerMs: 40,
+    });
+    installFakeCgroup(fake);
+
+    const result = await destroy();
+
+    expect(fake.killed).toBe(false);
+    expect(result.confirmed).toBe(true);
+    expect(result.signaled).toEqual([]);
+  }, 20_000);
+
+  it("keeps refusing a path that exists but is not on a cgroup v2 filesystem", async () => {
+    const fake = newFake({ members: [], statfsType: TMPFS_MAGIC });
+    installFakeCgroup(fake);
+
+    const result = await destroy();
+
+    expect(fake.killed).toBe(false);
+    expect(result.confirmed).toBe(false);
+    expect(result.reason).toMatch(/is not on a cgroup v2 filesystem/);
   }, 20_000);
 
   it("refuses a scope whose member list cannot be read", async () => {

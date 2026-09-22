@@ -68,6 +68,8 @@ const SCOPE_PREFIX = "pickforge-";
 const SCOPE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 /** How long a member whose ownership cannot yet be read may stay undecided. */
 const MEMBER_VERIFY_TIMEOUT_MS = 1_000;
+/** How long a pruned scope directory may stay visible after its files fail. */
+const PRUNE_SETTLE_MS = 100;
 const INSIDE_SCOPE_ADVICE =
   "Run the command from a shell outside the session, not from one started by `desktop exec`.";
 
@@ -696,6 +698,37 @@ function classifyCgroupMember(
 }
 
 /**
+ * What a pre-kill check decided: `cgroup.kill` may be written, the scope
+ * cgroup has vanished so there is nothing left to kill, or the reason the
+ * kill is refused.
+ */
+type KillGuard = "kill" | "vacated" | { refusal: string };
+
+/**
+ * Classify a check that just failed on a scope cgroup that existed when
+ * destroy began. If the directory is gone, a concurrent session create pruned
+ * it as an empty scope (`pruneEmptyScopeCgroups`); the kernel refuses `rmdir`
+ * on a cgroup with members, so a vanished scope is a vacated one and the
+ * failure is that window, not a foreign path. The entry can stay visible for
+ * a moment after its files already fail (a `cgroup.procs` read gets ENODEV
+ * while the rmdir completes), so a directory that is still there is given a
+ * short bound to disappear; one that stays failed the check for real and its
+ * refusal stands. Either way the marker sweep still runs and must confirm on
+ * its own.
+ */
+async function vacatedOr(
+  cgroupDir: string,
+  refusal: string,
+): Promise<KillGuard> {
+  const deadline = Date.now() + PRUNE_SETTLE_MS;
+  while (fs.existsSync(cgroupDir)) {
+    if (Date.now() >= deadline) return { refusal };
+    await sleep(POLL_INTERVAL_MS);
+  }
+  return "vacated";
+}
+
+/**
  * Prove, immediately before `cgroup.kill`, that every process the kill would
  * reach is this session's own. A directory named `pickforge-<id>` on a cgroup
  * v2 filesystem is already bound to one session, so this is the second, live
@@ -708,11 +741,13 @@ function classifyCgroupMember(
 async function verifyCgroupMembership(
   cgroupDir: string,
   token: string,
-): Promise<string | undefined> {
+): Promise<KillGuard> {
   const deadline = Date.now() + MEMBER_VERIFY_TIMEOUT_MS;
   for (;;) {
     const members = readCgroupProcs(cgroupDir);
-    if (members === undefined) return `could not read ${cgroupDir}/cgroup.procs`;
+    if (members === undefined) {
+      return vacatedOr(cgroupDir, `could not read ${cgroupDir}/cgroup.procs`);
+    }
     const chain = selfAndAncestorIdentities();
     const inScope = new Set(members);
     const undecided: number[] = [];
@@ -724,17 +759,19 @@ async function verifyCgroupMembership(
       else if (verdict === "unknown") undecided.push(pid);
     }
     if (foreign.length > 0) {
-      return (
-        `refusing cgroup cleanup: ${cgroupDir} holds process(es) that do not ` +
-        `carry this session's containment token: ${foreign.join(", ")}`
-      );
+      return {
+        refusal:
+          `refusing cgroup cleanup: ${cgroupDir} holds process(es) that do not ` +
+          `carry this session's containment token: ${foreign.join(", ")}`,
+      };
     }
-    if (undecided.length === 0) return undefined;
+    if (undecided.length === 0) return "kill";
     if (Date.now() >= deadline) {
-      return (
-        `refusing cgroup cleanup: could not verify that process(es) ` +
-        `${undecided.join(", ")} in ${cgroupDir} belong to this session`
-      );
+      return {
+        refusal:
+          `refusing cgroup cleanup: could not verify that process(es) ` +
+          `${undecided.join(", ")} in ${cgroupDir} belong to this session`,
+      };
     }
     await sleep(POLL_INTERVAL_MS);
   }
@@ -748,18 +785,21 @@ async function verifyCgroupMembership(
 async function guardCgroupKill(
   cgroupDir: string,
   token: string,
-): Promise<string | undefined> {
+): Promise<KillGuard> {
   if (!isCgroup2Dir(cgroupDir)) {
-    return `refusing cgroup cleanup: ${cgroupDir} is not on a cgroup v2 filesystem`;
+    return vacatedOr(
+      cgroupDir,
+      `refusing cgroup cleanup: ${cgroupDir} is not on a cgroup v2 filesystem`,
+    );
   }
   const members = readCgroupProcs(cgroupDir);
   if (members === undefined) {
-    return `could not read ${cgroupDir}/cgroup.procs`;
+    return vacatedOr(cgroupDir, `could not read ${cgroupDir}/cgroup.procs`);
   }
   const inside = ownChainInside(cgroupDir, members);
   const evacuated =
     inside.length === 0 ? undefined : evacuateOwnChain(cgroupDir, inside);
-  if (evacuated !== undefined) return evacuated;
+  if (evacuated !== undefined) return { refusal: evacuated };
   return verifyCgroupMembership(cgroupDir, token);
 }
 
@@ -952,9 +992,12 @@ async function destroyCgroupMembers(
   if (problem !== undefined) return `refusing cgroup cleanup: ${problem}`;
   const cgroupDir = scope.cgroupDir as string;
   if (!fs.existsSync(cgroupDir)) return undefined;
-  const blocked = await guardCgroupKill(cgroupDir, scope.token);
-  if (blocked !== undefined) return blocked;
-  if (!killCgroup(cgroupDir)) return `could not write ${cgroupDir}/cgroup.kill`;
+  let guard = await guardCgroupKill(cgroupDir, scope.token);
+  if (guard === "kill" && !killCgroup(cgroupDir)) {
+    guard = await vacatedOr(cgroupDir, `could not write ${cgroupDir}/cgroup.kill`);
+  }
+  if (guard === "vacated") return undefined;
+  if (guard !== "kill") return guard.refusal;
   if (!(await waitForCgroupEmpty(cgroupDir, timeoutMs))) {
     return `cgroup ${cgroupDir} still has members after cgroup.kill`;
   }
