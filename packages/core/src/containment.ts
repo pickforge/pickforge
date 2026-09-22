@@ -247,12 +247,14 @@ export function containmentScopeProblem(
   return scopeCgroupProblem(scope.cgroupDir, scope.id);
 }
 
-/** Whether a directory really lives on a cgroup v2 filesystem. */
-function isCgroup2Dir(dir: string): boolean {
+type CgroupFsProbe = "cgroup2" | "foreign" | "unreadable";
+
+/** Which filesystem a directory lives on, or that it could not be asked. */
+function probeCgroupFs(dir: string): CgroupFsProbe {
   try {
-    return fs.statfsSync(dir).type === CGROUP2_SUPER_MAGIC;
+    return fs.statfsSync(dir).type === CGROUP2_SUPER_MAGIC ? "cgroup2" : "foreign";
   } catch {
-    return false;
+    return "unreadable";
   }
 }
 
@@ -705,6 +707,20 @@ function classifyCgroupMember(
 type KillGuard = "kill" | "vacated" | { refusal: string };
 
 /**
+ * Whether the kernel reports no entry at all at `cgroupDir`. Only ENOENT
+ * counts: a directory that cannot be inspected (EACCES on a parent, say) may
+ * well still hold members, so it is not missing, and `existsSync`, which
+ * folds every error into `false`, must not decide this.
+ */
+function scopeDirMissing(cgroupDir: string): boolean {
+  try {
+    return fs.lstatSync(cgroupDir, { throwIfNoEntry: false }) === undefined;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Classify a check that just failed on a scope cgroup that existed when
  * destroy began. If the directory is gone, a concurrent session create pruned
  * it as an empty scope (`pruneEmptyScopeCgroups`); the kernel refuses `rmdir`
@@ -712,16 +728,16 @@ type KillGuard = "kill" | "vacated" | { refusal: string };
  * failure is that window, not a foreign path. The entry can stay visible for
  * a moment after its files already fail (a `cgroup.procs` read gets ENODEV
  * while the rmdir completes), so a directory that is still there is given a
- * short bound to disappear; one that stays failed the check for real and its
- * refusal stands. Either way the marker sweep still runs and must confirm on
- * its own.
+ * short bound to disappear; one that stays, or cannot be inspected, failed
+ * the check for real and its refusal stands. Either way the marker sweep
+ * still runs and must confirm on its own.
  */
 async function vacatedOr(
   cgroupDir: string,
   refusal: string,
 ): Promise<KillGuard> {
   const deadline = Date.now() + PRUNE_SETTLE_MS;
-  while (fs.existsSync(cgroupDir)) {
+  while (!scopeDirMissing(cgroupDir)) {
     if (Date.now() >= deadline) return { refusal };
     await sleep(POLL_INTERVAL_MS);
   }
@@ -786,11 +802,12 @@ async function guardCgroupKill(
   cgroupDir: string,
   token: string,
 ): Promise<KillGuard> {
-  if (!isCgroup2Dir(cgroupDir)) {
-    return vacatedOr(
-      cgroupDir,
-      `refusing cgroup cleanup: ${cgroupDir} is not on a cgroup v2 filesystem`,
-    );
+  const filesystem = probeCgroupFs(cgroupDir);
+  if (filesystem !== "cgroup2") {
+    const refusal = `refusing cgroup cleanup: ${cgroupDir} is not on a cgroup v2 filesystem`;
+    // A positive answer that this is some other filesystem is final; only a
+    // statfs that could not answer may be the prune window.
+    return filesystem === "foreign" ? { refusal } : vacatedOr(cgroupDir, refusal);
   }
   const members = readCgroupProcs(cgroupDir);
   if (members === undefined) {
