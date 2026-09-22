@@ -671,14 +671,15 @@ In 0.6.0, `PICKLAB_TELEMETRY` is still accepted only when `PICKFORGE_TELEMETRY` 
 ## Support matrix
 
 These boundaries come from the published 0.4.0-beta.1 and 0.4.0-alpha.2
-release packets. They are not evidence of a completed stable-artifact pass.
-Unlisted host/target combinations are unverified and unsupported.
+release packets and the 0.6.0 native desktop acceptance. They are not evidence
+of a completed stable-artifact pass. Unlisted host/target combinations are
+unverified and unsupported.
 
 | Surface | Host → target | Support and limits |
 | --- | --- | --- |
 | Flutter deep integration | Linux x86_64 → Flutter Linux desktop | Verified Rust `pickforge doctor/init/evidence` and generated official Dart MCP configuration. The desktop fixture separately proved counter interaction and state-preserving hot reload through `flutter run`, not a Dart MCP reload call. Flutter and Dart must be installed. |
 | Flutter integration CLI | macOS arm64 → Flutter macOS fixture | Verified Rust `doctor/init/evidence` and generated Dart MCP. The fixture GUI was driven by an external sandboxed driver, not the Pickforge lab. No macOS lab support. |
-| Desktop lab | Linux x86_64 → isolated X11/Xvfb desktop | Verified Flutter fixture screenshots, clicks and teardown. Flutter hot reload was driven separately, not by the lab. Requires Xvfb, xdotool and screenshot tooling; x11vnc is needed for VNC observation. This is not native Wayland or arbitrary desktop-app certification. |
+| Desktop lab | Linux x86_64 → isolated X11/Xvfb desktop | Verified native app journeys against the published 0.6.0 package: zenity form editing with ASCII and Unicode text, a file dialog, LibreOffice Writer scrolling and drag selection, a focus change to a second window, failed actions, pause, takeover and resume, and cancellation with cleanup, each with a recorded evidence outcome and an independent image review. Earlier packets verified Flutter fixture screenshots, clicks and teardown; Flutter hot reload was driven separately, not by the lab. Requires Xvfb, xdotool and screenshot tooling; x11vnc is needed for VNC observation. Not native Wayland (tracked in #155), not the user's existing desktop, and not certification of arbitrary desktop apps. |
 | Headed browser lab | Linux → isolated headed Chrome/Chromium | Available lab surface, but no successful browser journey is proved by these packets. Unverified for stable support. Requires desktop dependencies, Chrome/Chromium and a live browser session before the DevTools relay starts. |
 | Android APK/emulator lab | Linux x86_64 → API 37 x86_64 emulator | Verified Flutter release APK install, launch, taps, screenshots, UI tree, logcat and background/hot resume. Requires Android SDK command-line tools, platform-tools/ADB, emulator, system image, a dedicated AVD and working KVM for the tested setup. Use 3072 MiB guest RAM to reproduce the passing beta.1 setup: 2 GB failed twice, with one confirmed low-memory kill. The beta.1 3 GB result is one run, not a portable minimum or automatic default. No Android hot-reload proof. |
 | Agent harnesses | Linux x86_64 → generated Dart MCP and Pickforge MCP | Claude Code, Codex and Pi verified with actual model-driven tool calls. Pi requires `pi-mcp-adapter` and passed on retry. This does not certify browser use or every tool in every harness. |
