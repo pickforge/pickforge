@@ -4,6 +4,7 @@ import {
   ObservationTimeoutError,
   observationBudget,
   isProcessGroupAlive,
+  listProcessGroupMembers,
   readProcessGroupLeaderIdentity,
   readProcessIdentity,
   runCommand,
@@ -26,6 +27,13 @@ const DEFAULT_WAIT_TIMEOUT_MS = 10_000;
 export const DEFAULT_EXEC_WINDOW_TIMEOUT_MS = 30_000;
 const LAUNCH_GRACE_MS = 300;
 const LAUNCH_POLL_INTERVAL_MS = 50;
+/**
+ * Upper bound on waiting for the containment supervisor to spawn the app.
+ * Only a stuck supervisor gets near it; a merely slow one is observed long
+ * before. Expiry is a failed launch, never a launch that is assumed to be
+ * fine.
+ */
+const SUPERVISOR_SPAWN_TIMEOUT_MS = 10_000;
 
 export interface LaunchAppOptions {
   display: string;
@@ -147,6 +155,35 @@ function resolveSpawnTarget(opts: LaunchAppOptions): {
   return { command: contained.command, args: contained.args, name };
 }
 
+/**
+ * With a containment scope the group leader is the supervisor, and the app
+ * only becomes a group member once Node has started and the scope is joined.
+ * A grace window measured from the supervisor's own start counts that startup
+ * against the app, so on a loaded host the group can outlive the window before
+ * the app has run at all and an app that exits at once is reported as launched
+ * (#191). Wait until a second group member is visible, or the group has
+ * already died, before the window opens; a supervisor that does neither
+ * within the bound is a failed launch, which the caller cleans up. Without a
+ * supervisor the leader is the app itself and there is nothing to wait for.
+ */
+async function waitForSupervisedSpawn(
+  opts: LaunchAppOptions,
+  leader: number,
+  logPath: string,
+): Promise<void> {
+  if (opts.containment === undefined) return;
+  const deadline = Date.now() + SUPERVISOR_SPAWN_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (!isProcessGroupAlive(leader)) return;
+    if (listProcessGroupMembers(leader).some((pid) => pid !== leader)) return;
+    await sleep(LAUNCH_POLL_INTERVAL_MS);
+  }
+  throw new Error(
+    `The containment supervisor did not start ${opts.command} on ${opts.display} ` +
+      `within ${SUPERVISOR_SPAWN_TIMEOUT_MS}ms. Log: ${logPath}`,
+  );
+}
+
 async function startApp(opts: LaunchAppOptions): Promise<StartedApp> {
   parseDisplayNumber(opts.display);
   const target = resolveSpawnTarget(opts);
@@ -171,6 +208,7 @@ async function startApp(opts: LaunchAppOptions): Promise<StartedApp> {
   let identity = readProcessIdentity(daemon.pid);
   let succeeded = false;
   try {
+    await waitForSupervisedSpawn(opts, daemon.pid, daemon.logPath);
     const graceDeadline = Date.now() + LAUNCH_GRACE_MS;
     while (Date.now() < graceDeadline) {
       if (!isProcessGroupAlive(daemon.pid)) {

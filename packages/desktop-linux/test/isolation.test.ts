@@ -134,7 +134,7 @@ describeWithXvfb("desktop session runtime isolation", () => {
     const dump = path.join(tmpRoot, "app-env.txt");
     const command = writeExecutable(
       "dump-env.sh",
-      `for name in HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS DBUS_SYSTEM_BUS_ADDRESS DISPLAY WAYLAND_DISPLAY PICKFORGE_CONTAINMENT_TOKEN; do printf '%s=' "$name"; printenv "$name"; done > "${dump}"\nexec /bin/sleep 300`,
+      `for name in HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS DBUS_SYSTEM_BUS_ADDRESS DISPLAY WAYLAND_DISPLAY PICKFORGE_CONTAINMENT_TOKEN; do printf '%s=' "$name"; printenv "$name"; done > "${dump}.part" && mv "${dump}.part" "${dump}"\nexec /bin/sleep 300`,
     );
 
     const isolation = await ensureDesktopSessionIsolation(handle.id, env);
