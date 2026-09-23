@@ -1008,7 +1008,9 @@ async function destroyCgroupMembers(
   const problem = containmentScopeProblem(scope);
   if (problem !== undefined) return `refusing cgroup cleanup: ${problem}`;
   const cgroupDir = scope.cgroupDir as string;
-  if (!fs.existsSync(cgroupDir)) return undefined;
+  // Only a scope the kernel reports as absent has nothing to kill. One that
+  // merely cannot be inspected goes through the guard and is refused there.
+  if (scopeDirMissing(cgroupDir)) return undefined;
   let guard = await guardCgroupKill(cgroupDir, scope.token);
   if (guard === "kill" && !killCgroup(cgroupDir)) {
     guard = await vacatedOr(cgroupDir, `could not write ${cgroupDir}/cgroup.kill`);
