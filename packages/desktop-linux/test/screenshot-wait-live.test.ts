@@ -25,6 +25,11 @@ if (process.env.PICKFORGE_REQUIRE_DESKTOP_WAIT === "1" && !available) {
   );
 }
 
+// zenity keeps its window mapped for this long; the paint wait below fits inside it
+// together with the 8 s window wait.
+const WINDOW_LIFETIME_S = 30;
+const PAINT_WAIT_MS = 20_000;
+
 it.skipIf(!available)("captures geometry and distinguishes pixel change from PNG metadata on managed Xvfb", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-wait-live-"));
   const env = { ...process.env, PICKFORGE_HOME: path.join(root, "home") };
@@ -76,7 +81,7 @@ it.skipIf(!available)("captures geometry and distinguishes pixel change from PNG
     const launched = execApp({
       display: session.display,
       command: "zenity",
-      args: ["--info", "--title", "Wait Live", "--text", "Wait Live", "--timeout", "20"],
+      args: ["--info", "--title", "Wait Live", "--text", "Wait Live", "--timeout", String(WINDOW_LIFETIME_S)],
       logDir: session.logDir,
       env,
       ...isolation,
@@ -91,10 +96,15 @@ it.skipIf(!available)("captures geometry and distinguishes pixel change from PNG
     expect(window.reason).toBe("window");
     expect(window.window?.name).toContain("Wait Live");
 
+    // xdotool lists the window once it is mapped; GTK paints its first frame later,
+    // about 250 ms after that unloaded and 8 s or more under heavy CPU load (#193).
+    // This pixel-change wait is the paint wait, so its budget covers the rest of the
+    // window's lifetime instead of a fixed 5 s. Unloaded it still returns at the
+    // first changed sample; the change detection itself is unchanged.
     const changed = await desktopWait({
       display: session.display,
       mode: { type: "changed", baselinePath: firstPath },
-      timeoutMs: 5_000,
+      timeoutMs: PAINT_WAIT_MS,
       env,
     });
     expect(changed.reason).toBe("changed");
@@ -102,4 +112,4 @@ it.skipIf(!available)("captures geometry and distinguishes pixel change from PNG
     await destroyDesktopSession(session.id, env);
     fs.rmSync(root, { recursive: true, force: true });
   }
-}, 40_000);
+}, 60_000);
