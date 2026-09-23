@@ -437,32 +437,40 @@ describe("cgroup cleanup guards (simulated cgroup)", () => {
     expect(result.reason).toMatch(/is not on a cgroup v2 filesystem/);
   }, 20_000);
 
-  it("keeps refusing a populated scope that became inaccessible rather than gone", async () => {
-    // The parent lost search permission after the existence check: statfs
-    // and lstat fail with EACCES and `existsSync` reports false, but the
-    // cgroup and its stranger are still there. Not provably gone, so refused.
-    const stranger = spawnMember(undefined);
-    const fake = newFake({ members: [stranger] });
-    installFakeCgroup(fake);
-    const exists = vi.mocked(fs.existsSync);
-    const answer = exists.getMockImplementation() as typeof fs.existsSync;
-    exists.mockImplementation(((target: fs.PathLike) => {
-      const present = answer(target);
-      if (target === SCOPE_DIR) {
-        fake.accessError = Object.assign(new Error("EACCES: permission denied"), {
-          code: "EACCES",
-        });
+  it.each(["before destroy begins", "after the first existence probe"] as const)(
+    "keeps refusing a populated scope that is inaccessible rather than gone, %s",
+    async (when) => {
+      // The parent lost search permission: statfs and lstat fail with EACCES
+      // and `existsSync` reports false, but the cgroup and its stranger are
+      // still there. Not provably gone, so refused rather than confirmed.
+      const stranger = spawnMember(undefined);
+      const accessError = Object.assign(new Error("EACCES: permission denied"), {
+        code: "EACCES",
+      });
+      const fake = newFake({
+        members: [stranger],
+        ...(when === "before destroy begins" ? { accessError } : {}),
+      });
+      installFakeCgroup(fake);
+      if (when === "after the first existence probe") {
+        const lstat = vi.mocked(fs.lstatSync);
+        const answer = lstat.getMockImplementation() as typeof fs.lstatSync;
+        lstat.mockImplementation(((target: fs.PathLike) => {
+          const stats = answer(target);
+          fake.accessError = accessError;
+          return stats;
+        }) as typeof fs.lstatSync);
       }
-      return present;
-    }) as typeof fs.existsSync);
 
-    const result = await destroy();
+      const result = await destroy();
 
-    expect(fake.killed).toBe(false);
-    expect(result.confirmed).toBe(false);
-    expect(result.reason).toMatch(/is not on a cgroup v2 filesystem/);
-    expect(isPidAlive(stranger)).toBe(true);
-  }, 20_000);
+      expect(fake.killed).toBe(false);
+      expect(result.confirmed).toBe(false);
+      expect(result.reason).toMatch(/is not on a cgroup v2 filesystem/);
+      expect(isPidAlive(stranger)).toBe(true);
+    },
+    20_000,
+  );
 
   it("refuses a scope whose member list cannot be read", async () => {
     const fake = newFake({ members: [] });
