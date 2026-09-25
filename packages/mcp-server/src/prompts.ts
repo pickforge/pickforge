@@ -168,9 +168,58 @@ function registerDevicePassPrompt(server: McpServer): void {
   );
 }
 
+function registerFlutterComponentPreviewPrompt(server: McpServer): void {
+  server.registerPrompt(
+    "preview-flutter-component",
+    {
+      title: "Preview a Flutter component",
+      description:
+        "Render and verify one Flutter widget in isolation, without the full " +
+        "app, auth, routing, or backend, across states and viewports.",
+      argsSchema: {
+        widget: z
+          .string()
+          .describe('Target widget, e.g. "ProfileCard in lib/profile/profile_card.dart"'),
+        states: z
+          .string()
+          .optional()
+          .describe("States and data to render (default: normal plus stress states)"),
+        viewports: z
+          .string()
+          .optional()
+          .describe("Logical widths to capture (default: 390, 768, 1440 at DPR 1)"),
+      },
+    },
+    ({ widget, states, viewports }) =>
+      userMessage(
+        [
+          `Preview the Flutter widget \`${widget}\` in isolation, without starting the full app, auth, routing, or backend.`,
+          "",
+          `States: ${states ?? "normal plus stress states: long, empty, and error content where they apply"}`,
+          `Viewports: ${viewports ?? "390, 768, and 1440 logical pixels at DPR 1, unless the project says otherwise"}`,
+          "",
+          "1. Record `git status --short` as the baseline. Then discover before generating anything: the Flutter command (use `fvm flutter` when the repo has `.fvmrc`), the SDK version, the widget's constructor, and the theme, localization delegates, providers or inherited widgets, router and media dependencies, fonts, and assets it needs. Reuse existing test wrappers, builders, and fixtures; do not create a second app or test convention.",
+          "2. Choose lanes by purpose:",
+          "   a. Widget Previewer, preferred for interactive visual iteration when the SDK supports `flutter widget-preview start`. Write a temporary `@Preview` adapter that wraps the widget in the app's real theme, localizations, and inherited dependencies.",
+          "   b. Widget-test capture harness, always used for the checks: deterministic state matrices, exact logical sizes, overflow, semantics, and text scaling. Write a temporary test that sets the view size and DPR, pumps each state, and fails on overflow or any exception from `tester.takeException()`. It can also write captures outside the source tree when Chromium pixels are not needed.",
+          "   c. Temporary web entrypoint, only when the previewer is unavailable or cannot host the widget.",
+          "3. Track every path you create. Prefer paths outside the source tree. When Flutter needs a Dart file inside the package, use a unique name, confirm it did not exist, and record it for cleanup. Never modify production routing, app startup, committed feature code, existing golden baselines, or files you did not create.",
+          '4. Serve visual lanes from your own shell so the Flutter command and pub cache resolve: `flutter widget-preview start --web-server` for the previewer, or `flutter run -d web-server` for the web entrypoint, both on loopback. View the printed URL in a `session_create` (type "browser") session, which has a private profile: `desktop_key` ctrl+l, `desktop_type` the URL, then `desktop_key` Return. Never open it in the user\'s browser or on the user\'s real display. Chrome cannot shrink to phone widths, so give each viewport its own preview or route that wraps the widget in a `MediaQuery` and `SizedBox` at the requested logical size. Before each capture, wait with `desktop_wait` until sampled frames stay unchanged, so loading frames are not recorded. Capture each state and viewport with `desktop_screenshot` without `out` or `runSlug`, so every image joins the session\'s evidence run; take the runId from the first result, note which image shows which state and width, and inspect every image.',
+          "5. In the widget-test harness, check each state for text scaling (at least 1.0 and 2.0), semantics labels, the tap target and text contrast guidelines (`meetsGuideline`), overflow and exceptions, and every responsive breakpoint the widget has. Use real project fonts and assets. Report rendering that is not deterministic or that differs between the widget-test and Chromium engines.",
+          "6. Keep generated adapters, tests, screenshots, and logs temporary. Add permanent previews or golden baselines only if the user asks for them, and never accept or update goldens automatically.",
+          "7. Clean up in every outcome, including failure: stop the previewer or server, destroy the session with `session_destroy`, and delete only the paths you recorded. If a run is interrupted, print the exact paths and commands still needed to clean up.",
+          "8. Confirm `git status --short` matches the baseline. Then report evidence for each requested state and viewport: screenshot paths or run ids, check results, and anything you could not verify. Use `artifact_report` for the session's evidence run and record the verdict on that run with `evidence_outcome`. Give inspectedScreenshots only as run-relative `screenshots/<actionId>.png` paths of images you actually inspected.",
+          "",
+          HUMAN_BLOCKER_GUIDELINE,
+        ].join("\n"),
+      ),
+  );
+}
+
 export function registerPrompts(server: McpServer): void {
   registerPrompt1(server);
   registerPrompt2(server);
   registerPrompt3(server);
   registerDevicePassPrompt(server);
+  registerFlutterComponentPreviewPrompt(server);
 }
