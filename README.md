@@ -829,7 +829,14 @@ Resources, addressable as `pickforge://` URIs:
   The status includes a read-only viewer endpoint/readiness report when VNC is
   present. MCP never opens a host GUI; only the CLI launches viewer windows.
 
-Prompts: `test-flutter-desktop-visually`, `debug-android-apk`, `run-visual-regression-check`.
+Prompts: `test-flutter-desktop-visually`, `debug-android-apk`, `run-visual-regression-check`, `device_pass`, and `preview-flutter-component`.
+
+`preview-flutter-component` (required `widget`, optional `states` and
+`viewports`) renders one Flutter widget without the full app. It prefers the
+Flutter Widget Previewer, then a temporary widget-test harness, then a
+temporary web entrypoint, captures each state at 390, 768 and 1440 logical
+pixels by default, checks text scaling and semantics, and removes every file
+it generated.
 
 ## Architecture
 

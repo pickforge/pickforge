@@ -39,6 +39,7 @@ describe("prompts", () => {
     expect([...byName.keys()].sort()).toEqual([
       "debug-android-apk",
       "device_pass",
+      "preview-flutter-component",
       "run-visual-regression-check",
       "test-flutter-desktop-visually",
     ]);
@@ -62,6 +63,11 @@ describe("prompts", () => {
         .get("test-flutter-desktop-visually")
         ?.arguments?.map((argument) => argument.name),
     ).toContain("appCommand");
+    expect(byName.get("preview-flutter-component")?.arguments).toEqual([
+      expect.objectContaining({ name: "widget", required: true }),
+      expect.objectContaining({ name: "states", required: false }),
+      expect.objectContaining({ name: "viewports", required: false }),
+    ]);
   });
 
   it("delivers short acceptance instructions during initialization", () => {
@@ -172,5 +178,57 @@ describe("prompts", () => {
     expect(text).toContain("artifact_report");
     expect(text).toContain("test/baselines");
     expect(text).toContain("request_user_input");
+  });
+
+  it("guides an isolated flutter component preview", async () => {
+    const result = await lab.client.getPrompt({
+      name: "preview-flutter-component",
+      arguments: {
+        widget: "ProfileCard",
+        states: "signed out, 80-character name",
+        viewports: "360 and 1024",
+      },
+    });
+    const text = promptText(result);
+    expect(text).toContain("`ProfileCard`");
+    expect(text).toContain("States: signed out, 80-character name");
+    expect(text).toContain("Viewports: 360 and 1024");
+    expect(text).toMatch(/Discover before generating anything/);
+    expect(text).toMatch(/fvm flutter.*\.fvmrc/);
+    expect(text).toMatch(/theme, localization delegates, providers or inherited widgets/);
+    expect(text).toMatch(/Reuse existing test wrappers/);
+    expect(text).toMatch(/a\. Widget Previewer[\s\S]*b\. Widget-test capture harness[\s\S]*c\. Temporary web entrypoint, only when/);
+    expect(text).toContain("flutter widget-preview start");
+    expect(text).toContain("@Preview");
+    expect(text).toContain("tester.takeException()");
+    expect(text).toContain("session_create");
+    expect(text).toContain("desktop_launch");
+    expect(text).toContain("desktop_screenshot");
+    expect(text).toMatch(/never on the user's real display/);
+    expect(text).toMatch(/text scaling \(at least 1\.0 and 2\.0\), semantics labels/);
+    expect(text).toContain("meetsGuideline");
+    expect(text).toMatch(/Never modify production routing, app startup/);
+    expect(text).toMatch(/never accept or update goldens automatically/);
+    expect(text).toMatch(/Clean up in every outcome, including failure/);
+    expect(text).toMatch(/delete only the paths you recorded/);
+    expect(text).toMatch(/If a run is interrupted, print the exact paths/);
+    expect(text).toContain("git status --short");
+    expect(text).toContain("session_destroy");
+    expect(text).toContain("artifact_report");
+    expect(text).toContain("evidence_outcome");
+    expect(text).toContain("request_user_input");
+  });
+
+  it("defaults the component preview states and viewports", async () => {
+    const result = await lab.client.getPrompt({
+      name: "preview-flutter-component",
+      arguments: { widget: "ProfileCard" },
+    });
+    const text = promptText(result);
+    expect(text).toMatch(/States: normal plus stress states: long, empty, and error content/);
+    expect(text).toMatch(/Viewports: 390, 768, and 1440 logical pixels at DPR 1/);
+    await expect(
+      lab.client.getPrompt({ name: "preview-flutter-component" }),
+    ).rejects.toThrow();
   });
 });
