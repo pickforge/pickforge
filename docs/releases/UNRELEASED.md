@@ -8,11 +8,12 @@
   one Flutter widget without the full app, auth, routing or backend. Give it
   the widget and, optionally, states and viewports. It uses the Flutter Widget
   Previewer when the SDK has one, a temporary widget-test harness for exact
-  sizes, overflow and semantics checks, and a temporary web entrypoint only as
-  a fallback. Captures default to 390, 768 and 1440 logical pixels. Visual
-  lanes run in a Pickforge session, generated files are removed afterwards,
-  and production routing, app startup and golden baselines are left alone.
-  (#43)
+  sizes, and a temporary web entrypoint only as a fallback. The widget-test
+  harness always runs the text scaling, semantics and overflow checks.
+  Captures default to 390, 768 and 1440 logical pixels, and previews are
+  viewed in a Pickforge browser session. Generated files are removed
+  afterwards, and production routing, app startup and golden baselines are
+  left alone. (#43)
 
 ## Validation
 

@@ -832,11 +832,11 @@ Resources, addressable as `pickforge://` URIs:
 Prompts: `test-flutter-desktop-visually`, `debug-android-apk`, `run-visual-regression-check`, `device_pass`, and `preview-flutter-component`.
 
 `preview-flutter-component` (required `widget`, optional `states` and
-`viewports`) renders one Flutter widget without the full app. It prefers the
-Flutter Widget Previewer, then a temporary widget-test harness, then a
-temporary web entrypoint, captures each state at 390, 768 and 1440 logical
-pixels by default, checks text scaling and semantics, and removes every file
-it generated.
+`viewports`) renders one Flutter widget without the full app. It checks text
+scaling, semantics and overflow in a temporary widget-test harness, and views
+the Flutter Widget Previewer, or a temporary web entrypoint as a fallback, in
+a Pickforge browser session. It captures each state at 390, 768 and 1440
+logical pixels by default and removes every file it generated.
 
 ## Architecture
 
