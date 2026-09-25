@@ -219,6 +219,7 @@ describe("prompts", () => {
     expect(text).toContain("session_destroy");
     expect(text).toContain("artifact_report");
     expect(text).toMatch(/record the verdict on that run with `evidence_outcome`/);
+    expect(text).toMatch(/inspectedScreenshots only as run-relative `screenshots\/<actionId>\.png` paths/);
     expect(text).toContain("request_user_input");
   });
 
