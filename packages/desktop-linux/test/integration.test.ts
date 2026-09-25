@@ -641,6 +641,44 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
     TEST_TIMEOUT_MS,
   );
 
+  it(
+    "keeps a connecting client when the last running client disconnects",
+    async () => {
+      const session = await createDesktopSession({ projectDir, registryEnv: env });
+      const socket = net.createConnection(
+        `/tmp/.X11-unix/X${parseDisplayNumber(session.display)}`,
+      );
+      try {
+        await new Promise<void>((resolve, reject) => {
+          socket.once("connect", resolve);
+          socket.once("error", reject);
+        });
+        const closed = new Promise<undefined>((resolve) => {
+          socket.on("error", () => resolve(undefined));
+          socket.once("close", () => resolve(undefined));
+        });
+        // Let Xvfb accept the connection, then let a short-lived client be the
+        // last running one. A server reset at its exit would close this socket.
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        expect(await listWindows(session.display)).toEqual([]);
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        const status = await Promise.race([
+          new Promise<number | undefined>((resolve) => {
+            socket.once("data", (data) => resolve(data[0]));
+            // Little-endian X11 setup request for protocol 11.0 without auth.
+            socket.write(Buffer.from([0x6c, 0, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+          }),
+          closed,
+        ]);
+        expect(status).toBe(1);
+      } finally {
+        socket.destroy();
+        await destroyDesktopSession(session.id, env);
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
   it.skipIf(!hasZenity)(
     "keeps a GTK exec client on Xvfb despite inherited Wayland variables",
     async () => {
