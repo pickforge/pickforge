@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type {
   EndHumanTakeoverResult,
   HumanTakeoverHandle,
@@ -36,7 +36,7 @@ let root: string;
 // Every test must inject a fake watchdog spawner: the real one re-execs
 // `process.argv[1]` (the vitest worker under test) with `internal
 // takeover-watchdog` argv, which is a real, unwanted side effect in tests.
-let watchdogKill: ReturnType<typeof vi.fn>;
+let watchdogKill: Mock<() => void>;
 let spawnWatchdog: SpawnWatchdogFn;
 
 function fakeHandle(overrides: Partial<HumanTakeoverHandle> = {}): HumanTakeoverHandle {
