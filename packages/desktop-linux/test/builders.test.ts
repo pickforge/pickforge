@@ -23,13 +23,14 @@ describe("buildXvfbArgs", () => {
       "1280x800x24",
       "-nolisten",
       "tcp",
+      "-noreset",
     ]);
   });
 
   it("builds args with custom geometry", () => {
     expect(
       buildXvfbArgs({ display: ":123", width: 1920, height: 1080, depth: 16 }),
-    ).toEqual([":123", "-screen", "0", "1920x1080x16", "-nolisten", "tcp"]);
+    ).toEqual([":123", "-screen", "0", "1920x1080x16", "-nolisten", "tcp", "-noreset"]);
   });
 
   it("rejects invalid displays", () => {

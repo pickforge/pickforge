@@ -207,6 +207,11 @@ export function buildXvfbArgs(opts: XvfbArgsOptions): string[] {
     `${width}x${height}x${depth}`,
     "-nolisten",
     "tcp",
+    // Without this Xvfb resets whenever its last running client disconnects
+    // and closes any client still in its connection handshake, so two
+    // overlapping short-lived clients such as xdotool fail with "Can't open
+    // display" (#201).
+    "-noreset",
   ];
 }
 
