@@ -256,7 +256,8 @@ describe("app wait cleanup", () => {
   }, 10_000);
 
   it("keeps an app that leaves its group after launch running", async () => {
-    // The app itself calls setsid() once the launcher has seen it, so only the
+    // The app leaves a worker in its group and calls setsid() at once, so the
+    // launcher may only ever see the worker. Once the worker exits, only the
     // supervisor is left in the group while the app is still running. That
     // is a launched app, not one that exited immediately.
     const fifo = path.join(root, "release-setsid.fifo");
@@ -270,7 +271,7 @@ describe("app wait cleanup", () => {
     const pidFile = `${command}.pid`;
     writeExecutable(
       command,
-      `#!/bin/sh\necho $$ > '${pidFile}'\nread _ < '${fifo}'\nexec setsid /bin/sleep 30\n`,
+      `#!/bin/sh\necho $$ > '${pidFile}'\n(read _ < '${fifo}') &\nexec setsid /bin/sleep 30\n`,
     );
     const scope = createContainmentScope({ id: "desk-leaves-group", useCgroup: false });
     try {
