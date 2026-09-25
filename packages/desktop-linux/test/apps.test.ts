@@ -4,6 +4,9 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const identityState = vi.hoisted(() => ({ miss: false }));
+const memberState = vi.hoisted(() => ({
+  onSeen: undefined as (() => void) | undefined,
+}));
 
 vi.mock("@pickforge/lab-core", async (importOriginal) => {
   const actual = await importOriginal<
@@ -13,6 +16,11 @@ vi.mock("@pickforge/lab-core", async (importOriginal) => {
     ...actual,
     readProcessIdentity: (pid: number) =>
       identityState.miss ? undefined : actual.readProcessIdentity(pid),
+    listProcessGroupMembers: (pgid: number) => {
+      const members = actual.listProcessGroupMembers(pgid);
+      if (members.some((pid) => pid !== pgid)) memberState.onSeen?.();
+      return members;
+    },
   };
 });
 
@@ -196,6 +204,89 @@ describe("app wait cleanup", () => {
       expect(Date.now() - startedAt).toBeGreaterThanOrEqual(1_000);
     } finally {
       process.execPath = realNode;
+      await destroyContainmentScope(scope, { termTimeoutMs: 500, killTimeoutMs: 500 });
+    }
+  });
+
+  it("does not count supervisor exit against the launch grace window", async () => {
+    // A supervisor that outlives the app by more than the grace window, as a
+    // loaded host can make it by delaying its exit poll (#203). The hold runs
+    // inside process.exit, after the app is gone, so the group stays alive
+    // with the supervisor as its only member. The app exits only once the
+    // launcher has seen it, so the grace window has really opened.
+    const hold = path.join(root, "hold-exit.cjs");
+    writeExecutable(
+      hold,
+      'process.on("exit", () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000));\n',
+    );
+    const realNode = process.execPath;
+    const lingeringNode = path.join(root, "lingering-node");
+    writeExecutable(
+      lingeringNode,
+      `#!/bin/sh\nexec '${realNode}' --require '${hold}' "$@"\n`,
+    );
+    const fifo = path.join(root, "release-app.fifo");
+    expect(spawnSync("mkfifo", [fifo]).status).toBe(0);
+    const release = fs.openSync(fifo, "r+");
+    memberState.onSeen = () => {
+      memberState.onSeen = undefined;
+      fs.writeSync(release, "\n");
+    };
+    const command = path.join(root, "exits-once-seen");
+    writeExecutable(command, `#!/bin/sh\nread _ < '${fifo}'\n`);
+    const scope = createContainmentScope({ id: "desk-lingering-supervisor", useCgroup: false });
+    process.execPath = lingeringNode;
+    try {
+      await expect(
+        launchApp({
+          display: DISPLAY,
+          command,
+          logDir: path.join(root, "lingering-supervisor-logs"),
+          containment: scope,
+        }),
+      ).rejects.toThrow(
+        /exited immediately.*still held by the session's marker containment/,
+      );
+    } finally {
+      process.execPath = realNode;
+      memberState.onSeen = undefined;
+      fs.closeSync(release);
+      await destroyContainmentScope(scope, { termTimeoutMs: 500, killTimeoutMs: 500 });
+    }
+  }, 10_000);
+
+  it("keeps an app that leaves its group after launch running", async () => {
+    // The app leaves a worker in its group and calls setsid() at once, so the
+    // launcher may only ever see the worker. Once the worker exits, only the
+    // supervisor is left in the group while the app is still running. That
+    // is a launched app, not one that exited immediately.
+    const fifo = path.join(root, "release-setsid.fifo");
+    expect(spawnSync("mkfifo", [fifo]).status).toBe(0);
+    const release = fs.openSync(fifo, "r+");
+    memberState.onSeen = () => {
+      memberState.onSeen = undefined;
+      fs.writeSync(release, "\n");
+    };
+    const command = path.join(root, "leaves-group");
+    const pidFile = `${command}.pid`;
+    writeExecutable(
+      command,
+      `#!/bin/sh\necho $$ > '${pidFile}'\n(read _ < '${fifo}') &\nexec setsid /bin/sleep 30\n`,
+    );
+    const scope = createContainmentScope({ id: "desk-leaves-group", useCgroup: false });
+    try {
+      const app = await launchApp({
+        display: DISPLAY,
+        command,
+        logDir: path.join(root, "leaves-group-logs"),
+        containment: scope,
+      });
+      liveGroups.add(app.pid);
+      const pid = readStartedGroup(pidFile);
+      expect(isProcessGroupAlive(pid)).toBe(true);
+    } finally {
+      memberState.onSeen = undefined;
+      fs.closeSync(release);
       await destroyContainmentScope(scope, { termTimeoutMs: 500, killTimeoutMs: 500 });
     }
   });

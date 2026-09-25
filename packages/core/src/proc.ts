@@ -555,6 +555,7 @@ export interface ProcessIdentity {
 
 interface ProcStat {
   state: string;
+  ppid: number;
   pgrp: number;
   startTicks: number;
 }
@@ -571,16 +572,18 @@ export function parseProcStat(content: string): ProcStat | undefined {
   const fields = content.slice(close + 1).trim().split(/\s+/);
   // fields[0] is field 3 (state); field N maps to fields[N - 3].
   const state = fields[0];
+  const ppid = Number(fields[4 - 3]);
   const pgrp = Number(fields[5 - 3]);
   const startTicks = Number(fields[22 - 3]);
   if (
     state === undefined ||
+    !Number.isFinite(ppid) ||
     !Number.isFinite(pgrp) ||
     !Number.isFinite(startTicks)
   ) {
     return undefined;
   }
-  return { state, pgrp, startTicks };
+  return { state, ppid, pgrp, startTicks };
 }
 
 function readProcStat(pid: number): ProcStat | undefined {
@@ -659,24 +662,34 @@ export function isProcessGroupAlive(pgid: number): boolean {
   }
 }
 
-/** List the PIDs whose process group id equals `pgid`. */
-export function listProcessGroupMembers(pgid: number): number[] {
+/** List the PIDs of live, non-zombie processes whose stat matches. */
+function listLiveProcesses(matches: (stat: ProcStat) => boolean): number[] {
   let entries: string[];
   try {
     entries = fs.readdirSync("/proc");
   } catch {
     return [];
   }
-  const members: number[] = [];
+  const pids: number[] = [];
   for (const entry of entries) {
     if (!/^\d+$/.test(entry)) continue;
     const pid = Number(entry);
     const stat = readProcStat(pid);
-    if (stat !== undefined && stat.state !== "Z" && stat.pgrp === pgid) {
-      members.push(pid);
+    if (stat !== undefined && stat.state !== "Z" && matches(stat)) {
+      pids.push(pid);
     }
   }
-  return members;
+  return pids;
+}
+
+/** List the PIDs whose process group id equals `pgid`. */
+export function listProcessGroupMembers(pgid: number): number[] {
+  return listLiveProcesses((stat) => stat.pgrp === pgid);
+}
+
+/** List the live PIDs whose parent is `ppid`, wherever their group is. */
+export function listChildProcesses(ppid: number): number[] {
+  return listLiveProcesses((stat) => stat.ppid === ppid);
 }
 
 export type StopProcessGroupOutcome =

@@ -246,11 +246,13 @@ describe("process identity and group termination", () => {
   it("parses process state so zombie group members can be ignored", () => {
     const fields = Array.from({ length: 20 }, () => "0");
     fields[0] = "Z";
+    fields[1] = "7";
     fields[2] = "123";
     fields[19] = "456";
 
     expect(parseProcStat(`123 (worker (test)) ${fields.join(" ")}`)).toEqual({
       state: "Z",
+      ppid: 7,
       pgrp: 123,
       startTicks: 456,
     });
