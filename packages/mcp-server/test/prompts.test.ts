@@ -206,7 +206,8 @@ describe("prompts", () => {
     expect(text).toMatch(/desktop_key` ctrl\+l, `desktop_type` the URL/);
     expect(text).toMatch(/Never open it in the user's browser or on the user's real display/);
     expect(text).toMatch(/`MediaQuery` and `SizedBox` at the requested logical size/);
-    expect(text).toContain("desktop_screenshot");
+    expect(text).toMatch(/desktop_wait` until sampled frames stay unchanged/);
+    expect(text).toMatch(/desktop_screenshot` without `out` or `runSlug`, so every image joins the session's evidence run/);
     expect(text).toMatch(/text scaling \(at least 1\.0 and 2\.0\), semantics labels/);
     expect(text).toContain("meetsGuideline");
     expect(text).toMatch(/Never modify production routing, app startup/);
@@ -217,7 +218,7 @@ describe("prompts", () => {
     expect(text).toMatch(/Confirm `git status --short` matches the baseline/);
     expect(text).toContain("session_destroy");
     expect(text).toContain("artifact_report");
-    expect(text).toContain("evidence_outcome");
+    expect(text).toMatch(/record the verdict on that run with `evidence_outcome`/);
     expect(text).toContain("request_user_input");
   });
 
