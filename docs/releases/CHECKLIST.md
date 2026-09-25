@@ -55,7 +55,11 @@ test "$(./target/release/pickforge --version)" = "pickforge $VERSION"
 ## 3. Run the opt-in live Flutter test
 
 Use a real Flutter SDK and a disposable Flutter project. This test is never
-silently replaced by a mock.
+silently replaced by a mock. It creates the project with
+`flutter create --offline`, so the pub cache must already hold the app
+template's packages such as `flutter_lints` and `cupertino_icons`. On a fresh
+machine or after a Flutter upgrade, run one online `flutter create` in a
+scratch directory first, or the test fails at fixture creation.
 
 ```sh
 PICKFORGE_LIVE_FLUTTER=1 cargo test -p pickforge-cli --test live_flutter
