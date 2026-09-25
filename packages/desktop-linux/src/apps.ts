@@ -7,6 +7,7 @@ import {
   listProcessGroupMembers,
   readProcessGroupLeaderIdentity,
   readProcessIdentity,
+  readProcessStartTicks,
   runCommand,
   startDaemon,
   stopProcessGroupVerified,
@@ -155,20 +156,40 @@ function resolveSpawnTarget(opts: LaunchAppOptions): {
   return { command: contained.command, args: contained.args, name };
 }
 
-function hasSupervisedMember(leader: number): boolean {
-  return listProcessGroupMembers(leader).some((pid) => pid !== leader);
+/** Group members seen besides the leader, by pid, with their start ticks. */
+type SeenMembers = Map<number, number>;
+
+/**
+ * Record the group's members other than the leader and report whether there
+ * are any.
+ */
+function observeMembers(leader: number, seen: SeenMembers): boolean {
+  const members = listProcessGroupMembers(leader).filter((pid) => pid !== leader);
+  for (const pid of members) {
+    if (seen.has(pid)) continue;
+    const ticks = readProcessStartTicks(pid);
+    if (ticks !== undefined) seen.set(pid, ticks);
+  }
+  return members.length > 0;
 }
 
 /**
  * Whether the launched app, and every descendant still in its group, is gone.
- * Under a supervisor that is already true once only the supervisor is left:
- * it exits on its own, but only after its next poll, which on a loaded host
- * can outlast the whole grace window and turn an app that exited at once into
- * a reported launch (#203).
+ * Under a supervisor that is already true once only the supervisor is left
+ * and every member seen so far has died: the supervisor exits on its own, but
+ * only after its next poll, which on a loaded host can outlast the whole grace
+ * window and turn an app that exited at once into a reported launch (#203). A
+ * member that left the group alive still counts, as it keeps the supervisor
+ * alive when it is the app itself.
  */
-function hasAppExited(opts: LaunchAppOptions, leader: number): boolean {
+function hasAppExited(
+  opts: LaunchAppOptions,
+  leader: number,
+  seen: SeenMembers,
+): boolean {
   if (!isProcessGroupAlive(leader)) return true;
-  return opts.containment !== undefined && !hasSupervisedMember(leader);
+  if (opts.containment === undefined || observeMembers(leader, seen)) return false;
+  return [...seen].every(([pid, ticks]) => readProcessStartTicks(pid) !== ticks);
 }
 
 /**
@@ -186,12 +207,13 @@ async function waitForSupervisedSpawn(
   opts: LaunchAppOptions,
   leader: number,
   logPath: string,
+  seen: SeenMembers,
 ): Promise<void> {
   if (opts.containment === undefined) return;
   const deadline = Date.now() + SUPERVISOR_SPAWN_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (!isProcessGroupAlive(leader)) return;
-    if (hasSupervisedMember(leader)) return;
+    if (observeMembers(leader, seen)) return;
     await sleep(LAUNCH_POLL_INTERVAL_MS);
   }
   throw new Error(
@@ -224,10 +246,11 @@ async function startApp(opts: LaunchAppOptions): Promise<StartedApp> {
   let identity = readProcessIdentity(daemon.pid);
   let succeeded = false;
   try {
-    await waitForSupervisedSpawn(opts, daemon.pid, daemon.logPath);
+    const seen: SeenMembers = new Map();
+    await waitForSupervisedSpawn(opts, daemon.pid, daemon.logPath, seen);
     const graceDeadline = Date.now() + LAUNCH_GRACE_MS;
     while (Date.now() < graceDeadline) {
-      if (hasAppExited(opts, daemon.pid)) {
+      if (hasAppExited(opts, daemon.pid, seen)) {
         throw new Error(
           `${opts.command} exited immediately after launch on ${opts.display}. ` +
             escapeAdvice(containmentLabel(opts.containment)) +

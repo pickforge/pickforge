@@ -255,6 +255,41 @@ describe("app wait cleanup", () => {
     }
   }, 10_000);
 
+  it("keeps an app that leaves its group after launch running", async () => {
+    // The app itself calls setsid() once the launcher has seen it, so only the
+    // supervisor is left in the group while the app is still running. That
+    // is a launched app, not one that exited immediately.
+    const fifo = path.join(root, "release-setsid.fifo");
+    expect(spawnSync("mkfifo", [fifo]).status).toBe(0);
+    const release = fs.openSync(fifo, "r+");
+    memberState.onSeen = () => {
+      memberState.onSeen = undefined;
+      fs.writeSync(release, "\n");
+    };
+    const command = path.join(root, "leaves-group");
+    const pidFile = `${command}.pid`;
+    writeExecutable(
+      command,
+      `#!/bin/sh\necho $$ > '${pidFile}'\nread _ < '${fifo}'\nexec setsid /bin/sleep 30\n`,
+    );
+    const scope = createContainmentScope({ id: "desk-leaves-group", useCgroup: false });
+    try {
+      const app = await launchApp({
+        display: DISPLAY,
+        command,
+        logDir: path.join(root, "leaves-group-logs"),
+        containment: scope,
+      });
+      liveGroups.add(app.pid);
+      const pid = readStartedGroup(pidFile);
+      expect(isProcessGroupAlive(pid)).toBe(true);
+    } finally {
+      memberState.onSeen = undefined;
+      fs.closeSync(release);
+      await destroyContainmentScope(scope, { termTimeoutMs: 500, killTimeoutMs: 500 });
+    }
+  });
+
   it("fails the launch and stops a supervisor that never spawns the app", async () => {
     // A supervisor stuck before its spawn must not be reported as a launched
     // app once the bounded wait expires; the failure path stops its group.
