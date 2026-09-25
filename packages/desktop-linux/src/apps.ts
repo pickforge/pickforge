@@ -4,6 +4,7 @@ import {
   ObservationTimeoutError,
   observationBudget,
   isProcessGroupAlive,
+  listChildProcesses,
   listProcessGroupMembers,
   readProcessGroupLeaderIdentity,
   readProcessIdentity,
@@ -155,6 +156,23 @@ function resolveSpawnTarget(opts: LaunchAppOptions): {
   return { command: contained.command, args: contained.args, name };
 }
 
+function hasSupervisedMember(leader: number): boolean {
+  return listProcessGroupMembers(leader).some((pid) => pid !== leader);
+}
+
+/**
+ * Whether the launched app, and every descendant still in its group, is gone.
+ * Under a supervisor that is already true once its own child has died and it
+ * is the group's only member, the condition it exits on. It only exits after
+ * its next poll, though, which on a loaded host can outlast the whole grace
+ * window and turn an app that exited at once into a reported launch (#203).
+ */
+function hasAppExited(opts: LaunchAppOptions, leader: number): boolean {
+  if (!isProcessGroupAlive(leader)) return true;
+  if (opts.containment === undefined) return false;
+  return listChildProcesses(leader).length === 0 && !hasSupervisedMember(leader);
+}
+
 /**
  * With a containment scope the group leader is the supervisor, and the app
  * only becomes a group member once Node has started and the scope is joined.
@@ -175,7 +193,7 @@ async function waitForSupervisedSpawn(
   const deadline = Date.now() + SUPERVISOR_SPAWN_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (!isProcessGroupAlive(leader)) return;
-    if (listProcessGroupMembers(leader).some((pid) => pid !== leader)) return;
+    if (hasSupervisedMember(leader)) return;
     await sleep(LAUNCH_POLL_INTERVAL_MS);
   }
   throw new Error(
@@ -211,7 +229,7 @@ async function startApp(opts: LaunchAppOptions): Promise<StartedApp> {
     await waitForSupervisedSpawn(opts, daemon.pid, daemon.logPath);
     const graceDeadline = Date.now() + LAUNCH_GRACE_MS;
     while (Date.now() < graceDeadline) {
-      if (!isProcessGroupAlive(daemon.pid)) {
+      if (hasAppExited(opts, daemon.pid)) {
         throw new Error(
           `${opts.command} exited immediately after launch on ${opts.display}. ` +
             escapeAdvice(containmentLabel(opts.containment)) +

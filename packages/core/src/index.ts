@@ -178,6 +178,7 @@ export {
   identityIsAlive,
   isPidAlive,
   isProcessGroupAlive,
+  listChildProcesses,
   listProcessGroupMembers,
   processIdentityMatches,
   readProcessGroupLeaderIdentity,
