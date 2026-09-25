@@ -239,9 +239,8 @@ fn create_project(temp: &Path, home: &Path, state: &Path, deadline: Instant) -> 
         "pickforge_live_e2e",
     ]);
     command.arg(&app);
-    // The isolated home moves the pub cache too, so an offline resolve would always miss and
-    // this fixture would silently degrade to the minimal fallback. Point pub at the real
-    // cache for fixture creation only; the CLI under test never sees it.
+    // The isolated home moves the pub cache too, so an offline resolve would always miss.
+    // Point pub at the real cache for fixture creation only; the CLI under test never sees it.
     if let Some(cache) = pub_cache() {
         command.env("PUB_CACHE", cache);
     }
@@ -253,29 +252,16 @@ fn create_project(temp: &Path, home: &Path, state: &Path, deadline: Instant) -> 
         deadline,
         Duration::from_secs(120),
     );
-    if output.status.success() {
-        eprintln!("live Flutter fixture: flutter create --offline");
-        return app;
-    }
-
-    eprintln!(
-        "live Flutter fixture: minimal fallback (flutter create failed: {})",
-        String::from_utf8_lossy(&output.stderr).trim()
+    assert!(
+        output.status.success(),
+        "live Flutter fixture: flutter create --offline failed with {}. The pub cache must \
+         already hold the app template's packages; warm it with one online `flutter create`.\n\
+         stdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
-    if app.exists() {
-        std::fs::remove_dir_all(&app).unwrap();
-    }
-    std::fs::create_dir_all(app.join("lib")).unwrap();
-    std::fs::write(
-        app.join("pubspec.yaml"),
-        "name: pickforge_live_e2e\nenvironment:\n  sdk: ^3.0.0\ndependencies:\n  flutter:\n    sdk: flutter\n",
-    )
-    .unwrap();
-    std::fs::write(
-        app.join("lib/main.dart"),
-        "import 'package:flutter/widgets.dart';\nvoid main() => runApp(const SizedBox());\n",
-    )
-    .unwrap();
+    eprintln!("live Flutter fixture: flutter create --offline");
     app
 }
 
