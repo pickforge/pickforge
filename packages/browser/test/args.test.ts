@@ -21,6 +21,8 @@ describe("buildChromeArgs", () => {
       "--gcm-checkin-url=https://127.0.0.1:0",
       "--gcm-registration-url=https://127.0.0.1:0",
       "--gcm-mcs-endpoint=https://127.0.0.1:0",
+      "--gaia-url=https://127.0.0.1:0",
+      "--component-updater=url-source=https://127.0.0.1:0",
       "--disable-component-update",
       "--disable-domain-reliability",
       "--disable-client-side-phishing-detection",
@@ -28,7 +30,7 @@ describe("buildChromeArgs", () => {
       expect(args).toContain(flag);
     }
     expect(args.filter((arg) => arg.startsWith("--disable-features="))).toEqual([
-      "--disable-features=Translate,MediaRouter,AutofillServerCommunication,OptimizationHints,OptimizationTargetPrediction,OptimizationGuideModelExecution",
+      "--disable-features=Translate,MediaRouter,AutofillServerCommunication,OptimizationHints,OptimizationTargetPrediction,OptimizationGuideModelExecution,NetworkTimeServiceQuerying,SafeBrowsingHashPrefixRealTimeLookups,AimEnabled,PreconnectToSearch",
     ]);
     expect(args).toContain("--remote-debugging-address=127.0.0.1");
     expect(args).toContain("--remote-debugging-port=0");

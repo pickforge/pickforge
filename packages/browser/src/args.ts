@@ -83,12 +83,16 @@ export function buildChromeArgs(opts: BuildChromeArgsOptions): string[] {
     "--gcm-checkin-url=https://127.0.0.1:0",
     "--gcm-registration-url=https://127.0.0.1:0",
     "--gcm-mcs-endpoint=https://127.0.0.1:0",
+    // Browser sign-in list-accounts polling and the on-device model manifest
+    // fetch ignore the switches above; sink them on loopback like GCM.
+    "--gaia-url=https://127.0.0.1:0",
+    "--component-updater=url-source=https://127.0.0.1:0",
     "--disable-component-update",
     "--disable-domain-reliability",
     "--disable-client-side-phishing-detection",
     // Background networking is not a firewall. Disable independent vendor services
     // explicitly; see README's browser lab section for Chromium switch sources.
-    "--disable-features=Translate,MediaRouter,AutofillServerCommunication,OptimizationHints,OptimizationTargetPrediction,OptimizationGuideModelExecution",
+    "--disable-features=Translate,MediaRouter,AutofillServerCommunication,OptimizationHints,OptimizationTargetPrediction,OptimizationGuideModelExecution,NetworkTimeServiceQuerying,SafeBrowsingHashPrefixRealTimeLookups,AimEnabled,PreconnectToSearch",
     "--disable-gpu",
     "--disable-dev-shm-usage",
     "--password-store=basic",

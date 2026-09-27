@@ -608,12 +608,16 @@ updates, `--disable-domain-reliability` stops reliability reporting, and
 `--disable-client-side-phishing-detection` disables client-side phishing checks.
 The single `--disable-features` list contains `Translate`, `MediaRouter`,
 `AutofillServerCommunication`, `OptimizationHints`,
-`OptimizationTargetPrediction` and `OptimizationGuideModelExecution`: translation,
-cast discovery, server-backed autofill, optimization hints, prediction models
-and model execution are disabled. These defaults are for automation, not a
-hardened personal browser: Safe Browsing protection and component updates are
-reduced, and notification/push journeys cannot be tested with these defaults.
-Normal DevTools automation does not need those services.
+`OptimizationTargetPrediction`, `OptimizationGuideModelExecution`,
+`NetworkTimeServiceQuerying`, `SafeBrowsingHashPrefixRealTimeLookups`,
+`AimEnabled` and `PreconnectToSearch`: translation, cast discovery,
+server-backed autofill, optimization hints, prediction models, model execution,
+network time queries, Safe Browsing real-time lookups, the omnibox AI Mode
+eligibility check and the startup search engine preconnect are disabled. These
+defaults are for automation, not a hardened personal browser: Safe Browsing
+protection and component updates are reduced, and notification/push journeys
+cannot be tested with these defaults. Normal DevTools automation does not need
+those services.
 
 Chromium documents these switches in
 [Chrome flags for tools](https://github.com/GoogleChrome/chrome-launcher/blob/main/docs/chrome-flags-for-tools.md#background-networking),
@@ -646,12 +650,30 @@ callers can override defaults through `extraArgs`; in particular, another
 `--disable-features` argument replaces the entire default list rather than
 merging with it. No zero-egress guarantee is made.
 
+The 0.4.0 candidate egress check (#139) found five more startup clients that
+the switches above do not stop, identified by the traffic annotation in each
+NetLog request: `network_time_component` (`clients2.google.com`),
+`safe_browsing_ohttp_key_fetch` (`www.gstatic.com`), `aim_eligibility_fetch` and
+a search preconnect (`www.google.com`), `gaia_auth_list_accounts`
+(`accounts.google.com`), and `update_client` fetching the on-device model
+manifest (`update.googleapis.com`, then `edgedl.me.gvt1.com`) despite
+`--disable-component-update`. The first three are covered by the features
+listed above. Sign-in and the component updater have no kill switch, so the lab
+sets `--gaia-url=https://127.0.0.1:0` and
+`--component-updater=url-source=https://127.0.0.1:0`, which leave both clients
+running against an unusable loopback endpoint. Chrome no longer treats
+`accounts.google.com` as its sign-in origin; pages can still sign in to Google
+as ordinary web content, without browser account integration. With these
+defaults a 200-second idle capture on Chrome 154.0.8037.57 showed no vendor
+hostname. The only remaining entry was `[2001:4860:4860::8888]:443`, which is
+Chrome's IPv6 reachability probe: a UDP socket connect that sends no bytes.
+
 For a later authorized Astra low execution pass, install the candidate lab build,
 then run `node scripts/lab/chrome-egress-check.mjs` with Node.js 22 or newer and
 the browser lab dependencies installed. `LAB_BIN` selects an installed lab
 executable; `CHROME_BIN` selects an absolute Chrome executable path. The script
 uses a fresh lab home and project, never opens a host viewer, leaves `about:blank`
-idle for 90 seconds, closes Chrome through loopback CDP to flush NetLog, destroys
+idle for 120 seconds, closes Chrome through loopback CDP to flush NetLog, destroys
 only its own sessions, and prints non-loopback request/DNS/socket destinations.
 It does not proxy or block traffic. Evidence remains owner-only under
 `~/.pickforge/lab/chrome-egress-checks/`; raw NetLog is not redacted and must not

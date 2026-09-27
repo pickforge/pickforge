@@ -47,11 +47,16 @@ async function report(netLog) {
     throw new Error("Net log contains no events; capture is not valid");
   }
   const found = { destinations: new Set(), unparsed: 0 };
-  for (const event of log.events) collect(event.params, false, found);
+  // UDP/TCP local-address events name this host's interface, not a destination.
+  const local = new Set(Object.entries(log.constants?.logEventTypes ?? {})
+    .filter(([name]) => name.endsWith("_LOCAL_ADDRESS")).map(([, id]) => id));
+  for (const event of log.events) {
+    if (!local.has(event.type)) collect(event.params, false, found);
+  }
   console.log("Non-loopback destinations observed in Chrome NetLog (requests/DNS/connect attempts, not proof of delivery):");
   console.log([...found.destinations].sort().join("\n") || "(none observed)");
   console.log(`Unparseable destination fields: ${found.unparsed}`);
-  console.log("A quiet 90-second sample is not proof of no egress. Raw log stays private.");
+  console.log("A quiet 120-second sample is not proof of no egress. Raw log stays private.");
 }
 
 function shellQuote(value) {
@@ -84,9 +89,21 @@ async function closeBrowser(port) {
       socket.close();
       reject(new Error("Timed out closing Chrome to flush NetLog"));
     }, 10000);
+    let acknowledged = false;
     socket.addEventListener("open", () => socket.send(JSON.stringify({ id: 1, method: "Browser.close" })));
+    // Chrome acknowledges, then drops the socket with an error as it exits.
+    socket.addEventListener("message", ({ data }) => {
+      const reply = JSON.parse(data);
+      if (reply.id !== 1) return;
+      clearTimeout(timer);
+      if (reply.error) reject(new Error(`CDP close failed: ${reply.error.message}`));
+      else { acknowledged = true; resolve(); }
+    });
     socket.addEventListener("close", () => { clearTimeout(timer); resolve(); });
-    socket.addEventListener("error", () => { clearTimeout(timer); reject(new Error("CDP close failed")); });
+    socket.addEventListener("error", () => {
+      clearTimeout(timer);
+      if (!acknowledged) reject(new Error("CDP close failed"));
+    });
   });
 }
 
@@ -120,7 +137,8 @@ async function capture() {
     PICKFORGE_HOME: path.join(dir, "state"), PICKFORGE_TELEMETRY: "0",
     PICKFORGE_CHROME_BIN: wrapper,
   };
-  const run = (args) => exec(lab, [...args, "--project-dir", projectDir, "--json"], {
+  // Every command reads this check's own PICKFORGE_HOME; only create takes --project-dir.
+  const run = (args) => exec(lab, [...args, "--json"], {
     env, cwd: projectDir, timeout: 120000, maxBuffer: 4 * 1024 * 1024,
   });
   const controller = new AbortController();
@@ -129,7 +147,7 @@ async function capture() {
   process.once("SIGTERM", interrupt);
   console.log(`Private evidence: ${dir}`);
   try {
-    const created = await run(["session", "create", "--type", "browser", "--no-viewer"]);
+    const created = await run(["session", "create", "--type", "browser", "--no-viewer", "--project-dir", projectDir]);
     await writeFile(path.join(dir, "session.json"), created.stdout);
     // Use only the session returned from this fresh lab home.
     const status = JSON.parse(created.stdout);
@@ -138,8 +156,9 @@ async function capture() {
       throw new Error("Unexpected session create response; see private session.json");
     }
     const session = sessions[0];
-    console.log(`Headed browser on private Xvfb ${session.display}; observing about:blank for 90 seconds`);
-    await delay(90000, undefined, { signal: controller.signal });
+    console.log(`Headed browser on private Xvfb ${session.display}; observing about:blank for 120 seconds`);
+    // Component update checks start about 90 seconds after launch.
+    await delay(120000, undefined, { signal: controller.signal });
     await closeBrowser(session.cdpPort);
     // Browser.close disconnects before the process has finished flushing the file.
     await waitForNetLog(netLog);
