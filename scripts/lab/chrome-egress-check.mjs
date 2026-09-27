@@ -140,6 +140,9 @@ async function capture() {
   // Every command reads this check's own PICKFORGE_HOME; only create takes --project-dir.
   const run = (args) => exec(lab, [...args, "--json"], {
     env, cwd: projectDir, timeout: 120000, maxBuffer: 4 * 1024 * 1024,
+  }).catch((error) => {
+    // The lab reports failures as JSON on stdout, which execFile leaves out of the message.
+    throw new Error(`${error.message}${error.stdout ?? ""}`);
   });
   const controller = new AbortController();
   const interrupt = () => controller.abort();
