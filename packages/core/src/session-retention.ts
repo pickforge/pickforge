@@ -2,8 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DirHandle, withDirHandle } from "./dir-handle.js";
 import { legacySessionsDirs, sessionsDir, type EnvLike } from "./paths.js";
-import { sessionDataDir, takeoverIdentityName, type SessionRecord } from "./session.js";
-import { readTakeoverIdentityBinding } from "./takeover.js";
+import { sessionDataDir, type SessionRecord } from "./session.js";
 
 const MARKER = "stopped.json";
 const SESSION_ID = /^(desk|andr|duo|brow)-[0-9a-f]{6,}$/;
@@ -77,15 +76,12 @@ async function pruneDirectory(root: DirHandle, id: string, roots: string[], age:
       if (name !== MARKER && !LOG_FILE.test(name)) return false;
       if ((await dir.lstatChild(name))?.isFile() !== true) return false;
     }
-    // Only a binding to exactly this torn-down directory may be retired.
-    const binding = await readTakeoverIdentityBinding(root, id, dir.stat);
-    if (binding === "uncertain") return false;
     if (await registryHasSession(id, roots)) return false;
     for (const name of names.filter((name) => name !== MARKER)) await dir.unlinkChild(name);
     await dir.unlinkChild(MARKER);
     await fs.promises.rmdir(root.resolve(id));
-    // The binding outlives the directory, so late takeover callers fail closed.
-    if (binding !== "absent") await root.unlinkOwnedFile(takeoverIdentityName(id), binding);
+    // The sibling takeover identity record stays: late callers for this id
+    // keep failing closed, and createSession never reuses a reserved id.
     return true;
   });
 }

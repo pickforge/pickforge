@@ -88,37 +88,6 @@ async function withSessionDirectory<T>(
   });
 }
 
-function sameIdentity(a: { dev: unknown; ino: unknown }, b: fs.Stats): boolean {
-  return a.dev === b.dev && a.ino === b.ino;
-}
-
-/**
- * Classify the takeover identity record beside a retained session directory:
- * `"absent"`, the record's own stats when it binds exactly `session`, or
- * `"uncertain"` for anything else. Only a bound record may be retired.
- */
-export async function readTakeoverIdentityBinding(
-  parent: DirHandle, sessionId: string, session: fs.Stats,
-): Promise<fs.Stats | "absent" | "uncertain"> {
-  const name = takeoverIdentityName(sessionId);
-  const entry = await parent.lstatChild(name);
-  if (entry === undefined) return "absent";
-  if (!entry.isFile()) return "uncertain";
-  try {
-    const file = await parent.openFile(name, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-    try {
-      const stat = await file.stat();
-      const binding: unknown = JSON.parse(await file.readFile("utf8"));
-      if (!sameIdentity(stat, entry) || !Array.isArray(binding)) return "uncertain";
-      return sameIdentity({ dev: binding[0], ino: binding[1] }, session) ? stat : "uncertain";
-    } finally {
-      await file.close();
-    }
-  } catch {
-    return "uncertain";
-  }
-}
-
 async function publishCoordinationIdentity(parent: DirHandle, marker: string, raw: string): Promise<void> {
   const tmp = `.takeover-identity-${crypto.randomUUID()}`;
   await parent.writeFileAtomic(tmp, raw);

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSession, destroySessionRecord, sessionDataDir, takeoverIdentityName, updateSession } from "../src/session.js";
 import { sessionsDir } from "../src/paths.js";
 import { parseSessionRetentionDuration, pruneSessionLogs, retainSessionLogs } from "../src/session-retention.js";
-import { acquireAgentPermit, releaseAgentPermit, withAgentPermit } from "../src/takeover.js";
+import { acquireAgentPermit, readHumanLease, withAgentPermit } from "../src/takeover.js";
 
 const forcedIds = vi.hoisted(() => [] as string[]);
 vi.mock("node:crypto", async (importOriginal) => {
@@ -23,7 +23,10 @@ beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-retention-"));
   env = { PICKFORGE_HOME: home };
 });
-afterEach(() => fs.rmSync(home, { recursive: true, force: true }));
+afterEach(() => {
+  forcedIds.length = 0;
+  fs.rmSync(home, { recursive: true, force: true });
+});
 
 async function stopped(type: "desktop" | "browser" | "android" = "desktop", takeover = false) {
   const record = await createSession({ type, projectDir: home }, env);
@@ -133,53 +136,19 @@ describe("explicit session log pruning", () => {
     expect(fs.readFileSync(path.join(outside, "mine"), "utf8")).toBe("keep");
   });
 
-  it("retires a takeover identity bound to the pruned directory so its id works again", async () => {
+  it("keeps the takeover identity so late callers for a pruned id still fail closed", async () => {
     const { record, dir } = await stopped("desktop", true);
     const marker = path.join(sessionsDir(env), takeoverIdentityName(record.id));
-    expect(fs.existsSync(marker)).toBe(true);
-    // A late caller for the torn-down session fails closed before pruning.
-    await expect(acquireAgentPermit(record.id, env)).rejects.toThrow(/identity changed/);
+    const binding = fs.readFileSync(marker, "utf8");
     expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
     expect(fs.existsSync(dir)).toBe(false);
-    expect(fs.existsSync(marker)).toBe(false);
-    const permit = await acquireAgentPermit(record.id, env);
-    await releaseAgentPermit(permit);
-    expect(fs.existsSync(marker)).toBe(true);
-  });
-
-  it.each([
-    ["another directory", JSON.stringify([0, 0, null])],
-    ["unreadable", "not json"],
-  ])("keeps the directory and a takeover identity bound to %s", async (_label, content) => {
-    const { record, dir } = await stopped("desktop", true);
-    const marker = path.join(sessionsDir(env), takeoverIdentityName(record.id));
-    fs.unlinkSync(marker);
-    fs.writeFileSync(marker, content);
-    expect(await pruneSessionLogs(0, env)).toEqual([]);
-    expect(fs.existsSync(path.join(dir, "xvfb.log"))).toBe(true);
-    expect(fs.readFileSync(marker, "utf8")).toBe(content);
-  });
-
-  it("keeps a takeover identity symlink without following it", async () => {
-    const { record, dir } = await stopped("desktop", true);
-    const marker = path.join(sessionsDir(env), takeoverIdentityName(record.id));
-    const outside = path.join(home, "outside");
-    fs.renameSync(marker, outside);
-    fs.symlinkSync(outside, marker);
-    expect(await pruneSessionLogs(0, env)).toEqual([]);
-    expect(fs.existsSync(path.join(dir, "xvfb.log"))).toBe(true);
-    expect(fs.lstatSync(marker).isSymbolicLink()).toBe(true);
-  });
-
-  it("keeps the binding while a permit is held or the session is registered", async () => {
-    const held = await stopped("desktop", true);
-    fs.mkdirSync(path.join(held.dir, "permits"));
-    const active = await stopped("desktop", true);
-    fs.writeFileSync(path.join(sessionsDir(env), `${active.record.id}.json`), JSON.stringify({ ...active.record, status: "running" }));
-    expect(await pruneSessionLogs(0, env)).toEqual([]);
-    for (const { record } of [held, active]) {
-      expect(fs.existsSync(path.join(sessionsDir(env), takeoverIdentityName(record.id)))).toBe(true);
-    }
+    expect(fs.readFileSync(marker, "utf8")).toBe(binding);
+    let delivered = false;
+    await expect(withAgentPermit(record.id, env, async () => { delivered = true; })).rejects.toThrow();
+    await expect(readHumanLease(record.id, env)).rejects.toThrow();
+    expect(delivered).toBe(false);
+    expect(fs.existsSync(dir)).toBe(false);
+    await expect(acquireAgentPermit(record.id, env)).rejects.toThrow();
   });
 
   it("does not allocate an id whose takeover identity is still reserved", async () => {
