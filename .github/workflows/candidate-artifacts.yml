@@ -45,6 +45,17 @@ jobs:
 
       - run: bun run build
 
+      # Installed frames carry machine-specific absolute paths, so Sentry can
+      # only match them to the uploaded sourcemaps by debug ID. Inject before
+      # packing so the smoked and published tarball carries them.
+      - name: Inject Sentry debug IDs
+        run: |
+          set -eu
+          npx --yes @sentry/cli@3.8.0 sourcemaps inject packages/cli/dist
+          for file in packages/cli/dist/*.js; do
+            grep -q '^//# debugId=' "$file" || { echo "no debug ID in $file" >&2; exit 1; }
+          done
+
       # `npm pack` produces the byte-for-byte tarball that `npm publish` would
       # upload. The smokes install this file; the publish job uploads this file.
       - name: Pack the candidate

@@ -14,6 +14,9 @@
   viewed in a Pickforge browser session. Generated files are removed
   afterwards, and production routing, app startup and golden baselines are
   left alone. (#43)
+- The published CLI now carries Sentry debug IDs, so fatal reports from
+  opted-in telemetry can resolve to source wherever the package is
+  installed. (#140)
 
 ## Validation
 
