@@ -7,7 +7,7 @@ import { appendAction, beginEvidenceRun } from "./evidence.js";
 import { ensureDir, type EnvLike } from "./paths.js";
 import { DirHandle, withDirHandle } from "./dir-handle.js";
 import { identityIsAlive, readProcessStartTicks } from "./proc.js";
-import { sessionDataDir } from "./session.js";
+import { sessionDataDir, takeoverIdentityName } from "./session.js";
 
 /**
  * Supervised pause / human takeover (pickforge/pickforge#21).
@@ -78,7 +78,7 @@ async function withSessionDirectory<T>(
   return withDirHandle(DirHandle.open(parentPath), async (parent) => {
     // Outside the replaceable session tree, shared by every process. Never
     // refresh this binding to a new inode or silently recreate bound storage.
-    const marker = `.${sessionId}.takeover-identity`;
+    const marker = takeoverIdentityName(sessionId);
     const raw = await readTextIfPresent(parent.resolve(marker));
     if (!create && raw === undefined && await parent.lstatChild(sessionId) === undefined) return undefined;
     return withDirHandle(

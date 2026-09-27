@@ -80,6 +80,8 @@ async function pruneDirectory(root: DirHandle, id: string, roots: string[], age:
     for (const name of names.filter((name) => name !== MARKER)) await dir.unlinkChild(name);
     await dir.unlinkChild(MARKER);
     await fs.promises.rmdir(root.resolve(id));
+    // The sibling takeover identity record stays: late callers for this id
+    // keep failing closed, and createSession never reuses a reserved id.
     return true;
   });
 }
