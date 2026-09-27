@@ -142,6 +142,11 @@ export function sessionDataDir(
   return path.join(path.dirname(sessionPathForRead(id, env)), id);
 }
 
+/** Sibling record binding a session's takeover coordination directories. */
+export function takeoverIdentityName(id: string): string {
+  return `.${id}.takeover-identity`;
+}
+
 function serialize(record: SessionRecord): string {
   return `${JSON.stringify(record, null, 2)}\n`;
 }
@@ -159,8 +164,9 @@ export async function createSession(
       status: input.status ?? "starting",
       projectDir: input.projectDir,
     };
-    // Retained directories reserve IDs until explicit pruning completes.
+    // Retained directories and unretired takeover bindings reserve IDs.
     if (fs.existsSync(path.join(sessionsDir(env), record.id))) continue;
+    if (fs.existsSync(path.join(sessionsDir(env), takeoverIdentityName(record.id)))) continue;
     if (input.desktop !== undefined) record.desktop = input.desktop;
     if (input.android !== undefined) record.android = input.android;
     if (input.browser !== undefined) record.browser = input.browser;
