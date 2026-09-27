@@ -305,11 +305,13 @@ report from the published package and open it in the Sentry `picklab` project:
 
 ```sh
 PICKFORGE_TELEMETRY=1 npx --yes -p "pickforge@$VERSION" \
-  pickforge-lab takeover status --session pf-symbolication-check
+  pickforge-lab internal takeover-watchdog --session pf-symbolication-check \
+  --lease pf-symbolication-check --interval invalid
 ```
 
-Its `Session not found` frames must resolve to `src/` TypeScript files under
-release `pickforge@$VERSION`, not to `dist/` chunks.
+It exits 1 with `error: Invalid --interval "invalid"`. That event's frames must
+resolve to `src/` TypeScript files under release `pickforge@$VERSION`, not to
+`dist/` chunks.
 
 ## 11. Reset the notes for the next release
 
