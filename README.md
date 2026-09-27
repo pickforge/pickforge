@@ -663,10 +663,17 @@ sets `--gaia-url=https://127.0.0.1:0` and
 `--component-updater=url-source=https://127.0.0.1:0`, which leave both clients
 running against an unusable loopback endpoint. Chrome no longer treats
 `accounts.google.com` as its sign-in origin; pages can still sign in to Google
-as ordinary web content, without browser account integration. With these
-defaults a 200-second idle capture on Chrome 154.0.8037.57 showed no vendor
-hostname. The only remaining entry was `[2001:4860:4860::8888]:443`, which is
-Chrome's IPv6 reachability probe: a UDP socket connect that sends no bytes.
+as ordinary web content, without browser account integration.
+
+With these defaults, two `chrome-egress-check.mjs` runs on Chrome 154.0.8037.57
+each observed one vendor request: an `update.googleapis.com` activity ping sent
+while Chrome closed. Chrome's
+[activity reporter](https://chromium.googlesource.com/chromium/src/+/main/components/activity_reporter/configurator.cc)
+reports each ended browser session to a hardcoded URL, at most once every five
+hours per browser process, and no switch or feature disables it. Blocking it
+would need a proxy or resolver rule, which the lab does not set. The only other
+entry was `[2001:4860:4860::8888]:443`, Chrome's IPv6 reachability probe: a UDP
+socket connect that sends no bytes.
 
 For a later authorized Astra low execution pass, install the candidate lab build,
 then run `node scripts/lab/chrome-egress-check.mjs` with Node.js 22 or newer and
