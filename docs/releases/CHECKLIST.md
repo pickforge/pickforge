@@ -93,6 +93,7 @@ generated project tree.
 
 ```sh
 bun run build
+npx --yes @sentry/cli@3.8.0 sourcemaps inject packages/cli/dist
 cargo build --release --locked
 rm -rf /tmp/candidate && mkdir -p /tmp/candidate/npm /tmp/candidate/assets
 (cd packages/cli && npm pack --pack-destination /tmp/candidate/npm)
@@ -298,6 +299,19 @@ Require all of these final facts:
   only for a stable release.
 - Both Rust targets and both checksum files are public.
 - `https://pickforge.dev/install.sh` serves the canonical installer.
+
+When the publish run's Sentry step uploaded sourcemaps, send one opted-in fatal
+report from the published package and open it in the Sentry `picklab` project:
+
+```sh
+PICKFORGE_TELEMETRY=1 npx --yes -p "pickforge@$VERSION" \
+  pickforge-lab internal takeover-watchdog --session pf-symbolication-check \
+  --lease pf-symbolication-check --interval invalid
+```
+
+It exits 1 with `error: Invalid --interval "invalid"`. That event's frames must
+resolve to `src/` TypeScript files under release `pickforge@$VERSION`, not to
+`dist/` chunks.
 
 ## 11. Reset the notes for the next release
 
