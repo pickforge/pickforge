@@ -203,11 +203,9 @@ jobs:
         run: npm install --global npm@11.5.1
 
       # Uploads the sourcemaps that are *inside* the verified tarball, and the
-      # JavaScript they belong to, unmodified. This proves byte identity only.
-      # Resolution of absolute installed frame paths without debug IDs has not
-      # been demonstrated, so do not treat this best-effort upload as proof of
-      # resolved production stacks. The follow-up is recorded in the release
-      # notes alongside #98; it must inject before packing, never mutate this artifact.
+      # JavaScript they belong to, unmodified. Debug IDs were injected before
+      # packing (candidate-artifacts.yml), which is how Sentry matches installed
+      # frames to these files; never inject into or otherwise mutate this artifact.
       - name: Upload the candidate tarball's sourcemaps to Sentry
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
@@ -223,7 +221,7 @@ jobs:
           mkdir -p sentry-sourcemaps
           tar -xzf "$TARBALL" -C sentry-sourcemaps
           test -d sentry-sourcemaps/package/dist
-          if ! npx --yes @sentry/cli sourcemaps upload \
+          if ! npx --yes @sentry/cli@3.8.0 sourcemaps upload \
             --org "$SENTRY_ORG" --project "$SENTRY_PROJECT" \
             --release "pickforge@$RELEASE_VERSION" sentry-sourcemaps/package/dist; then
             echo "::warning::Sentry sourcemap upload failed; continuing release"

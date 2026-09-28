@@ -1,10 +1,21 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createSession, destroySessionRecord, sessionDataDir, updateSession } from "../src/session.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createSession, destroySessionRecord, sessionDataDir, takeoverIdentityName, updateSession } from "../src/session.js";
 import { sessionsDir } from "../src/paths.js";
 import { parseSessionRetentionDuration, pruneSessionLogs, retainSessionLogs } from "../src/session-retention.js";
+import { acquireAgentPermit, readHumanLease, withAgentPermit } from "../src/takeover.js";
+
+const forcedIds = vi.hoisted(() => [] as string[]);
+vi.mock("node:crypto", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:crypto")>();
+  const randomBytes = (size: number) => {
+    const forced = forcedIds.shift();
+    return forced === undefined ? actual.randomBytes(size) : Buffer.from(forced, "hex");
+  };
+  return { ...actual, default: { ...actual, randomBytes }, randomBytes };
+});
 
 let home: string;
 let env: { PICKFORGE_HOME: string };
@@ -12,12 +23,16 @@ beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-retention-"));
   env = { PICKFORGE_HOME: home };
 });
-afterEach(() => fs.rmSync(home, { recursive: true, force: true }));
+afterEach(() => {
+  forcedIds.length = 0;
+  fs.rmSync(home, { recursive: true, force: true });
+});
 
-async function stopped(type: "desktop" | "browser" | "android" = "desktop") {
+async function stopped(type: "desktop" | "browser" | "android" = "desktop", takeover = false) {
   const record = await createSession({ type, projectDir: home }, env);
   const dir = sessionDataDir(record.id, env);
-  fs.mkdirSync(dir);
+  if (takeover) await withAgentPermit(record.id, env, async () => {});
+  else fs.mkdirSync(dir);
   fs.writeFileSync(path.join(dir, "xvfb.log"), "diagnostics");
   await retainSessionLogs(record, env);
   await destroySessionRecord(record.id, env);
@@ -119,6 +134,28 @@ describe("explicit session log pruning", () => {
     await retainSessionLogs(record, env);
     expect(fs.existsSync(path.join(dir, "permits"))).toBe(false);
     expect(fs.readFileSync(path.join(outside, "mine"), "utf8")).toBe("keep");
+  });
+
+  it("keeps the takeover identity so late callers for a pruned id still fail closed", async () => {
+    const { record, dir } = await stopped("desktop", true);
+    const marker = path.join(sessionsDir(env), takeoverIdentityName(record.id));
+    const binding = fs.readFileSync(marker, "utf8");
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+    expect(fs.existsSync(dir)).toBe(false);
+    expect(fs.readFileSync(marker, "utf8")).toBe(binding);
+    let delivered = false;
+    await expect(withAgentPermit(record.id, env, async () => { delivered = true; })).rejects.toThrow();
+    await expect(readHumanLease(record.id, env)).rejects.toThrow();
+    expect(delivered).toBe(false);
+    expect(fs.existsSync(dir)).toBe(false);
+    await expect(acquireAgentPermit(record.id, env)).rejects.toThrow();
+  });
+
+  it("does not allocate an id whose takeover identity is still reserved", async () => {
+    fs.mkdirSync(sessionsDir(env), { recursive: true });
+    fs.writeFileSync(path.join(sessionsDir(env), takeoverIdentityName("desk-0badc0de")), "[0,0,null]");
+    forcedIds.push("0badc0de", "0badf00d");
+    expect((await createSession({ type: "desktop", projectDir: home }, env)).id).toBe("desk-0badf00d");
   });
 
   it.each(["", "0d", "-1d", "1.5h", "1", "all", "999999999999999w"])("rejects invalid duration %s", (value) => {
