@@ -17,6 +17,15 @@
 - The published CLI now carries Sentry debug IDs, so fatal reports from
   opted-in telemetry can resolve to source wherever the package is
   installed. (#140)
+- Browser lab sessions send less traffic to Google. Chrome's network time
+  queries, Safe Browsing real-time lookups, AI Mode eligibility check and
+  startup search preconnect are off. Browser sign-in polling and the on-device
+  model update check now go to an unusable loopback address. Chrome therefore
+  no longer treats `accounts.google.com` as its own sign-in page; pages can
+  still sign in to Google as ordinary websites. The
+  `scripts/lab/chrome-egress-check.mjs` release check now closes Chrome and
+  cleans up correctly, exits 0 on a successful capture and observes for 120
+  seconds. (#139)
 
 ## Validation
 
@@ -25,3 +34,6 @@
 ## Known limits
 
 - <What this release does not do, and what is not proven yet.>
+- Browser lab sessions still send Chrome's activity ping to
+  `update.googleapis.com` when a browser session ends. It has a hardcoded URL
+  and no switch to disable it. (#139)
