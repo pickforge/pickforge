@@ -2041,7 +2041,7 @@ describe("pickforge-lab artifacts", () => {
     const run = await createRun(projectDir, "exposure", { evidence: true, device: { kind: "desktop", platform: "linux" } }, env);
     const args = ["artifacts", "report", run.runId, "--project-dir", projectDir];
     expect(parseJson(await runCli([...args, "--json"], env))).toMatchObject({
-      reportPath: null, outcome: null, device: { kind: "desktop", platform: "linux" },
+      reportPath: null, shareReportPath: null, shareReportBytes: null, outcome: null, device: { kind: "desktop", platform: "linux" },
     });
     expect((await runCli(args, env)).stdout.trim()).toMatch(/Report: not finalized yet$/);
     const reportPath = path.join(run.dir, "report.html");
@@ -2051,9 +2051,16 @@ describe("pickforge-lab artifacts", () => {
     await run.finish();
     await writeEvidenceReport(run);
     expect(parseJson(await runCli([...args, "--json"], env))).toMatchObject({
-      reportPath, outcome: { status: "blocked", scenario: "Checkout" },
+      reportPath, shareReportPath: path.join(run.dir, "report-share.html"),
+      shareReportBytes: fs.statSync(path.join(run.dir, "report-share.html")).size,
+      outcome: { status: "blocked", scenario: "Checkout" },
     });
-    expect((await runCli(args, env)).stdout.trim().endsWith(`Report: ${reportPath}`)).toBe(true);
+    const shareReportPath = path.join(run.dir, "report-share.html");
+    const shareReportBytes = fs.statSync(shareReportPath).size;
+    expect((await runCli(args, env)).stdout.trim().endsWith(`Shareable report: ${shareReportPath} (${shareReportBytes} bytes)`)).toBe(true);
+    fs.renameSync(shareReportPath, path.join(run.dir, "saved-share.html"));
+    fs.symlinkSync("saved-share.html", shareReportPath);
+    expect(parseJson(await runCli([...args, "--json"], env))).toMatchObject({ shareReportPath: null, shareReportBytes: null });
     const listArgs = ["artifacts", "list", "--json", "--project-dir", projectDir];
     expect(parseJson(await runCli(listArgs, env)).runs[0].outcome).toBe("blocked");
     fs.renameSync(reportPath, path.join(run.dir, "saved.html"));
@@ -2225,7 +2232,7 @@ describe("pickforge-lab artifacts", () => {
     expect(result.code).toBe(0);
     const report = parseJson(result);
     expect(report.manifest.status).toBe("orphaned");
-    expect(report.manifest.artifacts.map((artifact: { path: string }) => artifact.path)).toEqual(["actions.jsonl", "report.html"]);
+    expect(report.manifest.artifacts.map((artifact: { path: string }) => artifact.path)).toEqual(["actions.jsonl", "report.html", "report-share.html"]);
     expect(report.recovery.sessions[0].sessionId).toBe("brow-orphan");
     expect(fs.readFileSync(report.recovery.sessions[0].index, "utf8")).toContain(`${runId}/report.html`);
     expect(fs.readFileSync(path.join(dir, "actions.jsonl"), "utf8")).toBe(journal);

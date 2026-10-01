@@ -5,6 +5,8 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   EVIDENCE_REPORT,
+  EVIDENCE_SHARE_REPORT,
+  MAX_SHARE_IMAGE_BYTES,
   appendAction,
   createRun,
   renderEvidenceHtml,
@@ -17,7 +19,9 @@ import {
   type EvidenceOutcomeRecord,
   type RunManifest,
 } from "../src/index.js";
-import { renderEvidenceSessionIndex } from "../src/evidence-render.js";
+import { DirHandle } from "../src/dir-handle.js";
+import { readBoundedFileIn } from "../src/bounded-read.js";
+import { writeEvidenceReportIn, renderEvidenceSessionIndex } from "../src/evidence-render.js";
 
 const TOKEN = `ghp_${"a".repeat(36)}`;
 
@@ -256,7 +260,7 @@ describe("writeEvidenceReport", () => {
     expect(html).not.toContain("../outside.png");
     const manifest = JSON.parse(fs.readFileSync(path.join(run.dir, "manifest.json"), "utf8")) as RunManifest;
     expect(manifest.artifacts.map((artifact) => artifact.path)).toEqual([
-      "screenshots/good.png", "actions.jsonl", "report.html",
+      "screenshots/good.png", "actions.jsonl", "report.html", "report-share.html",
     ]);
     expect(manifest.evidenceTruncated).toBe(false);
     expect(
@@ -294,7 +298,7 @@ describe("writeEvidenceReport", () => {
     await run.finish("completed");
     await writeEvidenceReport(run);
     expect(run.manifest.evidenceTruncated).toBe(true);
-    expect(run.manifest.artifacts.map((artifact) => artifact.path)).toEqual(["actions.jsonl", "report.html"]);
+    expect(run.manifest.artifacts.map((artifact) => artifact.path)).toEqual(["actions.jsonl", "report.html", "report-share.html"]);
     // Session teardown records its final action after finish, then refreshes.
     await appendAction(run, action({ tool: "session_destroy" }));
     await writeEvidenceReport(run);
@@ -934,5 +938,169 @@ describe("evidence report pinned script behaviour", () => {
     expect(html).toContain(
       ".zoom:checked~.inspect-bar label{border-color:var(--ember);color:var(--ember)}",
     );
+  });
+});
+
+
+// Sanitized, full-resolution 1x1 PNG. No customer captures belong in fixtures.
+const FIXTURE_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=", "base64");
+
+function imagePayloads(html: string): Record<string, string> {
+  const json = html.match(/<script type="application\/json" id="image-data">([^<]*)<\/script>/)?.[1];
+  expect(json).toBeDefined();
+  return JSON.parse(json!);
+}
+
+async function exportFixture(records: EvidenceRecord[], files: Record<string, Buffer> = {}) {
+  const run = await createRun(projectDir, "share", { evidence: true, device: {
+    kind: "mobile-emulation", platform: "linux", browser: "Chromium", viewport: { width: 390, height: 844 },
+  } });
+  for (const [name, bytes] of Object.entries(files)) fs.writeFileSync(path.join(run.dir, "screenshots", name), bytes);
+  const journal = path.join(run.dir, "actions.jsonl");
+  fs.writeFileSync(journal, records.map((record) => JSON.stringify(record)).join("\n") + "\n");
+  return { run, journal };
+}
+
+describe("standalone evidence report", () => {
+  it("embeds unique original payloads once and keeps context, redaction, CSP and offline links", async () => {
+    // This credential-shaped base64 must survive even though text redaction removes it.
+    const base64Key = `AKIA${"A".repeat(16)}`;
+    const second = Buffer.concat([FIXTURE_PNG, Buffer.alloc(1, 255), Buffer.from(base64Key, "base64")]);
+    const records: EvidenceRecord[] = [
+      action({ artifacts: ["screenshots/one.png", "screenshots/one.png", "screenshots/copy.png"],
+        tool: '"><img onerror=alert(1)>', target: { caption: `日本語 café token=${TOKEN}` }, error: "</script>" }),
+      action({ actionId: "second", startedAt: "2026-07-13T12:01:00.000Z", tool: "browser_screenshot", artifacts: ["screenshots/two.png"] }),
+      outcome({ scenario: "支払い café", inspectedScreenshots: ["screenshots/one.png"], revision: "abc123", steps: ["Open cart", "Confirm"], notes: `token=${TOKEN}` }),
+      outcome({ scenario: "Refund", status: "fail", inspectedScreenshots: ["screenshots/two.png"], limitations: ["</script>", "Untested tablet"], recordedAt: "2026-07-13T12:06:00.000Z" }),
+      outcome({ scenario: "Blocked flow", status: "blocked", inspectedScreenshots: [], recordedAt: "2026-07-13T12:07:00.000Z" }),
+    ];
+    const { run, journal } = await exportFixture(records, { "one.png": FIXTURE_PNG, "copy.png": FIXTURE_PNG, "two.png": second });
+    const originals = [journal, ...["one.png", "copy.png", "two.png"].map((name) => path.join(run.dir, "screenshots", name))]
+      .map((file) => ({ file, bytes: fs.readFileSync(file), mtime: fs.statSync(file).mtimeMs }));
+    await writeEvidenceReport(run);
+    const sharePath = path.join(run.dir, EVIDENCE_SHARE_REPORT);
+    const copied = path.join(root, "unrelated", EVIDENCE_SHARE_REPORT);
+    fs.mkdirSync(path.dirname(copied));
+    fs.copyFileSync(sharePath, copied);
+    expect(fs.readdirSync(path.dirname(copied))).toEqual([EVIDENCE_SHARE_REPORT]);
+    const html = fs.readFileSync(copied, "utf8");
+    const payloads = imagePayloads(html);
+    expect(Object.keys(payloads)).toHaveLength(2);
+    for (const original of [FIXTURE_PNG, second]) {
+      const hash = createHash("sha256").update(original).digest("hex");
+      expect(payloads[hash]).toBe(original.toString("base64"));
+      expect(Buffer.from(payloads[hash]!, "base64")).toEqual(original);
+      expect(html.split(payloads[hash]!).length - 1).toBe(1);
+      expect(payloads[hash]).toMatch(/^[A-Za-z0-9+/]+={0,2}$/);
+    }
+    expect(second.toString("base64")).toContain(`/${base64Key}`);
+    expect(html.match(/data-img="/g)).toHaveLength(8); // Each gallery reference has an inspect reference.
+    expect(html).not.toContain(TOKEN);
+    expect(html).toContain("token=[REDACTED]");
+    expect(html).toContain("日本語 café");
+    expect(html).toContain("支払い café");
+    for (const status of ["pass", "fail", "blocked"]) expect(html).toContain(`panel outcome s-${status}`);
+    for (const text of ["abc123", "Chromium", "390x844", "Open cart", "Untested tablet", "Actual size", "Action timeline"]) expect(html).toContain(text);
+    expect(html).toContain("&lt;/script&gt;");
+    expect(html).toContain("&lt;img onerror");
+    expect(html).toContain("<noscript>");
+    expect(html).toContain("This file is self-contained");
+    expect(html).toContain(`${FIXTURE_PNG.length + second.length} bytes before base64`);
+    expect(html).toContain("Original screenshots, manifest.json and actions.jsonl remain the authoritative evidence");
+    expect(html).toContain("report.html, manifest.json and actions.jsonl are not included as attachments");
+    expect(html).not.toContain("Open original");
+    // Inspect actual URL attributes; base64 can naturally contain two slashes.
+    expect(html).not.toMatch(/(?:src|href)="(?!#)[^"]*"/);
+    expect(html).not.toMatch(/https?:|url\(|(?:src|href)="\/\//);
+    const script = scriptOf(html);
+    const hash = createHash("sha256").update(script).digest("base64");
+    expect(html).toContain(`default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'sha256-${hash}'; base-uri 'none'; form-action 'none'`);
+    expect(html.match(/<script>/g)).toHaveLength(1);
+    for (const original of originals) {
+      expect(fs.readFileSync(original.file)).toEqual(original.bytes);
+      expect(fs.statSync(original.file).mtimeMs).toBe(original.mtime);
+    }
+    expect(run.manifest.artifacts.map((artifact) => artifact.path)).toContain(EVIDENCE_SHARE_REPORT);
+    const linked = fs.readFileSync(path.join(run.dir, EVIDENCE_REPORT), "utf8");
+    expect(linked).toBe(renderEvidenceHtml(run.manifest, records, new Set(["screenshots/one.png", "screenshots/copy.png", "screenshots/two.png"])));
+  });
+
+  it("discloses unsafe, unsupported, missing and over-cap references instead of embedding them", async () => {
+    const paths = ["../outside.png", "/absolute.png", "screenshots/link.png", "screenshots/hard.png", "screenshots/missing.png", "screenshots/text.png", "screenshots/large.png", "screenshots/file.jpg", "logs/note.txt"];
+    const { run } = await exportFixture([action({ artifacts: paths }), outcome({ inspectedScreenshots: ["screenshots/outcome-missing.png"] })], { "text.png": Buffer.from("not PNG"), "file.jpg": FIXTURE_PNG });
+    const outside = path.join(root, "outside.png");
+    fs.writeFileSync(outside, FIXTURE_PNG);
+    fs.symlinkSync(outside, path.join(run.dir, "screenshots/link.png"));
+    fs.linkSync(outside, path.join(run.dir, "screenshots/hard.png"));
+    const large = path.join(run.dir, "screenshots/large.png");
+    fs.writeFileSync(large, FIXTURE_PNG);
+    fs.truncateSync(large, MAX_SHARE_IMAGE_BYTES + 1);
+    const dir = await DirHandle.open(run.dir);
+    try {
+      await writeEvidenceReportIn(dir, run.manifest, [action({ artifacts: paths }), outcome({ inspectedScreenshots: ["screenshots/outcome-missing.png"] })]);
+    } finally { await dir.close(); }
+    const html = fs.readFileSync(path.join(run.dir, EVIDENCE_SHARE_REPORT), "utf8");
+    expect(imagePayloads(html)).toEqual({});
+    for (const relative of [...paths, "screenshots/outcome-missing.png"]) expect(html).toContain(relative);
+    for (const reason of ["Unsafe or unsupported", "without symlinks or hardlinks", "Missing file", "PNG signature missing", "Over per-image cap"]) expect(html).toContain(reason);
+    expect(html).not.toMatch(/(?:src|href)="(?!#)/);
+  });
+
+  it("includes manifest-only screenshots and discloses non-screenshot artifacts", async () => {
+    const { run } = await exportFixture([], { "orphan.png": FIXTURE_PNG });
+    run.manifest.artifacts = ["screenshots/orphan.png", "notes.log"].map((relative) => ({
+      type: "other", name: path.basename(relative), path: relative, createdAt: run.manifest.createdAt,
+    }));
+    fs.writeFileSync(path.join(run.dir, "notes.log"), "sanitized notes");
+    const dir = await DirHandle.open(run.dir);
+    try { await writeEvidenceReportIn(dir, run.manifest, []); } finally { await dir.close(); }
+    const html = fs.readFileSync(path.join(run.dir, EVIDENCE_SHARE_REPORT), "utf8");
+    expect(Object.values(imagePayloads(html))).toEqual([FIXTURE_PNG.toString("base64")]);
+    expect(html).toContain("Recorded screenshot");
+    expect(html).toContain("notes.log: Unsafe or unsupported");
+  });
+
+  it("discloses a missing screenshot directory and bounded-read failures", async () => {
+    const { run } = await exportFixture([action({ artifacts: ["screenshots/good.png"] })], { "good.png": FIXTURE_PNG });
+    const read = vi.spyOn(await import("../src/bounded-read.js"), "readBoundedFileIn").mockRejectedValueOnce(new Error("changed"));
+    await writeEvidenceReport(run);
+    read.mockRestore();
+    expect(fs.readFileSync(path.join(run.dir, EVIDENCE_SHARE_REPORT), "utf8")).toContain("File unreadable, changed, or unsafe during bounded read");
+    fs.renameSync(path.join(run.dir, "screenshots"), path.join(run.dir, "saved-screenshots"));
+    await writeEvidenceReport(run);
+    expect(fs.readFileSync(path.join(run.dir, EVIDENCE_SHARE_REPORT), "utf8")).toContain("Screenshot directory missing or unsafe");
+  });
+
+  it("caps total unique bytes and still includes duplicates at the cap", async () => {
+    const names = Array.from({ length: 10 }, (_, index) => `cap-${index}.png`);
+    const { run } = await exportFixture([action({ artifacts: names.map((name) => `screenshots/${name}`) })],
+      Object.fromEntries(names.map((name) => [name, FIXTURE_PNG])));
+    // Model full-size reads with one reusable buffer. Encoding is stubbed here
+    // to keep this budget test from writing a 350 MiB report; fidelity is tested above.
+    const image = Buffer.alloc(MAX_SHARE_IMAGE_BYTES);
+    FIXTURE_PNG.copy(image);
+    image.toString = () => FIXTURE_PNG.toString("base64");
+    let index = 0;
+    const read = vi.spyOn(await import("../src/bounded-read.js"), "readBoundedFileIn").mockImplementation(async () => {
+      image[image.length - 1] = index === 9 ? 0 : index;
+      index += 1;
+      return image;
+    });
+    try { await writeEvidenceReport(run); } finally { read.mockRestore(); }
+    const html = fs.readFileSync(path.join(run.dir, EVIDENCE_SHARE_REPORT), "utf8");
+    expect(Object.keys(imagePayloads(html))).toHaveLength(8);
+    expect(html).toContain("cap-8.png: Over total image cap (268435456 bytes)");
+    expect(html).not.toContain("cap-9.png: Over total");
+    expect(html).toContain("9 capture file(s) embedded as 8 unique image(s), 268435456 bytes");
+  });
+
+  it("enforces a bounded read cap and single-link rule at the opened file", async () => {
+    const { run } = await exportFixture([], { "one.png": FIXTURE_PNG });
+    const dir = await DirHandle.open(path.join(run.dir, "screenshots"));
+    try {
+      await expect(readBoundedFileIn(dir, "one.png", Date.now() + 5000, { maxBytes: 8, singleLink: true })).rejects.toThrow("exceeds 8 bytes");
+      fs.linkSync(path.join(run.dir, "screenshots/one.png"), path.join(run.dir, "screenshots/copy.png"));
+      await expect(readBoundedFileIn(dir, "one.png", Date.now() + 5000, { singleLink: true })).rejects.toThrow("single-link");
+    } finally { await dir.close(); }
   });
 });

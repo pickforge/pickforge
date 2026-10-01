@@ -4,6 +4,14 @@
 
 ## Changes
 
+- Lab evidence finalization now writes `report-share.html` alongside the linked
+  `report.html`. Download and open the share report in a browser, or ZIP the
+  single file if a channel blocks HTML attachments. Original PNGs are embedded
+  once per content hash at full resolution. Limits are 32 MiB per image and
+  256 MiB total; excluded files are listed. Large runs produce large files.
+  CLI and MCP artifact reports expose its path and byte size. The MCP report
+  resource still serves the linked viewer. (#186)
+
 - The MCP prompt `preview-flutter-component` walks an agent through rendering
   one Flutter widget without the full app, auth, routing or backend. Give it
   the widget and, optionally, states and viewports. It uses the Flutter Widget

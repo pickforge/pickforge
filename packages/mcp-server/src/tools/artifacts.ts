@@ -4,6 +4,7 @@ import { z } from "zod";
 import {
   EVIDENCE_ACTION_LOG,
   EVIDENCE_REPORT,
+  evidenceShareReportInfo,
   latestOutcome,
   recordEvidenceOutcome,
   listArtifactRuns,
@@ -142,6 +143,7 @@ export function registerArtifactTools(
         const outcome = latest === null ? null : { status: latest.status, scenario: latest.scenario };
         const reportPath = await catalog.hasRootFile(entry, EVIDENCE_REPORT)
           ? path.join(dir, EVIDENCE_REPORT) : null;
+        const share = await evidenceShareReportInfo(catalog, entry);
         return {
           data: {
             source: "lab",
@@ -150,6 +152,7 @@ export function registerArtifactTools(
             dir,
             manifest,
             reportPath,
+            ...share,
             outcome,
             device: manifest.device ?? null,
             report: [...renderRunReport(manifest, dir, records),

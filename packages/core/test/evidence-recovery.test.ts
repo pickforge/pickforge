@@ -383,7 +383,7 @@ describe("explicit evidence recovery", () => {
       expect(await fs.promises.readFile(path.join(run.dir, "actions.jsonl"))).toEqual(journals[i]);
       const summary = await manifest(run.dir);
       expect(summary.status).toBe("orphaned");
-      expect(summary.artifacts.map((artifact) => artifact.type).sort()).toEqual(["log", "report", "screenshot"]);
+      expect(summary.artifacts.map((artifact) => artifact.type).sort()).toEqual(["log", "report", "report", "screenshot"]);
       const html = await fs.promises.readFile(path.join(run.dir, "report.html"), "utf8");
       expect(html).toContain("orphaned");
       expect(html).toContain("synthetic_action");
@@ -436,7 +436,7 @@ describe("explicit evidence recovery", () => {
     expect(await manifest(run.dir)).toMatchObject({
       runId: run.runId, sessionId: "brow-synthetic", status: "orphaned", evidenceRecovery: "complete",
     });
-    expect((await manifest(run.dir)).artifacts).toHaveLength(3);
+    expect((await manifest(run.dir)).artifacts).toHaveLength(4);
     expect((await fs.promises.readdir(runsRoot)).filter((name) => name.startsWith("session-")))
       .toEqual([path.basename(settled[1]!)]);
     const bytes = await Promise.all(settled.map((file) => fs.promises.readFile(file)));
@@ -555,7 +555,7 @@ describe("explicit evidence recovery", () => {
     await fs.promises.writeFile(path.join(run.dir, "manifest.json"), JSON.stringify(summary));
     await finalizeOrphanedEvidenceRuns(project);
     expect((await manifest(run.dir)).status).toBe("completed");
-    expect((await manifest(run.dir)).artifacts).toHaveLength(3);
+    expect((await manifest(run.dir)).artifacts).toHaveLength(4);
   });
 
   it("indexes completed runs with a report without rewriting or skipping them", async () => {
@@ -604,7 +604,7 @@ describe("explicit evidence recovery", () => {
     await fs.promises.symlink(outside, path.join(path.dirname(run.dir), "session-brow-synthetic.html"));
     const result = await finalizeOrphanedEvidenceRuns(project);
     expect(result.sessions[0]!.runs[0]!.journal).toBe("corrupt");
-    expect((await manifest(run.dir)).artifacts.map((artifact) => artifact.path)).toEqual(["report.html"]);
+    expect((await manifest(run.dir)).artifacts.map((artifact) => artifact.path)).toEqual(["report.html", "report-share.html"]);
     expect(await fs.promises.readFile(outside, "utf8")).toBe("private-outside");
     expect(await fs.promises.readFile(path.join(run.dir, "report.html"), "utf8")).not.toContain("private-outside");
   });

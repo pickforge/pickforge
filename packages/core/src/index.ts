@@ -142,6 +142,10 @@ export {
 
 export {
   EVIDENCE_REPORT,
+  EVIDENCE_SHARE_REPORT,
+  MAX_SHARE_IMAGE_BYTES,
+  MAX_SHARE_TOTAL_BYTES,
+  evidenceShareReportInfo,
   renderEvidenceHtml,
   renderRunReport,
   sortEvidenceRecords,
