@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { crc32 } from "node:zlib";
+import zlib, { crc32, deflateSync } from "node:zlib";
 import { encodePng } from "../../desktop-linux/test/png-fixture.js";
 import fs from "node:fs";
 import os from "node:os";
@@ -23,7 +23,7 @@ import {
 } from "../src/index.js";
 import { DirHandle } from "../src/dir-handle.js";
 import { readBoundedFileIn } from "../src/bounded-read.js";
-import { writeEvidenceReportIn, renderEvidenceSessionIndex } from "../src/evidence-render.js";
+import { writeEvidenceReportIn, renderEvidenceSessionIndex, MAX_SHARE_INFLATED_IMAGE_BYTES } from "../src/evidence-render.js";
 
 const TOKEN = `ghp_${"a".repeat(36)}`;
 
@@ -960,6 +960,49 @@ function pngWithShortHeader(): Buffer {
   return Buffer.concat([FIXTURE_PNG.subarray(0, 8), header, FIXTURE_PNG.subarray(33)]);
 }
 
+function pngChunk(type: string, data: Buffer): Buffer {
+  const chunk = Buffer.alloc(data.length + 12);
+  chunk.writeUInt32BE(data.length);
+  chunk.write(type, 4, "ascii");
+  data.copy(chunk, 8);
+  chunk.writeUInt32BE(crc32(chunk.subarray(4, -4)) >>> 0, chunk.length - 4);
+  return chunk;
+}
+
+function pngWithStream(parts: readonly Buffer[], header = FIXTURE_PNG.subarray(16, 29)): Buffer {
+  const palette = header[9] === 3 ? [pngChunk("PLTE", Buffer.alloc(3))] : [];
+  return Buffer.concat([
+    FIXTURE_PNG.subarray(0, 8), pngChunk("IHDR", header), ...palette,
+    ...parts.map((part) => pngChunk("IDAT", part)), pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+function changedPngHeader(offset: number, value: number): Buffer {
+  const header = Buffer.from(FIXTURE_PNG.subarray(16, 29));
+  header[offset] = value;
+  return header;
+}
+
+function adam7Png(width: number, height: number): Buffer {
+  const header = changedPngHeader(12, 1);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  const raw: number[] = [];
+  for (const [x, y, dx, dy] of [
+    [0, 0, 8, 8], [4, 0, 8, 8], [0, 4, 4, 8], [2, 0, 4, 4],
+    [0, 2, 2, 4], [1, 0, 2, 2], [0, 1, 1, 2],
+  ]) {
+    if (x >= width) continue;
+    for (let row = y; row < height; row += dy) {
+      raw.push(0); // No filter; write each RGB pixel belonging to this pass.
+      for (let column = x; column < width; column += dx) raw.push(column, row, 0);
+    }
+  }
+  const compressed = deflateSync(Buffer.from(raw));
+  // Deliberately split the zlib stream across PNG chunks.
+  return pngWithStream([compressed.subarray(0, 3), compressed.subarray(3)], header);
+}
+
 function imagePayloads(html: string): Record<string, string> {
   const json = html.match(/<script type="application\/json" id="image-data">([^<]*)<\/script>/)?.[1];
   expect(json).toBeDefined();
@@ -1166,6 +1209,18 @@ describe("standalone evidence report", () => {
     ["invalid chunk type", encodePng(1, 1, Buffer.alloc(3), [{ type: "pi1x", data: Buffer.alloc(0) }])],
     ["zero width", encodePng(0, 1, Buffer.alloc(0))],
     ["zero height", encodePng(1, 0, Buffer.alloc(0))],
+    ["invalid bit depth", pngWithStream([deflateSync(Buffer.alloc(4))], changedPngHeader(8, 4))],
+    ["invalid color type", pngWithStream([deflateSync(Buffer.alloc(4))], changedPngHeader(9, 5))],
+    ["invalid compression method", pngWithStream([deflateSync(Buffer.alloc(4))], changedPngHeader(10, 1))],
+    ["invalid filter method", pngWithStream([deflateSync(Buffer.alloc(4))], changedPngHeader(11, 1))],
+    ["invalid interlace method", pngWithStream([deflateSync(Buffer.alloc(4))], changedPngHeader(12, 2))],
+    ["truncated zlib with valid chunk CRC", pngWithStream([deflateSync(Buffer.alloc(4)).subarray(0, -1)])],
+    ["corrupt zlib with valid chunk CRC", pngWithStream([Buffer.concat([deflateSync(Buffer.alloc(4)).subarray(0, -4), Buffer.alloc(4, 0xff)])])],
+    ["trailing zlib data", pngWithStream([Buffer.concat([deflateSync(Buffer.alloc(4)), Buffer.from([0])])])],
+    ["second zlib stream", pngWithStream([deflateSync(Buffer.alloc(4)), deflateSync(Buffer.alloc(4))])],
+    ["short raw data", pngWithStream([deflateSync(Buffer.alloc(3))])],
+    ["long raw data", pngWithStream([deflateSync(Buffer.alloc(5))])],
+    ["deflate bomb exceeding expected size", pngWithStream([deflateSync(Buffer.alloc(1024 * 1024))])],
   ])("discloses %s PNGs without embedding them", async (_name, bytes) => {
     const { run } = await exportFixture([action({ artifacts: ["screenshots/invalid.png", "screenshots/good.png"] })], {
       "invalid.png": bytes, "good.png": FIXTURE_PNG,
@@ -1175,6 +1230,63 @@ describe("standalone evidence report", () => {
     expect(Object.values(imagePayloads(html))).toEqual([FIXTURE_PNG.toString("base64")]);
     expect(html).toContain("screenshots/invalid.png: Incomplete or corrupt PNG");
     expect(fs.readFileSync(path.join(run.dir, "screenshots/invalid.png"))).toEqual(bytes);
+  });
+
+  it("rejects huge dimensions before inflating even a small compressed bomb", async () => {
+    const header = Buffer.from(FIXTURE_PNG.subarray(16, 29));
+    header.writeUInt32BE(32768, 0);
+    header.writeUInt32BE(32768, 4);
+    expect(32768 * (1 + 32768 * 3)).toBeGreaterThan(MAX_SHARE_INFLATED_IMAGE_BYTES);
+    expect(MAX_SHARE_INFLATED_IMAGE_BYTES).toBe(1024 ** 3);
+    const bytes = pngWithStream([deflateSync(Buffer.alloc(1024 * 1024))], header);
+    const { run } = await exportFixture([action({ artifacts: ["screenshots/huge.png"] })], { "huge.png": bytes });
+    const inflate = vi.spyOn(zlib, "inflateSync");
+    try {
+      await writeEvidenceReport(run);
+      expect(inflate).not.toHaveBeenCalled();
+    } finally { inflate.mockRestore(); }
+    const html = fs.readFileSync(path.join(run.dir, EVIDENCE_SHARE_REPORT), "utf8");
+    expect(imagePayloads(html)).toEqual({});
+    expect(html).toContain("screenshots/huge.png: Incomplete or corrupt PNG");
+    expect(fs.readFileSync(path.join(run.dir, "screenshots/huge.png"))).toEqual(bytes);
+  });
+
+  it("bounds inflate by the expected scanline size", async () => {
+    const bytes = pngWithStream([deflateSync(Buffer.alloc(1024 * 1024))]);
+    const { run } = await exportFixture([action({ artifacts: ["screenshots/bomb.png"] })], { "bomb.png": bytes });
+    const inflate = vi.spyOn(zlib, "inflateSync");
+    try {
+      await writeEvidenceReport(run);
+      expect(inflate).toHaveBeenCalledWith(expect.any(Buffer), { info: true, maxOutputLength: 5 });
+    } finally { inflate.mockRestore(); }
+    expect(imagePayloads(fs.readFileSync(path.join(run.dir, EVIDENCE_SHARE_REPORT), "utf8"))).toEqual({});
+  });
+
+  it.each([[1, 1], [1, 5], [5, 1], [9, 9]])("embeds a valid %ix%i Adam7 PNG unchanged", async (width, height) => {
+    const bytes = adam7Png(width, height);
+    const { run } = await exportFixture([action({ artifacts: ["screenshots/adam7.png"] })], { "adam7.png": bytes });
+    await writeEvidenceReport(run);
+    const html = fs.readFileSync(path.join(run.dir, EVIDENCE_SHARE_REPORT), "utf8");
+    expect(Object.values(imagePayloads(html))).toEqual([bytes.toString("base64")]);
+    expect(html).toContain("Not included: none.");
+    expect(fs.readFileSync(path.join(run.dir, "screenshots/adam7.png"))).toEqual(bytes);
+  });
+
+  it.each([
+    [0, 1, 1], [0, 2, 1], [0, 4, 1], [0, 8, 1], [0, 16, 1],
+    [2, 8, 3], [2, 16, 3], [3, 1, 1], [3, 2, 1], [3, 4, 1], [3, 8, 1],
+    [4, 8, 2], [4, 16, 2], [6, 8, 4], [6, 16, 4],
+  ])("accepts color type %i at bit depth %i with %i samples", async (color, depth, samples) => {
+    const header = changedPngHeader(9, color);
+    header[8] = depth;
+    header.writeUInt32BE(3, 0);
+    header.writeUInt32BE(2, 4);
+    const bytes = pngWithStream([deflateSync(Buffer.alloc(2 * (1 + Math.ceil(3 * depth * samples / 8))))], header);
+    const { run } = await exportFixture([action({ artifacts: ["screenshots/color.png"] })], { "color.png": bytes });
+    await writeEvidenceReport(run);
+    const html = fs.readFileSync(path.join(run.dir, EVIDENCE_SHARE_REPORT), "utf8");
+    expect(Object.values(imagePayloads(html))).toEqual([bytes.toString("base64")]);
+    expect(html).toContain("Not included: none.");
   });
 
   it("enforces a bounded read cap and single-link rule at the opened file", async () => {
