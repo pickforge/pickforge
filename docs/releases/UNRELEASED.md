@@ -43,6 +43,9 @@
 
 - Each finalized Lab run stores about 1.33 times its screenshot bytes again in
   `report-share.html`. Rendering near the 256 MiB cap needs roughly 1 GB of memory.
+- If rewriting the share report fails when an outcome is recorded on an already
+  finalized run, the previous reports stay in place and the error is returned;
+  `actions.jsonl` stays authoritative.
 
 - <What this release does not do, and what is not proven yet.>
 - Browser lab sessions still send Chrome's activity ping to

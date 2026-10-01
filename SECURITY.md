@@ -55,7 +55,8 @@ arrow-key browsing depend on that script. `report-share.html` uses the same
 viewer with a hash-pinned hydration script and allows images only from `data:`.
 It embeds original PNG bytes once per content hash, using bounded reads through
 the verified screenshot directory. Symlinks, hardlinks, unsafe paths and files
-without a PNG signature are excluded and listed. Limits are 32 MiB per image
+without a PNG signature, or with incomplete or corrupt PNG data, are excluded
+and listed. Limits are 32 MiB per image
 and 256 MiB total. Text stays escaped and redacted; image bytes are unchanged.
 Without JavaScript, report text remains readable and a notice explains that
 embedded captures cannot be displayed.

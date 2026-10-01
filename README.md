@@ -482,7 +482,8 @@ it lives) contains:
 Download and open `report-share.html` in a browser. It works offline with no
 adjacent files. If a channel blocks HTML attachments, ZIP the single file.
 Images are limited to 32 MiB each and 256 MiB of unique image bytes per report.
-Missing, unsafe, unsupported and over-limit files are listed as not included.
+Missing, unsafe, unsupported and over-limit files, including incomplete or corrupt
+PNGs, are listed as not included.
 Quality is never reduced to fit. Base64 adds about one third to image size, so
 large runs produce large files. Original screenshots, `manifest.json` and
 `actions.jsonl` remain authoritative. Logs and other attachments are not embedded.

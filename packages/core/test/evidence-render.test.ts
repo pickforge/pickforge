@@ -1020,6 +1020,26 @@ async function exportFixture(records: EvidenceRecord[], files: Record<string, Bu
 }
 
 describe("standalone evidence report", () => {
+  it("inflates identical embedded payloads once and discloses every invalid copy", async () => {
+    const valid = pngWithData(Buffer.alloc(2 * 1024 * 1024));
+    const invalid = pngWithStream([deflateSync(Buffer.alloc(4)).subarray(0, -1)]);
+    const copies = Array.from({ length: 5 }, (_, index) => `copy-${index}.png`);
+    const files = { ...Object.fromEntries(copies.map((name) => [name, valid])), "invalid.png": invalid, "invalid-copy.png": invalid };
+    const { run } = await exportFixture([action({ artifacts: Object.keys(files).map((name) => `screenshots/${name}`) })], files);
+    const inflate = vi.spyOn(zlib, "inflateSync");
+    try {
+      await writeEvidenceReport(run);
+      expect(inflate).toHaveBeenCalledTimes(3);
+      const validStream = deflateSync(Buffer.alloc(4));
+      expect(inflate.mock.calls.filter(([input]) => Buffer.isBuffer(input) && input.equals(validStream))).toHaveLength(1);
+    } finally { inflate.mockRestore(); }
+    const html = fs.readFileSync(path.join(run.dir, EVIDENCE_SHARE_REPORT), "utf8");
+    expect(Object.values(imagePayloads(html))).toEqual([valid.toString("base64")]);
+    expect(html).toContain("5 capture file(s) embedded as 1 unique image(s)");
+    expect(html).toContain("screenshots/invalid.png: Incomplete or corrupt PNG");
+    expect(html).toContain("screenshots/invalid-copy.png: Incomplete or corrupt PNG");
+  });
+
   it("embeds unique original payloads once and keeps context, redaction, CSP and offline links", async () => {
     // This credential-shaped base64 must survive even though text redaction removes it.
     const base64Key = `AKIA${"A".repeat(16)}`;
@@ -1130,6 +1150,8 @@ describe("standalone evidence report", () => {
     expect(html).toContain('aria-label="Inspect capture screenshots/orphan.png"');
     expect(html).toContain('<b>Recorded screenshot</b>');
     expect(html).toContain('aria-label="Recorded screenshot"');
+    expect(html.match(/alt="Recorded screenshot"/g)).toHaveLength(2);
+    expect(html).not.toContain("Recorded screenshot, Recorded screenshot");
   });
 
   it("discloses a missing screenshot directory and bounded-read failures", async () => {
@@ -1178,7 +1200,8 @@ describe("standalone evidence report", () => {
     expect(html).not.toMatch(/step 0|Step 0/);
     expect(html).toContain('aria-label="Inspect capture screenshots/outcome.png"');
     expect(html).toContain('<span class="mono">Recorded screenshot · screenshots/outcome.png</span>');
-    expect(html).toContain('alt="Recorded screenshot, Recorded screenshot"');
+    expect(html.match(/alt="Recorded screenshot"/g)).toHaveLength(2);
+    expect(html).not.toContain("Recorded screenshot, Recorded screenshot");
   });
 
   it("keeps collected images and omissions when closing the screenshot handle fails", async () => {

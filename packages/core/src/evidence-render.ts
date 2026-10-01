@@ -702,10 +702,15 @@ function captureHeading(capture: Capture): string {
   return capture.step === 0 ? title : `Step ${capture.step} · ${title}`;
 }
 
+function captureAlt(capture: Capture): string {
+  const description = captureDescription(capture);
+  return description === capture.title ? escapeHtml(description) : `${description}, ${escapeHtml(capture.title)}`;
+}
+
 function renderCapture(capture: Capture, share?: ShareImages): string {
   return `<figure class="cap"${filterAttributes(capture.lens, capture.scenarios)} data-search="${capture.search}">
 <a href="#${capture.id}" aria-label="${capture.step === 0 ? "Inspect capture" : `Inspect step ${capture.step} capture`} ${escapeHtml(capture.path)}">
-<span class="stage"><img ${imageSource(capture, share)} alt="${captureDescription(capture)}, ${escapeHtml(capture.title)}" loading="lazy"></span>
+<span class="stage"><img ${imageSource(capture, share)} alt="${captureAlt(capture)}" loading="lazy"></span>
 <figcaption><b>${captureHeading(capture)}</b><span class="mono">${escapeHtml(capture.status)} · ${escapeHtml(capture.path)}</span>${capture.target === "" ? "" : `<span class="mono">${escapeHtml(capture.target)}</span>`}</figcaption>
 </a></figure>`;
 }
@@ -727,7 +732,7 @@ function renderInspect(captures: readonly Capture[], index: number, share?: Shar
 <label class="btn grow" for="zoom-${capture.id}">Actual size</label>
 ${share === undefined ? `<a class="btn" href="${escapeHtml(capture.path)}">Open original</a>` : ""}
 <a class="btn" href="#captures">Close</a></div>
-<div class="inspect-stage"><img ${imageSource(capture, share)} alt="${captureDescription(capture)}, ${escapeHtml(capture.title)}"></div>
+<div class="inspect-stage"><img ${imageSource(capture, share)} alt="${captureAlt(capture)}"></div>
 <div class="inspect-foot">${browseLink(captures[index - 1], false)}<span class="mono">${index + 1} / ${captures.length}</span>${browseLink(captures[index + 1], true)}</div>
 </section>`;
 }
@@ -966,6 +971,11 @@ function includeShareImage(
   share: ShareImages, relative: string, bytes: Buffer,
 ): void {
   const omitted = share.omitted;
+  const hash = createHash("sha256").update(bytes).digest("hex");
+  if (share.payloads[hash] !== undefined) {
+    share.hashes.set(relative, hash);
+    return;
+  }
   if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
     omitted.set(relative, "Unsupported image; PNG signature missing");
     return;
@@ -974,16 +984,13 @@ function includeShareImage(
     omitted.set(relative, "Incomplete or corrupt PNG");
     return;
   }
-  const hash = createHash("sha256").update(bytes).digest("hex");
-  if (share.payloads[hash] === undefined) {
-    if (share.bytes + bytes.length > MAX_SHARE_TOTAL_BYTES) {
-      omitted.set(relative, `Over total image cap (${formatShareBytes(MAX_SHARE_TOTAL_BYTES)})`);
-      return;
-    }
-    // Base64 bypasses text redaction: altering it would corrupt evidence.
-    share.payloads[hash] = bytes.toString("base64");
-    share.bytes += bytes.length;
+  if (share.bytes + bytes.length > MAX_SHARE_TOTAL_BYTES) {
+    omitted.set(relative, `Over total image cap (${formatShareBytes(MAX_SHARE_TOTAL_BYTES)})`);
+    return;
   }
+  // Base64 bypasses text redaction: altering it would corrupt evidence.
+  share.payloads[hash] = bytes.toString("base64");
+  share.bytes += bytes.length;
   share.hashes.set(relative, hash);
 }
 
