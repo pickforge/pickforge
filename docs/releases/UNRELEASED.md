@@ -41,6 +41,9 @@
 
 ## Known limits
 
+- Each finalized Lab run stores about 1.33 times its screenshot bytes again in
+  `report-share.html`. Rendering near the 256 MiB cap needs roughly 1 GB of memory.
+
 - <What this release does not do, and what is not proven yet.>
 - Browser lab sessions still send Chrome's activity ping to
   `update.googleapis.com` when a browser session ends. It has a hardcoded URL

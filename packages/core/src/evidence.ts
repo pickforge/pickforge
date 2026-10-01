@@ -1022,6 +1022,19 @@ function forgetRunByteCache(runDir: string): void {
   runByteCache.delete(runDir);
 }
 
+/** Apply the same accounting exclusions to snapshots and byte scans. */
+function classifyRunArtifactEntry(
+  entry: fs.Dirent, relative: string,
+): "directory" | "file" | undefined {
+  if (entry.isSymbolicLink()) return undefined;
+  if (entry.isDirectory()) return "directory";
+  if (!entry.isFile()) return undefined;
+  if (["manifest.json", "report.html", "report-share.html"].includes(relative)) return undefined;
+  if (relative === EVIDENCE_ACTION_LOG) return undefined;
+  if (entry.name.startsWith(".")) return undefined;
+  return "file";
+}
+
 /**
  * Snapshot the set of *counted* entry names in every directory of the run tree
  * (never following symlinks, never touching a file's contents) — the same
@@ -1049,17 +1062,13 @@ async function snapshotRunDirEntries(
     const files: string[] = [];
     const subdirs: string[] = [];
     for (const entry of entries) {
-      if (entry.isSymbolicLink()) continue;
-      if (entry.isDirectory()) {
+      const relative = rel === "" ? entry.name : `${rel}/${entry.name}`;
+      const kind = classifyRunArtifactEntry(entry, relative);
+      if (kind === "directory") {
         subdirs.push(entry.name);
         continue;
       }
-      if (!entry.isFile()) continue;
-      const rel2 = rel === "" ? entry.name : `${rel}/${entry.name}`;
-      if (rel2 === "manifest.json") continue;
-      if (rel2 === EVIDENCE_ACTION_LOG) continue;
-      if (entry.name.startsWith(".")) continue;
-      files.push(entry.name);
+      if (kind === "file") files.push(entry.name);
     }
     files.sort();
     subdirs.sort();
@@ -1086,8 +1095,8 @@ function dirEntriesEqual(
 
 /**
  * Full recursive scan of every counted file under the run directory (every
- * file except the action journal, the manifest, and dot-prefixed control/temp
- * files; symlinks are never followed). This is the ground truth the cache in
+ * file except the action journal, manifest, generated reports and dot-prefixed
+ * control/temp files; symlinks are never followed). This is the ground truth the cache in
  * `measureRunArtifactBytes` falls back to whenever the directory-mtime
  * snapshot shows the tree may have changed.
  */
@@ -1102,21 +1111,13 @@ async function walkRunArtifactBytes(runDir: string): Promise<number> {
       throw error;
     }
     for (const entry of entries) {
-      if (entry.isSymbolicLink()) continue;
       const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
+      const kind = classifyRunArtifactEntry(entry, path.relative(runDir, full));
+      if (kind === "directory") {
         await walk(full);
         continue;
       }
-      if (!entry.isFile()) continue;
-      const rel = path.relative(runDir, full);
-      // Exclude the manifest, the journal (measured live, separately, since it
-      // is appended in place rather than replaced), and any dot-prefixed
-      // control/temp file (the truncation sentinel, `.manifest.json.tmp-*`,
-      // pointer temps).
-      if (rel === "manifest.json") continue;
-      if (rel === EVIDENCE_ACTION_LOG) continue;
-      if (entry.name.startsWith(".")) continue;
+      if (kind !== "file") continue;
       try {
         const stat = await fs.promises.lstat(full);
         total += stat.size;

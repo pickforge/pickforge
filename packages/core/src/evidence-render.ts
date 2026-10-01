@@ -1,6 +1,7 @@
 import { readBoundedFileIn } from "./bounded-read.js";
 import type { RunCatalog, RunCatalogEntry } from "./run-catalog.js";
 import { createHash } from "node:crypto";
+import { crc32 } from "node:zlib";
 import {
   isOutcomeRecord,
   type EvidenceOutcomeRecord,
@@ -691,11 +692,20 @@ function imageSource(capture: Capture, share?: ShareImages): string {
     : `data-img="${share.hashes.get(capture.path)!}"`;
 }
 
+function captureDescription(capture: Capture): string {
+  return capture.step === 0 ? "Recorded screenshot" : `Capture for step ${capture.step}`;
+}
+
+function captureHeading(capture: Capture): string {
+  const title = escapeHtml(capture.title);
+  return capture.step === 0 ? title : `Step ${capture.step} · ${title}`;
+}
+
 function renderCapture(capture: Capture, share?: ShareImages): string {
   return `<figure class="cap"${filterAttributes(capture.lens, capture.scenarios)} data-search="${capture.search}">
-<a href="#${capture.id}" aria-label="Inspect step ${capture.step} capture ${escapeHtml(capture.path)}">
-<span class="stage"><img ${imageSource(capture, share)} alt="Capture for step ${capture.step}, ${escapeHtml(capture.title)}" loading="lazy"></span>
-<figcaption><b>Step ${capture.step} · ${escapeHtml(capture.title)}</b><span class="mono">${escapeHtml(capture.status)} · ${escapeHtml(capture.path)}</span>${capture.target === "" ? "" : `<span class="mono">${escapeHtml(capture.target)}</span>`}</figcaption>
+<a href="#${capture.id}" aria-label="${capture.step === 0 ? "Inspect capture" : `Inspect step ${capture.step} capture`} ${escapeHtml(capture.path)}">
+<span class="stage"><img ${imageSource(capture, share)} alt="${captureDescription(capture)}, ${escapeHtml(capture.title)}" loading="lazy"></span>
+<figcaption><b>${captureHeading(capture)}</b><span class="mono">${escapeHtml(capture.status)} · ${escapeHtml(capture.path)}</span>${capture.target === "" ? "" : `<span class="mono">${escapeHtml(capture.target)}</span>`}</figcaption>
 </a></figure>`;
 }
 
@@ -710,13 +720,13 @@ function browseLink(target: Capture | undefined, next: boolean): string {
 
 function renderInspect(captures: readonly Capture[], index: number, share?: ShareImages): string {
   const capture = captures[index]!;
-  return `<section class="inspect" id="${capture.id}" aria-label="Capture for step ${capture.step}">
+  return `<section class="inspect" id="${capture.id}" aria-label="${captureDescription(capture)}">
 <input type="checkbox" class="zoom" id="zoom-${capture.id}">
-<div class="inspect-bar"><span class="mono">Step ${capture.step} · ${escapeHtml(capture.title)} · ${escapeHtml(capture.path)}</span>
+<div class="inspect-bar"><span class="mono">${captureHeading(capture)} · ${escapeHtml(capture.path)}</span>
 <label class="btn grow" for="zoom-${capture.id}">Actual size</label>
 ${share === undefined ? `<a class="btn" href="${escapeHtml(capture.path)}">Open original</a>` : ""}
 <a class="btn" href="#captures">Close</a></div>
-<div class="inspect-stage"><img ${imageSource(capture, share)} alt="Capture for step ${capture.step}, ${escapeHtml(capture.title)}"></div>
+<div class="inspect-stage"><img ${imageSource(capture, share)} alt="${captureDescription(capture)}, ${escapeHtml(capture.title)}"></div>
 <div class="inspect-foot">${browseLink(captures[index - 1], false)}<span class="mono">${index + 1} / ${captures.length}</span>${browseLink(captures[index + 1], true)}</div>
 </section>`;
 }
@@ -858,6 +868,19 @@ export function reportContentSecurityPolicy(script: string = REPORT_SCRIPT, shar
   return `default-src 'none'; img-src ${share ? "data:" : "'self' data:"}; style-src 'unsafe-inline'; script-src 'sha256-${digest}'; base-uri 'none'; form-action 'none'`;
 }
 
+function appendShareCaptures(
+  captures: Capture[], share: ShareImages, outcomes: readonly EvidenceOutcomeRecord[], fallback: Lens,
+): void {
+  for (const relative of share.hashes.keys()) {
+    if (captures.some((capture) => capture.path === relative)) continue;
+    captures.push({
+      id: `cap-artifact-${captures.length + 1}`, step: 0, title: "Recorded screenshot",
+      path: relative, status: "recorded", target: "", lens: fallback,
+      scenarios: captureScenarios(relative, outcomes), search: searchAttribute([relative]),
+    });
+  }
+}
+
 export function renderEvidenceHtml(
   manifest: RunManifest,
   records: readonly EvidenceRecord[],
@@ -868,16 +891,7 @@ export function renderEvidenceHtml(
   const ordered = timelineRecords(records);
   const fallback = deviceLens(manifest.device);
   const captures = collectCaptures(ordered, safeScreenshots, outcomes, fallback);
-  if (share !== undefined) {
-    for (const relative of share.hashes.keys()) {
-      if (captures.some((capture) => capture.path === relative)) continue;
-      captures.push({
-        id: `cap-artifact-${captures.length + 1}`, step: 0, title: "Recorded screenshot",
-        path: relative, status: "recorded", target: "", lens: fallback,
-        scenarios: captureScenarios(relative, outcomes), search: searchAttribute([relative]),
-      });
-    }
-  }
+  if (share !== undefined) appendShareCaptures(captures, share, outcomes, fallback);
   const script = share === undefined ? REPORT_SCRIPT : SHARE_REPORT_SCRIPT;
   const steps = ordered
     .map((record, index) => renderStep(record, index + 1, captures, fallback))
@@ -899,7 +913,7 @@ export function renderEvidenceHtml(
 <title>Pickforge run ${escapeHtml(manifest.runId)}</title>
 <style>
 ${REPORT_STYLE}
-${lensRules()}${scenarioRules(outcomes.length < 2 ? 0 : outcomes.length)}
+${share === undefined ? "" : "body.js .no-js{display:none}\n"}${lensRules()}${scenarioRules(outcomes.length < 2 ? 0 : outcomes.length)}
 </style>
 </head>
 <body>
@@ -917,7 +931,7 @@ ${renderOutcomes(outcomes)}
 ${renderWarnings(manifest, ordered)}
 <div class="toolbar"><h2 id="captures">Captures <span class="count js-only"><span id="match-count">${captures.length}</span> shown</span></h2>
 <span class="search-wrap"><label class="eyebrow" for="search">Search</label><input id="search" type="search" placeholder="Filter captures and steps"></span></div>
-${share === undefined ? "" : `<noscript><p class="warn">JavaScript is required to display embedded captures. Report text remains readable.</p></noscript>\n`}${gallery}
+${share === undefined ? "" : `<p class="warn no-js">JavaScript is required to display embedded captures. Report text remains readable.</p>\n`}${gallery}
 <p class="empty js-only" id="no-match" role="status" hidden>Nothing matches the current search and filters.</p>
 <div class="toolbar"><h2 id="timeline">Timeline</h2></div>
 <section aria-label="Action timeline">
@@ -934,11 +948,17 @@ ${share === undefined ? "" : `<script type="application/json" id="image-data">${
 `;
 }
 
+function formatShareBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
 function renderShareFooter(share: ShareImages): string {
   const omissions = [...share.omitted].map(([relative, reason]) =>
     `<li>${escapeHtml(relative)}: ${escapeHtml(reason)}</li>`,
   ).join("");
-  return `<footer>This file is self-contained. ${share.hashes.size} capture file(s) embedded as ${Object.keys(share.payloads).length} unique image(s), ${share.bytes} bytes before base64 encoding. Full resolution is preserved. Limits: ${MAX_SHARE_IMAGE_BYTES} bytes per image and ${MAX_SHARE_TOTAL_BYTES} bytes total. ${omissions === "" ? "Not included: none." : `Not included:<ul>${omissions}</ul>`} report.html, manifest.json and actions.jsonl are not included as attachments. Original screenshots, manifest.json and actions.jsonl remain the authoritative evidence.</footer>`;
+  return `<footer>This file is self-contained. ${share.hashes.size} capture file(s) embedded as ${Object.keys(share.payloads).length} unique image(s), ${formatShareBytes(share.bytes)} before base64 encoding. Full resolution is preserved. Limits: ${MAX_SHARE_IMAGE_BYTES / (1024 * 1024)} MiB per image and ${MAX_SHARE_TOTAL_BYTES / (1024 * 1024)} MiB total. ${omissions === "" ? "Not included: none." : `Not included:<ul>${omissions}</ul>`} report.html, manifest.json and actions.jsonl are not included as attachments. Original screenshots, manifest.json and actions.jsonl remain the authoritative evidence.</footer>`;
 }
 
 function includeShareImage(
@@ -949,10 +969,14 @@ function includeShareImage(
     omitted.set(relative, "Unsupported image; PNG signature missing");
     return;
   }
+  if (!completePng(bytes)) {
+    omitted.set(relative, "Incomplete or corrupt PNG");
+    return;
+  }
   const hash = createHash("sha256").update(bytes).digest("hex");
   if (share.payloads[hash] === undefined) {
     if (share.bytes + bytes.length > MAX_SHARE_TOTAL_BYTES) {
-      omitted.set(relative, `Over total image cap (${MAX_SHARE_TOTAL_BYTES} bytes)`);
+      omitted.set(relative, `Over total image cap (${formatShareBytes(MAX_SHARE_TOTAL_BYTES)})`);
       return;
     }
     // Base64 bypasses text redaction: altering it would corrupt evidence.
@@ -962,13 +986,60 @@ function includeShareImage(
   share.hashes.set(relative, hash);
 }
 
+interface PngChunk {
+  type: string;
+  data: Buffer;
+  end: number;
+}
+
+function readPngChunk(bytes: Buffer, offset: number): PngChunk | undefined {
+  if (offset + 12 > bytes.length) return undefined;
+  const length = bytes.readUInt32BE(offset);
+  const end = offset + 12 + length;
+  if (end > bytes.length) return undefined;
+  const type = bytes.toString("latin1", offset + 4, offset + 8);
+  if (!/^[A-Za-z]{4}$/.test(type)) return undefined;
+  const checksum = crc32(bytes.subarray(offset + 4, end - 4)) >>> 0;
+  if (checksum !== bytes.readUInt32BE(end - 4)) return undefined;
+  return { type, data: bytes.subarray(offset + 8, end - 4), end };
+}
+
+function validPngHeader(data: Buffer): boolean {
+  return data.length === 13 && data.readUInt32BE(0) > 0 && data.readUInt32BE(4) > 0;
+}
+
+/** Check framing and checksums without decoding or changing any image bytes. */
+function completePng(bytes: Buffer): boolean {
+  const header = readPngChunk(bytes, 8);
+  if (header?.type !== "IHDR" || !validPngHeader(header.data)) return false;
+  let offset = header.end;
+  let hasImageData = false;
+  while (offset < bytes.length) {
+    const chunk = readPngChunk(bytes, offset);
+    if (chunk === undefined || chunk.type === "IHDR") return false;
+    if (chunk.type === "IEND") {
+      return hasImageData && chunk.data.length === 0 && chunk.end === bytes.length;
+    }
+    if (chunk.type === "IDAT") hasImageData = true;
+    offset = chunk.end;
+  }
+  return false;
+}
+
+function shareScreenshotPathReason(relative: string): string | undefined {
+  const unsafe = "Unsafe or unsupported screenshot path; only screenshots/*.png are included";
+  if (path.isAbsolute(relative) || relative.includes("\\") || relative.includes("\0")) return unsafe;
+  if (relative.split("/").some((part) => part === "" || part === "." || part === "..")) return unsafe;
+  if (!relative.startsWith("screenshots/")) return "Not a screenshot; only screenshots/*.png are embedded";
+  return safeScreenshotPath(relative) ? undefined : unsafe;
+}
+
 /** Classify one candidate before reading through the held screenshot directory. */
 async function readShareScreenshot(
   screenshots: DirHandle | undefined, relative: string,
 ): Promise<Buffer | string> {
-  if (!safeScreenshotPath(relative)) {
-    return "Unsafe or unsupported screenshot path; only screenshots/*.png are included";
-  }
+  const pathReason = shareScreenshotPathReason(relative);
+  if (pathReason !== undefined) return pathReason;
   if (screenshots === undefined) {
     return "Screenshot directory missing or unsafe";
   }
@@ -981,7 +1052,7 @@ async function readShareScreenshot(
     return "Unsafe file; requires a regular file without symlinks or hardlinks";
   }
   if (stat.size > MAX_SHARE_IMAGE_BYTES) {
-    return `Over per-image cap (${MAX_SHARE_IMAGE_BYTES} bytes)`;
+    return `Over per-image cap (${formatShareBytes(MAX_SHARE_IMAGE_BYTES)})`;
   }
   return readBoundedFileIn(screenshots, name, Date.now() + 30_000, {
     maxBytes: MAX_SHARE_IMAGE_BYTES, singleLink: true,
@@ -1017,7 +1088,7 @@ async function collectShareImages(
       }
     }
   } finally {
-    await screenshots?.close();
+    await screenshots?.close().catch(() => {});
   }
   return share;
 }
@@ -1152,8 +1223,8 @@ export async function writeEvidenceReportIn(
     manifest.evidenceTruncated = records.some(isTruncationRecord);
   }
   const html = renderEvidenceHtml(manifest, records, safeScreenshots);
-  await runDir.writeFileAtomic(EVIDENCE_REPORT, html);
   await runDir.writeFileAtomic(EVIDENCE_SHARE_REPORT, renderEvidenceHtml(manifest, records, new Set(share.hashes.keys()), share));
+  await runDir.writeFileAtomic(EVIDENCE_REPORT, html);
   await runDir.writeFileAtomic(
     "manifest.json", `${JSON.stringify(manifest, null, 2)}\n`,
   );
