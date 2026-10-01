@@ -962,6 +962,32 @@ function includeShareImage(
   share.hashes.set(relative, hash);
 }
 
+/** Classify one candidate before reading through the held screenshot directory. */
+async function readShareScreenshot(
+  screenshots: DirHandle | undefined, relative: string,
+): Promise<Buffer | string> {
+  if (!safeScreenshotPath(relative)) {
+    return "Unsafe or unsupported screenshot path; only screenshots/*.png are included";
+  }
+  if (screenshots === undefined) {
+    return "Screenshot directory missing or unsafe";
+  }
+  const name = relative.slice("screenshots/".length);
+  const stat = await screenshots.lstatChild(name);
+  if (stat === undefined) {
+    return "Missing file";
+  }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
+    return "Unsafe file; requires a regular file without symlinks or hardlinks";
+  }
+  if (stat.size > MAX_SHARE_IMAGE_BYTES) {
+    return `Over per-image cap (${MAX_SHARE_IMAGE_BYTES} bytes)`;
+  }
+  return readBoundedFileIn(screenshots, name, Date.now() + 30_000, {
+    maxBytes: MAX_SHARE_IMAGE_BYTES, singleLink: true,
+  });
+}
+
 /** Read original bytes through the held screenshot directory, never a caller path. */
 async function collectShareImages(
   runDir: DirHandle, manifest: RunManifest, records: readonly EvidenceRecord[],
@@ -979,33 +1005,13 @@ async function collectShareImages(
     for (const relative of candidates) {
       // Generated context is already rendered as text, not an external attachment.
       if ([EVIDENCE_REPORT, EVIDENCE_SHARE_REPORT, EVIDENCE_ACTION_LOG, "manifest.json"].includes(relative)) continue;
-      if (!safeScreenshotPath(relative)) {
-        omitted.set(relative, "Unsafe or unsupported screenshot path; only screenshots/*.png are included");
-        continue;
-      }
-      if (screenshots === undefined) {
-        omitted.set(relative, "Screenshot directory missing or unsafe");
-        continue;
-      }
       try {
-        const name = relative.slice("screenshots/".length);
-        const stat = await screenshots.lstatChild(name);
-        if (stat === undefined) {
-          omitted.set(relative, "Missing file");
-          continue;
+        const candidate = await readShareScreenshot(screenshots, relative);
+        if (typeof candidate === "string") {
+          omitted.set(relative, candidate);
+        } else {
+          includeShareImage(share, relative, candidate);
         }
-        if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
-          omitted.set(relative, "Unsafe file; requires a regular file without symlinks or hardlinks");
-          continue;
-        }
-        if (stat.size > MAX_SHARE_IMAGE_BYTES) {
-          omitted.set(relative, `Over per-image cap (${MAX_SHARE_IMAGE_BYTES} bytes)`);
-          continue;
-        }
-        const bytes = await readBoundedFileIn(screenshots, name, Date.now() + 30_000, {
-          maxBytes: MAX_SHARE_IMAGE_BYTES, singleLink: true,
-        });
-        includeShareImage(share, relative, bytes);
       } catch {
         omitted.set(relative, "File unreadable, changed, or unsafe during bounded read");
       }
