@@ -27,6 +27,8 @@ export interface FakeBrowserBehavior {
   monitor?: number;
   /** Ignore SIGINT and SIGTERM, like a browser that is slow to quit. */
   ignoreSignals?: boolean;
+  /** Start a helper in the same process group that outlives this process. */
+  forkChild?: boolean;
 }
 
 export interface ViewerFakes {
@@ -79,6 +81,11 @@ if (behavior.ignoreSignals) {
 }
 // Logged after the signal setup, so a test can wait for this line first.
 fs.appendFileSync(callsLog, JSON.stringify({ tool: "browser", name: require("node:path").basename(process.argv[1]), args, pid: process.pid }) + "\\n");
+if (behavior.forkChild) {
+  const helper = require("node:child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  helper.unref();
+  fs.appendFileSync(callsLog, JSON.stringify({ tool: "browser-child", pid: helper.pid }) + "\\n");
+}
 const app = args.find((arg) => arg.startsWith("--app="));
 if (behavior.mapAfterMs !== undefined && app !== undefined) {
   setTimeout(() => {

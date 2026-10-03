@@ -4,9 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   getSession,
-  listProcessGroupMembers,
   readProcessIdentity,
-  stopProcessGroupVerified,
+  stopOwnedDaemonGroup,
   type DesktopSessionInfo,
   type EnvLike,
 } from "@pickforge/lab-core";
@@ -23,7 +22,6 @@ import {
 } from "@pickforge/lab-desktop-linux";
 import { buildViewerUrl } from "./contract.js";
 import {
-  applyHyprlandWindowMode,
   detectHyprland,
   disableViewerRule,
   hyprlandRuleName,
@@ -223,7 +221,7 @@ export class ViewerInterruptedError extends Error {
   }
 }
 
-/** The browser may still run, so its launch stays for session teardown. */
+/** The unrecorded browser may still run, so its profile is not deleted under it. */
 class ViewerLaunchKeptError extends Error {}
 
 interface ExitStatus {
@@ -316,11 +314,18 @@ async function spawnBrowser(
   return { child, pid: child.pid, exited, done: () => finished };
 }
 
-/** Stop a browser whose identity was not recorded. True once its group is gone. */
-async function stopUnrecordedBrowser(pid: number, startTicks: number | undefined): Promise<boolean> {
-  if (startTicks === undefined) return listProcessGroupMembers(pid).length === 0;
-  const { outcome } = await stopProcessGroupVerified({ pid, startTicks });
-  return outcome === "terminated" || outcome === "already-dead";
+/**
+ * Stop a browser whose identity was not recorded, by the group this process
+ * spawned it to lead. The leader may already have exited, so its identity
+ * can be gone. True once the group is empty.
+ */
+async function stopUnrecordedBrowser(spawned: SpawnedBrowser): Promise<boolean> {
+  return stopOwnedDaemonGroup({
+    pid: spawned.pid,
+    logPath: "",
+    child: spawned.child,
+    release: () => spawned.child.unref(),
+  });
 }
 
 function hyprlandLaunch(ctx: HyprlandContext, launchId: string): ViewerHyprlandLaunch {
@@ -399,11 +404,11 @@ async function startLocked(
       await writeViewerLaunchRecord(recorded, opts.registryEnv);
     } catch (error) {
       // Teardown cannot find an unrecorded browser, so do not leave one.
-      if (await stopUnrecordedBrowser(spawned.pid, recorded.startTicks)) throw error;
+      if (await stopUnrecordedBrowser(spawned)) throw error;
       const message = error instanceof Error ? error.message : String(error);
       throw new ViewerLaunchKeptError(
-        `${message}; the viewer browser (pid ${spawned.pid}) could not be stopped, ` +
-          `so launch ${launchId} remains for session teardown`,
+        `${message}; the viewer browser (pid ${spawned.pid}) could not be stopped ` +
+          `and must be closed by hand`,
         { cause: error },
       );
     }
@@ -418,11 +423,11 @@ async function startLocked(
 }
 
 /**
- * Wait for the window to map, then place it once on the monitor it opened
- * on. The rule placed it from the focused monitor's reserved area, which can
- * differ from its own. Resolves true when the window mapped.
+ * Wait for the window to map. The rule already placed it, so nothing moves
+ * it here: a later move could undo an expansion the page asked for right
+ * after mapping. Resolves true when the window mapped.
  */
-async function placeWindow(
+async function waitForWindow(
   record: ViewerLaunchRecord,
   spawned: SpawnedBrowser,
   guard: InterruptGuard,
@@ -434,9 +439,7 @@ async function placeWindow(
     timeoutMs,
     stopped: () => spawned.done() || guard.signal !== undefined,
   });
-  if (window === undefined) return false;
-  await applyHyprlandWindowMode(record, "thumbnail");
-  return true;
+  return window !== undefined;
 }
 
 async function runLaunch(
@@ -453,7 +456,7 @@ async function runLaunch(
   );
   let placed = false;
   try {
-    placed = await placeWindow(record, spawned, guard, opts.windowWaitMs ?? WINDOW_WAIT_MS);
+    placed = await waitForWindow(record, spawned, guard, opts.windowWaitMs ?? WINDOW_WAIT_MS);
   } finally {
     if (record.hyprland !== undefined) await disableViewerRule(record.hyprland, record.hyprland.ruleName);
   }

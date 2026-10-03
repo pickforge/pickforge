@@ -109,6 +109,12 @@ describe("class pattern and Lua literals", () => {
       'hl.window_rule({name="pickforge-viewer-x", match={class="^a\\\\.b$"}, float=true, pin=true, ' +
         'no_initial_focus=true, size={384,240}, move={"(monitor_w-384-24)","(monitor_h-240-54)"}})',
     );
+    expect(
+      buildRuleInstallLua("pickforge-viewer-x", "^x$", { width: 384, height: 240 }, { name: "DP-1", right: 6, bottom: 32 }),
+    ).toBe(
+      'hl.window_rule({name="pickforge-viewer-x", match={class="^x$"}, float=true, pin=true, ' +
+        'no_initial_focus=true, monitor="DP-1", size={384,240}, move={"(monitor_w-384-30)","(monitor_h-240-56)"}})',
+    );
     expect(buildRuleDisableLua("pickforge-viewer-x")).toBe(
       'hl.window_rule({name="pickforge-viewer-x", enabled=false})',
     );
@@ -191,12 +197,18 @@ describe("detectHyprland", () => {
 });
 
 describe("rule lifecycle helpers", () => {
-  it("installs with the focused monitor's reserved space and disables by name", async () => {
-    fakes.setState({ monitors: [monitor({ focused: false }), monitor({ id: 1, reserved: [0, 0, 6, 32] })] });
+  it("pins the rule to the focused monitor whose reserved space it uses, and disables by name", async () => {
+    fakes.setState({
+      monitors: [monitor({ name: "DP-1", focused: false }), monitor({ id: 1, name: "HDMI-A-1", reserved: [0, 0, 6, 32] })],
+    });
     expect(await installViewerRule(ctx(), "pickforge-viewer-x", "^x$", { width: 384, height: 240 })).toBe(true);
     expect(await disableViewerRule(ctx(), "pickforge-viewer-x")).toBe(true);
     expect(evals()).toEqual([
-      buildRuleInstallLua("pickforge-viewer-x", "^x$", { width: 384, height: 240 }, { right: 6, bottom: 32 }),
+      buildRuleInstallLua("pickforge-viewer-x", "^x$", { width: 384, height: 240 }, {
+        name: "HDMI-A-1",
+        right: 6,
+        bottom: 32,
+      }),
       buildRuleDisableLua("pickforge-viewer-x"),
     ]);
   });

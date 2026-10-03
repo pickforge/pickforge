@@ -10,14 +10,14 @@ const {
   removeViewerLaunch,
   withSessionVncLock,
   getSession,
-  stopProcessGroupVerified,
+  stopOwnedDaemonGroup,
 } = vi.hoisted(() => ({
   prepareViewerLaunch: vi.fn(),
   writeViewerLaunchRecord: vi.fn(),
   removeViewerLaunch: vi.fn(),
   withSessionVncLock: vi.fn(),
   getSession: vi.fn(),
-  stopProcessGroupVerified: vi.fn(),
+  stopOwnedDaemonGroup: vi.fn(),
 }));
 
 vi.mock("@pickforge/lab-desktop-linux", async (importOriginal) => ({
@@ -30,8 +30,8 @@ vi.mock("@pickforge/lab-desktop-linux", async (importOriginal) => ({
 
 vi.mock("@pickforge/lab-core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@pickforge/lab-core")>();
-  stopProcessGroupVerified.mockImplementation(actual.stopProcessGroupVerified);
-  return { ...actual, getSession, stopProcessGroupVerified };
+  stopOwnedDaemonGroup.mockImplementation(actual.stopOwnedDaemonGroup);
+  return { ...actual, getSession, stopOwnedDaemonGroup };
 });
 
 import { viewerClassPattern } from "../src/viewer/hyprland.js";
@@ -147,6 +147,14 @@ function sequence(): string[] {
     }
     return `query:${args[3]}`;
   });
+}
+
+function isZombie(pid: number): boolean {
+  try {
+    return fs.readFileSync(`/proc/${String(pid)}/stat`, "utf8").split(") ")[1]?.startsWith("Z") === true;
+  } catch {
+    return false;
+  }
 }
 
 function records(): ViewerLaunchRecord[] {
@@ -298,10 +306,10 @@ describe("launchViewerWindow", () => {
       "record+pid",
     ]);
     expectStartedAfter(["install", "record"]);
-    // Polls until the window maps, one placement on its monitor, then the disable.
-    expect(order.slice(-4)).toEqual(["query:clients", "query:monitors", "place", "disable"]);
-    expect(order.slice(5, -3).length).toBeGreaterThan(0);
-    expect(order.slice(5, -3).every((step) => step === "query:clients")).toBe(true);
+    // Polls until the window maps, then the disable. The rule placed it, so nothing moves it.
+    expect(order.at(-1)).toBe("disable");
+    expect(order.slice(5, -1).length).toBeGreaterThan(0);
+    expect(order.slice(5, -1).every((step) => step === "query:clients")).toBe(true);
     expect(order.filter((step) => step === "disable")).toHaveLength(1);
     const install = fakes.calls().find((call) => (call.args as string[])[2] === "eval");
     expect((install?.args as string[] | undefined)?.[3]).toContain("(monitor_h-216-64)");
@@ -368,7 +376,7 @@ describe("launchViewerWindow", () => {
     expect(fakes.calls().some((call) => call.tool === "browser")).toBe(false);
   });
 
-  it("stops the browser by identity with escalation when its identity cannot be recorded", async () => {
+  it("stops the owned browser group with escalation when its identity cannot be recorded", async () => {
     // The fake ignores SIGTERM, so only the SIGKILL escalation stops it.
     fakes.setBrowser({ ignoreSignals: true });
     writeViewerLaunchRecord.mockResolvedValueOnce(undefined).mockImplementationOnce(async () => {
@@ -379,26 +387,44 @@ describe("launchViewerWindow", () => {
 
     await expect(launchViewerWindow(options())).rejects.toThrow(/^disk full$/);
 
-    const recorded = records()[1];
-    const pid = recorded?.pid;
+    const pid = records()[1]?.pid;
     expect(pid).toEqual(expect.any(Number));
     spawnedPids.push(pid as number);
-    expect(recorded?.startTicks).toEqual(expect.any(Number));
     expect(fakes.calls().find((call) => call.tool === "browser")?.pid).toBe(pid);
-    expect(stopProcessGroupVerified).toHaveBeenCalledWith({ pid, startTicks: recorded?.startTicks });
-    expect(await stopProcessGroupVerified.mock.results[0]?.value).toEqual({ outcome: "terminated", signaled: true });
-    // The zombie is gone once this process reaps it.
-    await vi.waitFor(() => expect(fs.existsSync(`/proc/${String(pid)}`)).toBe(false), { timeout: 2_000 });
+    expect(stopOwnedDaemonGroup).toHaveBeenCalledWith(expect.objectContaining({ pid }));
+    expect(await stopOwnedDaemonGroup.mock.results[0]?.value).toBe(true);
+    expect(fs.existsSync(`/proc/${String(pid)}`)).toBe(false);
     expect(removeViewerLaunch).toHaveBeenCalledWith("desk-aaaaaa11", LAUNCH_ID, undefined);
   }, 20_000);
 
-  it("keeps the launch for teardown when the unrecorded browser may survive", async () => {
+  it("stops the group members of a browser leader that exited before its identity was read", async () => {
+    fakes.setBrowser({ forkChild: true, exitAfterMs: 50, exitCode: 0 });
+    let helper: number | undefined;
+    writeViewerLaunchRecord.mockResolvedValueOnce(undefined).mockImplementationOnce(async (record: ViewerLaunchRecord) => {
+      // Fail only once the leader is gone and its helper still runs in the group.
+      await vi.waitFor(() => {
+        helper = fakes.calls().find((call) => call.tool === "browser-child")?.pid as number | undefined;
+        expect(helper).toEqual(expect.any(Number));
+        expect(fs.existsSync(`/proc/${String(record.pid)}/stat`) && !isZombie(record.pid as number)).toBe(false);
+      }, { timeout: 5_000 });
+      throw new Error("disk full");
+    });
+
+    await expect(launchViewerWindow(options())).rejects.toThrow(/^disk full$/);
+
+    const pid = records()[1]?.pid as number;
+    spawnedPids.push(pid);
+    expect(fs.existsSync(`/proc/${String(helper)}`)).toBe(false);
+    expect(removeViewerLaunch).toHaveBeenCalledWith("desk-aaaaaa11", LAUNCH_ID, undefined);
+  }, 20_000);
+
+  it("keeps the profile and asks for a manual close when the unrecorded browser may survive", async () => {
     fakes.setBrowser({});
     writeViewerLaunchRecord.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("disk full"));
-    stopProcessGroupVerified.mockResolvedValueOnce({ outcome: "survived", signaled: true });
+    stopOwnedDaemonGroup.mockResolvedValueOnce(false);
 
     await expect(launchViewerWindow(options())).rejects.toThrow(
-      /^disk full; the viewer browser \(pid \d+\) could not be stopped, so launch [0-9a-f]+ remains for session teardown$/,
+      /^disk full; the viewer browser \(pid \d+\) could not be stopped and must be closed by hand$/,
     );
 
     spawnedPids.push(records()[1]?.pid as number);
@@ -555,13 +581,13 @@ describe("launchViewerWindow", () => {
     expect(removeViewerLaunch).toHaveBeenCalledWith("desk-aaaaaa11", LAUNCH_ID, undefined);
   });
 
-  it("places the mapped window on its own monitor, not the focused one", async () => {
+  it("pins the rule to the monitor it measured and never moves the mapped window", async () => {
     fakes.installHyprctl();
     fakes.setState({
       status: { configProvider: "lua" },
       monitors: [
-        monitor({ id: 0, focused: true, reserved: [0, 0, 0, 40] }),
-        monitor({ id: 1, x: 1920, focused: false, reserved: [0, 0, 0, 0] }),
+        monitor({ id: 0, name: "DP-1", focused: true, reserved: [0, 0, 0, 40] }),
+        monitor({ id: 1, name: "HDMI-A-1", x: 1920, focused: false, reserved: [0, 0, 0, 0] }),
       ],
     });
     fakes.setBrowser({ mapAfterMs: 50, monitor: 1 });
@@ -569,13 +595,15 @@ describe("launchViewerWindow", () => {
     const result = await launch({ env: hyprEnv() });
 
     expect(result.adapter).toBe("hyprland");
-    const place = fakes
+    const evals = fakes
       .calls()
-      .map((call) => (call.args as string[] | undefined)?.[3] ?? "")
-      .find((lua) => lua.includes("hl.dsp.window.move"));
-    // 1920 + 1920 - 384 - 24 and 1080 - 216 - 24, without the focused monitor's bar.
-    expect(place).toContain("resize({x=384,y=216,");
-    expect(place).toContain("move({x=3432,y=840,");
+      .map((call) => call.args as string[] | undefined)
+      .filter((args) => args?.[2] === "eval")
+      .map((args) => args?.[3] ?? "");
+    expect(evals[0]).toContain('monitor="DP-1", size={384,216}');
+    expect(evals[0]).toContain('"(monitor_h-216-64)"');
+    // A move after mapping could undo an expansion the page asked for.
+    expect(evals.some((lua) => lua.includes("hl.dsp.window"))).toBe(false);
   });
 
   it("keeps a launch that cannot be removed for a later prune", async () => {

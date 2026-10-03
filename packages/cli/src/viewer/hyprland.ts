@@ -270,27 +270,34 @@ export function buildPlacementLua(address: string, rect: Rect): string {
   );
 }
 
+/** The focused monitor when the rule is built, and its right and bottom reserved space. */
+export interface RuleMonitor {
+  name?: string;
+  right: number;
+  bottom: number;
+}
+
 /**
  * Lua for the launch rule: float, pin, no initial focus, the thumbnail size,
- * and the bottom-right corner of the monitor the window opens on. `move`
- * uses Hyprland's monitor-relative expressions, so the rule follows the
- * monitor; `reserved` is the right and bottom reserved space of the focused
- * monitor when the rule was built. The launcher places the window again on
- * its own monitor once it maps, because that monitor may reserve less or more.
+ * and the bottom-right corner of one monitor. The rule pins the window to the
+ * monitor whose reserved space it uses, so focus that moves before the window
+ * maps cannot put it on a monitor with other reserved space. `move` uses
+ * Hyprland's monitor-relative expressions for that monitor.
  */
 export function buildRuleInstallLua(
   ruleName: string,
   classPattern: string,
   size: ViewerWindowSize,
-  reserved: { right: number; bottom: number } = { right: 0, bottom: 0 },
+  monitor: RuleMonitor = { right: 0, bottom: 0 },
 ): string {
   const width = luaInt(size.width);
   const height = luaInt(size.height);
-  const right = luaInt(THUMBNAIL_MARGIN + reserved.right);
-  const bottom = luaInt(THUMBNAIL_MARGIN + reserved.bottom);
+  const right = luaInt(THUMBNAIL_MARGIN + monitor.right);
+  const bottom = luaInt(THUMBNAIL_MARGIN + monitor.bottom);
+  const pinned = monitor.name === undefined ? "" : `monitor=${luaString(monitor.name)}, `;
   return (
     `hl.window_rule({name=${luaString(ruleName)}, match={class=${luaString(classPattern)}}, ` +
-    `float=true, pin=true, no_initial_focus=true, size={${width},${height}}, ` +
+    `float=true, pin=true, no_initial_focus=true, ${pinned}size={${width},${height}}, ` +
     `move={${luaString(`(monitor_w-${width}-${right})`)},${luaString(`(monitor_h-${height}-${bottom})`)}}})`
   );
 }
@@ -299,14 +306,16 @@ export function buildRuleDisableLua(ruleName: string): string {
   return `hl.window_rule({name=${luaString(ruleName)}, enabled=false})`;
 }
 
-async function focusedReserved(ctx: HyprlandContext): Promise<{ right: number; bottom: number }> {
+async function focusedMonitor(ctx: HyprlandContext): Promise<RuleMonitor> {
   try {
     const monitors = await hyprctlJson(ctx, "monitors");
     const focused = Array.isArray(monitors)
       ? monitors.find((entry) => isRecord(entry) && entry.focused === true)
       : undefined;
-    const [, , right, bottom] = parseReserved(isRecord(focused) ? focused.reserved : undefined);
-    return { right: Math.max(0, Math.round(right)), bottom: Math.max(0, Math.round(bottom)) };
+    if (!isRecord(focused)) return { right: 0, bottom: 0 };
+    const [, , right, bottom] = parseReserved(focused.reserved);
+    const name = typeof focused.name === "string" && focused.name !== "" ? focused.name : undefined;
+    return { name, right: Math.max(0, Math.round(right)), bottom: Math.max(0, Math.round(bottom)) };
   } catch {
     return { right: 0, bottom: 0 };
   }
@@ -319,8 +328,8 @@ export async function installViewerRule(
   classPattern: string,
   size: ViewerWindowSize,
 ): Promise<boolean> {
-  const reserved = await focusedReserved(ctx);
-  return hyprctlEval(ctx, buildRuleInstallLua(ruleName, classPattern, size, reserved));
+  const monitor = await focusedMonitor(ctx);
+  return hyprctlEval(ctx, buildRuleInstallLua(ruleName, classPattern, size, monitor));
 }
 
 /** Disable the named launch rule. It stays registered until a config reload. */
