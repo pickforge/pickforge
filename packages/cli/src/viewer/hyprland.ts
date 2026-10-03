@@ -1,7 +1,6 @@
-import { execFile } from "node:child_process";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import type { EnvLike } from "@pickforge/lab-core";
+import { runCommand, type EnvLike } from "@pickforge/lab-core";
 import {
   findOnPath,
   type ViewerHyprlandLaunch,
@@ -51,7 +50,7 @@ interface Rect {
 }
 
 const HYPRCTL_TIMEOUT_MS = 2_000;
-const HYPRCTL_MAX_BUFFER = 4 * 1024 * 1024;
+const HYPRCTL_MAX_OUTPUT = 4 * 1024 * 1024;
 const INSTANCE_PATTERN = /^[A-Za-z0-9_]+$/;
 const ADDRESS_PATTERN = /^0x[0-9a-f]+$/;
 /** Space between the thumbnail and the screen edges, in logical pixels. */
@@ -91,33 +90,17 @@ export function luaInt(value: number): string {
   return String(value);
 }
 
-function hyprctlEnv(ctx: HyprlandContext): NodeJS.ProcessEnv {
-  return {
-    ...process.env,
-    XDG_RUNTIME_DIR: ctx.xdgRuntimeDir,
-    HYPRLAND_INSTANCE_SIGNATURE: ctx.instance,
-  };
-}
-
 /** Run hyprctl against one instance, as an argv array without a shell. */
-export function runHyprctl(ctx: HyprlandContext, args: string[]): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile(
-      ctx.hyprctl,
-      ["--instance", ctx.instance, ...args],
-      {
-        env: hyprctlEnv(ctx),
-        shell: false,
-        timeout: HYPRCTL_TIMEOUT_MS,
-        maxBuffer: HYPRCTL_MAX_BUFFER,
-        encoding: "utf8",
-      },
-      (error, stdout) => {
-        if (error !== null) reject(error);
-        else resolve(stdout);
-      },
-    );
+export async function runHyprctl(ctx: HyprlandContext, args: string[]): Promise<string> {
+  const result = await runCommand(ctx.hyprctl, ["--instance", ctx.instance, ...args], {
+    env: { XDG_RUNTIME_DIR: ctx.xdgRuntimeDir, HYPRLAND_INSTANCE_SIGNATURE: ctx.instance },
+    timeoutMs: HYPRCTL_TIMEOUT_MS,
+    maxOutputBytes: HYPRCTL_MAX_OUTPUT,
   });
+  if (!result.ok || result.stdoutTruncated) {
+    throw new Error(`hyprctl ${args[0] ?? ""} failed`);
+  }
+  return result.stdout;
 }
 
 async function hyprctlJson(ctx: HyprlandContext, what: string): Promise<unknown> {
