@@ -217,15 +217,13 @@ function connect() {
   state.socket = socket;
 }
 
+function validDimension(value) {
+  return Number.isInteger(value) && value > 0;
+}
+
 function validSize(size) {
-  return (
-    size !== null &&
-    typeof size === "object" &&
-    Number.isInteger(size.width) &&
-    Number.isInteger(size.height) &&
-    size.width > 0 &&
-    size.height > 0
-  );
+  if (size === null || typeof size !== "object") return false;
+  return validDimension(size.width) && validDimension(size.height);
 }
 
 /** Ask the bridge to resize the window; fall back to resizeTo elsewhere. */
