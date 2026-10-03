@@ -28,4 +28,6 @@ regexes = [
   '''^ghp_0123456789012345678901234567890abcde$''',
   # placeholder key in the CLI secret-shape sweep (crates/pickforge-cli tests)
   '''^api_key=abc123$''',
+  # RFC 6455 sample Sec-WebSocket-Key, "the sample nonce" (viewer bridge security tests)
+  '''^dGhlIHNhbXBsZSBub25jZQ==$''',
 ]
