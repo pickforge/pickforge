@@ -179,6 +179,9 @@ export {
 } from "./takeover-watchdog.js";
 
 export {
+  withViewerDir,
+  readViewerPrivateFile,
+  writeViewerPrivateFile,
   VIEWER_LAUNCH_ID_PATTERN,
   ViewerVncUnavailableError,
   connectSessionVncReadOnly,

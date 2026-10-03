@@ -92,6 +92,7 @@ export function buildVncArgs(opts: VncArgsOptions): string[] {
     "-forever",
     "-shared",
     "-nopw",
+    "-nosel",
   ];
   if (opts.viewOnly !== false) {
     args.push("-viewonly");

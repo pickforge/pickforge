@@ -76,10 +76,12 @@ describe("buildVncArgs", () => {
       "-forever",
       "-shared",
       "-nopw",
+      "-nosel",
       "-viewonly",
       "-quiet",
     ]);
     expect(args).toContain("-localhost");
+    expect(args).toContain("-nosel");
     expect(args).toContain("-viewonly");
   });
 
@@ -90,7 +92,9 @@ describe("buildVncArgs", () => {
       viewOnly: false,
     });
     expect(args).toContain("-localhost");
+    expect(args).toContain("-nosel");
     expect(args).not.toContain("-viewonly");
+    expect(args).toContain("-nosel");
   });
 
   it("rejects invalid ports", () => {

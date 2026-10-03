@@ -1,3 +1,4 @@
+import { stopSessionViewer } from "./viewer-state.js";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -978,6 +979,7 @@ export async function teardownDesktopSession(
     // Apps first: they are clients of the display, and killing the display out
     // from under them would leave the escape this cleanup exists to catch.
     const containedGone = await stopSessionContainment(desktop, failures);
+    failures.push(...await stopSessionViewer(id, desktop, registryEnv));
     const vncGone = await stopSessionVnc(id, desktop, failures);
     const xvfbGone = await stopSessionXvfb(desktop, failures);
     await removeSessionRuntime(
