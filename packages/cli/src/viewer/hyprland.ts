@@ -275,7 +275,8 @@ export function buildPlacementLua(address: string, rect: Rect): string {
  * and the bottom-right corner of the monitor the window opens on. `move`
  * uses Hyprland's monitor-relative expressions, so the rule follows the
  * monitor; `reserved` is the right and bottom reserved space of the focused
- * monitor when the rule was built.
+ * monitor when the rule was built. The launcher places the window again on
+ * its own monitor once it maps, because that monitor may reserve less or more.
  */
 export function buildRuleInstallLua(
   ruleName: string,

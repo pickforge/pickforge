@@ -23,6 +23,10 @@ export interface FakeBrowserBehavior {
   /** Kill itself with this signal after `exitAfterMs`. */
   exitSignal?: NodeJS.Signals;
   floating?: boolean;
+  /** Hyprland monitor id the client maps on. */
+  monitor?: number;
+  /** Ignore SIGINT and SIGTERM, like a browser that is slow to quit. */
+  ignoreSignals?: boolean;
 }
 
 export interface ViewerFakes {
@@ -68,15 +72,20 @@ const BROWSER_SOURCE = `
 const fs = require("node:fs");
 const [callsLog, stateFile, clientsFile, behaviorFile] = __PATHS__;
 const args = process.argv.slice(2);
-fs.appendFileSync(callsLog, JSON.stringify({ tool: "browser", name: require("node:path").basename(process.argv[1]), args, pid: process.pid }) + "\\n");
 const behavior = JSON.parse(fs.readFileSync(behaviorFile, "utf8"));
+if (behavior.ignoreSignals) {
+  process.on("SIGINT", () => {});
+  process.on("SIGTERM", () => {});
+}
+// Logged after the signal setup, so a test can wait for this line first.
+fs.appendFileSync(callsLog, JSON.stringify({ tool: "browser", name: require("node:path").basename(process.argv[1]), args, pid: process.pid }) + "\\n");
 const app = args.find((arg) => arg.startsWith("--app="));
 if (behavior.mapAfterMs !== undefined && app !== undefined) {
   setTimeout(() => {
     const url = new URL(app.slice("--app=".length));
     const cls = "chrome-" + url.hostname + "_" + url.pathname.replace(/\\//g, "_") + "-Default";
     const clients = fs.existsSync(clientsFile) ? JSON.parse(fs.readFileSync(clientsFile, "utf8")) : [];
-    clients.push({ address: "0x" + (0xabc000 + clients.length).toString(16), class: cls, pid: process.pid, floating: behavior.floating !== false, monitor: 0 });
+    clients.push({ address: "0x" + (0xabc000 + clients.length).toString(16), class: cls, pid: process.pid, floating: behavior.floating !== false, monitor: behavior.monitor ?? 0 });
     fs.writeFileSync(clientsFile, JSON.stringify(clients));
   }, behavior.mapAfterMs);
 }

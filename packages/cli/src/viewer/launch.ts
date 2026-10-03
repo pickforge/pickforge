@@ -2,11 +2,19 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import fs from "node:fs";
 import path from "node:path";
-import { readProcessIdentity, type DesktopSessionInfo, type EnvLike } from "@pickforge/lab-core";
+import {
+  getSession,
+  listProcessGroupMembers,
+  readProcessIdentity,
+  stopProcessGroupVerified,
+  type DesktopSessionInfo,
+  type EnvLike,
+} from "@pickforge/lab-core";
 import {
   findOnPath,
   prepareViewerLaunch,
   removeViewerLaunch,
+  withSessionVncLock,
   writeViewerLaunchRecord,
   type ViewerBrowserKind,
   type ViewerHyprlandLaunch,
@@ -15,6 +23,7 @@ import {
 } from "@pickforge/lab-desktop-linux";
 import { buildViewerUrl } from "./contract.js";
 import {
+  applyHyprlandWindowMode,
   detectHyprland,
   disableViewerRule,
   hyprlandRuleName,
@@ -193,6 +202,8 @@ export interface LaunchViewerWindowOptions {
   registryEnv?: NodeJS.ProcessEnv;
   /** Upper bound for the Hyprland window wait. */
   windowWaitMs?: number;
+  /** @internal test hook: replace the conventional signal exit after an interrupt. */
+  _exitOnSignal?: (signal: NodeJS.Signals) => void;
 }
 
 export interface LaunchedViewerWindow {
@@ -204,16 +215,85 @@ export interface LaunchedViewerWindow {
   signal?: NodeJS.Signals | null;
 }
 
+/** An interrupt ended the launch after the browser was stopped and the launch removed. */
+export class ViewerInterruptedError extends Error {
+  constructor(readonly signal: NodeJS.Signals) {
+    super(`Viewer launch interrupted by ${signal}`);
+    this.name = "ViewerInterruptedError";
+  }
+}
+
+/** The browser may still run, so its launch stays for session teardown. */
+class ViewerLaunchKeptError extends Error {}
+
 interface ExitStatus {
   exitCode: number | null;
   signal: NodeJS.Signals | null;
+}
+
+interface SpawnedBrowser {
+  child: ChildProcess;
+  pid: number;
+  exited: Promise<ExitStatus>;
+  done: () => boolean;
+}
+
+function killGroup(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    // Already gone.
+  }
+}
+
+const INTERRUPT_SIGNALS = ["SIGINT", "SIGTERM"] as const;
+
+/**
+ * Interrupt handling for one launch, from before the spawn to the end of
+ * the wait. The first interrupt sends SIGTERM to the browser group and any
+ * later one sends SIGKILL, so a browser that ignores SIGTERM cannot keep
+ * this process alive.
+ */
+class InterruptGuard {
+  signal: NodeJS.Signals | undefined;
+  private count = 0;
+  private pid: number | undefined;
+  private readonly onSignal = (signal: NodeJS.Signals): void => {
+    this.count += 1;
+    this.signal ??= signal;
+    this.forward();
+  };
+
+  constructor() {
+    for (const signal of INTERRUPT_SIGNALS) process.on(signal, this.onSignal);
+  }
+
+  attach(pid: number): void {
+    this.pid = pid;
+    this.forward();
+  }
+
+  dispose(): void {
+    for (const signal of INTERRUPT_SIGNALS) process.off(signal, this.onSignal);
+  }
+
+  private forward(): void {
+    if (this.pid === undefined || this.count === 0) return;
+    killGroup(this.pid, this.count === 1 ? "SIGTERM" : "SIGKILL");
+  }
+}
+
+/** With the handlers removed, the default action ends the process with the signal. */
+function exitWithSignal(signal: NodeJS.Signals): void {
+  process.kill(process.pid, signal);
 }
 
 async function spawnBrowser(
   browser: ViewerBrowser,
   args: string[],
   env: NodeJS.ProcessEnv,
-): Promise<{ child: ChildProcess; pid: number; exited: Promise<ExitStatus>; done: () => boolean }> {
+  guard: InterruptGuard,
+): Promise<SpawnedBrowser> {
   // Detached, so the browser leads its own process group: session teardown
   // stops the whole group by verified identity, and closing the terminal of
   // an automatic launch does not close the window.
@@ -223,6 +303,7 @@ async function spawnBrowser(
     stdio: "ignore",
     detached: true,
   });
+  if (child.pid !== undefined) guard.attach(child.pid);
   let finished = false;
   const exited = new Promise<ExitStatus>((resolve) => {
     child.once("exit", (exitCode, signal) => {
@@ -235,25 +316,11 @@ async function spawnBrowser(
   return { child, pid: child.pid, exited, done: () => finished };
 }
 
-function killGroup(pid: number, signal: NodeJS.Signals): void {
-  try {
-    process.kill(-pid, signal);
-  } catch {
-    // Already gone.
-  }
-}
-
-/** Forward an interrupt of this process to the browser group while waiting. */
-async function waitWithForwardedSignals(pid: number, exited: Promise<ExitStatus>): Promise<ExitStatus> {
-  const forward = (signal: NodeJS.Signals): void => killGroup(pid, signal);
-  process.on("SIGINT", forward);
-  process.on("SIGTERM", forward);
-  try {
-    return await exited;
-  } finally {
-    process.off("SIGINT", forward);
-    process.off("SIGTERM", forward);
-  }
+/** Stop a browser whose identity was not recorded. True once its group is gone. */
+async function stopUnrecordedBrowser(pid: number, startTicks: number | undefined): Promise<boolean> {
+  if (startTicks === undefined) return listProcessGroupMembers(pid).length === 0;
+  const { outcome } = await stopProcessGroupVerified({ pid, startTicks });
+  return outcome === "terminated" || outcome === "already-dead";
 }
 
 function hyprlandLaunch(ctx: HyprlandContext, launchId: string): ViewerHyprlandLaunch {
@@ -283,54 +350,23 @@ async function installRule(
 }
 
 /**
- * Spawn the browser with the rule in place. The rule is disabled in every
- * case once the window maps, the browser exits, the wait times out, or
- * anything fails before that.
+ * Under the session's VNC lock, which teardown also holds: check that the
+ * session still runs, prepare the profile, record the launch, spawn the
+ * browser and record its identity. A teardown therefore either runs first
+ * and stops the launch here, or runs after and finds the recorded browser.
+ * On failure the rule is disabled and the launch removed, unless the
+ * browser may still run.
  */
-async function spawnRecordedBrowser(
-  record: ViewerLaunchRecord,
-  args: string[],
+async function startLocked(
   opts: LaunchViewerWindowOptions,
   env: NodeJS.ProcessEnv,
-): Promise<{ pid: number; exited: Promise<ExitStatus>; placed: boolean; child: ChildProcess }> {
-  const hyprland = record.hyprland;
-  try {
-    await writeViewerLaunchRecord(record, opts.registryEnv);
-    const spawned = await spawnBrowser(opts.browser, args, env);
-    const identity = readProcessIdentity(spawned.pid);
-    try {
-      await writeViewerLaunchRecord(
-        { ...record, pid: spawned.pid, startTicks: identity?.startTicks },
-        opts.registryEnv,
-      );
-    } catch (error) {
-      // Teardown could not find an unrecorded browser, so do not leave one.
-      killGroup(spawned.pid, "SIGTERM");
-      throw error;
-    }
-    let placed = false;
-    if (hyprland !== undefined) {
-      const window = await waitForViewerWindow(hyprland, hyprland.classPattern, spawned.pid, {
-        timeoutMs: opts.windowWaitMs ?? WINDOW_WAIT_MS,
-        stopped: spawned.done,
-      });
-      placed = window !== undefined;
-    }
-    return { ...spawned, placed };
-  } finally {
-    if (hyprland !== undefined) await disableViewerRule(hyprland, hyprland.ruleName);
+  guard: InterruptGuard,
+): Promise<{ record: ViewerLaunchRecord; spawned: SpawnedBrowser }> {
+  const session = await getSession(opts.sessionId, opts.registryEnv);
+  if (session?.status !== "running") {
+    throw new Error(`Session ${opts.sessionId} is not running; the viewer was not opened`);
   }
-}
-
-/**
- * Open one viewer window on the bridge. With `waitForExit`, resolve once
- * the browser main process exits and remove the launch; otherwise resolve
- * after the bounded window wait, leaving the browser running unref'd.
- */
-export async function launchViewerWindow(opts: LaunchViewerWindowOptions): Promise<LaunchedViewerWindow> {
-  const env = opts.env ?? process.env;
-  const prepared = await prepareViewerLaunch(opts.sessionId, opts.registryEnv);
-  const { launchId, profileDir } = prepared;
+  const { launchId, profileDir } = await prepareViewerLaunch(opts.sessionId, opts.registryEnv);
   const sizes = viewerWindowSizes(opts.desktop);
   const argsOptions = {
     url: buildViewerUrl(opts.bridgePort, launchId, opts.token),
@@ -338,7 +374,7 @@ export async function launchViewerWindow(opts: LaunchViewerWindowOptions): Promi
     launchId,
     size: sizes.thumbnail,
   };
-  let spawned: Awaited<ReturnType<typeof spawnRecordedBrowser>>;
+  let hyprland: ViewerHyprlandLaunch | undefined;
   try {
     if (opts.browser.kind === "firefox") await writeFirefoxUserJs(profileDir);
     const record: ViewerLaunchRecord = {
@@ -349,29 +385,113 @@ export async function launchViewerWindow(opts: LaunchViewerWindowOptions): Promi
       profileDir,
       ...sizes,
     };
-    const hyprland = await installRule(opts.browser, env, launchId, sizes.thumbnail);
+    hyprland = await installRule(opts.browser, env, launchId, sizes.thumbnail);
     if (hyprland !== undefined) record.hyprland = hyprland;
     const args =
       opts.browser.kind === "firefox"
         ? buildFirefoxViewerArgs(argsOptions)
         : buildChromiumViewerArgs(argsOptions);
-    spawned = await spawnRecordedBrowser(record, args, opts, env);
+    await writeViewerLaunchRecord(record, opts.registryEnv);
+    if (guard.signal !== undefined) throw new ViewerInterruptedError(guard.signal);
+    const spawned = await spawnBrowser(opts.browser, args, env, guard);
+    const recorded = { ...record, pid: spawned.pid, startTicks: readProcessIdentity(spawned.pid)?.startTicks };
+    try {
+      await writeViewerLaunchRecord(recorded, opts.registryEnv);
+    } catch (error) {
+      // Teardown cannot find an unrecorded browser, so do not leave one.
+      if (await stopUnrecordedBrowser(spawned.pid, recorded.startTicks)) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      throw new ViewerLaunchKeptError(
+        `${message}; the viewer browser (pid ${spawned.pid}) could not be stopped, ` +
+          `so launch ${launchId} remains for session teardown`,
+        { cause: error },
+      );
+    }
+    return { record: recorded, spawned };
   } catch (error) {
-    await removeViewerLaunch(opts.sessionId, launchId, opts.registryEnv).catch(() => {});
+    if (hyprland !== undefined) await disableViewerRule(hyprland, hyprland.ruleName);
+    if (!(error instanceof ViewerLaunchKeptError)) {
+      await removeViewerLaunch(opts.sessionId, launchId, opts.registryEnv).catch(() => {});
+    }
     throw error;
   }
+}
+
+/**
+ * Wait for the window to map, then place it once on the monitor it opened
+ * on. The rule placed it from the focused monitor's reserved area, which can
+ * differ from its own. Resolves true when the window mapped.
+ */
+async function placeWindow(
+  record: ViewerLaunchRecord,
+  spawned: SpawnedBrowser,
+  guard: InterruptGuard,
+  timeoutMs: number,
+): Promise<boolean> {
+  const hyprland = record.hyprland;
+  if (hyprland === undefined) return false;
+  const window = await waitForViewerWindow(hyprland, hyprland.classPattern, spawned.pid, {
+    timeoutMs,
+    stopped: () => spawned.done() || guard.signal !== undefined,
+  });
+  if (window === undefined) return false;
+  await applyHyprlandWindowMode(record, "thumbnail");
+  return true;
+}
+
+async function runLaunch(
+  opts: LaunchViewerWindowOptions,
+  guard: InterruptGuard,
+): Promise<LaunchedViewerWindow> {
+  const env = opts.env ?? process.env;
+  // Released before the placement wait: the bridge takes this lock for
+  // every VNC connect, and the page connects while the window maps.
+  const { record, spawned } = await withSessionVncLock(
+    opts.sessionId,
+    opts.registryEnv ?? process.env,
+    () => startLocked(opts, env, guard),
+  );
+  let placed = false;
+  try {
+    placed = await placeWindow(record, spawned, guard, opts.windowWaitMs ?? WINDOW_WAIT_MS);
+  } finally {
+    if (record.hyprland !== undefined) await disableViewerRule(record.hyprland, record.hyprland.ruleName);
+  }
   const result: LaunchedViewerWindow = {
-    launchId,
+    launchId: record.launchId,
     browser: opts.browser.name,
-    adapter: spawned.placed ? "hyprland" : "none",
+    adapter: placed ? "hyprland" : "none",
     pid: spawned.pid,
   };
-  if (!opts.waitForExit) {
+  if (!opts.waitForExit && guard.signal === undefined && !spawned.done()) {
     spawned.child.unref();
     return result;
   }
-  const status = await waitWithForwardedSignals(spawned.pid, spawned.exited);
+  const status = await spawned.exited;
   // A launch that cannot be removed now is pruned by a later launch.
-  await removeViewerLaunch(opts.sessionId, launchId, opts.registryEnv).catch(() => {});
+  await removeViewerLaunch(opts.sessionId, record.launchId, opts.registryEnv).catch(() => {});
   return { ...result, ...status };
+}
+
+/**
+ * Open one viewer window on the bridge. With `waitForExit`, resolve once
+ * the browser main process exits and remove the launch; otherwise resolve
+ * after the bounded window wait, leaving the browser running unref'd, or
+ * with its exit status when it already exited. An interrupt stops the
+ * browser, cleans up, and ends this process with the same signal.
+ */
+export async function launchViewerWindow(opts: LaunchViewerWindowOptions): Promise<LaunchedViewerWindow> {
+  const guard = new InterruptGuard();
+  let launched: LaunchedViewerWindow | undefined;
+  try {
+    launched = await runLaunch(opts, guard);
+  } catch (error) {
+    if (guard.signal === undefined) throw error;
+  } finally {
+    guard.dispose();
+  }
+  const signal = guard.signal;
+  if (signal === undefined) return launched as LaunchedViewerWindow;
+  (opts._exitOnSignal ?? exitWithSignal)(signal);
+  throw new ViewerInterruptedError(signal);
 }

@@ -4,10 +4,20 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ViewerLaunchRecord } from "@pickforge/lab-desktop-linux";
 
-const { prepareViewerLaunch, writeViewerLaunchRecord, removeViewerLaunch } = vi.hoisted(() => ({
+const {
+  prepareViewerLaunch,
+  writeViewerLaunchRecord,
+  removeViewerLaunch,
+  withSessionVncLock,
+  getSession,
+  stopProcessGroupVerified,
+} = vi.hoisted(() => ({
   prepareViewerLaunch: vi.fn(),
   writeViewerLaunchRecord: vi.fn(),
   removeViewerLaunch: vi.fn(),
+  withSessionVncLock: vi.fn(),
+  getSession: vi.fn(),
+  stopProcessGroupVerified: vi.fn(),
 }));
 
 vi.mock("@pickforge/lab-desktop-linux", async (importOriginal) => ({
@@ -15,7 +25,14 @@ vi.mock("@pickforge/lab-desktop-linux", async (importOriginal) => ({
   prepareViewerLaunch,
   writeViewerLaunchRecord,
   removeViewerLaunch,
+  withSessionVncLock,
 }));
+
+vi.mock("@pickforge/lab-core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@pickforge/lab-core")>();
+  stopProcessGroupVerified.mockImplementation(actual.stopProcessGroupVerified);
+  return { ...actual, getSession, stopProcessGroupVerified };
+});
 
 import { viewerClassPattern } from "../src/viewer/hyprland.js";
 import {
@@ -26,6 +43,7 @@ import {
   hasGraphicalSession,
   launchViewerWindow,
   viewerWindowSizes,
+  ViewerInterruptedError,
   type LaunchViewerWindowOptions,
 } from "../src/viewer/launch.js";
 import { createViewerFakes, monitor, type ViewerFakes } from "./viewer-fakes.js";
@@ -52,6 +70,10 @@ beforeEach(() => {
     fs.appendFileSync(fakes.callsLog, `${JSON.stringify({ tool: "record", pid: record.pid ?? null })}\n`);
   });
   removeViewerLaunch.mockResolvedValue(undefined);
+  withSessionVncLock.mockImplementation(async (_id: string, _env: unknown, operation: () => Promise<unknown>) =>
+    operation(),
+  );
+  getSession.mockResolvedValue({ id: "desk-aaaaaa11", status: "running" });
 });
 
 afterEach(() => {
@@ -116,8 +138,13 @@ function sequence(): string[] {
   return fakes.calls().map((call) => {
     if (call.tool === "record") return call.pid === null ? "record" : "record+pid";
     if (call.tool === "browser") return "browser";
+    if (call.tool !== "hyprctl") return String(call.tool);
     const args = call.args as string[];
-    if (args[2] === "eval") return (args[3] as string).includes("enabled=false") ? "disable" : "install";
+    if (args[2] === "eval") {
+      const lua = args[3] as string;
+      if (lua.includes("enabled=false")) return "disable";
+      return lua.includes("hl.dsp.window.move") ? "place" : "install";
+    }
     return `query:${args[3]}`;
   });
 }
@@ -271,9 +298,10 @@ describe("launchViewerWindow", () => {
       "record+pid",
     ]);
     expectStartedAfter(["install", "record"]);
-    expect(order.at(-1)).toBe("disable");
-    expect(order.slice(5, -1).length).toBeGreaterThan(0);
-    expect(order.slice(5, -1).every((step) => step === "query:clients")).toBe(true);
+    // Polls until the window maps, one placement on its monitor, then the disable.
+    expect(order.slice(-4)).toEqual(["query:clients", "query:monitors", "place", "disable"]);
+    expect(order.slice(5, -3).length).toBeGreaterThan(0);
+    expect(order.slice(5, -3).every((step) => step === "query:clients")).toBe(true);
     expect(order.filter((step) => step === "disable")).toHaveLength(1);
     const install = fakes.calls().find((call) => (call.args as string[])[2] === "eval");
     expect((install?.args as string[] | undefined)?.[3]).toContain("(monitor_h-216-64)");
@@ -340,16 +368,89 @@ describe("launchViewerWindow", () => {
     expect(fakes.calls().some((call) => call.tool === "browser")).toBe(false);
   });
 
-  it("stops the browser when its identity cannot be recorded", async () => {
+  it("stops the browser by identity with escalation when its identity cannot be recorded", async () => {
+    // The fake ignores SIGTERM, so only the SIGKILL escalation stops it.
+    fakes.setBrowser({ ignoreSignals: true });
+    writeViewerLaunchRecord.mockResolvedValueOnce(undefined).mockImplementationOnce(async () => {
+      // Fail only once the fake runs and ignores SIGTERM.
+      await vi.waitFor(() => expect(fakes.calls().some((call) => call.tool === "browser")).toBe(true));
+      throw new Error("disk full");
+    });
+
+    await expect(launchViewerWindow(options())).rejects.toThrow(/^disk full$/);
+
+    const recorded = records()[1];
+    const pid = recorded?.pid;
+    expect(pid).toEqual(expect.any(Number));
+    spawnedPids.push(pid as number);
+    expect(recorded?.startTicks).toEqual(expect.any(Number));
+    expect(fakes.calls().find((call) => call.tool === "browser")?.pid).toBe(pid);
+    expect(stopProcessGroupVerified).toHaveBeenCalledWith({ pid, startTicks: recorded?.startTicks });
+    expect(await stopProcessGroupVerified.mock.results[0]?.value).toEqual({ outcome: "terminated", signaled: true });
+    // The zombie is gone once this process reaps it.
+    await vi.waitFor(() => expect(fs.existsSync(`/proc/${String(pid)}`)).toBe(false), { timeout: 2_000 });
+    expect(removeViewerLaunch).toHaveBeenCalledWith("desk-aaaaaa11", LAUNCH_ID, undefined);
+  }, 20_000);
+
+  it("keeps the launch for teardown when the unrecorded browser may survive", async () => {
     fakes.setBrowser({});
     writeViewerLaunchRecord.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("disk full"));
+    stopProcessGroupVerified.mockResolvedValueOnce({ outcome: "survived", signaled: true });
 
-    await expect(launchViewerWindow(options())).rejects.toThrow(/disk full/);
+    await expect(launchViewerWindow(options())).rejects.toThrow(
+      /^disk full; the viewer browser \(pid \d+\) could not be stopped, so launch [0-9a-f]+ remains for session teardown$/,
+    );
 
-    const browser = fakes.calls().find((call) => call.tool === "browser");
-    const pid = browser?.pid as number;
-    await vi.waitFor(() => expect(fs.existsSync(`/proc/${pid}`)).toBe(false), { timeout: 5_000 });
-    expect(removeViewerLaunch).toHaveBeenCalled();
+    spawnedPids.push(records()[1]?.pid as number);
+    expect(removeViewerLaunch).not.toHaveBeenCalled();
+  });
+
+  it("checks the session and starts the browser under the session lock, then places it unlocked", async () => {
+    withSessionVncLock.mockImplementation(
+      async (_id: string, _env: unknown, operation: () => Promise<unknown>) => {
+        fs.appendFileSync(fakes.callsLog, `${JSON.stringify({ tool: "lock" })}\n`);
+        try {
+          return await operation();
+        } finally {
+          fs.appendFileSync(fakes.callsLog, `${JSON.stringify({ tool: "unlock" })}\n`);
+        }
+      },
+    );
+    getSession.mockImplementation(async () => {
+      fs.appendFileSync(fakes.callsLog, `${JSON.stringify({ tool: "session" })}\n`);
+      return { status: "running" };
+    });
+    prepareViewerLaunch.mockImplementation(async () => {
+      fs.appendFileSync(fakes.callsLog, `${JSON.stringify({ tool: "prepare" })}\n`);
+      return { launchId: LAUNCH_ID, launchDir: path.dirname(profileDir), profileDir };
+    });
+    fakes.installHyprctl();
+    fakes.setState({ status: { configProvider: "lua" }, monitors: [monitor()] });
+    fakes.setBrowser({ mapAfterMs: 150 });
+
+    await launch({ env: hyprEnv() });
+
+    const order = sequence();
+    expect(withSessionVncLock).toHaveBeenCalledWith("desk-aaaaaa11", process.env, expect.any(Function));
+    expect(order.slice(0, 3)).toEqual(["lock", "session", "prepare"]);
+    const unlocked = order.indexOf("unlock");
+    expect(order.indexOf("record+pid")).toBeLessThan(unlocked);
+    expect(order.slice(unlocked + 1)).toContain("query:clients");
+    expect(order.slice(unlocked + 1).at(-1)).toBe("disable");
+    expect(order.slice(0, unlocked).includes("query:clients")).toBe(false);
+  });
+
+  it.each([undefined, { status: "stopped" }])("opens nothing for a session that ended before the lock (%o)", async (session) => {
+    getSession.mockResolvedValue(session);
+    fakes.setBrowser({});
+
+    await expect(launchViewerWindow(options())).rejects.toThrow(
+      "Session desk-aaaaaa11 is not running; the viewer was not opened",
+    );
+
+    expect(prepareViewerLaunch).not.toHaveBeenCalled();
+    expect(writeViewerLaunchRecord).not.toHaveBeenCalled();
+    expect(fakes.calls().some((call) => call.tool === "browser")).toBe(false);
   });
 
   it("falls back to an ordinary window when Hyprland refuses the rule", async () => {
@@ -396,12 +497,85 @@ describe("launchViewerWindow", () => {
     expect(removeViewerLaunch).toHaveBeenCalledTimes(2);
   });
 
-  it("forwards an interrupt to the browser group while waiting", async () => {
+  it("stops the browser and cleans up on an interrupt during the window wait", async () => {
+    fakes.installHyprctl();
+    fakes.setState({ status: { configProvider: "lua" }, monitors: [] });
     fakes.setBrowser({});
-    const pending = launchViewerWindow(options({ waitForExit: true }));
-    await vi.waitFor(() => expect(writeViewerLaunchRecord).toHaveBeenCalledTimes(2));
+    const exitOnSignal = vi.fn();
+    const started = Date.now();
+    const pending = launchViewerWindow(
+      options({ env: hyprEnv(), windowWaitMs: 30_000, _exitOnSignal: exitOnSignal }),
+    );
+    await vi.waitFor(() => expect(fakes.calls().some((call) => call.tool === "browser")).toBe(true));
+    const pid = records()[1]?.pid as number;
+    spawnedPids.push(pid);
+
     process.emit("SIGINT", "SIGINT");
-    expect(await pending).toMatchObject({ signal: "SIGINT" });
+
+    await expect(pending).rejects.toBeInstanceOf(ViewerInterruptedError);
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(exitOnSignal).toHaveBeenCalledWith("SIGINT");
+    expect(fs.existsSync(`/proc/${String(pid)}`)).toBe(false);
+    expect(sequence().at(-1)).toBe("disable");
+    expect(removeViewerLaunch).toHaveBeenCalledWith("desk-aaaaaa11", LAUNCH_ID, undefined);
+    expect(process.listenerCount("SIGINT")).toBe(0);
+  });
+
+  it("sends SIGTERM on the first interrupt and SIGKILL on the second", async () => {
+    fakes.setBrowser({ ignoreSignals: true });
+    const exitOnSignal = vi.fn();
+    const pending = launchViewerWindow(options({ waitForExit: true, _exitOnSignal: exitOnSignal }));
+    let settled = false;
+    void pending.catch(() => {}).finally(() => (settled = true));
+    await vi.waitFor(() => expect(fakes.calls().some((call) => call.tool === "browser")).toBe(true));
+    const pid = records()[1]?.pid as number;
+    spawnedPids.push(pid);
+
+    process.emit("SIGINT", "SIGINT");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(settled).toBe(false);
+    expect(fs.existsSync(`/proc/${String(pid)}`)).toBe(true);
+    process.emit("SIGTERM", "SIGTERM");
+
+    await expect(pending).rejects.toMatchObject({ signal: "SIGINT" });
+    expect(exitOnSignal).toHaveBeenCalledTimes(1);
+    expect(exitOnSignal).toHaveBeenCalledWith("SIGINT");
+    expect(fs.existsSync(`/proc/${String(pid)}`)).toBe(false);
+    expect(removeViewerLaunch).toHaveBeenCalledWith("desk-aaaaaa11", LAUNCH_ID, undefined);
+  });
+
+  it("reports an exit seen during placement in an automatic launch", async () => {
+    fakes.installHyprctl();
+    fakes.setState({ status: { configProvider: "lua" }, monitors: [] });
+    fakes.setBrowser({ exitAfterMs: 50, exitCode: 5 });
+
+    const result = await launch({ env: hyprEnv(), windowWaitMs: 30_000 });
+
+    expect(result).toMatchObject({ adapter: "none", exitCode: 5, signal: null });
+    expect(removeViewerLaunch).toHaveBeenCalledWith("desk-aaaaaa11", LAUNCH_ID, undefined);
+  });
+
+  it("places the mapped window on its own monitor, not the focused one", async () => {
+    fakes.installHyprctl();
+    fakes.setState({
+      status: { configProvider: "lua" },
+      monitors: [
+        monitor({ id: 0, focused: true, reserved: [0, 0, 0, 40] }),
+        monitor({ id: 1, x: 1920, focused: false, reserved: [0, 0, 0, 0] }),
+      ],
+    });
+    fakes.setBrowser({ mapAfterMs: 50, monitor: 1 });
+
+    const result = await launch({ env: hyprEnv() });
+
+    expect(result.adapter).toBe("hyprland");
+    const place = fakes
+      .calls()
+      .map((call) => (call.args as string[] | undefined)?.[3] ?? "")
+      .find((lua) => lua.includes("hl.dsp.window.move"));
+    // 1920 + 1920 - 384 - 24 and 1080 - 216 - 24, without the focused monitor's bar.
+    expect(place).toContain("resize({x=384,y=216,");
+    expect(place).toContain("move({x=3432,y=840,");
   });
 
   it("keeps a launch that cannot be removed for a later prune", async () => {
