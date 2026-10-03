@@ -85,7 +85,7 @@ function processOwnsTarget(pid: number, display: string, socketPath: string, dea
 /** Linux procfs, UID, lock and socket-owner checks, not SO_PEERCRED or a
  * cryptographic peer identity. Never consult XAUTHORITY or home configuration.
  */
-export async function validateTypingTarget(sessionId: string, display: string, env: EnvLike, deadline = performance.now() + X11_SETUP_MS): Promise<{ path: string; alive: () => boolean }> {
+async function validateOwnedTarget(sessionId: string, display: string, env: EnvLike, deadline: number): Promise<{ path: string; alive: () => boolean; identity: OwnedDisplayIdentity }> {
   try {
     remaining(deadline);
     if (!/^:(0|[1-9]\d{0,5})$/.test(display)) throw typingFailure();
@@ -105,10 +105,15 @@ export async function validateTypingTarget(sessionId: string, display: string, e
     processOwnsTarget(pid!, display, socketPath, deadline);
     if (!alive()) throw typingFailure();
     remaining(deadline);
-    return { path: socketPath, alive };
+    return { path: socketPath, alive, identity: { display, ...identity } };
   } catch {
     throw typingFailure();
   }
+}
+
+export async function validateTypingTarget(sessionId: string, display: string, env: EnvLike, deadline = performance.now() + X11_SETUP_MS): Promise<{ path: string; alive: () => boolean }> {
+  const { path, alive } = await validateOwnedTarget(sessionId, display, env, deadline);
+  return { path, alive };
 }
 
 /** The owned Xvfb a session's input and captures were verified against. */
@@ -125,9 +130,14 @@ export interface OwnedDisplayIdentity {
  * redirects input.
  */
 export async function verifyOwnedDisplayTarget(
-  _sessionId: string,
-  _display: string,
-  _env: EnvLike,
+  sessionId: string,
+  display: string,
+  env: EnvLike,
 ): Promise<OwnedDisplayIdentity | undefined> {
-  return undefined;
+  try {
+    const target = await validateOwnedTarget(sessionId, display, env, performance.now() + X11_SETUP_MS);
+    return target.identity;
+  } catch {
+    return undefined;
+  }
 }
