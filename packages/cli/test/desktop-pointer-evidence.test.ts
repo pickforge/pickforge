@@ -7,7 +7,10 @@ import { runDesktopClick, runDesktopDrag } from "../src/commands/desktop.js";
 
 type Identity = { display: string; pid: number; startTicks: number } | undefined | "reject";
 const IDENTITY = vi.hoisted(() => ({ display: ":42", pid: 4242, startTicks: 777 }));
-const state = vi.hoisted(() => ({ order: [] as string[], fail: false, verify: [] as Identity[], appendFail: false, beginFail: false }));
+const state = vi.hoisted(() => ({
+  order: [] as string[], fail: false, verify: [] as Identity[], appendFail: false, beginFail: false,
+  verifyArgs: [] as unknown[][], inputDisplays: [] as string[], beginGate: undefined as Promise<void> | undefined,
+}));
 vi.mock("@pickforge/lab-core", async (original) => {
   const actual = await original<typeof import("@pickforge/lab-core")>();
   return { ...actual,
@@ -16,6 +19,8 @@ vi.mock("@pickforge/lab-core", async (original) => {
       return actual.appendAction(...args);
     },
     beginEvidenceRun: async (...args: Parameters<typeof actual.beginEvidenceRun>) => {
+      state.order.push("begin");
+      await state.beginGate;
       if (state.beginFail) throw new Error("synthetic begin failure");
       return actual.beginEvidenceRun(...args);
     },
@@ -23,13 +28,15 @@ vi.mock("@pickforge/lab-core", async (original) => {
 });
 vi.mock("@pickforge/lab-desktop-linux", async (original) => {
   const actual = await original<typeof import("@pickforge/lab-desktop-linux")>();
-  const input = async () => {
+  const input = async (opts: { display: string }) => {
     state.order.push("input");
+    state.inputDisplays.push(opts.display);
     if (state.fail) throw new Error("synthetic input failure");
   };
   return { ...actual, click: input, drag: input,
-    verifyOwnedDisplayTarget: vi.fn(async () => {
+    verifyOwnedDisplayTarget: vi.fn(async (...args: unknown[]) => {
       state.order.push("verify");
+      state.verifyArgs.push(args);
       const next = state.verify.length > 0 ? state.verify.shift() : IDENTITY;
       if (next === "reject") throw new Error("synthetic verification rejection");
       return next;
@@ -56,6 +63,7 @@ beforeEach(async () => {
   vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => { stderr.push(String(chunk)); return true; });
   session = (await createSession({ type: "desktop", projectDir: root, status: "running", desktop: { display: ":42", homePolicy: "private" } }, env)).id;
   state.order = []; state.fail = false; state.verify = []; state.appendFail = false; state.beginFail = false;
+  state.verifyArgs = []; state.inputDisplays = []; state.beginGate = undefined;
 });
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -79,7 +87,7 @@ it.each([
 ] as const)("%s appends one verified record and keeps its JSON output", async (_name, run, tool, target, data) => {
   expect(await run()).toBe(0);
   expect(JSON.parse(logs.at(-1)!)).toEqual({ ok: true, ...data, sessionId: session, errors: [] });
-  expect(state.order).toEqual(["verify", "input", "verify"]);
+  expect(state.order).toEqual(["verify", "input", "verify", "begin"]);
   const recorded = await actions();
   expect(recorded).toHaveLength(1);
   expect(recorded[0]).toMatchObject({ source: "cli", tool, sessionId: session, status: "ok", inputState: "completed", target: { ...target, coordinateSpace: "xvfb-root" } });
@@ -149,7 +157,51 @@ it("reports the input error, not the append error, when both fail", async () => 
 it("runs the input without a record when the evidence run cannot begin", async () => {
   state.beginFail = true;
   expect(await click()).toBe(0);
-  expect(state.order).toEqual(["input"]);
+  expect(state.order).toEqual(["verify", "input", "verify", "begin"]);
+  expect(JSON.parse(logs.at(-1)!)).toEqual({ ok: true, sessionId: session, display: ":42", x: 2, y: 3, button: 1, errors: [] });
   expect(stderr).toEqual(["[pickforge-lab evidence] desktop_click: synthetic begin failure\n"]);
   expect(await listRuns(root, env)).toEqual([]);
+});
+
+it("reports the input error, not the begin error, when both fail", async () => {
+  state.fail = true; state.beginFail = true;
+  expect(await drag()).toBe(1);
+  const output = [...logs, ...errors].join("\n");
+  expect(output).toContain("synthetic input failure");
+  expect(output).not.toContain("synthetic begin failure");
+  expect(stderr).toEqual(["[pickforge-lab evidence] desktop_drag: synthetic begin failure\n"]);
+  expect(await listRuns(root, env)).toEqual([]);
+});
+
+it.each([["click", click], ["drag", drag]] as const)("dispatches the %s before a contended run claim settles", async (_name, run) => {
+  let release!: () => void;
+  state.beginGate = new Promise((resolve) => { release = resolve; });
+  const pending = run();
+  await vi.waitFor(() => expect(state.order).toEqual(["verify", "input", "verify", "begin"]));
+  const claimedAt = Date.now();
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  release();
+  expect(await pending).toBe(0);
+  const [action] = await actions();
+  expect(action).toMatchObject({ inputState: "completed", target: { coordinateSpace: "xvfb-root" } });
+  expect(Date.parse(action!.startedAt)).toBeLessThanOrEqual(claimedAt);
+  expect(action!.durationMs).toBeLessThan(150);
+});
+
+it.each([["click", click], ["drag", drag]] as const)("verifies the session display the %s used, with the process env", async (_name, run) => {
+  const hostDisplay = process.env.DISPLAY;
+  process.env.DISPLAY = ":7";
+  try {
+    expect(await run()).toBe(0);
+  } finally {
+    if (hostDisplay === undefined) delete process.env.DISPLAY;
+    else process.env.DISPLAY = hostDisplay;
+  }
+  expect(state.inputDisplays).toEqual([":42"]);
+  expect(state.verifyArgs).toHaveLength(2);
+  for (const [sessionId, display, verifyEnv] of state.verifyArgs) {
+    expect(sessionId).toBe(session);
+    expect(display).toBe(":42");
+    expect(verifyEnv).toBe(process.env);
+  }
 });

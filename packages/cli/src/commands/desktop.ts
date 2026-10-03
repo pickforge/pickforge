@@ -148,13 +148,16 @@ function reportEvidenceFailure(tool: string, error: unknown): void {
   process.stderr.write(`[pickforge-lab evidence] ${tool}: ${detail}\n`);
 }
 
-/** Evidence is best effort: its failures never block the input or change the command result. */
+/**
+ * Evidence is best effort: its failures never block the input or change the command result.
+ * Only the config read and the bounded ownership check run before the input; the run claim waits.
+ */
 async function pointerWithEvidence(
   opts: DesktopCommandOptions, tool: "desktop_click" | "desktop_drag",
   sessionId: string, display: string, target: Record<string, number>, input: () => Promise<void>,
 ): Promise<void> {
-  const run = await startPointerEvidence(opts, tool, sessionId);
-  const before = run === undefined ? undefined : await ownedDisplay(sessionId, display);
+  const enabled = await pointerEvidenceEnabled(opts, tool);
+  const before = enabled ? await ownedDisplay(sessionId, display) : undefined;
   const startedAt = new Date();
   const action: EvidenceAction = {
     actionId: crypto.randomUUID(), source: "cli", tool, sessionId,
@@ -169,26 +172,22 @@ async function pointerWithEvidence(
     throw error;
   } finally {
     action.durationMs = Date.now() - startedAt.getTime();
-    if (run !== undefined) await recordPointerAction(run, action, sessionId, display, before, target);
+    if (enabled) await recordPointerAction(opts, action, sessionId, display, before, target);
   }
 }
 
-async function startPointerEvidence(
-  opts: DesktopCommandOptions, tool: string, sessionId: string,
-): Promise<RunHandle | undefined> {
+async function pointerEvidenceEnabled(opts: DesktopCommandOptions, tool: string): Promise<boolean> {
   try {
-    const projectDir = resolveProjectDir(opts);
-    return isEvidenceEnabled(await loadConfig(projectDir))
-      ? (await beginEvidenceRun(projectDir, sessionId)).run : undefined;
+    return isEvidenceEnabled(await loadConfig(resolveProjectDir(opts)));
   } catch (error) {
     reportEvidenceFailure(tool, error);
-    return undefined;
+    return false;
   }
 }
 
 /** Marks the target as root pixels only when the same owned display survived the input. */
 async function recordPointerAction(
-  run: RunHandle, action: EvidenceAction, sessionId: string, display: string,
+  opts: DesktopCommandOptions, action: EvidenceAction, sessionId: string, display: string,
   before: Awaited<ReturnType<typeof ownedDisplay>>, target: Record<string, number>,
 ): Promise<void> {
   try {
@@ -196,6 +195,7 @@ async function recordPointerAction(
     const verified = after !== undefined && after.display === before?.display &&
       after.pid === before.pid && after.startTicks === before.startTicks;
     action.target = { ...sanitizeActionTarget(verified ? { ...target, coordinateSpace: "xvfb-root" } : target) };
+    const { run } = await beginEvidenceRun(resolveProjectDir(opts), sessionId);
     await appendAction(run, action);
   } catch (error) {
     reportEvidenceFailure(action.tool, error);

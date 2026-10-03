@@ -8,17 +8,19 @@ type Identity = { display: string; pid: number; startTicks: number } | undefined
 const IDENTITY = vi.hoisted(() => ({ display: ":99", pid: 4242, startTicks: 777 }));
 const state = vi.hoisted(() => ({
   order: [] as string[], fail: "", publishedFailure: false, captureBytes: 0,
-  verify: [] as Identity[],
+  verify: [] as Identity[], verifyArgs: [] as unknown[][], inputDisplays: [] as string[],
 }));
 vi.mock("@pickforge/lab-desktop-linux", async (original) => {
   const actual = await original<typeof import("@pickforge/lab-desktop-linux")>();
-  const input = async (opts: { sessionId: string; env: NodeJS.ProcessEnv }) => withAgentPermit(opts.sessionId, opts.env, async () => {
+  const input = async (opts: { sessionId: string; display: string; env: NodeJS.ProcessEnv }) => withAgentPermit(opts.sessionId, opts.env, async () => {
     state.order.push("input");
+    state.inputDisplays.push(opts.display);
     if (state.fail === "input") throw new Error("synthetic input failure");
   });
   return { ...actual, click: input, doubleClick: input, drag: input, scroll: input, move: input,
-    verifyOwnedDisplayTarget: vi.fn(async () => {
+    verifyOwnedDisplayTarget: vi.fn(async (...args: unknown[]) => {
       state.order.push("verify");
+      state.verifyArgs.push(args);
       const next = state.verify.length > 0 ? state.verify.shift() : IDENTITY;
       if (next === "reject") throw new Error("synthetic verification rejection");
       return next;
@@ -43,7 +45,7 @@ beforeEach(async () => {
   env = { ...process.env, PICKFORGE_HOME: dirs.home, PICKFORGE_STORAGE_MODE: "project-local" };
   session = writeDesktopSessionRecord(dirs.home, dirs.projectDir);
   lab = await connectLab({ projectDir: dirs.projectDir, env });
-  state.order = []; state.fail = ""; state.publishedFailure = false; state.captureBytes = 0; state.verify = [];
+  state.order = []; state.fail = ""; state.publishedFailure = false; state.captureBytes = 0; state.verify = []; state.verifyArgs = []; state.inputDisplays = [];
 });
 afterEach(async () => { await lab.close(); removeLabDirs(dirs); });
 
@@ -97,6 +99,19 @@ it.each(pointer)("%s records target, space, input state and capture links withou
       expect(Object.keys(shot).sort()).toEqual(captureKeys);
       expect(fs.readFileSync(shot.path)).toEqual(MINI_PNG);
     }
+  }
+});
+
+it.each(pointer)("%s verifies the session display with the server env, not a host DISPLAY", async (tool, args) => {
+  await lab.close();
+  lab = await connectLab({ projectDir: dirs.projectDir, env: { ...env, DISPLAY: ":7" } });
+  expect((await call(tool, args)).ok).toBe(true);
+  expect(state.inputDisplays).toEqual([":987"]);
+  expect(state.verifyArgs).toHaveLength(2);
+  for (const [sessionId, display, verifyEnv] of state.verifyArgs) {
+    expect(sessionId).toBe(session);
+    expect(display).toBe(":987");
+    expect(verifyEnv).toMatchObject({ PICKFORGE_HOME: dirs.home, PICKFORGE_STORAGE_MODE: "project-local", DISPLAY: ":7" });
   }
 });
 
