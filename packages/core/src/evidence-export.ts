@@ -24,7 +24,7 @@ export interface ExportFrame {
   annotated: boolean; reason?: string;
 }
 export interface ExportVideo {
-  file: "slideshow.mp4"; kind: "slideshow-of-stills"; frameMs: number; width: 1280; height: 720;
+  file: "slideshow.mp4"; concatFile: "slideshow.ffconcat"; kind: "slideshow-of-stills"; frameMs: number; width: number; height: number;
 }
 export interface EvidenceExportManifest {
   schema: "pickforge.evidence-export"; version: 1; runId: string; exportId: string; createdAt: string;
@@ -90,8 +90,18 @@ async function findFfmpeg(): Promise<string> {
   throw new Error("--video requires ffmpeg on PATH");
 }
 
-async function writeVideo(dir: DirHandle, ffmpeg: string, frames: ExportFrame[], frameMs: number): Promise<void> {
+/** Preserve the largest capture canvas. Scale proportionally only above 3840 by 2160, then round up to even pixels. */
+export function slideshowSize(frames: readonly Pick<ExportFrame, "size">[]): PngSize {
+  const width = Math.max(...frames.map(frame => frame.size.width));
+  const height = Math.max(...frames.map(frame => frame.size.height));
+  assertRasterSize(width, 1); assertRasterSize(1, height);
+  const scale = Math.min(1, 3840 / width, 2160 / height);
+  return { width: Math.ceil(width * scale / 2) * 2, height: Math.ceil(height * scale / 2) * 2 };
+}
+
+async function writeVideo(dir: DirHandle, ffmpeg: string, frames: ExportFrame[], frameMs: number): Promise<ExportVideo> {
   if (frames.length === 0) throw new Error("Video requires at least one exported frame");
+  const { width, height } = slideshowSize(frames);
   // The child reads the parent's pinned directory, never a run pathname.
   const framePath = (file: string) => dir.resolve(file).replace("/proc/self/", `/proc/${process.pid}/`);
   const concat = "ffconcat version 1.0\n" + frames.map(frame => `file 'file:${framePath(frame.file)}'\nduration ${frameMs / 1000}\n`).join("") +
@@ -101,7 +111,7 @@ async function writeVideo(dir: DirHandle, ffmpeg: string, frames: ExportFrame[],
   try {
     // ffmpeg writes only to stdout. The parent owns the exclusive output descriptor.
     const child = spawn(ffmpeg, ["-nostdin", "-n", "-v", "error", "-protocol_whitelist", "file,pipe", "-f", "concat", "-safe", "0", "-i", "pipe:0",
-      "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p",
+      "-vf", `scale=w='min(iw,${width})':h='min(ih,${height})':force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p`,
       "-an", "-c:v", "libx264", "-threads", "1", "-preset", "veryfast", "-r", "25", "-t", String(frames.length * frameMs / 1000),
       "-movflags", "frag_keyframe+empty_moov", "-f", "mp4", "pipe:1"], { stdio: ["pipe", "pipe", "ignore"] });
     let timedOut = false;
@@ -125,6 +135,7 @@ async function writeVideo(dir: DirHandle, ffmpeg: string, frames: ExportFrame[],
     catch (error) { child.kill("SIGKILL"); await Promise.allSettled([exited, output]); throw error; }
     finally { clearTimeout(timer); }
   } finally { await file.close(); }
+  return { file: "slideshow.mp4", concatFile: "slideshow.ffconcat", kind: "slideshow-of-stills", frameMs, width, height };
 }
 
 interface Sources {
@@ -210,9 +221,8 @@ export async function exportEvidenceRun(catalog: RunCatalog, entry: RunCatalogEn
               annotatedCount: frames.filter(f => f.annotated).length, pointerTrackPath: path.join(exportDir, "pointer-track.json"), videoPath: null, complete: true };
             let video: ExportVideo | null = null;
             if (ffmpeg !== undefined) {
-              try { await writeVideo(dir, ffmpeg, frames, frameMs); }
+              try { video = await writeVideo(dir, ffmpeg, frames, frameMs); }
               catch (error) { return { ...output, complete: false, videoError: `${(error as Error).message}; frames and pointer track preserved in incomplete export: ${exportDir}` }; }
-              video = { file: "slideshow.mp4", kind: "slideshow-of-stills", frameMs, width: 1280, height: 720 };
               output.videoPath = path.join(exportDir, video.file);
             }
             const exportManifest: EvidenceExportManifest = { schema: "pickforge.evidence-export", version: 1, runId: manifest.runId, exportId, createdAt,

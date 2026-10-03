@@ -1047,6 +1047,8 @@ function classifyRunArtifactEntry(
   entry: fs.Dirent, relative: string,
 ): "directory" | "file" | undefined {
   if (entry.isSymbolicLink()) return undefined;
+  // Derived exports never consume the evidence cap, in scans or snapshots.
+  if (relative === "exports" && entry.isDirectory()) return undefined;
   if (entry.isDirectory()) return "directory";
   if (!entry.isFile()) return undefined;
   if (["manifest.json", "report.html", "report-share.html"].includes(relative)) return undefined;

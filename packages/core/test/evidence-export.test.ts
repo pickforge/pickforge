@@ -6,7 +6,7 @@ import { crc32, deflateSync } from "node:zlib";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import { createRun, type RunHandle } from "../src/run.js";
 import { openRunCatalog, type RunCatalog, type RunCatalogEntry } from "../src/run-catalog.js";
-import { exportEvidenceRun, exportFrameMilliseconds, type EvidenceExportManifest } from "../src/evidence-export.js";
+import { exportEvidenceRun, exportFrameMilliseconds, slideshowSize, type EvidenceExportManifest } from "../src/evidence-export.js";
 import { encodePng, MAX_RASTER_PIXELS } from "../src/png-raster.js";
 import { DirHandle } from "../src/dir-handle.js";
 import { PNG_SIGNATURE, completePngSize } from "../src/evidence-png.js";
@@ -177,7 +177,31 @@ it.skipIf(!ffmpegInstalled)("creates a real even-sized slideshow from different 
   expect(result).toMatchObject({ complete: true, frameCount: 2, videoPath: expect.stringContaining("slideshow.mp4") });
   const probe = spawnSync("ffprobe", ["-v", "error", "-show_streams", "-show_format", "-of", "json", result.videoPath!], { encoding: "utf8" });
   expect(probe.status, probe.stderr).toBe(0);
-  const video = JSON.parse(probe.stdout); expect(video.streams[0]).toMatchObject({ width: 1280, height: 720, pix_fmt: "yuv420p", codec_name: "h264" });
+  const video = JSON.parse(probe.stdout); expect(video.streams[0]).toMatchObject({ width: 48, height: 54, pix_fmt: "yuv420p", codec_name: "h264" });
   expect(Number(video.format.duration)).toBeCloseTo(0.4, 1);
-  expect((await manifest(result.exportDir)).video).toEqual({ file: "slideshow.mp4", kind: "slideshow-of-stills", frameMs: 200, width: 1280, height: 720 });
+  expect(fs.existsSync(path.join(result.exportDir, "slideshow.ffconcat"))).toBe(true);
+  expect((await manifest(result.exportDir)).video).toEqual({ file: "slideshow.mp4", kind: "slideshow-of-stills", frameMs: 200, width: 48, height: 54, concatFile: "slideshow.ffconcat" });
+}, 20_000);
+
+it.each([
+  [[{ width: 1280, height: 800 }], { width: 1280, height: 800 }],
+  [[{ width: 1281, height: 801 }, { width: 31, height: 1001 }], { width: 1282, height: 1002 }],
+  [[{ width: 4000, height: 1000 }], { width: 3840, height: 960 }],
+  [[{ width: 1000, height: 4000 }], { width: 540, height: 2160 }],
+  [[{ width: 3840, height: 2160 }], { width: 3840, height: 2160 }],
+])("chooses an even canvas within 3840 by 2160 for %j", (sizes, expected) => {
+  expect(slideshowSize(sizes.map(size => ({ size })))).toEqual(expected);
+});
+it.skipIf(!ffmpegInstalled).each([
+  [1280, 800, 1280, 800],
+  [4000, 1000, 3840, 960],
+])("encodes %ix%i captures at %ix%i and records the concat file", async (width, height, expectedWidth, expectedHeight) => {
+  await screenshot("large.png", image(width, height));
+  await journal([action("large", ["screenshots/large.png"])]);
+  const result = await exportEvidenceRun(catalog, entry, { video: true, frameMs: 80 });
+  expect(result.complete, result.videoError).toBe(true);
+  const probe = spawnSync("ffprobe", ["-v", "error", "-show_streams", "-of", "json", result.videoPath!], { encoding: "utf8" });
+  expect(probe.status, probe.stderr).toBe(0);
+  expect(JSON.parse(probe.stdout).streams[0]).toMatchObject({ width: expectedWidth, height: expectedHeight, pix_fmt: "yuv420p" });
+  expect((await manifest(result.exportDir)).video).toMatchObject({ width: expectedWidth, height: expectedHeight, concatFile: "slideshow.ffconcat" });
 }, 20_000);

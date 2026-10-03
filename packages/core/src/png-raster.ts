@@ -99,25 +99,45 @@ const dashOn = (length: number) => {
   return ((length % period) + period) % period < GLYPH_DASH[0];
 };
 
-function segment(from: GlyphPoint, to: GlyphPoint, x: number, y: number): { distance: number; along: number } {
+function segment(from: GlyphPoint, to: GlyphPoint, x: number, y: number): { distance: number; along: number; projection: number; length: number } {
   const dx = to.x - from.x, dy = to.y - from.y, length = Math.hypot(dx, dy);
-  const along = length === 0 ? 0 : Math.max(0, Math.min(length, ((x - from.x) * dx + (y - from.y) * dy) / length));
-  return { distance: Math.hypot(x - from.x - (length === 0 ? 0 : dx * along / length), y - from.y - (length === 0 ? 0 : dy * along / length)), along };
+  const projection = length === 0 ? 0 : ((x - from.x) * dx + (y - from.y) * dy) / length;
+  const along = Math.max(0, Math.min(length, projection));
+  return { distance: Math.hypot(x - from.x - (length === 0 ? 0 : dx * along / length), y - from.y - (length === 0 ? 0 : dy * along / length)), along, projection, length };
 }
 
-function strokes(points: GlyphPoint[], dashed: boolean): Geometry {
+function strokes(points: GlyphPoint[], dashed: boolean, butt = dashed): Geometry {
   return {
     bounds: [Math.min(...points.map(p => p.x)), Math.min(...points.map(p => p.y)), Math.max(...points.map(p => p.x)), Math.max(...points.map(p => p.y))],
     distance: (x, y) => {
       let best = Infinity, offset = 0;
       for (let i = 1; i < points.length; i += 1) {
         const from = points[i - 1]!, to = points[i]!, hit = segment(from, to, x, y);
-        if (!dashed || dashOn(offset + hit.along)) best = Math.min(best, hit.distance - GLYPH_STROKE_WIDTH / 2);
+        const within = !butt || (hit.length > 0 && hit.projection >= 0 && hit.projection <= hit.length);
+        if (within && (!dashed || dashOn(offset + hit.along))) best = Math.min(best, hit.distance - GLYPH_STROKE_WIDTH / 2);
         offset += Math.hypot(to.x - from.x, to.y - from.y);
       }
       return best;
     },
   };
+}
+
+/** Rectangles use miter joins; only uninterrupted dashes join at a corner. */
+function box(part: Extract<GlyphPart, { shape: "box" }>): Geometry {
+  const { x, y, width: w, height: h, dashed } = part;
+  const points = [{ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }, { x, y }];
+  const edges = strokes(points, dashed, true);
+  const perimeter = 2 * (w + h), phases = [0, w, w + h, 2 * w + h];
+  const corners = points.slice(0, 4).map((point, index) => ({ point, index })).filter(({ index: i }) => {
+    const before = i === 0 ? perimeter : phases[i]!;
+    return !dashed || (dashOn(before - 1e-7) && dashOn(phases[i]! + 1e-7));
+  });
+  return { bounds: edges.bounds, distance: (px, py) => Math.min(edges.distance(px, py),
+    ...corners.map(({ point: p, index }) => {
+      const outsideX = index === 0 || index === 3 ? px < p.x : px > p.x;
+      const outsideY = index < 2 ? py < p.y : py > p.y;
+      return outsideX && outsideY ? Math.max(Math.abs(px - p.x), Math.abs(py - p.y)) - GLYPH_STROKE_WIDTH / 2 : Infinity;
+    })) };
 }
 
 function arrow(part: Extract<GlyphPart, { shape: "arrow" }>): Geometry {
@@ -149,10 +169,9 @@ function geometry(part: GlyphPart): Geometry {
   if (part.shape === "line") return strokes([part.from, part.to], part.dashed);
   if (part.shape === "arrow") return arrow(part);
   if (part.shape === "box") {
-    const { x, y, width: w, height: h } = part;
-    return strokes([{ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }, { x, y }], part.dashed);
+    return box(part);
   }
-  const { at, size } = part, top = at.y - size / 2, bottom = at.y + size / 2, cap = size / 6;
+  const { at, size } = part, top = at.y - size / 2, bottom = at.y + size / 2, cap = size / 4;
   const pieces = [strokes([{ x: at.x, y: top }, { x: at.x, y: bottom }], false),
     strokes([{ x: at.x - cap, y: top }, { x: at.x + cap, y: top }], false),
     strokes([{ x: at.x - cap, y: bottom }, { x: at.x + cap, y: bottom }], false)];
@@ -191,8 +210,7 @@ export function drawPointerGlyph(raster: PngRaster, glyph: PointerGlyph): void {
   if (glyph.width !== raster.width || glyph.height !== raster.height) throw new Error("Glyph size differs from PNG size");
   for (const part of glyph.parts) {
     const shape = geometry(part);
-    const filled = part.shape === "dot" || part.shape === "arrow";
-    drawLayer(raster, shape, GLYPH_HALO_COLOR, filled ? GLYPH_HALO_WIDTH / 2 : (GLYPH_HALO_WIDTH - GLYPH_STROKE_WIDTH) / 2);
+    drawLayer(raster, shape, GLYPH_HALO_COLOR, (GLYPH_HALO_WIDTH - GLYPH_STROKE_WIDTH) / 2);
     drawLayer(raster, shape, GLYPH_COLOR, 0);
   }
 }

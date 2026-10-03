@@ -47,8 +47,8 @@ it("draws a hollow ring with a halo beneath its stroke", () => {
   expect(rgb(image, 30, 20)).toBe(GLYPH_HALO_COLOR);
 });
 it("draws a filled dot with its halo", () => {
-  const image = draw([{ shape: "dot", at: { x: 20.5, y: 20.5 }, radius: 4 }]);
-  expect(rgb(image, 20, 20)).toBe(GLYPH_COLOR); expect(rgb(image, 25, 20)).toBe(GLYPH_HALO_COLOR);
+  const image = draw([{ shape: "dot", at: { x: 20, y: 20 }, radius: 4 }]);
+  expect(rgb(image, 20, 20)).toBe(GLYPH_COLOR); expect(rgb(image, 24, 20)).toBe(GLYPH_HALO_COLOR);
 });
 it("draws straight strokes and dashed gaps", () => {
   const image = draw([{ shape: "line", from: { x: 2.5, y: 12.5 }, to: { x: 42.5, y: 12.5 }, dashed: true }]);
@@ -58,7 +58,7 @@ it("draws straight strokes and dashed gaps", () => {
   expect(rgb(line, 3, 5)).toBe(GLYPH_COLOR);
 });
 it("draws arrow fill and halo for an unnormalised direction", () => {
-  const image = draw([{ shape: "arrow", at: { x: 10.5, y: 20.5 }, dx: 3, dy: 0, offset: 20, size: 12 }]);
+  const image = draw([{ shape: "arrow", at: { x: 10, y: 20 }, dx: 3, dy: 0, offset: 20, size: 12 }]);
   expect(rgb(image, 21, 20)).toBe(GLYPH_COLOR); expect(rgb(image, 17, 20)).toBe(GLYPH_HALO_COLOR);
   expect(rgb(image, 31, 20)).not.toBe(GLYPH_COLOR);
 });
@@ -89,4 +89,64 @@ it("composites coverage onto transparent pixels", () => {
   drawPointerGlyph(image, glyph([{ shape: "dot", at: { x: 20.5, y: 20.5 }, radius: 3 }]));
   expect([...image.pixels.subarray((20 * 64 + 20) * 4, (20 * 64 + 20) * 4 + 4)]).toEqual([255, 122, 26, 255]);
   expect(image.pixels[3]).toBe(0);
+});
+
+it("draws each part's halo before its own colour, in part order", () => {
+  const horizontal: GlyphPart = { shape: "line", from: { x: 5, y: 20 }, to: { x: 45, y: 20 }, dashed: false };
+  const vertical: GlyphPart = { shape: "line", from: { x: 20, y: 5 }, to: { x: 20, y: 45 }, dashed: false };
+  expect(rgb(draw([horizontal, vertical]), 21, 20)).toBe(GLYPH_HALO_COLOR);
+  expect(rgb(draw([vertical, horizontal]), 21, 20)).toBe(GLYPH_COLOR);
+});
+it("uses butt caps for dashed strokes and halos, and round caps for solid strokes", () => {
+  const line: GlyphPart = { shape: "line", from: { x: 10, y: 10 }, to: { x: 24, y: 10 }, dashed: true };
+  const dashed = draw([line]);
+  expect(rgb(dashed, 9, 10)).toBe("#FFFFFF"); // No halo before a butt-capped path.
+  expect(rgb(dashed, 24, 10)).toBe("#FFFFFF"); // No halo after its final dash.
+  expect(rgb(dashed, 15, 11)).toBe(GLYPH_HALO_COLOR);
+  expect(rgb(dashed, 16, 10)).toBe("#FFFFFF");
+  expect(rgb(dashed, 16, 11)).toBe("#FFFFFF"); // The halo has the same gap.
+  expect(rgb(draw([{ ...line, dashed: false }]), 24, 10)).toBe("#D16517");
+});
+it("uses square miter joins at solid and uninterrupted dashed box corners", () => {
+  const box: GlyphPart = { shape: "box", x: 20, y: 20, width: 14, height: 13, dashed: false };
+  const solid = draw([box]);
+  expect(rgb(solid, 19, 19)).toBe(GLYPH_COLOR);
+  expect(rgb(solid, 18, 18)).toBe(GLYPH_HALO_COLOR);
+  const dashed = draw([{ ...box, dashed: true }]);
+  expect(rgb(dashed, 34, 19)).toBe(GLYPH_COLOR);
+  expect(rgb(dashed, 35, 18)).toBe(GLYPH_HALO_COLOR);
+  const shortDash = draw([{ ...box, width: 15, dashed: true }]);
+  expect(rgb(shortDash, 36, 18)).toBe(GLYPH_HALO_COLOR); // The outer miter still joins.
+  expect(rgb(shortDash, 36, 21)).toBe("#FFFFFF"); // The join does not extend the next dash's butt cap.
+});
+it("draws half-height caret serifs with round caps", () => {
+  const image = draw([{ shape: "caret", at: { x: 20, y: 20 }, size: 24 }]);
+  expect(rgb(image, 14, 8)).toBe(GLYPH_COLOR); // The serif begins at 20 - 24/4.
+  expect(rgb(image, 25, 8)).toBe(GLYPH_COLOR);
+  expect(rgb(image, 26, 8)).toBe("#D16517"); // Rounded right serif cap.
+  expect(rgb(image, 28, 8)).toBe("#FFFFFF");
+});
+it("starts ring dashes at the rightmost point, clockwise on screen", () => {
+  const image = draw([{ shape: "ring", at: { x: 30, y: 30 }, radius: 14.2, dashed: true }]);
+  expect(rgb(image, 44, 31)).toBe(GLYPH_COLOR); // First dash, just below the origin.
+  expect(rgb(image, 44, 28)).toBe("#FFFFFF"); // Last arc is a gap, just above the origin.
+  expect(rgb(image, 42, 38)).toBe("#FFFFFF"); // Clockwise arc length is in the first gap.
+});
+it("starts box dashes at top-left and carries their phase clockwise through corners", () => {
+  const image = draw([{ shape: "box", x: 10, y: 10, width: 13, height: 20, dashed: true }]);
+  expect(rgb(image, 10, 10)).toBe(GLYPH_COLOR);
+  expect(rgb(image, 16, 10)).toBe("#FFFFFF");
+  expect(rgb(image, 23, 11)).toBe(GLYPH_COLOR); // Perimeter position 14 is a dash.
+  expect(rgb(image, 23, 13)).toBe("#FFFFFF"); // Position 16 is a gap, not a restarted dash.
+  expect(rgb(image, 10, 29)).toBe(GLYPH_COLOR); // The bottom-left corner carries position 46.
+});
+it("limits fill halos to half the halo-stroke width, with round polygon joins", () => {
+  const dot = draw([{ shape: "dot", at: { x: 20, y: 20 }, radius: 4 }]);
+  expect(rgb(dot, 24, 20)).toBe(GLYPH_HALO_COLOR);
+  expect(rgb(dot, 25, 20)).toBe("#FFFFFF");
+  const arrow = draw([{ shape: "arrow", at: { x: 10, y: 20 }, dx: 1, dy: 0, offset: 20, size: 12 }]);
+  expect(rgb(arrow, 17, 20)).toBe(GLYPH_HALO_COLOR);
+  expect(rgb(arrow, 16, 20)).toBe("#FFFFFF");
+  expect(rgb(arrow, 30, 20)).not.toBe("#FFFFFF"); // Round halo at the triangle tip.
+  expect(rgb(arrow, 31, 20)).toBe("#FFFFFF");
 });
