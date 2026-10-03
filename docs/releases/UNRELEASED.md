@@ -15,7 +15,8 @@
   with a Lua config, the window opens floating and pinned in the bottom-right
   corner without taking focus. `session create --viewer` and
   `viewer.mode: "auto"` use the same viewer. `watch --control` is unchanged.
-  (#207)
+  After the window closes, the bridge and the read-only x11vnc keep running
+  idle. The bridge exits after 10 minutes without a viewer or request. (#207)
 - Lab evidence finalization now writes `report-share.html` alongside the linked
   `report.html`. Download and open the share report in a browser, or ZIP the
   single file if a channel blocks HTML attachments. Original PNGs are embedded

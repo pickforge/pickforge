@@ -821,10 +821,11 @@ server-enforced read-only x11vnc server and reuses it on later watches. A
 loopback bridge serves a bundled, pinned noVNC 1.7.0 page and connects it to
 that server. The page opens in Chromium or Google Chrome as a chromeless app
 window, or in Firefox as an ordinary window. Each launch gets a fresh private
-browser profile. Frames never reach the agent; only host CPU is used while the
-window is open. Closing the window leaves the bridge, x11vnc, Xvfb and the
-session running. With no matching session it prints the create command; with
-multiple matches it fails closed until `--session` selects one.
+browser profile. Frames never reach the agent. Closing the window leaves the
+bridge, x11vnc, Xvfb and the session running. The bridge and x11vnc then stay
+idle, and the bridge exits after 10 minutes without a viewer or request.
+With no matching session it prints the create command; with multiple matches
+it fails closed until `--session` selects one.
 Desktop capability is resolved from the persisted desktop leg rather than the
 session type, so browser sessions are watchable without watch-specific browser
 contracts.
