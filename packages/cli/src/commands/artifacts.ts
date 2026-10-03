@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import {
   EVIDENCE_ACTION_LOG,
   EVIDENCE_REPORT,
+  evidenceShareReportInfo,
   latestOutcome,
   recordEvidenceOutcome,
   type EvidenceOutcomeInput,
@@ -163,10 +164,11 @@ async function labReport(
   const outcome = latest === null ? null : { status: latest.status, scenario: latest.scenario };
   const reportPath = await catalog.hasRootFile(entry, EVIDENCE_REPORT)
     ? path.join(dir, EVIDENCE_REPORT) : null;
+  const share = await evidenceShareReportInfo(catalog, entry);
   const listing = runId === undefined;
   return {
     data: {
-      source: "lab", runId: manifest.runId, dir, manifest, reportPath, outcome, device: manifest.device ?? null,
+      source: "lab", runId: manifest.runId, dir, manifest, reportPath, ...share, outcome, device: manifest.device ?? null,
       ...(listing ? { rustRuns } : {}), ...(recovery === undefined ? {} : { recovery }),
     },
     lines: [
@@ -174,6 +176,7 @@ async function labReport(
       ...(listing ? rustLines : []),
       ...(recovery === undefined ? [] : recoveryReportLines(recovery)),
       ...reportPathLine(reportPath, manifest.status),
+      ...(share.shareReportPath === null ? [] : [`Shareable report: ${share.shareReportPath} (${share.shareReportBytes} bytes)`]),
     ],
   };
 }

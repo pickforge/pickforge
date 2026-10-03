@@ -425,7 +425,7 @@ are automatically registered, and a device pass does not approve a merge.
 Computer-use tools share an evidence run while its creating process is alive.
 Short-lived CLI, MCP, and browser DevTools processes can leave several runs for
 one session. Destroying a session, or reaping a dead one, finalizes its current
-run and writes a self-contained `report.html` evidence viewer.
+run and writes `report.html` for local browsing and `report-share.html` for sharing.
 
 After stopping evidence producers, run `pickforge-lab artifacts report
 --finalize-orphans --project-dir <project>` or call MCP `artifact_report` with
@@ -437,8 +437,10 @@ in run-id order. Listing and reading reports remain read-only.
 Artifact reports expose the existing absolute HTML report path (or null), latest
 acceptance outcome (status and scenario, or null), and device metadata (or null)
 as `reportPath`, `outcome`, and `device` in CLI JSON and MCP `artifact_report`.
-Text reports end with the path, or `Report: not finalized yet` for running runs
-without a report; run lists include the latest outcome status or null. `outcome`
+`shareReportPath` and `shareReportBytes` give the shareable file path and byte size,
+or null when absent. Text reports include a `Shareable report:` line with both,
+or `Report: not finalized yet` for running runs without a report. Run lists
+include the latest outcome status or null. `outcome`
 reflects only the lab journal's acceptance record; Rust evidence runs carry their
 result in `status` and always list `outcome` as null.
 
@@ -473,7 +475,18 @@ it lives) contains:
   outcome summary, device/scenario filters, and a capture inspection view,
   which stay usable with scripts blocked; text search and arrow-key browsing
   come from one inline script pinned in the report CSP by hash
+- `report-share.html`: self-contained gallery with original PNG bytes embedded
+  once per unique image; JavaScript is required to display captures
 - `screenshots/` and `logs/` — associated artifacts, when explicitly captured
+
+Download and open `report-share.html` in a browser. It works offline with no
+adjacent files. If a channel blocks HTML attachments, ZIP the single file.
+Images are limited to 32 MiB each and 256 MiB of unique image bytes per report.
+Missing, unsafe, unsupported and over-limit files, including incomplete or corrupt
+PNGs, are listed as not included.
+Quality is never reduced to fit. Base64 adds about one third to image size, so
+large runs produce large files. Original screenshots, `manifest.json` and
+`actions.jsonl` remain authoritative. Logs and other attachments are not embedded.
 
 Runs may include optional device metadata from the session, including known
 viewport dimensions. Missing device metadata means unknown; existing runs need
@@ -788,7 +801,7 @@ pickforge-lab agents add --name my-agent --mcp-command "pickforge-lab mcp serve"
 | Takeover | `takeover status [--session <id>]` |
 | Desktop | `desktop windows`, `desktop focus --id <id>` / `--name <name>`, `desktop launch <cmd>`, `desktop exec <cmd>`, `desktop env`, `desktop screenshot`, `desktop wait`, `desktop click <x> <y>`, `desktop move <x> <y>`, `desktop scroll <deltaX> <deltaY>`, `desktop drag <fromX> <fromY> <toX> <toY>`, `desktop double-click <x> <y>`, `desktop type <text>`, `desktop key <keys>` |
 | Android | `android start`, `android install-apk <apk> [--wait-ready <s>]`, `android launch-app <pkg> [--wait-ready <s>]`, `android screenshot`, `android tap <x> <y>`, `android type <text>`, `android back`, `android home`, `android ui-tree`, `android logcat`, `android adb [args...]` |
-| Artifacts | `artifacts list`, `artifacts open <runId>`, `artifacts report [runId]` (HTML report path; JSON includes `reportPath`, `outcome`, `device`) |
+| Artifacts | `artifacts list`, `artifacts open <runId>`, `artifacts report [runId]` (shareable HTML path and size; JSON includes `shareReportPath`, `shareReportBytes`, `reportPath`, `outcome`, `device`) |
 | Agents | `agents list`, `agents install <agent> [--browser]`, `agents link <agent> [--browser]`, `agents unlink <agent>`, `agents doctor`, `agents add` |
 | Browser | `browser devtools-mcp` |
 | MCP | `mcp serve` |
@@ -853,7 +866,7 @@ Resources, addressable as `pickforge://` URIs:
 - `pickforge://runs/{runId}/screenshots/{name}` — screenshots
 - `pickforge://runs/{runId}/logs/{name}` — logs
 - `pickforge://runs/{runId}/actions` — sanitized action timeline JSON
-- `pickforge://runs/{runId}/report` — HTML viewer for the evidence filmstrip; its local path is `artifact_report.reportPath`
+- `pickforge://runs/{runId}/report` — linked HTML viewer; its local path is `artifact_report.reportPath`. The larger share report is available by local path only, through `shareReportPath` and `shareReportBytes`.
 - `pickforge://sessions/{sessionId}/status` — session liveness
   The status includes a read-only viewer endpoint/readiness report when VNC is
   present. MCP never opens a host GUI; only the CLI launches viewer windows.

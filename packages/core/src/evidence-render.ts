@@ -1,4 +1,7 @@
+import { readBoundedFileIn } from "./bounded-read.js";
+import type { RunCatalog, RunCatalogEntry } from "./run-catalog.js";
 import { createHash } from "node:crypto";
+import zlib, { crc32 } from "node:zlib";
 import {
   isOutcomeRecord,
   type EvidenceOutcomeRecord,
@@ -26,6 +29,31 @@ import {
 import type { RecoveredEvidenceRun } from "./evidence-recovery.js";
 
 export const EVIDENCE_REPORT = "report.html";
+export const EVIDENCE_SHARE_REPORT = "report-share.html";
+export const MAX_SHARE_IMAGE_BYTES = 32 * 1024 * 1024;
+export const MAX_SHARE_TOTAL_BYTES = 256 * 1024 * 1024;
+export const MAX_SHARE_INFLATED_IMAGE_BYTES = 1024 * 1024 * 1024;
+
+interface ShareImages {
+  hashes: Map<string, string>;
+  payloads: Record<string, string>;
+  bytes: number;
+  omitted: Map<string, string>;
+}
+
+/** Inspect metadata only; the large share report never travels through MCP. */
+export async function evidenceShareReportInfo(
+  catalog: RunCatalog, entry: RunCatalogEntry,
+): Promise<{ shareReportPath: string | null; shareReportBytes: number | null }> {
+  const bytes = await catalog.withRunDir(entry, async (dir) => {
+    const stat = await dir.lstatChild(EVIDENCE_SHARE_REPORT);
+    return stat?.isFile() === true && !stat.isSymbolicLink() && stat.nlink === 1 ? stat.size : null;
+  });
+  return {
+    shareReportPath: bytes == null ? null : path.join(entry.dir, EVIDENCE_SHARE_REPORT),
+    shareReportBytes: bytes ?? null,
+  };
+}
 
 /** One stable entry point for a session's process-scoped evidence runs. */
 export function renderEvidenceSessionIndex(
@@ -318,6 +346,15 @@ doc.addEventListener("keydown", (event) => {
   location.hash = step.getAttribute("href");
 });
 })();`;
+
+// Hashes and base64 contain no markup or secret-bearing text.
+const SHARE_REPORT_SCRIPT = `(() => {
+const payloads = JSON.parse(document.getElementById("image-data").textContent);
+document.querySelectorAll("img[data-img]").forEach((img) => {
+  img.src = "data:image/png;base64," + payloads[img.getAttribute("data-img")];
+});
+})();
+` + REPORT_SCRIPT;
 
 const REPORT_STYLE = `:root{color-scheme:dark;--bg:#0A0A0B;--p1:#0F0F11;--p2:#141417;--text:#F2F2F3;--muted:#6E6E75;--dim:#A4A4AB;--line:rgba(255,255,255,.08);--line2:rgba(255,255,255,.14);--ember:#FF7A1A;--pass:#55C993;--fail:#E77B86;--partial:#D9A441;--blocked:#9494B0;--unknown:#9494B0}
 *{box-sizing:border-box}
@@ -650,11 +687,31 @@ function filterAttributes(lens: Lens, scenarios: readonly number[]): string {
   return ` data-lens="${lens}" data-scenario="${escapeHtml(scenarios.join(" "))}"`;
 }
 
-function renderCapture(capture: Capture): string {
+function imageSource(capture: Capture, share?: ShareImages): string {
+  return share === undefined
+    ? `src="${escapeHtml(capture.path)}"`
+    : `data-img="${share.hashes.get(capture.path)!}"`;
+}
+
+function captureDescription(capture: Capture): string {
+  return capture.step === 0 ? "Recorded screenshot" : `Capture for step ${capture.step}`;
+}
+
+function captureHeading(capture: Capture): string {
+  const title = escapeHtml(capture.title);
+  return capture.step === 0 ? title : `Step ${capture.step} · ${title}`;
+}
+
+function captureAlt(capture: Capture): string {
+  const description = captureDescription(capture);
+  return description === capture.title ? escapeHtml(description) : `${description}, ${escapeHtml(capture.title)}`;
+}
+
+function renderCapture(capture: Capture, share?: ShareImages): string {
   return `<figure class="cap"${filterAttributes(capture.lens, capture.scenarios)} data-search="${capture.search}">
-<a href="#${capture.id}" aria-label="Inspect step ${capture.step} capture ${escapeHtml(capture.path)}">
-<span class="stage"><img src="${escapeHtml(capture.path)}" alt="Capture for step ${capture.step}, ${escapeHtml(capture.title)}" loading="lazy"></span>
-<figcaption><b>Step ${capture.step} · ${escapeHtml(capture.title)}</b><span class="mono">${escapeHtml(capture.status)} · ${escapeHtml(capture.path)}</span>${capture.target === "" ? "" : `<span class="mono">${escapeHtml(capture.target)}</span>`}</figcaption>
+<a href="#${capture.id}" aria-label="${capture.step === 0 ? "Inspect capture" : `Inspect step ${capture.step} capture`} ${escapeHtml(capture.path)}">
+<span class="stage"><img ${imageSource(capture, share)} alt="${captureAlt(capture)}" loading="lazy"></span>
+<figcaption><b>${captureHeading(capture)}</b><span class="mono">${escapeHtml(capture.status)} · ${escapeHtml(capture.path)}</span>${capture.target === "" ? "" : `<span class="mono">${escapeHtml(capture.target)}</span>`}</figcaption>
 </a></figure>`;
 }
 
@@ -667,15 +724,15 @@ function browseLink(target: Capture | undefined, next: boolean): string {
   return `<a class="btn ${className}" href="#${target.id}">${label}</a>`;
 }
 
-function renderInspect(captures: readonly Capture[], index: number): string {
+function renderInspect(captures: readonly Capture[], index: number, share?: ShareImages): string {
   const capture = captures[index]!;
-  return `<section class="inspect" id="${capture.id}" aria-label="Capture for step ${capture.step}">
+  return `<section class="inspect" id="${capture.id}" aria-label="${captureDescription(capture)}">
 <input type="checkbox" class="zoom" id="zoom-${capture.id}">
-<div class="inspect-bar"><span class="mono">Step ${capture.step} · ${escapeHtml(capture.title)} · ${escapeHtml(capture.path)}</span>
+<div class="inspect-bar"><span class="mono">${captureHeading(capture)} · ${escapeHtml(capture.path)}</span>
 <label class="btn grow" for="zoom-${capture.id}">Actual size</label>
-<a class="btn" href="${escapeHtml(capture.path)}">Open original</a>
+${share === undefined ? `<a class="btn" href="${escapeHtml(capture.path)}">Open original</a>` : ""}
 <a class="btn" href="#captures">Close</a></div>
-<div class="inspect-stage"><img src="${escapeHtml(capture.path)}" alt="Capture for step ${capture.step}, ${escapeHtml(capture.title)}"></div>
+<div class="inspect-stage"><img ${imageSource(capture, share)} alt="${captureAlt(capture)}"></div>
 <div class="inspect-foot">${browseLink(captures[index - 1], false)}<span class="mono">${index + 1} / ${captures.length}</span>${browseLink(captures[index + 1], true)}</div>
 </section>`;
 }
@@ -811,42 +868,58 @@ function scenarioRadios(outcomes: readonly EvidenceOutcomeRecord[]): string {
 }
 
 /** The exact CSP the report carries, with the pinned script hash. */
-export function reportContentSecurityPolicy(script: string = REPORT_SCRIPT): string {
+export function reportContentSecurityPolicy(script: string = REPORT_SCRIPT, share = false): string {
   const digest = createHash("sha256").update(script, "utf8").digest("base64");
   // frame-ancestors is ignored in <meta>-delivered CSP, so it is deliberately absent.
-  return `default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'sha256-${digest}'; base-uri 'none'; form-action 'none'`;
+  return `default-src 'none'; img-src ${share ? "data:" : "'self' data:"}; style-src 'unsafe-inline'; script-src 'sha256-${digest}'; base-uri 'none'; form-action 'none'`;
+}
+
+function appendShareCaptures(
+  captures: Capture[], share: ShareImages, outcomes: readonly EvidenceOutcomeRecord[], fallback: Lens,
+): void {
+  for (const relative of share.hashes.keys()) {
+    if (captures.some((capture) => capture.path === relative)) continue;
+    captures.push({
+      id: `cap-artifact-${captures.length + 1}`, step: 0, title: "Recorded screenshot",
+      path: relative, status: "recorded", target: "", lens: fallback,
+      scenarios: captureScenarios(relative, outcomes), search: searchAttribute([relative]),
+    });
+  }
 }
 
 export function renderEvidenceHtml(
   manifest: RunManifest,
   records: readonly EvidenceRecord[],
   safeScreenshots: ReadonlySet<string> = new Set(),
+  share?: ShareImages,
 ): string {
   const outcomes = sortOutcomes(records.filter(isOutcomeRecord));
   const ordered = timelineRecords(records);
   const fallback = deviceLens(manifest.device);
   const captures = collectCaptures(ordered, safeScreenshots, outcomes, fallback);
+  if (share !== undefined) appendShareCaptures(captures, share, outcomes, fallback);
+  const script = share === undefined ? REPORT_SCRIPT : SHARE_REPORT_SCRIPT;
   const steps = ordered
     .map((record, index) => renderStep(record, index + 1, captures, fallback))
     .join("\n");
   const gallery =
     captures.length === 0
-      ? `<p class="empty">No screenshots were captured in this run.</p>`
-      : `<div class="grid">${captures.map(renderCapture).join("\n")}</div>`;
+      ? `<p class="empty">${share === undefined ? "No screenshots were captured in this run." : "No screenshots are included in this file. See Not included below."}</p>`
+      : `<div class="grid">${captures.map((capture) => renderCapture(capture, share)).join("\n")}</div>`;
   const inspects = captures
-    .map((_capture, index) => renderInspect(captures, index))
+    .map((_capture, index) => renderInspect(captures, index, share))
     .join("\n");
 
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="${reportContentSecurityPolicy()}">
+<meta http-equiv="Content-Security-Policy" content="${reportContentSecurityPolicy(script, share !== undefined)}">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pickforge run ${escapeHtml(manifest.runId)}</title>
 <style>
 ${REPORT_STYLE}
-${lensRules()}${scenarioRules(outcomes.length < 2 ? 0 : outcomes.length)}
+${share === undefined ? "" : "body.js .no-js{display:none}\n"}${lensRules()}${scenarioRules(outcomes.length < 2 ? 0 : outcomes.length)}
 </style>
 </head>
 <body>
@@ -864,21 +937,228 @@ ${renderOutcomes(outcomes)}
 ${renderWarnings(manifest, ordered)}
 <div class="toolbar"><h2 id="captures">Captures <span class="count js-only"><span id="match-count">${captures.length}</span> shown</span></h2>
 <span class="search-wrap"><label class="eyebrow" for="search">Search</label><input id="search" type="search" placeholder="Filter captures and steps"></span></div>
-${gallery}
+${share === undefined ? "" : `<p class="warn no-js">JavaScript is required to display embedded captures. Report text remains readable.</p>\n`}${gallery}
 <p class="empty js-only" id="no-match" role="status" hidden>Nothing matches the current search and filters.</p>
 <div class="toolbar"><h2 id="timeline">Timeline</h2></div>
 <section aria-label="Action timeline">
 ${steps === "" ? `<p class="empty">No actions recorded.</p>` : steps}
 </section>
-<footer>Saved evidence for run ${escapeHtml(manifest.runId)}. Captures are files in this directory; the journal in actions.jsonl stays authoritative.</footer>
+${share === undefined ? `<footer>Saved evidence for run ${escapeHtml(manifest.runId)}. Captures are files in this directory; the journal in actions.jsonl stays authoritative.</footer>` : renderShareFooter(share)}
 </main>
 </div>
 </div>
 ${inspects}
-<script>${REPORT_SCRIPT}</script>
+${share === undefined ? "" : `<script type="application/json" id="image-data">${JSON.stringify(share.payloads)}</script>\n`}<script>${script}</script>
 </body>
 </html>
 `;
+}
+
+function formatShareBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+function renderShareFooter(share: ShareImages): string {
+  const omissions = [...share.omitted].map(([relative, reason]) =>
+    `<li>${escapeHtml(relative)}: ${escapeHtml(reason)}</li>`,
+  ).join("");
+  return `<footer>This file is self-contained. ${share.hashes.size} capture file(s) embedded as ${Object.keys(share.payloads).length} unique image(s), ${formatShareBytes(share.bytes)} before base64 encoding. Full resolution is preserved. Limits: ${MAX_SHARE_IMAGE_BYTES / (1024 * 1024)} MiB per image and ${MAX_SHARE_TOTAL_BYTES / (1024 * 1024)} MiB total. ${omissions === "" ? "Not included: none." : `Not included:<ul>${omissions}</ul>`} report.html, manifest.json and actions.jsonl are not included as attachments. Original screenshots, manifest.json and actions.jsonl remain the authoritative evidence.</footer>`;
+}
+
+function includeShareImage(
+  share: ShareImages, relative: string, bytes: Buffer,
+): void {
+  const omitted = share.omitted;
+  const hash = createHash("sha256").update(bytes).digest("hex");
+  if (share.payloads[hash] !== undefined) {
+    share.hashes.set(relative, hash);
+    return;
+  }
+  if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+    omitted.set(relative, "Unsupported image; PNG signature missing");
+    return;
+  }
+  if (!completePng(bytes)) {
+    omitted.set(relative, "Incomplete or corrupt PNG");
+    return;
+  }
+  if (share.bytes + bytes.length > MAX_SHARE_TOTAL_BYTES) {
+    omitted.set(relative, `Over total image cap (${formatShareBytes(MAX_SHARE_TOTAL_BYTES)})`);
+    return;
+  }
+  // Base64 bypasses text redaction: altering it would corrupt evidence.
+  share.payloads[hash] = bytes.toString("base64");
+  share.bytes += bytes.length;
+  share.hashes.set(relative, hash);
+}
+
+interface PngChunk {
+  type: string;
+  data: Buffer;
+  end: number;
+}
+
+function readPngChunk(bytes: Buffer, offset: number): PngChunk | undefined {
+  if (offset + 12 > bytes.length) return undefined;
+  const length = bytes.readUInt32BE(offset);
+  const end = offset + 12 + length;
+  if (end > bytes.length) return undefined;
+  const type = bytes.toString("latin1", offset + 4, offset + 8);
+  if (!/^[A-Za-z]{4}$/.test(type)) return undefined;
+  const checksum = crc32(bytes.subarray(offset + 4, end - 4)) >>> 0;
+  if (checksum !== bytes.readUInt32BE(end - 4)) return undefined;
+  return { type, data: bytes.subarray(offset + 8, end - 4), end };
+}
+
+const PNG_COLOR_FORMATS: Readonly<Record<number, { depths: readonly number[]; samples: number }>> = {
+  0: { depths: [1, 2, 4, 8, 16], samples: 1 },
+  2: { depths: [8, 16], samples: 3 },
+  3: { depths: [1, 2, 4, 8], samples: 1 },
+  4: { depths: [8, 16], samples: 2 },
+  6: { depths: [8, 16], samples: 4 },
+};
+
+// Each pass gives the first pixel (x, y) and the spacing (dx, dy).
+const ADAM7_PASSES = [
+  [0, 0, 8, 8], [4, 0, 8, 8], [0, 4, 4, 8], [2, 0, 4, 4],
+  [0, 2, 2, 4], [1, 0, 2, 2], [0, 1, 1, 2],
+] as const;
+
+interface PngLayout {
+  width: number;
+  height: number;
+  bitsPerPixel: number;
+  interlaced: boolean;
+}
+
+function readPngLayout(data: Buffer): PngLayout | undefined {
+  if (data.length !== 13) return undefined;
+  const width = data.readUInt32BE(0);
+  const height = data.readUInt32BE(4);
+  if (width === 0 || height === 0 || width > 0x7fffffff || height > 0x7fffffff) return undefined;
+  const format = PNG_COLOR_FORMATS[data[9]];
+  if (format === undefined || !format.depths.includes(data[8])) return undefined;
+  if (data[10] !== 0 || data[11] !== 0 || data[12] > 1) return undefined;
+  return { width, height, bitsPerPixel: data[8] * format.samples, interlaced: data[12] === 1 };
+}
+
+function pngRawSize(data: Buffer): number | undefined {
+  const layout = readPngLayout(data);
+  if (layout === undefined) return undefined;
+  const { width, height, bitsPerPixel } = layout;
+  const passes = layout.interlaced ? ADAM7_PASSES : [[0, 0, 1, 1]] as const;
+  let size = 0;
+  for (const [x, y, dx, dy] of passes) {
+    const columns = Math.max(0, Math.ceil((width - x) / dx));
+    const rows = Math.max(0, Math.ceil((height - y) / dy));
+    if (columns === 0 || rows === 0) continue;
+    size += rows * (1 + Math.ceil(columns * bitsPerPixel / 8));
+    if (size > MAX_SHARE_INFLATED_IMAGE_BYTES) return undefined;
+  }
+  return size;
+}
+
+function validPngStream(parts: readonly Buffer[], expectedSize: number): boolean {
+  if (parts.length === 0) return false;
+  const compressed = Buffer.concat(parts);
+  try {
+    // Node's info option returns this shape, but its typings only declare Buffer.
+    const result = zlib.inflateSync(compressed, {
+      info: true, maxOutputLength: expectedSize + 1,
+    }) as unknown as { buffer: Buffer; engine: zlib.Inflate };
+    return result.buffer.length === expectedSize && result.engine.bytesWritten === compressed.length;
+  } catch {
+    return false;
+  }
+}
+
+/** Validate framing, checksums and bounded image data without changing evidence bytes. */
+function completePng(bytes: Buffer): boolean {
+  const header = readPngChunk(bytes, 8);
+  if (header?.type !== "IHDR") return false;
+  const expectedSize = pngRawSize(header.data);
+  if (expectedSize === undefined) return false;
+  let offset = header.end;
+  const imageData: Buffer[] = [];
+  while (offset < bytes.length) {
+    const chunk = readPngChunk(bytes, offset);
+    if (chunk === undefined || chunk.type === "IHDR") return false;
+    if (chunk.type === "IEND") {
+      return chunk.data.length === 0 && chunk.end === bytes.length && validPngStream(imageData, expectedSize);
+    }
+    if (chunk.type === "IDAT") imageData.push(chunk.data);
+    offset = chunk.end;
+  }
+  return false;
+}
+
+function shareScreenshotPathReason(relative: string): string | undefined {
+  const unsafe = "Unsafe or unsupported screenshot path; only screenshots/*.png are included";
+  if (path.isAbsolute(relative) || relative.includes("\\") || relative.includes("\0")) return unsafe;
+  if (relative.split("/").some((part) => part === "" || part === "." || part === "..")) return unsafe;
+  if (!relative.startsWith("screenshots/")) return "Not a screenshot; only screenshots/*.png are embedded";
+  return safeScreenshotPath(relative) ? undefined : unsafe;
+}
+
+/** Classify one candidate before reading through the held screenshot directory. */
+async function readShareScreenshot(
+  screenshots: DirHandle | undefined, relative: string,
+): Promise<Buffer | string> {
+  const pathReason = shareScreenshotPathReason(relative);
+  if (pathReason !== undefined) return pathReason;
+  if (screenshots === undefined) {
+    return "Screenshot directory missing or unsafe";
+  }
+  const name = relative.slice("screenshots/".length);
+  const stat = await screenshots.lstatChild(name);
+  if (stat === undefined) {
+    return "Missing file";
+  }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
+    return "Unsafe file; requires a regular file without symlinks or hardlinks";
+  }
+  if (stat.size > MAX_SHARE_IMAGE_BYTES) {
+    return `Over per-image cap (${formatShareBytes(MAX_SHARE_IMAGE_BYTES)})`;
+  }
+  return readBoundedFileIn(screenshots, name, Date.now() + 30_000, {
+    maxBytes: MAX_SHARE_IMAGE_BYTES, singleLink: true,
+  });
+}
+
+/** Read original bytes through the held screenshot directory, never a caller path. */
+async function collectShareImages(
+  runDir: DirHandle, manifest: RunManifest, records: readonly EvidenceRecord[],
+): Promise<ShareImages> {
+  const hashes = new Map<string, string>();
+  const omitted = new Map<string, string>();
+  const share: ShareImages = { hashes, payloads: {}, bytes: 0, omitted };
+  const candidates = new Set([
+    ...manifest.artifacts.map((artifact) => artifact.path),
+    ...records.flatMap((record) => isTruncationRecord(record) ? []
+      : isOutcomeRecord(record) ? textList(record.inspectedScreenshots) : record.artifacts ?? []),
+  ]);
+  const screenshots = await openScreenshotsDir(runDir).catch(() => undefined);
+  try {
+    for (const relative of candidates) {
+      // Generated context is already rendered as text, not an external attachment.
+      if ([EVIDENCE_REPORT, EVIDENCE_SHARE_REPORT, EVIDENCE_ACTION_LOG, "manifest.json"].includes(relative)) continue;
+      try {
+        const candidate = await readShareScreenshot(screenshots, relative);
+        if (typeof candidate === "string") {
+          omitted.set(relative, candidate);
+        } else {
+          includeShareImage(share, relative, candidate);
+        }
+      } catch {
+        omitted.set(relative, "File unreadable, changed, or unsafe during bounded read");
+      }
+    }
+  } finally {
+    await screenshots?.close().catch(() => {});
+  }
+  return share;
 }
 
 async function openScreenshotsDir(
@@ -980,10 +1260,14 @@ async function evidenceInventory(
     path: EVIDENCE_REPORT,
     createdAt: manifest.createdAt,
   });
+  candidates.set(EVIDENCE_SHARE_REPORT, {
+    type: "report", name: EVIDENCE_SHARE_REPORT, path: EVIDENCE_SHARE_REPORT,
+    createdAt: manifest.createdAt,
+  });
   const artifacts: RunArtifact[] = [];
   for (const artifact of candidates.values()) {
     if (
-      artifact.path === EVIDENCE_REPORT ||
+      artifact.path === EVIDENCE_REPORT || artifact.path === EVIDENCE_SHARE_REPORT ||
       await regularArtifact(dir, artifact.path)
     ) {
       artifacts.push(artifact);
@@ -999,6 +1283,7 @@ export async function writeEvidenceReportIn(
   records: readonly EvidenceRecord[],
 ): Promise<void> {
   const safeScreenshots = await collectSafeScreenshots(runDir, records);
+  const share = await collectShareImages(runDir, manifest, records);
   manifest.artifacts = await evidenceInventory(runDir, manifest, records);
   if (manifest.evidenceRecovery === "corrupt" || manifest.evidenceRecovery === "missing") {
     delete manifest.evidenceTruncated;
@@ -1006,6 +1291,7 @@ export async function writeEvidenceReportIn(
     manifest.evidenceTruncated = records.some(isTruncationRecord);
   }
   const html = renderEvidenceHtml(manifest, records, safeScreenshots);
+  await runDir.writeFileAtomic(EVIDENCE_SHARE_REPORT, renderEvidenceHtml(manifest, records, new Set(share.hashes.keys()), share));
   await runDir.writeFileAtomic(EVIDENCE_REPORT, html);
   await runDir.writeFileAtomic(
     "manifest.json", `${JSON.stringify(manifest, null, 2)}\n`,

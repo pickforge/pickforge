@@ -137,7 +137,7 @@ describe("resource reads", () => {
     const manifest = JSON.parse(first(contents).text as string);
     expect(manifest.runId).toBe(RUN_ID);
     expect(manifest.artifacts.map((artifact: { path: string }) => artifact.path)).toEqual([
-      "screenshots/screenshot.png", "logs/app.log", "actions.jsonl", "report.html",
+      "screenshots/screenshot.png", "logs/app.log", "actions.jsonl", "report.html", "report-share.html",
     ]);
   });
 

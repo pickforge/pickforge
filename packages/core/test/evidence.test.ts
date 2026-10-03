@@ -20,6 +20,8 @@ import {
   type EvidenceRecord,
 } from "../src/evidence.js";
 import { createRun, listRuns, RunHandle } from "../src/run.js";
+import { writeEvidenceReport } from "../src/evidence-render.js";
+import { encodePng } from "../../desktop-linux/test/png-fixture.js";
 
 let project: string;
 
@@ -673,6 +675,31 @@ describe("evidence cap and truncation", () => {
     expect(result.outcome).toBe("truncated");
     expect(await isEvidenceTruncated(run.dir)).toBe(true);
   });
+
+  it("excludes generated reports from cached and rescanned recording bytes", async () => {
+    const run = await createRun(project, "large-report", { evidence: true });
+    for (const [index, name] of ["first.png", "second.png"].entries()) {
+      const png = encodePng(1, 1, Buffer.alloc(3), [{ type: "pfGx", data: Buffer.alloc(23 * 1024 * 1024, index) }]);
+      await fs.promises.writeFile(path.join(run.dir, "screenshots", name), png);
+    }
+    await appendAction(run, action({ artifacts: ["screenshots/first.png", "screenshots/second.png"] }));
+    await run.finish("completed");
+    await writeEvidenceReport(run);
+    const share = await fs.promises.stat(path.join(run.dir, "report-share.html"));
+    expect(share.size).toBeGreaterThan(60 * 1024 * 1024);
+    const cached = await appendAction(run, action({ actionId: "destroy", tool: "session_destroy" }));
+    expect(cached.outcome).toBe("appended");
+    // Adding a counted file forces a fresh walk as well as the cached path.
+    await fs.promises.writeFile(path.join(run.dir, "notes.log"), "note");
+    const rescanned = await appendAction(run, action({ actionId: "after-destroy", tool: "session_destroy" }));
+    expect(rescanned.outcome).toBe("appended");
+    expect(await isEvidenceTruncated(run)).toBe(false);
+    expect((await readActions(run.dir)).some(isTruncationRecord)).toBe(false);
+    await writeEvidenceReport(run);
+    const linked = await fs.promises.readFile(path.join(run.dir, "report.html"), "utf8");
+    expect(linked).not.toContain("Recording stopped at the evidence cap");
+    expect(linked).toContain("session_destroy");
+  }, 15_000);
 
   it("counts cumulative on-disk artifact bytes across appends", async () => {
     // Artifacts written to the run dir between appends must accumulate toward

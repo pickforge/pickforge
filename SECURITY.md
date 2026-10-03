@@ -51,7 +51,15 @@ produces an escaped `report.html` with a restrictive content security policy
 and no external requests. Its policy allows exactly one inline script, pinned
 by the sha256 of the emitted text. Filters, capture inspection, and the
 navigation links remain usable with scripts blocked; only text search and
-arrow-key browsing depend on that script.
+arrow-key browsing depend on that script. `report-share.html` uses the same
+viewer with a hash-pinned hydration script and allows images only from `data:`.
+It embeds original PNG bytes once per content hash, using bounded reads through
+the verified screenshot directory. Symlinks, hardlinks, unsafe paths and files
+without a PNG signature, or with incomplete or corrupt PNG data, are excluded
+and listed. Limits are 32 MiB per image
+and 256 MiB total. Text stays escaped and redacted; image bytes are unchanged.
+Without JavaScript, report text remains readable and a notice explains that
+embedded captures cannot be displayed.
 
 The recorder persists only allowlisted metadata. Typed and filled text becomes
 length plus input type. Failed network records keep method, URL origin/path

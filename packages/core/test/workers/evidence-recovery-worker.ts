@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { encodePng } from "../../../desktop-linux/test/png-fixture.js";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { appendAction, beginEvidenceRun } from "../../src/evidence.js";
@@ -18,7 +19,7 @@ if (mode === "recover" || mode === "crash-report") {
   console.log(JSON.stringify(await finalizeOrphanedEvidenceRuns(project)));
 } else {
   const { run } = await beginEvidenceRun(project, "brow-synthetic", { slug: "computer-use" });
-  await fs.promises.writeFile(path.join(run.dir, "screenshots", `${source}.png`), "synthetic pixels");
+  await fs.promises.writeFile(path.join(run.dir, "screenshots", `${source}.png`), encodePng(1, 1, Buffer.alloc(3)));
   await appendAction(run, {
     actionId: `${source}-${process.pid}`,
     source,

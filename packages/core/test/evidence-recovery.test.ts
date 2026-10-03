@@ -9,6 +9,7 @@ import { appendAction, beginEvidenceRun, activePointerPath } from "../src/eviden
 import { finalizeOrphanedEvidenceRuns, type EvidenceRecoveryResult } from "../src/evidence-recovery.js";
 import { createRun, type RunManifest } from "../src/run.js";
 import { DirHandle, RunStorageAccessError } from "../src/dir-handle.js";
+import { writeEvidenceReportIn } from "../src/evidence-render.js";
 import { openExistingRunsRootDir } from "../src/run-root.js";
 import { layoutMarkerContent } from "../src/state-layout.js";
 
@@ -383,7 +384,7 @@ describe("explicit evidence recovery", () => {
       expect(await fs.promises.readFile(path.join(run.dir, "actions.jsonl"))).toEqual(journals[i]);
       const summary = await manifest(run.dir);
       expect(summary.status).toBe("orphaned");
-      expect(summary.artifacts.map((artifact) => artifact.type).sort()).toEqual(["log", "report", "screenshot"]);
+      expect(summary.artifacts.map((artifact) => artifact.type).sort()).toEqual(["log", "report", "report", "screenshot"]);
       const html = await fs.promises.readFile(path.join(run.dir, "report.html"), "utf8");
       expect(html).toContain("orphaned");
       expect(html).toContain("synthetic_action");
@@ -436,7 +437,7 @@ describe("explicit evidence recovery", () => {
     expect(await manifest(run.dir)).toMatchObject({
       runId: run.runId, sessionId: "brow-synthetic", status: "orphaned", evidenceRecovery: "complete",
     });
-    expect((await manifest(run.dir)).artifacts).toHaveLength(3);
+    expect((await manifest(run.dir)).artifacts).toHaveLength(4);
     expect((await fs.promises.readdir(runsRoot)).filter((name) => name.startsWith("session-")))
       .toEqual([path.basename(settled[1]!)]);
     const bytes = await Promise.all(settled.map((file) => fs.promises.readFile(file)));
@@ -555,7 +556,32 @@ describe("explicit evidence recovery", () => {
     await fs.promises.writeFile(path.join(run.dir, "manifest.json"), JSON.stringify(summary));
     await finalizeOrphanedEvidenceRuns(project);
     expect((await manifest(run.dir)).status).toBe("completed");
-    expect((await manifest(run.dir)).artifacts).toHaveLength(3);
+    expect((await manifest(run.dir)).artifacts).toHaveLength(4);
+  });
+
+  it("recovers both reports after a failed share write leaves the linked report absent", async () => {
+    const run = await seed();
+    const before = await fs.promises.readFile(path.join(run.dir, "manifest.json"));
+    const write = DirHandle.prototype.writeFileAtomic;
+    const mock = vi.spyOn(DirHandle.prototype, "writeFileAtomic").mockImplementation(async function (this: DirHandle, name, content) {
+      if (name === "report-share.html") throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+      return write.call(this, name, content);
+    });
+    const dir = await DirHandle.open(run.dir);
+    try {
+      await expect(writeEvidenceReportIn(dir, await manifest(run.dir), [])).rejects.toThrow("disk full");
+    } finally {
+      await dir.close();
+      mock.mockRestore();
+    }
+    expect(fs.existsSync(path.join(run.dir, "report.html"))).toBe(false);
+    expect(fs.existsSync(path.join(run.dir, "report-share.html"))).toBe(false);
+    expect(await fs.promises.readFile(path.join(run.dir, "manifest.json"))).toEqual(before);
+    expect((await finalizeOrphanedEvidenceRuns(project)).sessions).toHaveLength(1);
+    for (const name of ["report.html", "report-share.html"]) {
+      expect(await fs.promises.readFile(path.join(run.dir, name), "utf8")).toContain("synthetic_action");
+      expect((await manifest(run.dir)).artifacts.map((artifact) => artifact.path)).toContain(name);
+    }
   });
 
   it("indexes completed runs with a report without rewriting or skipping them", async () => {
@@ -571,6 +597,7 @@ describe("explicit evidence recovery", () => {
     expect(await fs.promises.readFile(path.join(run.dir, "manifest.json"), "utf8")).toBe(bytes);
     expect(await fs.promises.readFile(path.join(run.dir, "report.html"), "utf8")).toBe("<html>kept</html>");
     expect(summary.evidenceRecovery).toBeUndefined();
+    expect(fs.existsSync(path.join(run.dir, "report-share.html"))).toBe(false);
   });
 
   it.each(["corrupt", "empty", "live-claim"])("skips an ambiguous %s session pointer", async (kind) => {
@@ -604,7 +631,7 @@ describe("explicit evidence recovery", () => {
     await fs.promises.symlink(outside, path.join(path.dirname(run.dir), "session-brow-synthetic.html"));
     const result = await finalizeOrphanedEvidenceRuns(project);
     expect(result.sessions[0]!.runs[0]!.journal).toBe("corrupt");
-    expect((await manifest(run.dir)).artifacts.map((artifact) => artifact.path)).toEqual(["report.html"]);
+    expect((await manifest(run.dir)).artifacts.map((artifact) => artifact.path)).toEqual(["report.html", "report-share.html"]);
     expect(await fs.promises.readFile(outside, "utf8")).toBe("private-outside");
     expect(await fs.promises.readFile(path.join(run.dir, "report.html"), "utf8")).not.toContain("private-outside");
   });

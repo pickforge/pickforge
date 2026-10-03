@@ -4,6 +4,14 @@
 
 ## Changes
 
+- Lab evidence finalization now writes `report-share.html` alongside the linked
+  `report.html`. Download and open the share report in a browser, or ZIP the
+  single file if a channel blocks HTML attachments. Original PNGs are embedded
+  once per content hash at full resolution. Limits are 32 MiB per image and
+  256 MiB total; excluded files are listed. Large runs produce large files.
+  CLI and MCP artifact reports expose its path and byte size. The MCP report
+  resource still serves the linked viewer. (#186)
+
 - The MCP prompt `preview-flutter-component` walks an agent through rendering
   one Flutter widget without the full app, auth, routing or backend. Give it
   the widget and, optionally, states and viewports. It uses the Flutter Widget
@@ -32,6 +40,12 @@
 - <What was actually run, and where its evidence lives. Nothing aspirational.>
 
 ## Known limits
+
+- Each finalized Lab run stores about 1.33 times its screenshot bytes again in
+  `report-share.html`. Rendering near the 256 MiB cap needs roughly 1 GB of memory.
+- If rewriting the share report fails when an outcome is recorded on an already
+  finalized run, the previous reports stay in place and the error is returned;
+  `actions.jsonl` stays authoritative.
 
 - <What this release does not do, and what is not proven yet.>
 - Browser lab sessions still send Chrome's activity ping to

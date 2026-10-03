@@ -13,22 +13,25 @@ export function observationBudget(deadline: number): number {
 
 function sameFile(a: fs.Stats, b: fs.Stats): boolean {
   if (!a.isFile() || !b.isFile()) return false;
-  const fields = ["dev", "ino", "size", "mtimeMs", "ctimeMs"] as const;
+  const fields = ["dev", "ino", "size", "mtimeMs", "ctimeMs", "nlink"] as const;
   return fields.every((field) => a[field] === b[field]);
 }
 
 /** Read only the verified opened regular file, in bounded chunks, never waiting on a FIFO. */
 export async function readBoundedFileIn(
   dir: DirHandle, name: string, deadline: number,
+  options: { maxBytes?: number; singleLink?: boolean } = {},
 ): Promise<Buffer> {
+  const maxBytes = options.maxBytes ?? MAX_BASELINE_BYTES;
   observationBudget(deadline);
   const before = await dir.lstatChild(name);
   if (!before?.isFile()) throw new RunStorageAccessError("Baseline is not a regular file");
+  if (options.singleLink === true && before.nlink !== 1) throw new RunStorageAccessError("Baseline is not a single-link file");
   const file = await dir.openFile(name, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
   try {
     const opened = await file.stat();
     if (!sameFile(before, opened)) throw new RunStorageAccessError("Baseline was replaced before reading");
-    if (opened.size > MAX_BASELINE_BYTES) throw new RunStorageAccessError(`Baseline exceeds ${MAX_BASELINE_BYTES} bytes`);
+    if (opened.size > maxBytes) throw new RunStorageAccessError(`Baseline exceeds ${maxBytes} bytes`);
     observationBudget(deadline);
     const data = Buffer.alloc(opened.size);
     let offset = 0;
@@ -39,7 +42,8 @@ export async function readBoundedFileIn(
       offset += bytesRead;
     }
     const after = await dir.lstatChild(name);
-    if (!after || !sameFile(opened, after) || !sameFile(opened, await file.stat())) {
+    const final = await file.stat();
+    if (!after || !sameFile(opened, after) || !sameFile(opened, final)) {
       throw new RunStorageAccessError("Baseline changed while reading");
     }
     observationBudget(deadline);
