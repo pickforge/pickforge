@@ -178,10 +178,12 @@ function sanitizePointer(source: Record<string, unknown>): SanitizedActionTarget
     result.fromY = fromY;
   }
   const noStart = fromX === undefined && fromY === undefined;
-  if (source.coordinateSpace === "xvfb-root" && pixelIndex(source.x) && pixelIndex(source.y) && (start || noStart)) {
-    result.coordinateSpace = "xvfb-root";
-  }
+  if (isRootPoint(source) && (start || noStart)) result.coordinateSpace = "xvfb-root";
   return result;
+}
+
+function isRootPoint(source: Record<string, unknown>): boolean {
+  return source.coordinateSpace === "xvfb-root" && pixelIndex(source.x) && pixelIndex(source.y);
 }
 
 /** The report's only admissible capture path shape. */
@@ -192,10 +194,19 @@ export function isSafeScreenshotPath(value: unknown): value is string {
 function captureLink(entry: unknown): EvidenceCaptureLink[] {
   if (typeof entry !== "object" || entry === null) return [];
   const { path, phase, width, height } = entry as Record<string, unknown>;
-  const size = (value: unknown): value is number => pixelIndex(value) && value > 0;
-  return isSafeScreenshotPath(path) && (phase === "before" || phase === "after") && size(width) && size(height)
-    ? [{ path, phase, width, height }]
+  const size = captureSize(width, height);
+  return isSafeScreenshotPath(path) && isCapturePhase(phase) && size !== undefined
+    ? [{ path, phase, ...size }]
     : [];
+}
+
+function isCapturePhase(value: unknown): value is EvidenceCaptureLink["phase"] {
+  return value === "before" || value === "after";
+}
+
+function captureSize(width: unknown, height: unknown): { width: number; height: number } | undefined {
+  const positive = (value: unknown): value is number => pixelIndex(value) && value > 0;
+  return positive(width) && positive(height) ? { width, height } : undefined;
 }
 
 function repeatedValues(entries: readonly unknown[], key: string): Set<unknown> {

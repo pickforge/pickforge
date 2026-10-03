@@ -153,14 +153,7 @@ async function pointerWithEvidence(
   opts: DesktopCommandOptions, tool: "desktop_click" | "desktop_drag",
   sessionId: string, display: string, target: Record<string, number>, input: () => Promise<void>,
 ): Promise<void> {
-  let run: RunHandle | undefined;
-  try {
-    const projectDir = resolveProjectDir(opts);
-    run = isEvidenceEnabled(await loadConfig(projectDir))
-      ? (await beginEvidenceRun(projectDir, sessionId)).run : undefined;
-  } catch (error) {
-    reportEvidenceFailure(tool, error);
-  }
+  const run = await startPointerEvidence(opts, tool, sessionId);
   const before = run === undefined ? undefined : await ownedDisplay(sessionId, display);
   const startedAt = new Date();
   const action: EvidenceAction = {
@@ -176,17 +169,36 @@ async function pointerWithEvidence(
     throw error;
   } finally {
     action.durationMs = Date.now() - startedAt.getTime();
-    if (run !== undefined) {
-      try {
-        const after = before === undefined ? undefined : await ownedDisplay(sessionId, display);
-        const verified = after !== undefined && after.display === before?.display &&
-          after.pid === before.pid && after.startTicks === before.startTicks;
-        action.target = { ...sanitizeActionTarget(verified ? { ...target, coordinateSpace: "xvfb-root" } : target) };
-        await appendAction(run, action);
-      } catch (error) {
-        reportEvidenceFailure(tool, error);
-      }
-    }
+    if (run !== undefined) await recordPointerAction(run, action, sessionId, display, before, target);
+  }
+}
+
+async function startPointerEvidence(
+  opts: DesktopCommandOptions, tool: string, sessionId: string,
+): Promise<RunHandle | undefined> {
+  try {
+    const projectDir = resolveProjectDir(opts);
+    return isEvidenceEnabled(await loadConfig(projectDir))
+      ? (await beginEvidenceRun(projectDir, sessionId)).run : undefined;
+  } catch (error) {
+    reportEvidenceFailure(tool, error);
+    return undefined;
+  }
+}
+
+/** Marks the target as root pixels only when the same owned display survived the input. */
+async function recordPointerAction(
+  run: RunHandle, action: EvidenceAction, sessionId: string, display: string,
+  before: Awaited<ReturnType<typeof ownedDisplay>>, target: Record<string, number>,
+): Promise<void> {
+  try {
+    const after = before === undefined ? undefined : await ownedDisplay(sessionId, display);
+    const verified = after !== undefined && after.display === before?.display &&
+      after.pid === before.pid && after.startTicks === before.startTicks;
+    action.target = { ...sanitizeActionTarget(verified ? { ...target, coordinateSpace: "xvfb-root" } : target) };
+    await appendAction(run, action);
+  } catch (error) {
+    reportEvidenceFailure(action.tool, error);
   }
 }
 
