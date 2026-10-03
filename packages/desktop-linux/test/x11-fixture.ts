@@ -252,3 +252,14 @@ export function installTargetFixture(root: string, server: FakeXServer): void {
     return socket;
   }) as typeof net.createConnection);
 }
+
+/** Redirect one synthetic process identity to a mutable procfs stat file. */
+export function installProcessIdentityFixture(root: string, pid: number, startTicks: number): string {
+  const fixture = path.join(root, "proc-stat");
+  const fields = ["S", "1", String(pid), ...Array<string>(16).fill("0"), String(startTicks)];
+  fs.writeFileSync(fixture, `${pid} (Xvfb) ${fields.join(" ")}\n`);
+  const read = fs.readFileSync.bind(fs);
+  vi.spyOn(fs, "readFileSync").mockImplementation(((file: fs.PathOrFileDescriptor, ...args: unknown[]) =>
+    Reflect.apply(read, fs, [String(file) === `/proc/${pid}/stat` ? fixture : file, ...args])) as typeof fs.readFileSync);
+  return fixture;
+}

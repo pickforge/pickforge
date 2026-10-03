@@ -64,6 +64,22 @@ const SAFE_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]*$/i;
 
 export type EvidenceActionStatus = "ok" | "error" | "cancelled" | "timeout";
 
+/** How far an input action got. Action `status` alone cannot tell these apart. */
+export type EvidenceInputState = "not-attempted" | "attempted" | "completed";
+
+/**
+ * Explicit link from an action to one of its own captures. Viewers never infer
+ * that a nearby screenshot belongs to an action.
+ */
+export interface EvidenceCaptureLink {
+  /** Run-relative path, also listed in the action's `artifacts`. */
+  path: string;
+  phase: "before" | "after";
+  /** PNG dimensions in pixels; equal to the captured root window. */
+  width: number;
+  height: number;
+}
+
 /**
  * One sanitized computer-use action. Producers are responsible for redacting
  * `target`, `artifacts`, and `error` before handing a record here; this module
@@ -83,6 +99,10 @@ export interface EvidenceAction {
   artifacts?: string[];
   /** Redacted, human-readable error summary. */
   error?: string;
+  /** Input progress for input actions; absent on older records. */
+  inputState?: EvidenceInputState;
+  /** Captures this action took, with phase and dimensions. */
+  captures?: EvidenceCaptureLink[];
 }
 
 /** The single, deterministic marker appended when the evidence cap is reached. */

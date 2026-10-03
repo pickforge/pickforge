@@ -9,6 +9,7 @@ import {
 import path from "node:path";
 import { assertSafeEntryName, RunStorageAccessError, type DirHandle } from "./dir-handle.js";
 import { redactSecrets } from "./redact.js";
+import { isSafeScreenshotPath as safeScreenshotPath, sanitizeActionTarget, sanitizeCaptureLinks } from "./evidence-sanitize.js";
 import {
   EVIDENCE_ACTION_LOG,
   RunHandle,
@@ -24,6 +25,7 @@ import {
   readEvidenceManifestIn,
   withJournalLock,
   type EvidenceAction,
+  type EvidenceCaptureLink,
   type EvidenceRecord,
 } from "./evidence.js";
 import type { RecoveredEvidenceRun } from "./evidence-recovery.js";
@@ -431,12 +433,28 @@ footer{margin-top:36px;padding-top:16px;border-top:1px solid var(--line);color:v
 @media (max-width:900px){.cols{display:block}.sidebar{min-height:0;border-right:0;border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:6px;padding:10px 14px}.sidebar .eyebrow,.sidebar hr{display:none}.sidebar label{width:auto;min-height:44px}main{padding:24px 16px 48px}.toolbar{flex-direction:column;align-items:stretch}#search{width:100%}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}`;
 
+/** Emitted only when a pointer marker renders, so unmarked reports keep their bytes. */
+const MARKER_STYLE = `.marker-input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.marker-label{margin-right:auto}
+.pointer-note{display:block}
+.framed{container-type:size}
+.image-frame{position:relative;display:block;flex:none;width:min(100cqw,calc(100cqh * var(--w) / var(--h)),calc(var(--w) * 1px));aspect-ratio:var(--w) / var(--h)}
+.image-frame img{display:block;width:100%;height:100%;max-width:none;max-height:none}
+.zoom:checked~.inspect-stage .image-frame{width:calc(var(--w) * 1px)}
+.zoom:checked~.inspect-stage .image-frame img{width:100%;height:100%}
+.pointer-line{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none}
+.pointer-line line{stroke:var(--ember);stroke-width:2;stroke-linecap:round}
+.pointer-line .halo{stroke:var(--bg);stroke-width:4}
+.pointer-ring,.pointer-dot{position:absolute;left:var(--x);top:var(--y);border-radius:50%;transform:translate(-50%,-50%);pointer-events:none}
+.pointer-ring{width:16px;height:16px;border:2px solid var(--ember);box-shadow:0 0 0 1px var(--bg),inset 0 0 0 1px var(--bg)}
+.pointer-dot{width:6px;height:6px;background:var(--ember);box-shadow:0 0 0 1px var(--bg)}
+.attempted .pointer-ring{border-style:dashed}
+.attempted .pointer-line line{stroke-dasharray:6 4;stroke-linecap:butt}
+#markers:not(:checked)~.shell .pointer,#markers:not(:checked)~.inspect .pointer{display:none}
+`;
+
 function renderMetadata(label: string, value: unknown): string {
   return `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`;
-}
-
-function safeScreenshotPath(value: string): boolean {
-  return /^screenshots\/[A-Za-z0-9._-]+\.png$/.test(value) && !value.includes("..");
 }
 
 function outcomeStatus(value: unknown): string {
@@ -624,6 +642,72 @@ interface Capture {
   lens: Lens;
   scenarios: number[];
   search: string;
+  marker?: PointerMarker;
+}
+
+interface PngSize {
+  width: number;
+  height: number;
+}
+
+/** Actual PNG sizes by capture path; a capture without one is never marked. */
+type ImageSizes = ReadonlyMap<string, Readonly<PngSize>>;
+
+interface PointerMarker {
+  width: number;
+  height: number;
+  x: number;
+  y: number;
+  from?: readonly [number, number];
+  state: "attempted" | "completed";
+  label: string;
+}
+
+/**
+ * A marker needs an explicit capture link whose size matches the PNG on disk,
+ * a verified xvfb-root point inside that capture and attempted input. Journal
+ * fields are re-validated here because the journal is on-disk data; anything
+ * else renders unmarked.
+ */
+function pointerMarker(record: EvidenceAction, artifact: string, size: Readonly<PngSize> | undefined): PointerMarker | undefined {
+  const state = record.inputState;
+  if (state !== "attempted" && state !== "completed") return undefined;
+  const link = sizedLink(record, artifact, size);
+  if (link === undefined) return undefined;
+  const { width, height } = link;
+  const inside = (px: number, py: number) => px < width && py < height;
+  const { coordinateSpace, x, y, fromX, fromY } = sanitizeActionTarget(record.target);
+  if (coordinateSpace !== "xvfb-root" || x === undefined || y === undefined || !inside(x, y)) return undefined;
+  const from = fromX === undefined || fromY === undefined ? undefined : [fromX, fromY] as const;
+  if (from === undefined ? String(record.tool) === "desktop_drag" : !inside(...from)) return undefined;
+  const verb = shortText(safeText(record.tool).replace(/^desktop_/, "").replaceAll("_", " "), 40);
+  const where = from === undefined ? `at ${x}, ${y}` : `${from[0]}, ${from[1]} → ${x}, ${y}`;
+  return { width, height, x, y, from, state, label: `Pointer: ${verb} ${where} · ${link.phase} · ${state}` };
+}
+
+/** The capture link for `artifact`, only when its size equals the actual PNG. */
+function sizedLink(record: EvidenceAction, artifact: string, size: Readonly<PngSize> | undefined): EvidenceCaptureLink | undefined {
+  const link = sanitizeCaptureLinks(record.captures).find((entry) => entry.path === artifact);
+  if (link === undefined || size === undefined) return undefined;
+  return link.width === size.width && link.height === size.height ? link : undefined;
+}
+
+function claimedPaths(record: EvidenceAction): Set<string> {
+  const artifacts: unknown[] = Array.isArray(record.artifacts) ? record.artifacts : [];
+  const links: unknown[] = Array.isArray(record.captures) ? record.captures : [];
+  const linked = links.map((entry) => (entry as { path?: unknown } | null)?.path);
+  return new Set([...artifacts, ...linked].filter((entry): entry is string => typeof entry === "string"));
+}
+
+/** Paths that more than one record claims; no single action owns them. */
+function contestedPaths(ordered: readonly TimelineRecord[]): Set<string> {
+  const seen = new Set<string>();
+  const contested = new Set<string>();
+  for (const record of ordered) {
+    if (isTruncationRecord(record)) continue;
+    for (const claimed of claimedPaths(record)) (seen.has(claimed) ? contested : seen).add(claimed);
+  }
+  return contested;
 }
 
 function captureScenarios(
@@ -644,6 +728,7 @@ function collectCaptures(
   safeScreenshots: ReadonlySet<string>,
   outcomes: readonly EvidenceOutcomeRecord[],
   fallback: Lens,
+  sizeOf: (artifact: string) => Readonly<PngSize> | undefined,
 ): Capture[] {
   const captures: Capture[] = [];
   ordered.forEach((record, index) => {
@@ -656,7 +741,9 @@ function collectCaptures(
     (record.artifacts ?? [])
       .filter((artifact) => safeScreenshots.has(artifact))
       .forEach((artifact, position) => {
+        const marker = pointerMarker(record, artifact, sizeOf(artifact));
         captures.push({
+          ...(marker === undefined ? {} : { marker }),
           id: `cap-${step}-${position + 1}`,
           step,
           title,
@@ -707,11 +794,42 @@ function captureAlt(capture: Capture): string {
   return description === capture.title ? escapeHtml(description) : `${description}, ${escapeHtml(capture.title)}`;
 }
 
+/** Percent of the image box at the pixel centre; fixed precision keeps output stable. */
+function percent(pixel: number, size: number): string {
+  return `${Number(((pixel + 0.5) / size * 100).toFixed(4))}%`;
+}
+
+function pointAt(className: string, marker: PointerMarker, x: number, y: number): string {
+  return `<span class="pointer ${className}" style="--x:${percent(x, marker.width)};--y:${percent(y, marker.height)}" aria-hidden="true"></span>`;
+}
+
+function pointerLine(marker: PointerMarker): string {
+  if (marker.from === undefined) return "";
+  const [fromX, fromY] = marker.from;
+  const ends = `x1="${fromX + 0.5}" y1="${fromY + 0.5}" x2="${marker.x + 0.5}" y2="${marker.y + 0.5}"`;
+  return `<svg class="pointer pointer-line" viewBox="0 0 ${marker.width} ${marker.height}" preserveAspectRatio="none" aria-hidden="true" focusable="false"><line class="halo" ${ends} vector-effect="non-scaling-stroke"/><line ${ends} vector-effect="non-scaling-stroke"/></svg>${pointAt("pointer-dot", marker, fromX, fromY)}`;
+}
+
+/** Image plus overlay; an unmarked capture keeps its original bare markup. */
+function framedImage(capture: Capture, image: string): string {
+  const marker = capture.marker;
+  if (marker === undefined) return image;
+  return `<span class="image-frame${marker.state === "attempted" ? " attempted" : ""}" style="--w:${marker.width};--h:${marker.height}">${image}${pointerLine(marker)}${pointAt("pointer-ring", marker, marker.x, marker.y)}</span>`;
+}
+
+function stageClass(base: string, capture: Capture): string {
+  return capture.marker === undefined ? base : `${base} framed`;
+}
+
+function markerNote(capture: Capture, className: string): string {
+  return capture.marker === undefined ? "" : `<span class="${className}">${escapeHtml(capture.marker.label)}</span>`;
+}
+
 function renderCapture(capture: Capture, share?: ShareImages): string {
   return `<figure class="cap"${filterAttributes(capture.lens, capture.scenarios)} data-search="${capture.search}">
 <a href="#${capture.id}" aria-label="${capture.step === 0 ? "Inspect capture" : `Inspect step ${capture.step} capture`} ${escapeHtml(capture.path)}">
-<span class="stage"><img ${imageSource(capture, share)} alt="${captureAlt(capture)}" loading="lazy"></span>
-<figcaption><b>${captureHeading(capture)}</b><span class="mono">${escapeHtml(capture.status)} · ${escapeHtml(capture.path)}</span>${capture.target === "" ? "" : `<span class="mono">${escapeHtml(capture.target)}</span>`}</figcaption>
+<span class="${stageClass("stage", capture)}">${framedImage(capture, `<img ${imageSource(capture, share)} alt="${captureAlt(capture)}" loading="lazy">`)}</span>
+<figcaption><b>${captureHeading(capture)}</b><span class="mono">${escapeHtml(capture.status)} · ${escapeHtml(capture.path)}</span>${capture.target === "" ? "" : `<span class="mono">${escapeHtml(capture.target)}</span>`}${markerNote(capture, "mono")}</figcaption>
 </a></figure>`;
 }
 
@@ -728,11 +846,11 @@ function renderInspect(captures: readonly Capture[], index: number, share?: Shar
   const capture = captures[index]!;
   return `<section class="inspect" id="${capture.id}" aria-label="${captureDescription(capture)}">
 <input type="checkbox" class="zoom" id="zoom-${capture.id}">
-<div class="inspect-bar"><span class="mono">${captureHeading(capture)} · ${escapeHtml(capture.path)}</span>
+<div class="inspect-bar"><span class="mono">${captureHeading(capture)} · ${escapeHtml(capture.path)}${markerNote(capture, "pointer-note")}</span>
 <label class="btn grow" for="zoom-${capture.id}">Actual size</label>
 ${share === undefined ? `<a class="btn" href="${escapeHtml(capture.path)}">Open original</a>` : ""}
 <a class="btn" href="#captures">Close</a></div>
-<div class="inspect-stage"><img ${imageSource(capture, share)} alt="${captureAlt(capture)}"></div>
+<div class="${stageClass("inspect-stage", capture)}">${framedImage(capture, `<img ${imageSource(capture, share)} alt="${captureAlt(capture)}">`)}</div>
 <div class="inspect-foot">${browseLink(captures[index - 1], false)}<span class="mono">${index + 1} / ${captures.length}</span>${browseLink(captures[index + 1], true)}</div>
 </section>`;
 }
@@ -892,11 +1010,14 @@ export function renderEvidenceHtml(
   records: readonly EvidenceRecord[],
   safeScreenshots: ReadonlySet<string> = new Set(),
   share?: ShareImages,
+  imageSizes?: ImageSizes,
 ): string {
   const outcomes = sortOutcomes(records.filter(isOutcomeRecord));
   const ordered = timelineRecords(records);
   const fallback = deviceLens(manifest.device);
-  const captures = collectCaptures(ordered, safeScreenshots, outcomes, fallback);
+  const contested = contestedPaths(ordered);
+  const sizeOf = (artifact: string) => contested.has(artifact) ? undefined : imageSizes?.get(artifact);
+  const captures = collectCaptures(ordered, safeScreenshots, outcomes, fallback, sizeOf);
   if (share !== undefined) appendShareCaptures(captures, share, outcomes, fallback);
   const script = share === undefined ? REPORT_SCRIPT : SHARE_REPORT_SCRIPT;
   const steps = ordered
@@ -909,6 +1030,7 @@ export function renderEvidenceHtml(
   const inspects = captures
     .map((_capture, index) => renderInspect(captures, index, share))
     .join("\n");
+  const marked = captures.some((capture) => capture.marker !== undefined);
 
   return `<!doctype html>
 <html lang="en">
@@ -919,11 +1041,11 @@ export function renderEvidenceHtml(
 <title>Pickforge run ${escapeHtml(manifest.runId)}</title>
 <style>
 ${REPORT_STYLE}
-${share === undefined ? "" : "body.js .no-js{display:none}\n"}${lensRules()}${scenarioRules(outcomes.length < 2 ? 0 : outcomes.length)}
+${share === undefined ? "" : "body.js .no-js{display:none}\n"}${marked ? MARKER_STYLE + activeRules("markers") : ""}${lensRules()}${scenarioRules(outcomes.length < 2 ? 0 : outcomes.length)}
 </style>
 </head>
 <body>
-${lensRadios()}${scenarioRadios(outcomes)}
+${lensRadios()}${scenarioRadios(outcomes)}${marked ? `<input type="checkbox" class="marker-input" id="markers" checked>` : ""}
 <div class="shell">
 <header class="topbar"><svg class="mark" viewBox="0 0 28 28" fill="none" aria-hidden="true"><path d="M5 22V6h11l7 7-7 7H9" stroke="currentColor" stroke-width="2"/><path d="m10 12 4 4 8-9" stroke="currentColor" stroke-width="2"/></svg><span class="brand">PICKFORGE <span>/ EVIDENCE</span></span></header>
 <div class="cols">
@@ -935,7 +1057,7 @@ ${lensButtons(captures)}${scenarioButtons(outcomes, captures)}
 ${renderSummary(manifest, outcomes.at(-1))}
 ${renderOutcomes(outcomes)}
 ${renderWarnings(manifest, ordered)}
-<div class="toolbar"><h2 id="captures">Captures <span class="count js-only"><span id="match-count">${captures.length}</span> shown</span></h2>
+<div class="toolbar"><h2 id="captures">Captures <span class="count js-only"><span id="match-count">${captures.length}</span> shown</span></h2>${marked ? `<label class="btn marker-label" for="markers">Pointer markers</label>` : ""}
 <span class="search-wrap"><label class="eyebrow" for="search">Search</label><input id="search" type="search" placeholder="Filter captures and steps"></span></div>
 ${share === undefined ? "" : `<p class="warn no-js">JavaScript is required to display embedded captures. Report text remains readable.</p>\n`}${gallery}
 <p class="empty js-only" id="no-match" role="status" hidden>Nothing matches the current search and filters.</p>
@@ -967,32 +1089,38 @@ function renderShareFooter(share: ShareImages): string {
   return `<footer>This file is self-contained. ${share.hashes.size} capture file(s) embedded as ${Object.keys(share.payloads).length} unique image(s), ${formatShareBytes(share.bytes)} before base64 encoding. Full resolution is preserved. Limits: ${MAX_SHARE_IMAGE_BYTES / (1024 * 1024)} MiB per image and ${MAX_SHARE_TOTAL_BYTES / (1024 * 1024)} MiB total. ${omissions === "" ? "Not included: none." : `Not included:<ul>${omissions}</ul>`} report.html, manifest.json and actions.jsonl are not included as attachments. Original screenshots, manifest.json and actions.jsonl remain the authoritative evidence.</footer>`;
 }
 
+/** Embed one image or record why not; returns the size of any fully valid PNG, embedded or not. */
 function includeShareImage(
   share: ShareImages, relative: string, bytes: Buffer,
-): void {
+): PngSize | undefined {
   const omitted = share.omitted;
   const hash = createHash("sha256").update(bytes).digest("hex");
   if (share.payloads[hash] !== undefined) {
+    // Identical bytes already passed full validation.
     share.hashes.set(relative, hash);
-    return;
+    return headerSize(bytes);
   }
-  if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+  if (!bytes.subarray(0, 8).equals(PNG_SIGNATURE)) {
     omitted.set(relative, "Unsupported image; PNG signature missing");
-    return;
+    return undefined;
   }
-  if (!completePng(bytes)) {
+  const size = completePngSize(bytes);
+  if (size === undefined) {
     omitted.set(relative, "Incomplete or corrupt PNG");
-    return;
+    return undefined;
   }
   if (share.bytes + bytes.length > MAX_SHARE_TOTAL_BYTES) {
     omitted.set(relative, `Over total image cap (${formatShareBytes(MAX_SHARE_TOTAL_BYTES)})`);
-    return;
+    return size;
   }
   // Base64 bypasses text redaction: altering it would corrupt evidence.
   share.payloads[hash] = bytes.toString("base64");
   share.bytes += bytes.length;
   share.hashes.set(relative, hash);
+  return size;
 }
+
+const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 
 interface PngChunk {
   type: string;
@@ -1044,9 +1172,7 @@ function readPngLayout(data: Buffer): PngLayout | undefined {
   return { width, height, bitsPerPixel: data[8] * format.samples, interlaced: data[12] === 1 };
 }
 
-function pngRawSize(data: Buffer): number | undefined {
-  const layout = readPngLayout(data);
-  if (layout === undefined) return undefined;
+function pngRawSize(layout: PngLayout): number | undefined {
   const { width, height, bitsPerPixel } = layout;
   const passes = layout.interlaced ? ADAM7_PASSES : [[0, 0, 1, 1]] as const;
   let size = 0;
@@ -1075,12 +1201,10 @@ function validPngStream(parts: readonly Buffer[], expectedSize: number): boolean
 }
 
 /** Validate framing, checksums and bounded image data without changing evidence bytes. */
-function completePng(bytes: Buffer): boolean {
-  const header = readPngChunk(bytes, 8);
-  if (header?.type !== "IHDR") return false;
-  const expectedSize = pngRawSize(header.data);
+function completePng(bytes: Buffer, layout: PngLayout, start: number): boolean {
+  const expectedSize = pngRawSize(layout);
   if (expectedSize === undefined) return false;
-  let offset = header.end;
+  let offset = start;
   const imageData: Buffer[] = [];
   while (offset < bytes.length) {
     const chunk = readPngChunk(bytes, offset);
@@ -1092,6 +1216,25 @@ function completePng(bytes: Buffer): boolean {
     offset = chunk.end;
   }
   return false;
+}
+
+function readPngHeader(bytes: Buffer): { layout: PngLayout; end: number } | undefined {
+  const header = readPngChunk(bytes, 8);
+  const layout = header?.type === "IHDR" ? readPngLayout(header.data) : undefined;
+  return layout === undefined ? undefined : { layout, end: header!.end };
+}
+
+/** Size from IHDR alone; only for bytes that already passed full validation. */
+function headerSize(bytes: Buffer): PngSize {
+  const { width, height } = readPngHeader(bytes)!.layout;
+  return { width, height };
+}
+
+/** The actual size of a PNG that passes full validation after its signature; otherwise unknown. */
+function completePngSize(bytes: Buffer): PngSize | undefined {
+  const header = readPngHeader(bytes);
+  if (header === undefined || !completePng(bytes, header.layout, header.end)) return undefined;
+  return { width: header.layout.width, height: header.layout.height };
 }
 
 function shareScreenshotPathReason(relative: string): string | undefined {
@@ -1127,13 +1270,28 @@ async function readShareScreenshot(
   });
 }
 
+/** Embed one candidate or record why not; any fully valid PNG also records its actual size. */
+async function addShareCandidate(
+  share: ShareImages, screenshots: DirHandle | undefined, relative: string, sizes: Map<string, PngSize>,
+): Promise<void> {
+  try {
+    const candidate = await readShareScreenshot(screenshots, relative);
+    if (typeof candidate === "string") {
+      share.omitted.set(relative, candidate);
+      return;
+    }
+    const size = includeShareImage(share, relative, candidate);
+    if (size !== undefined) sizes.set(relative, size);
+  } catch {
+    share.omitted.set(relative, "File unreadable, changed, or unsafe during bounded read");
+  }
+}
+
 /** Read original bytes through the held screenshot directory, never a caller path. */
 async function collectShareImages(
-  runDir: DirHandle, manifest: RunManifest, records: readonly EvidenceRecord[],
+  runDir: DirHandle, manifest: RunManifest, records: readonly EvidenceRecord[], sizes: Map<string, PngSize>,
 ): Promise<ShareImages> {
-  const hashes = new Map<string, string>();
-  const omitted = new Map<string, string>();
-  const share: ShareImages = { hashes, payloads: {}, bytes: 0, omitted };
+  const share: ShareImages = { hashes: new Map(), payloads: {}, bytes: 0, omitted: new Map() };
   const candidates = new Set([
     ...manifest.artifacts.map((artifact) => artifact.path),
     ...records.flatMap((record) => isTruncationRecord(record) ? []
@@ -1144,16 +1302,7 @@ async function collectShareImages(
     for (const relative of candidates) {
       // Generated context is already rendered as text, not an external attachment.
       if ([EVIDENCE_REPORT, EVIDENCE_SHARE_REPORT, EVIDENCE_ACTION_LOG, "manifest.json"].includes(relative)) continue;
-      try {
-        const candidate = await readShareScreenshot(screenshots, relative);
-        if (typeof candidate === "string") {
-          omitted.set(relative, candidate);
-        } else {
-          includeShareImage(share, relative, candidate);
-        }
-      } catch {
-        omitted.set(relative, "File unreadable, changed, or unsafe during bounded read");
-      }
+      await addShareCandidate(share, screenshots, relative, sizes);
     }
   } finally {
     await screenshots?.close().catch(() => {});
@@ -1188,9 +1337,7 @@ async function collectSafeScreenshots(
       if (!safeScreenshotPath(relative)) continue;
       const name = relative.slice("screenshots/".length);
       const stat = await screenshots.lstatChild(name);
-      if (stat?.isFile() === true && !stat.isSymbolicLink() && stat.nlink === 1) {
-        safe.add(relative);
-      }
+      if (stat?.isFile() === true && !stat.isSymbolicLink() && stat.nlink === 1) safe.add(relative);
     }
   } finally {
     await screenshots.close().catch(() => {});
@@ -1283,15 +1430,17 @@ export async function writeEvidenceReportIn(
   records: readonly EvidenceRecord[],
 ): Promise<void> {
   const safeScreenshots = await collectSafeScreenshots(runDir, records);
-  const share = await collectShareImages(runDir, manifest, records);
+  // One full PNG validation pass gives marker sizes to both reports.
+  const sizes = new Map<string, PngSize>();
+  const share = await collectShareImages(runDir, manifest, records, sizes);
   manifest.artifacts = await evidenceInventory(runDir, manifest, records);
   if (manifest.evidenceRecovery === "corrupt" || manifest.evidenceRecovery === "missing") {
     delete manifest.evidenceTruncated;
   } else {
     manifest.evidenceTruncated = records.some(isTruncationRecord);
   }
-  const html = renderEvidenceHtml(manifest, records, safeScreenshots);
-  await runDir.writeFileAtomic(EVIDENCE_SHARE_REPORT, renderEvidenceHtml(manifest, records, new Set(share.hashes.keys()), share));
+  const html = renderEvidenceHtml(manifest, records, safeScreenshots, undefined, sizes);
+  await runDir.writeFileAtomic(EVIDENCE_SHARE_REPORT, renderEvidenceHtml(manifest, records, new Set(share.hashes.keys()), share, sizes));
   await runDir.writeFileAtomic(EVIDENCE_REPORT, html);
   await runDir.writeFileAtomic(
     "manifest.json", `${JSON.stringify(manifest, null, 2)}\n`,
