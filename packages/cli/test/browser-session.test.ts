@@ -266,8 +266,9 @@ describe.skipIf(!hasXvfb)("built CLI browser lifecycle", () => {
           'server.listen(port, "127.0.0.1");\n' +
           'process.on("SIGTERM", () => server.close(() => process.exit(0)));\n',
       );
+      // The viewer prefers "chromium"; this fake shadows any real one.
       writeExecutable(
-        path.join(binDir, "remote-viewer"),
+        path.join(binDir, "chromium"),
         `#!${process.execPath}\nprocess.stdout.write("ignored viewer output\\n");\n`,
       );
       env.DISPLAY = ":0";
@@ -287,7 +288,9 @@ describe.skipIf(!hasXvfb)("built CLI browser lifecycle", () => {
       expect(created.viewer).toMatchObject({
         sessionId: session.id,
         opened: true,
+        browser: "chromium",
       });
+      expect(createdResult.stdout).not.toContain("#token=");
 
       const status = parseJson(
         await runCli(["session", "status", session.id as string, "--json"]),
