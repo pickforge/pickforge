@@ -520,8 +520,7 @@ it.skipIf(!ffmpegInstalled).each([1500, 137, 41])(
 it.each(["symlink", "content"])(
   "refuses a %s swap before pinning exported video frames",
   async (kind) => {
-    await screenshot("a.png");
-    await journal([action("a", ["screenshots/a.png"])]);
+    await fakeFfmpeg("#!/bin/sh\n/bin/cat >/dev/null\nprintf video\n");
     const outside = path.join(project, "outside.png");
     await fs.promises.writeFile(outside, image(2, 2));
     const open = DirHandle.prototype.openFile;
