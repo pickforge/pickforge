@@ -28,7 +28,7 @@ it.skipIf(!available)("associates real input capture pairs, geometry, inspection
     const window = windows.windows.find((item: { name: string }) => item.name === "Capture Fixture");
     expect(window).toBeDefined();
     expect((await call("desktop_focus", { id: window.id, capture: "both" })).ok).toBe(true);
-    expect(await call("desktop_wait", { stableMs: 500, timeoutMs: 20_000 })).toMatchObject({ ok: true, reason: "stable" });
+    expect(await call("desktop_wait", { stableMs: 1300, timeoutMs: 8_000 })).toMatchObject({ ok: true, reason: "stable" }); // Longer than a 1.2 s blink cycle and shorter than the 10 s blink timeout, so a live caret fails.
     const marker = "capture-synthetic-value";
     const typed = await call("desktop_type", { text: marker, capture: "both" });
     expect(typed.ok, JSON.stringify(typed)).toBe(true);
