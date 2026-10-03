@@ -34,7 +34,7 @@ describe("host display guard", () => {
 
   it("names the display, the path, and the issue in the error", () => {
     const message = socketChangeError(":0", "/tmp/.X11-unix/X0", "replaced").message;
-    expect(message).toContain("host display socket for DISPLAY=:0 was replaced");
+    expect(message).toContain("host display socket for DISPLAY=:0 changed");
     expect(message).toContain("/tmp/.X11-unix/X0");
     expect(message).toContain("#234");
   });

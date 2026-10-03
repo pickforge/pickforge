@@ -49,7 +49,7 @@ export function socketChangeError(
   change: string,
 ): Error {
   return new Error(
-    `The host display socket for DISPLAY=${display} was replaced during the test run ` +
+    `The host display socket for DISPLAY=${display} changed during the test run ` +
       `(${socketPath} was ${change}). New X11 apps on this host may fail until the ` +
       `display server restarts. See pickforge/pickforge#234.`,
   );
