@@ -1,7 +1,6 @@
 import { readBoundedFileIn } from "./bounded-read.js";
 import type { RunCatalog, RunCatalogEntry } from "./run-catalog.js";
 import { createHash } from "node:crypto";
-import fs from "node:fs";
 import zlib, { crc32 } from "node:zlib";
 import {
   isOutcomeRecord,
@@ -1090,36 +1089,38 @@ function renderShareFooter(share: ShareImages): string {
   return `<footer>This file is self-contained. ${share.hashes.size} capture file(s) embedded as ${Object.keys(share.payloads).length} unique image(s), ${formatShareBytes(share.bytes)} before base64 encoding. Full resolution is preserved. Limits: ${MAX_SHARE_IMAGE_BYTES / (1024 * 1024)} MiB per image and ${MAX_SHARE_TOTAL_BYTES / (1024 * 1024)} MiB total. ${omissions === "" ? "Not included: none." : `Not included:<ul>${omissions}</ul>`} report.html, manifest.json and actions.jsonl are not included as attachments. Original screenshots, manifest.json and actions.jsonl remain the authoritative evidence.</footer>`;
 }
 
+/** Embed one image or record why not; returns the size of any fully valid PNG, embedded or not. */
 function includeShareImage(
   share: ShareImages, relative: string, bytes: Buffer,
-): void {
+): PngSize | undefined {
   const omitted = share.omitted;
   const hash = createHash("sha256").update(bytes).digest("hex");
   if (share.payloads[hash] !== undefined) {
+    // Identical bytes already passed full validation.
     share.hashes.set(relative, hash);
-    return;
+    return headerSize(bytes);
   }
   if (!bytes.subarray(0, 8).equals(PNG_SIGNATURE)) {
     omitted.set(relative, "Unsupported image; PNG signature missing");
-    return;
+    return undefined;
   }
-  if (!completePng(bytes)) {
+  const size = completePngSize(bytes);
+  if (size === undefined) {
     omitted.set(relative, "Incomplete or corrupt PNG");
-    return;
+    return undefined;
   }
   if (share.bytes + bytes.length > MAX_SHARE_TOTAL_BYTES) {
     omitted.set(relative, `Over total image cap (${formatShareBytes(MAX_SHARE_TOTAL_BYTES)})`);
-    return;
+    return size;
   }
   // Base64 bypasses text redaction: altering it would corrupt evidence.
   share.payloads[hash] = bytes.toString("base64");
   share.bytes += bytes.length;
   share.hashes.set(relative, hash);
+  return size;
 }
 
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-// Signature, then the IHDR chunk: length, type, 13 data bytes and checksum.
-const PNG_HEADER_BYTES = 33;
 
 interface PngChunk {
   type: string;
@@ -1171,31 +1172,7 @@ function readPngLayout(data: Buffer): PngLayout | undefined {
   return { width, height, bitsPerPixel: data[8] * format.samples, interlaced: data[12] === 1 };
 }
 
-/** Size from the signature and a checksummed IHDR; anything else is unknown. */
-function pngSize(head: Buffer): PngSize | undefined {
-  if (!head.subarray(0, 8).equals(PNG_SIGNATURE)) return undefined;
-  const header = readPngChunk(head, 8);
-  const layout = header?.type === "IHDR" ? readPngLayout(header.data) : undefined;
-  return layout === undefined ? undefined : { width: layout.width, height: layout.height };
-}
-
-/** Read only the PNG header of the admitted file, refusing a swapped or linked entry. */
-async function readPngSizeIn(dir: DirHandle, name: string, admitted: fs.Stats): Promise<PngSize | undefined> {
-  const file = await dir.openFile(name, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
-  try {
-    const opened = await file.stat();
-    if (!opened.isFile() || opened.dev !== admitted.dev || opened.ino !== admitted.ino || opened.nlink !== 1) return undefined;
-    const head = Buffer.alloc(PNG_HEADER_BYTES);
-    const { bytesRead } = await file.read(head, 0, head.length, 0);
-    return pngSize(head.subarray(0, bytesRead));
-  } finally {
-    await file.close();
-  }
-}
-
-function pngRawSize(data: Buffer): number | undefined {
-  const layout = readPngLayout(data);
-  if (layout === undefined) return undefined;
+function pngRawSize(layout: PngLayout): number | undefined {
   const { width, height, bitsPerPixel } = layout;
   const passes = layout.interlaced ? ADAM7_PASSES : [[0, 0, 1, 1]] as const;
   let size = 0;
@@ -1224,12 +1201,10 @@ function validPngStream(parts: readonly Buffer[], expectedSize: number): boolean
 }
 
 /** Validate framing, checksums and bounded image data without changing evidence bytes. */
-function completePng(bytes: Buffer): boolean {
-  const header = readPngChunk(bytes, 8);
-  if (header?.type !== "IHDR") return false;
-  const expectedSize = pngRawSize(header.data);
+function completePng(bytes: Buffer, layout: PngLayout, start: number): boolean {
+  const expectedSize = pngRawSize(layout);
   if (expectedSize === undefined) return false;
-  let offset = header.end;
+  let offset = start;
   const imageData: Buffer[] = [];
   while (offset < bytes.length) {
     const chunk = readPngChunk(bytes, offset);
@@ -1241,6 +1216,25 @@ function completePng(bytes: Buffer): boolean {
     offset = chunk.end;
   }
   return false;
+}
+
+function readPngHeader(bytes: Buffer): { layout: PngLayout; end: number } | undefined {
+  const header = readPngChunk(bytes, 8);
+  const layout = header?.type === "IHDR" ? readPngLayout(header.data) : undefined;
+  return layout === undefined ? undefined : { layout, end: header!.end };
+}
+
+/** Size from IHDR alone; only for bytes that already passed full validation. */
+function headerSize(bytes: Buffer): PngSize {
+  const { width, height } = readPngHeader(bytes)!.layout;
+  return { width, height };
+}
+
+/** The actual size of a PNG that passes full validation after its signature; otherwise unknown. */
+function completePngSize(bytes: Buffer): PngSize | undefined {
+  const header = readPngHeader(bytes);
+  if (header === undefined || !completePng(bytes, header.layout, header.end)) return undefined;
+  return { width: header.layout.width, height: header.layout.height };
 }
 
 function shareScreenshotPathReason(relative: string): string | undefined {
@@ -1276,7 +1270,7 @@ async function readShareScreenshot(
   });
 }
 
-/** Embed one candidate or record why not; embedded bytes also give its actual size. */
+/** Embed one candidate or record why not; any fully valid PNG also records its actual size. */
 async function addShareCandidate(
   share: ShareImages, screenshots: DirHandle | undefined, relative: string, sizes: Map<string, PngSize>,
 ): Promise<void> {
@@ -1286,8 +1280,7 @@ async function addShareCandidate(
       share.omitted.set(relative, candidate);
       return;
     }
-    includeShareImage(share, relative, candidate);
-    const size = share.hashes.has(relative) ? pngSize(candidate) : undefined;
+    const size = includeShareImage(share, relative, candidate);
     if (size !== undefined) sizes.set(relative, size);
   } catch {
     share.omitted.set(relative, "File unreadable, changed, or unsafe during bounded read");
@@ -1330,7 +1323,6 @@ async function openScreenshotsDir(
 async function collectSafeScreenshots(
   runDir: DirHandle,
   records: readonly EvidenceRecord[],
-  sizes: Map<string, PngSize>,
 ): Promise<Set<string>> {
   const safe = new Set<string>();
   const screenshots = await openScreenshotsDir(runDir);
@@ -1345,11 +1337,7 @@ async function collectSafeScreenshots(
       if (!safeScreenshotPath(relative)) continue;
       const name = relative.slice("screenshots/".length);
       const stat = await screenshots.lstatChild(name);
-      if (stat?.isFile() === true && !stat.isSymbolicLink() && stat.nlink === 1) {
-        safe.add(relative);
-        const size = await readPngSizeIn(screenshots, name, stat).catch(() => undefined);
-        if (size !== undefined) sizes.set(relative, size);
-      }
+      if (stat?.isFile() === true && !stat.isSymbolicLink() && stat.nlink === 1) safe.add(relative);
     }
   } finally {
     await screenshots.close().catch(() => {});
@@ -1441,10 +1429,10 @@ export async function writeEvidenceReportIn(
   manifest: RunManifest,
   records: readonly EvidenceRecord[],
 ): Promise<void> {
+  const safeScreenshots = await collectSafeScreenshots(runDir, records);
+  // One full PNG validation pass gives marker sizes to both reports.
   const sizes = new Map<string, PngSize>();
-  const safeScreenshots = await collectSafeScreenshots(runDir, records, sizes);
-  const shareSizes = new Map<string, PngSize>();
-  const share = await collectShareImages(runDir, manifest, records, shareSizes);
+  const share = await collectShareImages(runDir, manifest, records, sizes);
   manifest.artifacts = await evidenceInventory(runDir, manifest, records);
   if (manifest.evidenceRecovery === "corrupt" || manifest.evidenceRecovery === "missing") {
     delete manifest.evidenceTruncated;
@@ -1452,7 +1440,7 @@ export async function writeEvidenceReportIn(
     manifest.evidenceTruncated = records.some(isTruncationRecord);
   }
   const html = renderEvidenceHtml(manifest, records, safeScreenshots, undefined, sizes);
-  await runDir.writeFileAtomic(EVIDENCE_SHARE_REPORT, renderEvidenceHtml(manifest, records, new Set(share.hashes.keys()), share, shareSizes));
+  await runDir.writeFileAtomic(EVIDENCE_SHARE_REPORT, renderEvidenceHtml(manifest, records, new Set(share.hashes.keys()), share, sizes));
   await runDir.writeFileAtomic(EVIDENCE_REPORT, html);
   await runDir.writeFileAtomic(
     "manifest.json", `${JSON.stringify(manifest, null, 2)}\n`,

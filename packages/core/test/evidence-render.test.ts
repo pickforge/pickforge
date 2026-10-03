@@ -1328,9 +1328,12 @@ describe("pointer markers against the PNG on disk", () => {
     actionId: name, inputState: "completed", target: { x: 1, y: 1, coordinateSpace: "xvfb-root" },
     artifacts: [`screenshots/${name}.png`], captures: [{ path: `screenshots/${name}.png`, phase: "after", width, height }],
   });
-  it("marks only captures whose link size equals the actual PNG header", async () => {
+  it("marks only captures whose link size equals a fully valid PNG", async () => {
     const png = encodePng(4, 3, Buffer.alloc(36));
-    const files = { "match.png": png, "cropped.png": encodePng(3, 3, Buffer.alloc(27)), "text.png": Buffer.from("not a png"), "short.png": png.subarray(0, 20) };
+    const files = {
+      "match.png": png, "cropped.png": encodePng(3, 3, Buffer.alloc(27)), "text.png": Buffer.from("not a png"),
+      "short.png": png.subarray(0, 20), "header.png": png.subarray(0, 33),
+    };
     const records = Object.keys(files).map((file, index) =>
       ({ ...pointerAction(file.slice(0, -4)), startedAt: `2026-07-13T12:00:0${index}.000Z` }));
     const { run } = await exportFixture(records, files);
@@ -1345,8 +1348,37 @@ describe("pointer markers against the PNG on disk", () => {
       expect(html.split("Pointer: click at 1, 1 · after · completed").length - 1).toBe(2);
     }
     const local = fs.readFileSync(path.join(run.dir, EVIDENCE_REPORT), "utf8");
-    for (const name of ["cropped", "text", "short"]) expect(local).toContain(`<span class="stage"><img src="screenshots/${name}.png"`);
+    for (const name of ["cropped", "text", "short", "header"]) expect(local).toContain(`<span class="stage"><img src="screenshots/${name}.png"`);
+    const shared = fs.readFileSync(path.join(run.dir, EVIDENCE_SHARE_REPORT), "utf8");
+    for (const name of ["short", "header"]) expect(shared).toContain(`screenshots/${name}.png: Incomplete or corrupt PNG`);
     Object.keys(files).forEach((name, index) => expect(fs.readFileSync(path.join(run.dir, "screenshots", name))).toEqual(originals[index]));
+  });
+
+  it("keeps a valid PNG marked in report.html when the share report omits it at the total cap", async () => {
+    const fillers = Array.from({ length: 8 }, (_, index) => `fill-${index}.png`);
+    const files = Object.fromEntries([...fillers, "late.png"].map((name) => [name, FIXTURE_PNG]));
+    const records = [action({ artifacts: fillers.map((name) => `screenshots/${name}`) }),
+      { ...pointerAction("late"), startedAt: "2026-07-13T12:00:09.000Z" }];
+    const { run } = await exportFixture(records, files);
+    // One reusable full-size 4x3 PNG, made unique per read; base64 is stubbed as in the cap test.
+    const padding = Buffer.alloc(MAX_SHARE_IMAGE_BYTES - encodePng(4, 3, Buffer.alloc(36)).length - 12);
+    const image = encodePng(4, 3, Buffer.alloc(36), [{ type: "pfGx", data: padding }]);
+    const dataEnd = 41 + image.readUInt32BE(33);
+    expect(image.length).toBe(MAX_SHARE_IMAGE_BYTES);
+    image.toString = (encoding, start, end) => encoding === "base64"
+      ? FIXTURE_PNG.toString("base64")
+      : Buffer.prototype.toString.call(image, encoding, start, end);
+    let index = 0;
+    const read = vi.spyOn(await import("../src/bounded-read.js"), "readBoundedFileIn").mockImplementation(async () => {
+      image[dataEnd - 1] = index;
+      image.writeUInt32BE(crc32(image.subarray(37, dataEnd)) >>> 0, dataEnd);
+      index += 1;
+      return image;
+    });
+    try { await writeEvidenceReport(run); } finally { read.mockRestore(); }
+    expect(fs.readFileSync(path.join(run.dir, EVIDENCE_SHARE_REPORT), "utf8")).toContain("screenshots/late.png: Over total image cap (256.0 MiB)");
+    const local = fs.readFileSync(path.join(run.dir, EVIDENCE_REPORT), "utf8");
+    expect(local).toContain('<span class="stage framed"><span class="image-frame" style="--w:4;--h:3"><img src="screenshots/late.png"');
   });
 
   it("renders each report unmarked when no capture size matches", async () => {
