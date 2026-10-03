@@ -328,6 +328,41 @@ async function stopUnrecordedBrowser(spawned: SpawnedBrowser): Promise<boolean> 
   });
 }
 
+function withBrowserIdentity(record: ViewerLaunchRecord, pid: number): ViewerLaunchRecord {
+  return { ...record, pid, startTicks: readProcessIdentity(pid)?.startTicks };
+}
+
+/**
+ * Record the spawned browser's identity. If that fails, stop the browser.
+ * If it may survive, retry the record so teardown can still find the group
+ * before it removes the profile.
+ */
+async function recordSpawnedBrowser(
+  record: ViewerLaunchRecord,
+  spawned: SpawnedBrowser,
+  registryEnv: NodeJS.ProcessEnv | undefined,
+): Promise<ViewerLaunchRecord> {
+  const recorded = withBrowserIdentity(record, spawned.pid);
+  try {
+    await writeViewerLaunchRecord(recorded, registryEnv);
+    return recorded;
+  } catch (error) {
+    // Teardown cannot find an unrecorded browser, so do not leave one.
+    if (await stopUnrecordedBrowser(spawned)) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    const kept = await writeViewerLaunchRecord(withBrowserIdentity(record, spawned.pid), registryEnv).then(
+      () => true,
+      () => false,
+    );
+    if (kept) throw new ViewerLaunchKeptError(message, { cause: error });
+    throw new ViewerLaunchKeptError(
+      `${message}; the viewer browser (pid ${spawned.pid}) could not be stopped ` +
+        `and must be closed by hand`,
+      { cause: error },
+    );
+  }
+}
+
 function hyprlandLaunch(ctx: HyprlandContext, launchId: string): ViewerHyprlandLaunch {
   return {
     ...ctx,
@@ -399,19 +434,7 @@ async function startLocked(
     await writeViewerLaunchRecord(record, opts.registryEnv);
     if (guard.signal !== undefined) throw new ViewerInterruptedError(guard.signal);
     const spawned = await spawnBrowser(opts.browser, args, env, guard);
-    const recorded = { ...record, pid: spawned.pid, startTicks: readProcessIdentity(spawned.pid)?.startTicks };
-    try {
-      await writeViewerLaunchRecord(recorded, opts.registryEnv);
-    } catch (error) {
-      // Teardown cannot find an unrecorded browser, so do not leave one.
-      if (await stopUnrecordedBrowser(spawned)) throw error;
-      const message = error instanceof Error ? error.message : String(error);
-      throw new ViewerLaunchKeptError(
-        `${message}; the viewer browser (pid ${spawned.pid}) could not be stopped ` +
-          `and must be closed by hand`,
-        { cause: error },
-      );
-    }
+    const recorded = await recordSpawnedBrowser(record, spawned, opts.registryEnv);
     return { record: recorded, spawned };
   } catch (error) {
     if (hyprland !== undefined) await disableViewerRule(hyprland, hyprland.ruleName);

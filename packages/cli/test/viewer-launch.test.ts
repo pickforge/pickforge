@@ -420,7 +420,10 @@ describe("launchViewerWindow", () => {
 
   it("keeps the profile and asks for a manual close when the unrecorded browser may survive", async () => {
     fakes.setBrowser({});
-    writeViewerLaunchRecord.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("disk full"));
+    writeViewerLaunchRecord
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("disk full"))
+      .mockRejectedValueOnce(new Error("disk full"));
     stopOwnedDaemonGroup.mockResolvedValueOnce(false);
 
     await expect(launchViewerWindow(options())).rejects.toThrow(
@@ -430,6 +433,34 @@ describe("launchViewerWindow", () => {
     spawnedPids.push(records()[1]?.pid as number);
     expect(removeViewerLaunch).not.toHaveBeenCalled();
   });
+
+  it("records the pid on retry so teardown keeps the profile while the browser group lives", async () => {
+    const actual = await vi.importActual<typeof import("@pickforge/lab-desktop-linux")>("@pickforge/lab-desktop-linux");
+    const core = await vi.importActual<typeof import("@pickforge/lab-core")>("@pickforge/lab-core");
+    const registryEnv = { PICKFORGE_HOME: path.join(root, "home") };
+    const sessionId = (
+      await core.createSession({ type: "desktop", status: "running", projectDir: root, desktop: { display: ":991" } }, registryEnv)
+    ).id;
+    prepareViewerLaunch.mockImplementation(actual.prepareViewerLaunch);
+    writeViewerLaunchRecord.mockImplementation(actual.writeViewerLaunchRecord);
+    removeViewerLaunch.mockImplementation(actual.removeViewerLaunch);
+    writeViewerLaunchRecord
+      .mockImplementationOnce(actual.writeViewerLaunchRecord)
+      .mockRejectedValueOnce(new Error("disk full"));
+    stopOwnedDaemonGroup.mockResolvedValueOnce(false);
+    fakes.setBrowser({});
+
+    await expect(launchViewerWindow(options({ sessionId, registryEnv }))).rejects.toThrow(/^disk full/);
+
+    const pid = records()[1]?.pid as number;
+    spawnedPids.push(pid);
+    expect(records()[2]?.pid).toBe(pid);
+    const launchId = records()[1]?.launchId as string;
+    const kept = await actual.readViewerLaunchRecord(sessionId, launchId, registryEnv);
+    expect(kept?.pid).toBe(pid);
+    await expect(actual.removeViewerLaunch(sessionId, launchId, registryEnv)).rejects.toThrow();
+    expect(fs.existsSync(records()[1]?.profileDir as string)).toBe(true);
+  }, 20_000);
 
   it("checks the session and starts the browser under the session lock, then places it unlocked", async () => {
     withSessionVncLock.mockImplementation(
