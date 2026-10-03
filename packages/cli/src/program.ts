@@ -1,4 +1,3 @@
-import { runViewerBridge } from "./commands/viewer-bridge.js";
 import { createRequire } from "node:module";
 import { Command, Option } from "commander";
 import type { PickforgeProfile, SessionType } from "@pickforge/lab-core";
@@ -56,6 +55,7 @@ import {
 import { runSetupAndroid } from "./commands/setup-android.js";
 import { runSetupLabUser } from "./commands/setup-lab-user.js";
 import { runTakeoverStatus, runTakeoverWatchdog } from "./commands/takeover.js";
+import { runViewerBridge } from "./commands/viewer-bridge.js";
 import { runWatch } from "./commands/watch.js";
 
 const require = createRequire(import.meta.url);

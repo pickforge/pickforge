@@ -1,4 +1,3 @@
-import { stopSessionViewer } from "./viewer-state.js";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -57,6 +56,7 @@ import {
   type VncHandle,
   type VncPartialStart,
 } from "./vnc.js";
+import { stopSessionViewer } from "./viewer-state.js";
 
 export interface CreateDesktopSessionOptions {
   projectDir: string;
