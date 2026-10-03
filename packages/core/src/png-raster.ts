@@ -9,7 +9,7 @@ import {
 } from "./evidence-glyph-style.js";
 import type { GlyphPart, GlyphPoint, PointerGlyph } from "./evidence-glyphs.js";
 
-/** Each RGBA or scanline buffer is bounded to about 32 MiB. */
+/** RGBA buffers are capped at 32 MiB; filtered scanlines at 72 MiB. */
 export const MAX_RASTER_PIXELS = 8 * 1024 * 1024;
 export interface PngRaster {
   width: number;
@@ -39,28 +39,162 @@ function paeth(a: number, b: number, c: number): number {
   return da <= db && da <= dc ? a : db <= dc ? b : c;
 }
 
-function unfilter(raw: Buffer, width: number, height: number, channels: number): Buffer {
-  const stride = width * channels;
-  const decoded = Buffer.alloc(stride * height);
+function unfilter(raw: Buffer, stride: number, height: number, channels: number): Buffer {
   for (let y = 0; y < height; y += 1) {
-    const row = y * stride;
     const input = y * (stride + 1);
+    const row = input + 1;
     const filter = raw[input]!;
     if (filter > 4) {
       throw new Error("Unsupported PNG row filter");
     }
     for (let x = 0; x < stride; x += 1) {
-      const a = x >= channels ? decoded[row + x - channels]! : 0;
-      const b = y > 0 ? decoded[row + x - stride]! : 0;
-      const c = y > 0 && x >= channels ? decoded[row + x - stride - channels]! : 0;
+      const a = x >= channels ? raw[row + x - channels]! : 0;
+      const b = y > 0 ? raw[row + x - stride - 1]! : 0;
+      const c = y > 0 && x >= channels ? raw[row + x - stride - 1 - channels]! : 0;
       const predictor = [0, a, b, Math.floor((a + b) / 2), paeth(a, b, c)][filter]!;
-      decoded[row + x] = (raw[input + x + 1]! + predictor) & 255;
+      raw[row + x] = (raw[input + x + 1]! + predictor) & 255;
     }
   }
-  return decoded;
+  return raw;
 }
 
-/** Decode 8-bit RGB/RGBA, non-interlaced PNGs. Other layouts fail explicitly. */
+interface PngLayout {
+  width: number;
+  height: number;
+  depth: number;
+  color: number;
+  samples: number;
+  palette?: Buffer;
+  transparent?: Buffer;
+  compressed: Buffer[];
+}
+interface PngPass {
+  x: number;
+  y: number;
+  dx: number;
+  dy: number;
+  width: number;
+  height: number;
+  stride: number;
+}
+
+function pngLayout(bytes: Buffer): PngLayout {
+  const color = bytes[25]!;
+  const layout: PngLayout = {
+    width: bytes.readUInt32BE(16),
+    height: bytes.readUInt32BE(20),
+    depth: bytes[24]!,
+    color,
+    samples: ({ 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 } as Record<number, number>)[color]!,
+    compressed: [],
+  };
+  for (let offset = 8; offset < bytes.length;) {
+    const length = bytes.readUInt32BE(offset);
+    const type = bytes.toString("ascii", offset + 4, offset + 8);
+    const data = bytes.subarray(offset + 8, offset + 8 + length);
+    if (type === "IDAT") {
+      layout.compressed.push(data);
+    } else if (type === "PLTE") {
+      layout.palette = data;
+    } else if (type === "tRNS") {
+      layout.transparent = data;
+    }
+    offset += 12 + length;
+  }
+  return layout;
+}
+
+function pngPasses(layout: PngLayout, interlaced: boolean): PngPass[] {
+  const steps = interlaced
+    ? [
+        [0, 0, 8, 8],
+        [4, 0, 8, 8],
+        [0, 4, 4, 8],
+        [2, 0, 4, 4],
+        [0, 2, 2, 4],
+        [1, 0, 2, 2],
+        [0, 1, 1, 2],
+      ]
+    : [[0, 0, 1, 1]];
+  return steps
+    .map(([x, y, dx, dy]) => {
+      const width = Math.max(0, Math.ceil((layout.width - x!) / dx!));
+      const height = Math.max(0, Math.ceil((layout.height - y!) / dy!));
+      return {
+        x: x!,
+        y: y!,
+        dx: dx!,
+        dy: dy!,
+        width,
+        height,
+        stride: Math.ceil((width * layout.samples * layout.depth) / 8),
+      };
+    })
+    .filter((pass) => pass.width > 0 && pass.height > 0);
+}
+
+function sample(row: Buffer, index: number, depth: number): number {
+  if (depth === 16) {
+    return row.readUInt16BE(index * 2);
+  }
+  if (depth === 8) {
+    return row[index]!;
+  }
+  const bit = index * depth;
+  return (row[Math.floor(bit / 8)]! >> (8 - depth - (bit % 8))) & ((1 << depth) - 1);
+}
+
+function indexedPixel(index: number, layout: PngLayout): number[] {
+  const palette = layout.palette;
+  if (palette === undefined || palette.length % 3 !== 0 || palette.length > 768) {
+    throw new Error("Invalid PNG palette");
+  }
+  if (index * 3 + 2 >= palette.length) {
+    throw new Error("PNG palette index out of range");
+  }
+  return [
+    palette[index * 3]!,
+    palette[index * 3 + 1]!,
+    palette[index * 3 + 2]!,
+    layout.transparent?.[index] ?? 255,
+  ];
+}
+
+function rgbaSample(values: number[], layout: PngLayout): number[] {
+  if (layout.color === 3) {
+    return indexedPixel(values[0]!, layout);
+  }
+  // Scale the full sample range, rounding 16-bit values to the nearest byte.
+  const maximum = 2 ** layout.depth - 1;
+  const scaled = values.map((value) => Math.round((value * 255) / maximum));
+  const gray = layout.color === 0 || layout.color === 4;
+  const rgb = gray ? [scaled[0]!, scaled[0]!, scaled[0]!] : scaled.slice(0, 3);
+  if (layout.color === 4 || layout.color === 6) {
+    return [...rgb, scaled.at(-1)!];
+  }
+  const transparent = layout.transparent;
+  const hidden =
+    transparent?.length === (gray ? 2 : 6) &&
+    values.every((value, i) => value === transparent.readUInt16BE(i * 2));
+  return [...rgb, hidden ? 0 : 255];
+}
+
+function decodePass(raw: Buffer, pass: PngPass, layout: PngLayout, pixels: Buffer): void {
+  const bpp = Math.max(1, Math.ceil((layout.samples * layout.depth) / 8));
+  const decoded = unfilter(raw, pass.stride, pass.height, bpp);
+  for (let y = 0; y < pass.height; y += 1) {
+    const row = decoded.subarray(y * (pass.stride + 1) + 1, (y + 1) * (pass.stride + 1));
+    for (let x = 0; x < pass.width; x += 1) {
+      const values = Array.from({ length: layout.samples }, (_, i) =>
+        sample(row, x * layout.samples + i, layout.depth),
+      );
+      const index = ((pass.y + y * pass.dy) * layout.width + pass.x + x * pass.dx) * 4;
+      pixels.set(rgbaSample(values, layout), index);
+    }
+  }
+}
+
+/** Decode all PNG colour depths and Adam7 passes into bounded RGBA8 buffers. */
 export function decodePng(bytes: Buffer): PngRaster {
   if (bytes.length > MAX_SHARE_IMAGE_BYTES) {
     throw new Error("PNG exceeds compressed byte cap");
@@ -74,44 +208,24 @@ export function decodePng(bytes: Buffer): PngRaster {
   if (completePngSize(bytes) === undefined) {
     throw new Error("Invalid PNG");
   }
-  const color = bytes[25];
-  if (bytes[24] !== 8 || (color !== 2 && color !== 6) || bytes[28] !== 0) {
-    throw new Error("Unsupported PNG raster layout");
+  const layout = pngLayout(bytes);
+  const passes = pngPasses(layout, bytes[28] === 1);
+  const length = passes.reduce((sum, pass) => sum + pass.height * (pass.stride + 1), 0);
+  if (length > 9 * MAX_RASTER_PIXELS) {
+    throw new Error("PNG exceeds scanline memory cap");
   }
-  const channels = color === 2 ? 3 : 4;
-  const parts: Buffer[] = [];
-  let transparent: Buffer | undefined;
-  for (let offset = 8; offset < bytes.length;) {
-    const length = bytes.readUInt32BE(offset);
-    const type = bytes.toString("ascii", offset + 4, offset + 8);
-    const data = bytes.subarray(offset + 8, offset + 8 + length);
-    if (type === "IDAT") {
-      parts.push(data);
-    }
-    if (type === "tRNS") {
-      transparent = data;
-    }
-    offset += 12 + length;
+  const raw = inflateSync(Buffer.concat(layout.compressed), { maxOutputLength: length });
+  if (raw.length !== length) {
+    throw new Error("Invalid PNG scanline length");
   }
-  const raw = inflateSync(Buffer.concat(parts), {
-    maxOutputLength: height * (width * channels + 1),
-  });
-  const decoded = unfilter(raw, width, height, channels);
-  return { width, height, pixels: rgbaPixels(decoded, channels, transparent) };
-}
-
-function rgbaPixels(decoded: Buffer, channels: number, transparent: Buffer | undefined): Buffer {
-  const count = decoded.length / channels;
-  const pixels = Buffer.alloc(count * 4);
-  for (let i = 0; i < count; i += 1) {
-    decoded.copy(pixels, i * 4, i * channels, i * channels + 3);
-    const transparentRgb =
-      channels === 3 &&
-      transparent?.length === 6 &&
-      [0, 1, 2].every((c) => decoded[i * channels + c] === transparent!.readUInt16BE(c * 2));
-    pixels[i * 4 + 3] = channels === 4 ? decoded[i * 4 + 3]! : transparentRgb ? 0 : 255;
+  const pixels = Buffer.alloc(width * height * 4);
+  let offset = 0;
+  for (const pass of passes) {
+    const end = offset + pass.height * (pass.stride + 1);
+    decodePass(raw.subarray(offset, end), pass, layout, pixels);
+    offset = end;
   }
-  return pixels;
+  return { width, height, pixels };
 }
 
 function chunk(type: string, data: Buffer): Buffer {
@@ -151,6 +265,7 @@ export function encodePng(raster: PngRaster): Buffer {
 type Geometry = {
   bounds: [number, number, number, number];
   distance: (x: number, y: number) => number;
+  distanceBound?: (x: number, y: number) => number;
 };
 const dashOn = (length: number) => {
   const period = GLYPH_DASH[0] + GLYPH_DASH[1];
@@ -192,6 +307,12 @@ function strokes(points: GlyphPoint[], dashed: boolean, butt = dashed): Geometry
       Math.max(...points.map((p) => p.x)),
       Math.max(...points.map((p) => p.y)),
     ],
+    distanceBound: (x, y) =>
+      Math.min(
+        ...points
+          .slice(1)
+          .map((to, i) => segment(points[i]!, to, x, y).distance - GLYPH_STROKE_WIDTH / 2),
+      ),
     distance: (x, y) => {
       let best = Infinity;
       let offset = 0;
@@ -240,6 +361,13 @@ function box(
     });
   return {
     bounds: edges.bounds,
+    distanceBound: (px, py) =>
+      Math.min(
+        edges.distanceBound!(px, py),
+        ...points
+          .slice(0, 4)
+          .map((p) => Math.max(Math.abs(px - p.x), Math.abs(py - p.y)) - GLYPH_STROKE_WIDTH / 2),
+      ),
     distance: (px, py) =>
       Math.min(
         edges.distance(px, py),
@@ -290,6 +418,10 @@ function geometry(part: GlyphPart): Geometry {
     const { at, radius } = part;
     return {
       bounds: [at.x - radius, at.y - radius, at.x + radius, at.y + radius],
+      distanceBound: (x, y) =>
+        part.shape === "dot"
+          ? Math.hypot(x - at.x, y - at.y) - radius
+          : Math.abs(Math.hypot(x - at.x, y - at.y) - radius) - GLYPH_STROKE_WIDTH / 2,
       distance: (x, y) => {
         const dx = x - at.x;
         const dy = y - at.y;
@@ -371,6 +503,11 @@ function drawLayer(raster: PngRaster, shape: Geometry, color: string, expansion:
       x < Math.min(raster.width, Math.ceil(right + margin));
       x += 1
     ) {
+      // Dash gaps are discontinuous. Use the continuous stroke as a lower bound.
+      const bound = shape.distanceBound ?? shape.distance;
+      if (bound(x + 0.5, y + 0.5) > expansion + 1) {
+        continue;
+      }
       const coverage = sampleCoverage(shape, x, y, expansion);
       if (coverage > 0) {
         blend(raster.pixels, (y * raster.width + x) * 4, rgb, coverage);

@@ -4,6 +4,7 @@ import {
   EVIDENCE_ACTION_LOG,
   EVIDENCE_REPORT,
   exportEvidenceRun,
+  exportFrameMilliseconds,
   evidenceShareReportInfo,
   latestOutcome,
   recordEvidenceOutcome,
@@ -48,6 +49,14 @@ export async function runArtifactsList(opts: BaseCliOptions): Promise<number> {
   });
 }
 
+function parseExportFrameMs(value: string | undefined): number {
+  try {
+    return exportFrameMilliseconds(value === undefined ? undefined : Number(value));
+  } catch (error) {
+    throw new Error(`--frame-ms: ${(error as Error).message}`);
+  }
+}
+
 export async function runArtifactsExport(
   runId: string | undefined,
   opts: BaseCliOptions & {
@@ -69,7 +78,7 @@ export async function runArtifactsExport(
     const { entry } = await findRun(projectDir, runId, catalog);
     const result = await exportEvidenceRun(catalog, entry, {
       video: opts.video,
-      frameMs: opts.frameMs === undefined ? undefined : Number(opts.frameMs),
+      frameMs: parseExportFrameMs(opts.frameMs),
     });
     return {
       data: { ...result },

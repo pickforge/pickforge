@@ -55,6 +55,7 @@ interface PngOptions {
   depth?: number;
   interlace?: number;
   transparency?: Buffer;
+  palette?: Buffer;
 }
 function png(raw: Buffer, width: number, height: number, options: PngOptions = {}): Buffer {
   const { color = 2, depth = 8, interlace = 0, transparency } = options;
@@ -67,6 +68,7 @@ function png(raw: Buffer, width: number, height: number, options: PngOptions = {
   return Buffer.concat([
     PNG_SIGNATURE,
     chunk("IHDR", header),
+    ...(options.palette ? [chunk("PLTE", options.palette)] : []),
     ...(transparency ? [chunk("tRNS", transparency)] : []),
     chunk("IDAT", deflateSync(raw)),
     chunk("IEND", Buffer.alloc(0)),
@@ -98,14 +100,11 @@ it("decodes RGB and every PNG filter, including transparent RGB", () => {
     decodePng(png(Buffer.from([0, 20, 30, 40]), 1, 1, { transparency: transparent })).pixels[3],
   ).toBe(0);
 });
-it("rejects corrupt, unsupported and excessive inputs", () => {
+it("rejects corrupt and excessive inputs", () => {
   expect(() => decodePng(Buffer.from("invalid"))).toThrow("Invalid PNG");
   const invalid = encodePng(raster(1, 1));
   invalid[invalid.length - 1] ^= 1;
   expect(() => decodePng(invalid)).toThrow("Invalid PNG");
-  expect(() => decodePng(png(Buffer.from([0, 1]), 1, 1, { color: 0 }))).toThrow(
-    "Unsupported PNG raster layout",
-  );
   expect(() => decodePng(png(Buffer.from([5, 1, 2, 3]), 1, 1))).toThrow("filter");
   expect(() => assertRasterSize(MAX_RASTER_PIXELS + 1, 1)).toThrow("cap");
   expect(() => assertRasterSize(0, 1)).toThrow();
@@ -263,4 +262,226 @@ it("limits fill halos to half the halo-stroke width, with round polygon joins", 
   expect(rgb(arrow, 16, 20)).toBe("#FFFFFF");
   expect(rgb(arrow, 30, 20)).not.toBe("#FFFFFF"); // Round halo at the triangle tip.
   expect(rgb(arrow, 31, 20)).toBe("#FFFFFF");
+});
+
+function sampleRow(values: number[], depth: number): Buffer {
+  const row = Buffer.alloc(Math.ceil((values.length * depth) / 8));
+  values.forEach((value, i) => {
+    if (depth === 16) {
+      row.writeUInt16BE(value, i * 2);
+    } else if (depth === 8) {
+      row[i] = value;
+    } else {
+      row[Math.floor((i * depth) / 8)]! |= value << (8 - depth - ((i * depth) % 8));
+    }
+  });
+  return Buffer.concat([Buffer.from([0]), row]);
+}
+
+it.each([1, 2, 4, 8, 16])("decodes grayscale depth %i and transparent samples", (depth) => {
+  const max = 2 ** depth - 1;
+  const transparent = Buffer.alloc(2);
+  transparent.writeUInt16BE(max);
+  const bytes = png(sampleRow([0, max, 0], depth), 3, 1, {
+    color: 0,
+    depth,
+    transparency: transparent,
+  });
+  expect([...decodePng(bytes).pixels]).toEqual([0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0, 255]);
+});
+
+it.each([1, 2, 4, 8])("decodes indexed depth %i with palette transparency", (depth) => {
+  const bytes = png(sampleRow([0, 1, 0], depth), 3, 1, {
+    color: 3,
+    depth,
+    palette: Buffer.from([10, 20, 30, 80, 90, 100]),
+    transparency: Buffer.from([128, 0]),
+  });
+  expect([...decodePng(bytes).pixels]).toEqual([10, 20, 30, 128, 80, 90, 100, 0, 10, 20, 30, 128]);
+  const opaque = png(sampleRow([1], depth), 1, 1, {
+    color: 3,
+    depth,
+    palette: Buffer.from([10, 20, 30, 80, 90, 100]),
+  });
+  expect([...decodePng(opaque).pixels]).toEqual([80, 90, 100, 255]);
+});
+
+it.each([
+  [4, 8],
+  [4, 16],
+  [2, 16],
+  [6, 16],
+])("decodes colour %i at depth %i", (color, depth) => {
+  const max = 2 ** depth - 1;
+  const values = color === 4 ? [max, 0] : color === 2 ? [max, 0, max] : [max, 0, max, 0];
+  const bytes = png(sampleRow(values, depth), 1, 1, { color, depth });
+  const expected = color === 4 ? [255, 255, 255, 0] : [255, 0, 255, color === 2 ? 255 : 0];
+  expect([...decodePng(bytes).pixels]).toEqual(expected);
+});
+
+function adam7Rows(width: number, height: number, depth: number): Buffer {
+  const steps = [
+    [0, 0, 8, 8],
+    [4, 0, 8, 8],
+    [0, 4, 4, 8],
+    [2, 0, 4, 4],
+    [0, 2, 2, 4],
+    [1, 0, 2, 2],
+    [0, 1, 1, 2],
+  ];
+  const rows: Buffer[] = [];
+  for (const [startX, startY, dx, dy] of steps) {
+    for (let y = startY!; y < height; y += dy!) {
+      const values: number[] = [];
+      for (let x = startX!; x < width; x += dx!) {
+        values.push((x + y) % 2 === 0 ? 0 : 2 ** depth - 1);
+      }
+      if (values.length > 0) {
+        rows.push(sampleRow(values, depth));
+      }
+    }
+  }
+  return Buffer.concat(rows);
+}
+
+it.each([1, 2, 4, 8, 16])(
+  "scatters all Adam7 passes at depth %i, including empty passes",
+  (depth) => {
+    for (const [width, height] of [
+      [9, 9],
+      [1, 1],
+      [2, 3],
+    ]) {
+      const bytes = png(adam7Rows(width!, height!, depth), width!, height!, {
+        depth,
+        color: 0,
+        interlace: 1,
+      });
+      const decoded = decodePng(bytes);
+      for (let y = 0; y < height!; y += 1) {
+        for (let x = 0; x < width!; x += 1) {
+          expect(rgb(decoded, x, y)).toBe((x + y) % 2 === 0 ? "#000000" : "#FFFFFF");
+        }
+      }
+    }
+  },
+);
+
+it("rejects missing palettes, invalid indices and truncated scanlines", () => {
+  expect(() => decodePng(png(Buffer.from([0, 0]), 1, 1, { color: 3 }))).toThrow("palette");
+  expect(() =>
+    decodePng(
+      png(Buffer.from([0, 1]), 1, 1, {
+        color: 3,
+        palette: Buffer.from([0, 0, 0]),
+      }),
+    ),
+  ).toThrow("index");
+  expect(() => decodePng(png(Buffer.from([0]), 1, 1))).toThrow();
+});
+
+it("decodes real ImageMagick convert grayscale1 and RGB16 images", () => {
+  // convert -size 2x2 xc:black -depth 1 -strip png:-.
+  const grayscale = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACAQAAAABazTCJAAAADElEQVQI12NgYGAAAAAEAAEn" +
+      "NCcKAAAAAElFTkSuQmCC",
+    "base64",
+  );
+  expect(grayscale[24]).toBe(1);
+  expect(decodePng(grayscale).pixels).toEqual(
+    Buffer.from([0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255]),
+  );
+  // convert -size 2x1 xc:red -depth 16 PNG48:-.
+  const converted = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABEAIAAAAr0DSeAAAAIGNIUk0AAHomAACAhAAA+gAAAIDo" +
+      "AAB1MAAA6mAAADqYAAAXcJy6UTwAAAAGYktHRP///////wlY99wAAAAldEVYdGRhdGU6Y3Jl" +
+      "YXRlADIwMjYtMTAtMDNUMTk6MDg6MzQrMDA6MDBBTztcAAAAJXRFWHRkYXRlOm1vZGlmeQAy" +
+      "MDI2LTEwLTAzVDE5OjA4OjM0KzAwOjAwMBKD4AAAACh0RVh0ZGF0ZTp0aW1lc3RhbXAAMjAy" +
+      "Ni0xMC0wM1QxOTowODozNCswMDowMGcHoj8AAAANSURBVAjXY/z/nwEOABcDAgAtuq71AAAA" +
+      "AElFTkSuQmCC",
+    "base64",
+  );
+  expect(converted[24]).toBe(16);
+  expect([...decodePng(converted).pixels]).toEqual([255, 0, 0, 255, 255, 0, 0, 255]);
+});
+
+function colorAdam7Rows(options: PngOptions): Buffer {
+  const steps = [
+    [0, 0, 8, 8],
+    [4, 0, 8, 8],
+    [0, 4, 4, 8],
+    [2, 0, 4, 4],
+    [0, 2, 2, 4],
+    [1, 0, 2, 2],
+    [0, 1, 1, 2],
+  ];
+  const depth = options.depth!;
+  const maximum = 2 ** depth - 1;
+  const values =
+    options.color === 3
+      ? [1]
+      : options.color === 4
+        ? [maximum, 0]
+        : options.color === 6
+          ? [maximum, 0, maximum, 0]
+          : [maximum, 0, maximum];
+  const rows: Buffer[] = [];
+  for (const [x, y, dx, dy] of steps) {
+    const count = Math.max(0, Math.ceil((9 - x!) / dx!));
+    for (let row = y!; row < 9; row += dy!) {
+      if (count > 0) {
+        rows.push(sampleRow(Array.from({ length: count }, () => values).flat(), depth));
+      }
+    }
+  }
+  return Buffer.concat(rows);
+}
+
+it.each([
+  [2, 8],
+  [2, 16],
+  [4, 8],
+  [4, 16],
+  [6, 8],
+  [6, 16],
+  [3, 1],
+  [3, 2],
+  [3, 4],
+  [3, 8],
+])("decodes Adam7 colour %i depth %i with multiple samples and palette alpha", (color, depth) => {
+  const options = {
+    color,
+    depth,
+    interlace: 1,
+    palette: Buffer.from([0, 0, 0, 255, 0, 255]),
+    transparency: Buffer.from([255, 0]),
+  };
+  const decoded = decodePng(png(colorAdam7Rows(options), 9, 9, options));
+  const expected = color === 4 ? [255, 255, 255, 0] : [255, 0, 255, color === 2 ? 255 : 0];
+  for (let index = 0; index < decoded.pixels.length; index += 4) {
+    expect([...decoded.pixels.subarray(index, index + 4)]).toEqual(expected);
+  }
+  expect(decodePng(encodePng(decoded))).toEqual(decoded);
+});
+
+it("uses byte filter spacing for packed grayscale and RGB16 samples", () => {
+  const packed = decodePng(png(Buffer.from([1, 0xaa, 0xab]), 16, 1, { color: 0, depth: 1 }));
+  expect(Array.from(packed.pixels.filter((_, i) => i % 4 === 0))).toEqual([
+    255, 0, 255, 0, 255, 0, 255, 0, 0, 255, 0, 255, 0, 255, 0, 255,
+  ]);
+  const raw = Buffer.from([1, 255, 255, 0, 0, 255, 255, 0, 0, 0, 0, 0, 0]);
+  expect([...decodePng(png(raw, 2, 1, { depth: 16 })).pixels]).toEqual([
+    255, 0, 255, 255, 255, 0, 255, 255,
+  ]);
+});
+
+it("rounds 16-bit samples and compares transparency before downsampling", () => {
+  const transparency = Buffer.alloc(2);
+  transparency.writeUInt16BE(257);
+  const bytes = png(sampleRow([257, 258, 32768], 16), 3, 1, {
+    color: 0,
+    depth: 16,
+    transparency,
+  });
+  expect([...decodePng(bytes).pixels]).toEqual([1, 1, 1, 0, 1, 1, 1, 255, 128, 128, 128, 255]);
 });

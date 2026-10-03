@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { DirHandle } from "./dir-handle.js";
 import { withDirHandle } from "./dir-handle.js";
 import {
@@ -20,7 +20,7 @@ import {
   readShareScreenshot,
   type PngSize,
 } from "./evidence-png.js";
-import { sanitizeCaptureLinks } from "./evidence-sanitize.js";
+import { sanitizeCaptureLinks, sanitizeErrorText } from "./evidence-sanitize.js";
 import { POINTER_GLYPH_VERSION, runPointerGlyphs, type PointerGlyph } from "./evidence-glyphs.js";
 import { assertRasterSize, decodePng, drawPointerGlyph, encodePng } from "./png-raster.js";
 import { createPointerTrack } from "./pointer-track.js";
@@ -92,7 +92,7 @@ const sha256 = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex
 
 export function exportFrameMilliseconds(value: number = DEFAULT_EXPORT_FRAME_MS): number {
   if (!Number.isSafeInteger(value) || value < 40 || value > 60_000) {
-    throw new Error("--frame-ms must be an integer from 40 to 60000");
+    throw new Error("frame duration must be an integer from 40 to 60000");
   }
   return value;
 }
@@ -133,11 +133,6 @@ async function readSource(
 function validatedSize(bytes: Buffer): PngSize | string {
   if (bytes.length < 33 || !bytes.subarray(0, 8).equals(PNG_SIGNATURE)) {
     return "Corrupt PNG";
-  }
-  try {
-    assertRasterSize(bytes.readUInt32BE(16), bytes.readUInt32BE(20));
-  } catch {
-    return "Over raster pixel cap or invalid dimensions";
   }
   return completePngSize(bytes) ?? "Corrupt PNG";
 }
@@ -184,6 +179,257 @@ export function slideshowSize(frames: readonly Pick<ExportFrame, "size">[]): Png
   return { width: Math.ceil((width * scale) / 2) * 2, height: Math.ceil((height * scale) / 2) * 2 };
 }
 
+interface PinnedFrame {
+  frame: ExportFrame;
+  file: fs.promises.FileHandle;
+  identity: fs.Stats;
+}
+
+async function hashDescriptor(file: fs.promises.FileHandle): Promise<string> {
+  const hash = createHash("sha256");
+  const buffer = Buffer.alloc(64 * 1024);
+  let position = 0;
+  for (;;) {
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, position);
+    if (bytesRead === 0) {
+      return hash.digest("hex");
+    }
+    position += bytesRead;
+    if (position > 64 * 1024 * 1024) {
+      throw new Error("Exported frame exceeds byte cap");
+    }
+    hash.update(buffer.subarray(0, bytesRead));
+  }
+}
+
+async function verifyPinnedFrame(dir: DirHandle, pinned: PinnedFrame): Promise<void> {
+  const current = await dir.lstatChild(pinned.frame.file);
+  if (current?.dev !== pinned.identity.dev || current?.ino !== pinned.identity.ino) {
+    throw new Error("Exported frame changed before video completed");
+  }
+  const stat = await pinned.file.stat();
+  if (!stat.isFile() || stat.nlink !== 1) {
+    throw new Error("Unsafe exported frame");
+  }
+  if ((await hashDescriptor(pinned.file)) !== pinned.frame.outputSha256) {
+    throw new Error("Exported frame hash changed");
+  }
+}
+
+async function pinFrame(dir: DirHandle, frame: ExportFrame): Promise<PinnedFrame> {
+  const file = await dir.openFile(
+    frame.file,
+    fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
+  );
+  try {
+    const pinned = { frame, file, identity: await file.stat() };
+    await verifyPinnedFrame(dir, pinned);
+    return pinned;
+  } catch (error) {
+    await file.close();
+    throw error;
+  }
+}
+
+async function pinFrames(dir: DirHandle, frames: ExportFrame[]): Promise<PinnedFrame[]> {
+  const pinned: PinnedFrame[] = [];
+  try {
+    for (const frame of frames) {
+      pinned.push(await pinFrame(dir, frame));
+    }
+    return pinned;
+  } catch (error) {
+    await Promise.all(pinned.map(({ file }) => file.close()));
+    throw error;
+  }
+}
+
+function concatInput(paths: string[], frameMs: number): string {
+  const entries = paths.map(
+    (file) => `file '${file}'\noption framerate 1000\nduration ${frameMs / 1000}\n`,
+  );
+  return (
+    "ffconcat version 1.0\n" + entries.join("") + `file '${paths.at(-1)!}'\noption framerate 1000\n`
+  );
+}
+
+function videoArguments(size: PngSize, count: number, frameMs: number): string[] {
+  const { width, height } = size;
+  // Uniform still durations use an exact rational rate, not a fixed 25 fps grid.
+  // Millisecond container timestamps preserve every requested duration.
+  return [
+    "-nostdin",
+    "-n",
+    "-v",
+    "error",
+    "-protocol_whitelist",
+    "file,pipe",
+    "-f",
+    "concat",
+    "-safe",
+    "0",
+    "-i",
+    "pipe:0",
+    "-vf",
+    `scale=w='min(iw,${width})':h='min(ih,${height})':` +
+      `force_original_aspect_ratio=decrease,pad=${width}:${height}:` +
+      "(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p",
+    "-an",
+    "-c:v",
+    "libx264",
+    "-threads",
+    "1",
+    "-preset",
+    "veryfast",
+    "-bf",
+    "0",
+    "-fps_mode",
+    "cfr",
+    "-r",
+    `1000/${frameMs}`,
+    "-enc_time_base",
+    `${frameMs}:1000`,
+    "-video_track_timescale",
+    "1000",
+    "-t",
+    String((count * frameMs) / 1000),
+    "-movflags",
+    "frag_keyframe+empty_moov",
+    "-f",
+    "mp4",
+    "pipe:1",
+  ];
+}
+
+function killVideoGroup(child: ChildProcessWithoutNullStreams): void {
+  if (child.pid === undefined) {
+    return;
+  }
+  try {
+    process.kill(-child.pid, "SIGKILL");
+  } catch {
+    // The group may already have exited.
+  }
+}
+
+async function boundedSettle(tasks: Promise<unknown>[], milliseconds: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      Promise.allSettled(tasks),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, milliseconds);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function writeVideoOutput(
+  child: ChildProcessWithoutNullStreams,
+  file: fs.promises.FileHandle,
+): Promise<void> {
+  let bytes = 0;
+  for await (const chunk of child.stdout) {
+    bytes += chunk.length;
+    if (bytes > 256 * 1024 * 1024) {
+      throw new Error("Video exceeds 256 MiB output cap");
+    }
+    await file.writeFile(chunk);
+  }
+  if (bytes === 0) {
+    throw new Error("ffmpeg produced no video");
+  }
+}
+
+async function encodeVideo(
+  ffmpeg: string,
+  args: string[],
+  concat: string,
+  file: fs.promises.FileHandle,
+): Promise<void> {
+  const child = spawn(ffmpeg, args, { detached: true, stdio: ["pipe", "pipe", "pipe"] });
+  let tail = Buffer.alloc(0);
+  const diagnostics = (async () => {
+    for await (const chunk of child.stderr) {
+      tail = Buffer.concat([tail, chunk]).subarray(-2048);
+    }
+  })();
+  const exited = new Promise<void>((resolve, reject) => {
+    child.once("error", () => reject(new Error("ffmpeg could not start")));
+    child.once("exit", (code) => (code === 0 ? resolve() : reject(new Error("ffmpeg failed"))));
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("ffmpeg timed out")), 120_000);
+  });
+  child.stdin.on("error", () => {});
+  child.stdin.end(concat);
+  const tasks = [exited, writeVideoOutput(child, file), diagnostics];
+  try {
+    await Promise.race([Promise.all(tasks), deadline]);
+  } catch (error) {
+    killVideoGroup(child);
+    await boundedSettle(tasks, 1000);
+    child.stdin.destroy();
+    child.stdout.destroy();
+    child.stderr.destroy();
+    await boundedSettle(tasks, 500);
+    const detail = sanitizeErrorText(tail.toString("utf8"), 2048).trim();
+    throw new Error(`${(error as Error).message}${detail === "" ? "" : `: ${detail}`}`);
+  } finally {
+    clearTimeout(timer);
+    killVideoGroup(child);
+  }
+}
+
+async function writePinnedVideo(
+  dir: DirHandle,
+  ffmpeg: string,
+  pinned: PinnedFrame[],
+  frameMs: number,
+): Promise<ExportVideo> {
+  const frames = pinned.map(({ frame }) => frame);
+  const size = slideshowSize(frames);
+  // The stored concat file works from this directory after descriptors close.
+  await writeExclusive(
+    dir,
+    "slideshow.ffconcat",
+    concatInput(
+      frames.map((f) => f.file),
+      frameMs,
+    ),
+  );
+  const paths = pinned.map(({ file }) => `file:/proc/${process.pid}/fd/${file.fd}`);
+  const file = await dir.openFile("slideshow.mp4", "wx", 0o600);
+  const identity = await file.stat();
+  try {
+    await encodeVideo(
+      ffmpeg,
+      videoArguments(size, frames.length, frameMs),
+      concatInput(paths, frameMs),
+      file,
+    );
+    for (const frame of pinned) {
+      await verifyPinnedFrame(dir, frame);
+    }
+  } catch (error) {
+    // Remove only our partial video. Frames and track remain visibly incomplete.
+    await dir.unlinkOwnedFile("slideshow.mp4", identity).catch(() => {});
+    throw error;
+  } finally {
+    await file.close();
+  }
+  return {
+    file: "slideshow.mp4",
+    concatFile: "slideshow.ffconcat",
+    kind: "slideshow-of-stills",
+    frameMs,
+    ...size,
+  };
+}
+
 async function writeVideo(
   dir: DirHandle,
   ffmpeg: string,
@@ -193,94 +439,12 @@ async function writeVideo(
   if (frames.length === 0) {
     throw new Error("Video requires at least one exported frame");
   }
-  const { width, height } = slideshowSize(frames);
-  // The child reads the parent's pinned directory, never a run pathname.
-  const framePath = (file: string) =>
-    dir.resolve(file).replace("/proc/self/", `/proc/${process.pid}/`);
-  const concat =
-    "ffconcat version 1.0\n" +
-    frames
-      .map((frame) => `file 'file:${framePath(frame.file)}'\nduration ${frameMs / 1000}\n`)
-      .join("") +
-    `file 'file:${framePath(frames.at(-1)!.file)}'\n`;
-  await writeExclusive(dir, "slideshow.ffconcat", concat);
-  const file = await dir.openFile("slideshow.mp4", "wx", 0o600);
+  const pinned = await pinFrames(dir, frames);
   try {
-    // ffmpeg writes only to stdout. The parent owns the exclusive output descriptor.
-    const child = spawn(
-      ffmpeg,
-      [
-        "-nostdin",
-        "-n",
-        "-v", "error",
-        "-protocol_whitelist", "file,pipe",
-        "-f", "concat",
-        "-safe", "0",
-        "-i", "pipe:0",
-        "-vf",
-        `scale=w='min(iw,${width})':h='min(ih,${height})':` +
-          `force_original_aspect_ratio=decrease,pad=${width}:${height}:` +
-          "(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p",
-        "-an",
-        "-c:v", "libx264",
-        "-threads", "1",
-        "-preset", "veryfast",
-        "-r", "25",
-        "-t", String((frames.length * frameMs) / 1000),
-        "-movflags", "frag_keyframe+empty_moov",
-        "-f", "mp4",
-        "pipe:1",
-      ],
-      { stdio: ["pipe", "pipe", "ignore"] },
-    );
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGKILL");
-    }, 120_000);
-    const exited = new Promise<void>((resolve, reject) => {
-      child.once("error", () => reject(new Error("ffmpeg could not start")));
-      child.once("close", (code) =>
-        code === 0 && !timedOut
-          ? resolve()
-          : reject(new Error(timedOut ? "ffmpeg timed out" : "ffmpeg failed")),
-      );
-    });
-    child.stdin.on("error", () => {});
-    child.stdin.end(concat);
-    const output = (async () => {
-      let bytes = 0;
-      for await (const chunk of child.stdout) {
-        bytes += chunk.length;
-        if (bytes > 256 * 1024 * 1024) {
-          throw new Error("Video exceeds 256 MiB output cap");
-        }
-        await file.writeFile(chunk);
-      }
-      if (bytes === 0) {
-        throw new Error("ffmpeg produced no video");
-      }
-    })();
-    try {
-      await Promise.all([exited, output]);
-    } catch (error) {
-      child.kill("SIGKILL");
-      await Promise.allSettled([exited, output]);
-      throw error;
-    } finally {
-      clearTimeout(timer);
-    }
+    return await writePinnedVideo(dir, ffmpeg, pinned, frameMs);
   } finally {
-    await file.close();
+    await Promise.all(pinned.map(({ file }) => file.close()));
   }
-  return {
-    file: "slideshow.mp4",
-    concatFile: "slideshow.ffconcat",
-    kind: "slideshow-of-stills",
-    frameMs,
-    width,
-    height,
-  };
 }
 
 interface Sources {
@@ -357,22 +521,24 @@ function renderFrame(
     drawPointerGlyph(raster, glyph);
     return { output: encodePng(raster), annotated: true };
   } catch (error) {
-    if (!(error instanceof Error) || error.message !== "Unsupported PNG raster layout") {
+    if (!(error instanceof Error) || !error.message.includes("raster pixel cap")) {
       throw error;
     }
     return {
       output: bytes,
       annotated: false,
-      reason: "Unsupported PNG raster layout; source copied without annotation",
+      reason: "Over raster pixel cap; source copied without annotation",
     };
   }
 }
 
 function copyReason(bytes: Buffer): string {
-  const supported = bytes[24] === 8 && (bytes[25] === 2 || bytes[25] === 6) && bytes[28] === 0;
-  return supported
-    ? "No eligible pointer glyph"
-    : "Unsupported PNG raster layout; source copied without annotation";
+  try {
+    assertRasterSize(bytes.readUInt32BE(16), bytes.readUInt32BE(20));
+    return "No eligible pointer glyph";
+  } catch {
+    return "Over raster pixel cap; source copied without annotation";
+  }
 }
 
 function frameOwnership(

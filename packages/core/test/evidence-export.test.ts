@@ -196,7 +196,7 @@ it.each(["symlink", "file"])("refuses an exports entry that is a %s", async (kin
   await expect(exportEvidenceRun(catalog, entry)).rejects.toThrow(/symlink|not a directory/);
   expect(await fs.promises.readdir(outside)).toEqual([]);
 });
-it("lists unsafe, missing, corrupt, over-byte-cap and over-pixel-cap sources with reasons", async () => {
+it("skips unsafe or corrupt sources and copies over-pixel-cap sources with reasons", async () => {
   await screenshot("good.png");
   await fs.promises.symlink(
     path.join(run.dir, "screenshots/good.png"),
@@ -230,19 +230,25 @@ it("lists unsafe, missing, corrupt, over-byte-cap and over-pixel-cap sources wit
   await journal([action("all", files)]);
   const result = await exportEvidenceRun(catalog, entry);
   const doc = await manifest(result.exportDir);
-  expect(result.frameCount).toBe(1);
-  expect(doc.skipped).toHaveLength(files.length - 1);
+  expect(result.frameCount).toBe(2);
+  expect(doc.skipped).toHaveLength(files.length - 2);
+  expect(doc.frames[1]).toMatchObject({
+    annotated: false,
+    reason: expect.stringContaining("pixel cap"),
+  });
+  expect(await fs.promises.readFile(path.join(result.exportDir, "frame-0002.png"))).toEqual(
+    oversized,
+  );
   const reasons = new Map(doc.skipped.map((s) => [s.source, s.reason]));
   expect(reasons.get(files[1]!)).toMatch(/Unsafe file/);
   expect(reasons.get(files[2]!)).toMatch(/hardlinks/);
   expect(reasons.get(files[3]!)).toBe("Corrupt PNG");
   expect(reasons.get(files[4]!)).toBe("Missing file");
   expect(reasons.get(files[5]!)).toMatch(/per-image cap/);
-  expect(reasons.get(files[6]!)).toMatch(/pixel cap/);
   expect(reasons.get(files[7]!)).toMatch(/Unsafe/);
   expect(reasons.get(files[8]!)).toMatch(/Unsafe/);
 });
-function customPng(width: number, height: number, color: number, raw: Buffer): Buffer {
+function customPng(width: number, height: number, color: number, raw: Buffer, depth = 8): Buffer {
   const chunk = (type: string, data: Buffer) => {
     const out = Buffer.alloc(data.length + 12);
     out.writeUInt32BE(data.length);
@@ -254,7 +260,7 @@ function customPng(width: number, height: number, color: number, raw: Buffer): B
   const header = Buffer.alloc(13);
   header.writeUInt32BE(width);
   header.writeUInt32BE(height, 4);
-  header[8] = 8;
+  header[8] = depth;
   header[9] = color;
   return Buffer.concat([
     PNG_SIGNATURE,
@@ -263,18 +269,20 @@ function customPng(width: number, height: number, color: number, raw: Buffer): B
     chunk("IEND", Buffer.alloc(0)),
   ]);
 }
-it("copies unsupported valid layouts with an explicit annotation reason", async () => {
-  const bytes = customPng(48, 32, 0, Buffer.alloc(32 * 49));
+it.each([1, 8])("annotates grayscale depth %i without changing original bytes", async (depth) => {
+  const bytes = customPng(48, 32, 0, Buffer.alloc(32 * (1 + (48 * depth) / 8)), depth);
   await screenshot("gray.png", bytes);
   await journal([action("gray", ["screenshots/gray.png"])]);
   const result = await exportEvidenceRun(catalog, entry, {
     glyphSource: () => new Map([["screenshots/gray.png", glyph()]]),
   });
   expect((await manifest(result.exportDir)).frames[0]).toMatchObject({
-    annotated: false,
-    reason: expect.stringContaining("Unsupported PNG raster layout"),
+    annotated: true,
   });
-  expect(await fs.promises.readFile(path.join(result.exportDir, "frame-0001.png"))).toEqual(bytes);
+  expect(await fs.promises.readFile(path.join(result.exportDir, "frame-0001.png"))).not.toEqual(
+    bytes,
+  );
+  expect(await fs.promises.readFile(path.join(run.dir, "screenshots/gray.png"))).toEqual(bytes);
 });
 it("skips screenshots when the screenshot directory is a symlink", async () => {
   await fs.promises.rename(path.join(run.dir, "screenshots"), path.join(project, "captures"));
@@ -361,7 +369,7 @@ it("rejects non-evidence, corrupt journals and invalid durations", async () => {
   await expect(exportEvidenceRun(catalog, entry)).rejects.toThrow("Corrupt evidence journal");
   expect(exportFrameMilliseconds()).toBe(1000);
   for (const n of [0, 39, 60001, 50.5, Infinity, NaN]) {
-    expect(() => exportFrameMilliseconds(n)).toThrow("--frame-ms");
+    expect(() => exportFrameMilliseconds(n)).toThrow("frame duration");
   }
 });
 it("only requires ffmpeg when video is requested", async () => {
@@ -387,6 +395,7 @@ it("preserves frames and track but no manifest when ffmpeg fails", async () => {
   expect(fs.existsSync(result.pointerTrackPath)).toBe(true);
   expect(fs.existsSync(path.join(result.exportDir, "frame-0001.png"))).toBe(true);
   expect(fs.existsSync(path.join(result.exportDir, "export.json"))).toBe(false);
+  expect(fs.existsSync(path.join(result.exportDir, "slideshow.mp4"))).toBe(false);
 });
 const ffmpegInstalled = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status === 0;
 it.skipIf(!ffmpegInstalled)(
@@ -472,3 +481,203 @@ it.skipIf(!ffmpegInstalled).each([
   },
   20_000,
 );
+
+it.skipIf(!ffmpegInstalled).each([1500, 137, 41])(
+  "preserves every decoded frame timestamp and duration at %i ms",
+  async (frameMs) => {
+    const names = ["a.png", "b.png", "c.png"];
+    for (const name of names) {
+      await screenshot(name);
+    }
+    await journal(names.map((name) => action(name, [`screenshots/${name}`])));
+    const result = await exportEvidenceRun(catalog, entry, { video: true, frameMs });
+    expect(result.complete, result.videoError).toBe(true);
+    const probe = spawnSync(
+      "ffprobe",
+      ["-v", "error", "-show_frames", "-show_format", "-of", "json", result.videoPath!],
+      { encoding: "utf8" },
+    );
+    expect(probe.status, probe.stderr).toBe(0);
+    const video = JSON.parse(probe.stdout);
+    expect(
+      video.frames.map((frame: { pts_time: string }) => Number(frame.pts_time) * 1000),
+    ).toEqual([0, frameMs, 2 * frameMs]);
+    expect(
+      video.frames.map((frame: { duration_time: string }) => Number(frame.duration_time) * 1000),
+    ).toEqual([frameMs, frameMs, frameMs]);
+    expect(Number(video.format.duration) * 1000).toBe(3 * frameMs);
+    const stored = await fs.promises.readFile(
+      path.join(result.exportDir, "slideshow.ffconcat"),
+      "utf8",
+    );
+    expect(stored).toContain("file 'frame-0001.png'");
+    expect(stored).not.toContain("/proc/");
+  },
+  20_000,
+);
+
+it.each(["symlink", "content"])(
+  "refuses a %s swap before pinning exported video frames",
+  async (kind) => {
+    await screenshot("a.png");
+    await journal([action("a", ["screenshots/a.png"])]);
+    const outside = path.join(project, "outside.png");
+    await fs.promises.writeFile(outside, image(2, 2));
+    const open = DirHandle.prototype.openFile;
+    vi.spyOn(DirHandle.prototype, "openFile").mockImplementation(async function (
+      this: DirHandle,
+      name,
+      flags,
+      mode,
+    ) {
+      if (name === "frame-0001.png" && typeof flags === "number") {
+        if (kind === "symlink") {
+          await fs.promises.unlink(this.resolve(name));
+          await fs.promises.symlink(outside, this.resolve(name));
+        } else {
+          await fs.promises.writeFile(this.resolve(name), image(2, 2));
+        }
+      }
+      return open.call(this, name, flags, mode);
+    });
+    const result = await exportEvidenceRun(catalog, entry, { video: true });
+    expect(result.complete).toBe(false);
+    expect(result.videoError).toMatch(/ELOOP|hash changed/);
+    expect(fs.existsSync(path.join(result.exportDir, "slideshow.mp4"))).toBe(false);
+    expect(await fs.promises.readFile(outside)).toEqual(image(2, 2));
+  },
+);
+
+async function fakeFfmpeg(script: string): Promise<void> {
+  await fs.promises.writeFile(path.join(project, "ffmpeg"), script, { mode: 0o700 });
+  vi.stubEnv("PATH", project);
+  await screenshot("a.png");
+  await journal([action("a", ["screenshots/a.png"])]);
+}
+
+it.each(["symlink", "content"])(
+  "detects a %s swap after pinning and reads exact descriptors",
+  async (kind) => {
+    const observed = path.join(project, "observed.png");
+    await fakeFfmpeg(
+      `#!${process.execPath}\n` +
+        `const fs = require('node:fs');\nlet input = '';\n` +
+        `process.stdin.on('data', chunk => input += chunk);\n` +
+        `process.stdin.on('end', () => {\n` +
+        `const source = input.match(/file 'file:([^']+)'/)[1];\n` +
+        `const bytes = fs.readFileSync(source);\n` +
+        `fs.writeFileSync(${JSON.stringify(observed)}, bytes);\n` +
+        `process.stdout.write(bytes);\n});\n`,
+    );
+    const open = DirHandle.prototype.openFile;
+    vi.spyOn(DirHandle.prototype, "openFile").mockImplementation(async function (
+      this: DirHandle,
+      name,
+      flags,
+      mode,
+    ) {
+      if (name === "slideshow.ffconcat") {
+        if (kind === "symlink") {
+          await fs.promises.rename(this.resolve("frame-0001.png"), this.resolve("original.png"));
+          const outside = path.join(project, "outside.png");
+          await fs.promises.writeFile(outside, image(2, 2));
+          await fs.promises.symlink(outside, this.resolve("frame-0001.png"));
+        } else {
+          await fs.promises.writeFile(this.resolve("frame-0001.png"), image(2, 2));
+        }
+      }
+      return open.call(this, name, flags, mode);
+    });
+    const result = await exportEvidenceRun(catalog, entry, {
+      video: true,
+      glyphSource: () => new Map(),
+    });
+    expect(result.complete).toBe(false);
+    expect(result.videoError).toMatch(/frame changed|hash changed/);
+    expect(await fs.promises.readFile(observed)).toEqual(
+      kind === "symlink" ? image() : image(2, 2),
+    );
+    expect(fs.existsSync(path.join(result.exportDir, "slideshow.mp4"))).toBe(false);
+  },
+);
+
+it("bounds and sanitizes ffmpeg stderr while removing partial output", async () => {
+  await fakeFfmpeg(
+    `#!${process.execPath}\n` +
+      `process.stdout.write('partial');\n` +
+      `process.stderr.write('x'.repeat(5000) + '\\nencoder detail token=private-secret\\n');\n` +
+      `process.exitCode = 1;\n`,
+  );
+  const result = await exportEvidenceRun(catalog, entry, { video: true });
+  expect(result.complete).toBe(false);
+  expect(result.videoError).toContain("encoder detail");
+  expect(result.videoError).not.toContain("private-secret");
+  expect(result.videoError!.length).toBeLessThan(2600);
+  expect(fs.existsSync(path.join(result.exportDir, "slideshow.mp4"))).toBe(false);
+});
+
+it("kills the ffmpeg process group and settles when a descendant keeps stdout open", async () => {
+  const descendant = path.join(project, "descendant.pid");
+  await fakeFfmpeg(`#!/bin/sh\n/bin/sleep 30 &\necho $! > '${descendant}'\nprintf partial\nwait\n`);
+  const timeout = globalThis.setTimeout;
+  vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+    callback: () => void,
+    milliseconds?: number,
+  ) => timeout(callback, milliseconds === 120_000 ? 100 : milliseconds)) as typeof setTimeout);
+  const started = Date.now();
+  const result = await exportEvidenceRun(catalog, entry, { video: true });
+  expect(Date.now() - started).toBeLessThan(2500);
+  expect(result.videoError).toContain("timed out");
+  const pid = (await fs.promises.readFile(descendant, "utf8")).trim();
+  const status = await fs.promises.readFile(`/proc/${pid}/stat`, "utf8").catch(() => "");
+  expect(status === "" || status.includes(") Z ")).toBe(true);
+  expect(fs.existsSync(path.join(result.exportDir, "slideshow.mp4"))).toBe(false);
+});
+
+it("removes its partial video when stdout exceeds the output cap", async () => {
+  await fakeFfmpeg(`#!/bin/sh\n/usr/bin/head -c 268435457 /dev/zero\n`);
+  const result = await exportEvidenceRun(catalog, entry, { video: true });
+  expect(result.complete).toBe(false);
+  expect(result.videoError).toContain("output cap");
+  expect(fs.existsSync(path.join(result.exportDir, "slideshow.mp4"))).toBe(false);
+}, 20_000);
+
+it("copies an over-pixel-cap PNG even when a glyph was supplied", async () => {
+  const width = MAX_RASTER_PIXELS + 1;
+  const bytes = customPng(width, 1, 0, Buffer.alloc(width + 1));
+  await screenshot("pixels.png", bytes);
+  await journal([action("large", ["screenshots/pixels.png"])]);
+  const result = await exportEvidenceRun(catalog, entry, {
+    glyphSource: () => new Map([["screenshots/pixels.png", { ...glyph(), width, height: 1 }]]),
+  });
+  expect(result).toMatchObject({ complete: true, frameCount: 1, annotatedCount: 0 });
+  expect((await manifest(result.exportDir)).frames[0]).toMatchObject({
+    annotated: false,
+    reason: expect.stringContaining("pixel cap"),
+  });
+  expect(await fs.promises.readFile(path.join(result.exportDir, "frame-0001.png"))).toEqual(bytes);
+});
+
+it("preserves an unowned replacement when cleaning up a failed video", async () => {
+  await fakeFfmpeg("#!/bin/sh\nprintf partial\nexit 1\n");
+  const open = DirHandle.prototype.openFile;
+  vi.spyOn(DirHandle.prototype, "openFile").mockImplementation(async function (
+    this: DirHandle,
+    name,
+    flags,
+    mode,
+  ) {
+    const file = await open.call(this, name, flags, mode);
+    if (name === "slideshow.mp4") {
+      await fs.promises.unlink(this.resolve(name));
+      await fs.promises.writeFile(this.resolve(name), "unowned replacement");
+    }
+    return file;
+  });
+  const result = await exportEvidenceRun(catalog, entry, { video: true });
+  expect(result.complete).toBe(false);
+  expect(await fs.promises.readFile(path.join(result.exportDir, "slideshow.mp4"), "utf8")).toBe(
+    "unowned replacement",
+  );
+  expect(fs.existsSync(path.join(result.exportDir, "export.json"))).toBe(false);
+});
