@@ -485,3 +485,11 @@ it("rounds 16-bit samples and compares transparency before downsampling", () => 
   });
   expect([...decodePng(bytes).pixels]).toEqual([1, 1, 1, 0, 1, 1, 1, 255, 128, 128, 128, 255]);
 });
+
+it("copies RGBA8 rows directly after every filter without losing alpha", () => {
+  const rows = Buffer.from([
+    0, 20, 30, 40, 50, 1, 20, 30, 40, 50, 2, 0, 0, 0, 0, 3, 10, 15, 20, 25, 4, 0, 0, 0, 0,
+  ]);
+  const decoded = decodePng(png(rows, 1, 5, { color: 6 }));
+  expect([...decoded.pixels]).toEqual(Array.from({ length: 5 }, () => [20, 30, 40, 50]).flat());
+});

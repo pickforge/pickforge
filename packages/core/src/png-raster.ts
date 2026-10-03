@@ -194,6 +194,39 @@ function decodePass(raw: Buffer, pass: PngPass, layout: PngLayout, pixels: Buffe
   }
 }
 
+/** Copy common capture rows directly; RGB transparency compares unscaled bytes. */
+function decodeRgb8(raw: Buffer, layout: PngLayout, pixels: Buffer): void {
+  const channels = layout.samples;
+  const stride = layout.width * channels;
+  unfilter(raw, stride, layout.height, channels);
+  const transparency = layout.transparent;
+  const transparentRgb =
+    layout.color === 2 && transparency?.length === 6
+      ? [transparency.readUInt16BE(0), transparency.readUInt16BE(2), transparency.readUInt16BE(4)]
+      : undefined;
+  for (let y = 0; y < layout.height; y += 1) {
+    const row = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
+    const output = y * layout.width * 4;
+    if (channels === 4) {
+      row.copy(pixels, output);
+      continue;
+    }
+    for (let x = 0; x < layout.width; x += 1) {
+      const source = x * 3;
+      const target = output + x * 4;
+      pixels[target] = row[source]!;
+      pixels[target + 1] = row[source + 1]!;
+      pixels[target + 2] = row[source + 2]!;
+      const hidden = transparentRgb?.every((value, c) => value === row[source + c]);
+      pixels[target + 3] = hidden ? 0 : 255;
+    }
+  }
+}
+
+function canCopyRgb8(layout: PngLayout, interlaced: boolean): boolean {
+  return !interlaced && layout.depth === 8 && (layout.color === 2 || layout.color === 6);
+}
+
 /** Decode all PNG colour depths and Adam7 passes into bounded RGBA8 buffers. */
 export function decodePng(bytes: Buffer): PngRaster {
   if (bytes.length > MAX_SHARE_IMAGE_BYTES) {
@@ -209,7 +242,8 @@ export function decodePng(bytes: Buffer): PngRaster {
     throw new Error("Invalid PNG");
   }
   const layout = pngLayout(bytes);
-  const passes = pngPasses(layout, bytes[28] === 1);
+  const interlaced = bytes[28] === 1;
+  const passes = pngPasses(layout, interlaced);
   const length = passes.reduce((sum, pass) => sum + pass.height * (pass.stride + 1), 0);
   if (length > 9 * MAX_RASTER_PIXELS) {
     throw new Error("PNG exceeds scanline memory cap");
@@ -219,6 +253,10 @@ export function decodePng(bytes: Buffer): PngRaster {
     throw new Error("Invalid PNG scanline length");
   }
   const pixels = Buffer.alloc(width * height * 4);
+  if (canCopyRgb8(layout, interlaced)) {
+    decodeRgb8(raw, layout, pixels);
+    return { width, height, pixels };
+  }
   let offset = 0;
   for (const pass of passes) {
     const end = offset + pass.height * (pass.stride + 1);
