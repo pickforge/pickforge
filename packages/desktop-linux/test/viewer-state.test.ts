@@ -83,6 +83,77 @@ async function browser(): Promise<{
   return readProcessIdentity(child.pid!)!;
 }
 
+async function viewerProcessGroup(
+  launchRecord: ViewerLaunchRecord,
+  memberArguments: string[][],
+  mode: "term" | "kill" = "term",
+  exitFile?: string,
+): Promise<{
+  leader: ChildProcess;
+  leaderIdentity: { pid: number; startTicks: number };
+  members: { pid: number; startTicks: number }[];
+  trace: string;
+}> {
+  const trace = path.join(testRoot, "viewer-signals.jsonl");
+  const childScript = `
+const fileSystem = require('node:fs');
+process.on('SIGTERM', () => {
+  fileSystem.appendFileSync(${JSON.stringify(trace)}, JSON.stringify({
+    pid: process.pid,
+    profileExists: fileSystem.existsSync(${JSON.stringify(launchRecord.profileDir)}),
+  }) + '\\n');
+  if (${JSON.stringify(mode)} === 'term') {
+    process.exit(0);
+  }
+});
+process.stdout.write('ready');
+const exitFile = ${JSON.stringify(exitFile) ?? "undefined"};
+if (exitFile !== undefined) {
+  setInterval(() => {
+    if (fileSystem.existsSync(exitFile)) process.exit(0);
+  }, 20);
+}
+setInterval(() => {}, 1000);
+`;
+  const leader = spawn(
+    process.execPath,
+    [
+      "-e",
+      `
+const { spawn } = require('node:child_process');
+const argumentsByMember = ${JSON.stringify(memberArguments)};
+Promise.all(argumentsByMember.map((args) => new Promise((resolve) => {
+  const child = spawn(process.execPath, ['-e', ${JSON.stringify(childScript)}, '--', ...args], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  child.stdout.once('data', () => resolve(child.pid));
+}))).then((pids) => process.stdout.write(JSON.stringify(pids)));
+process.on('SIGTERM', () => process.exit(0));
+setInterval(() => {}, 1000);
+`,
+    ],
+    { detached: true, stdio: ["ignore", "pipe", "ignore"] },
+  );
+  children.push(leader);
+  const [ready] = await once(leader.stdout!, "data");
+  const members = (JSON.parse(ready.toString()) as number[]).map(
+    (pid) => readProcessIdentity(pid)!,
+  );
+  survivors.push(...members);
+  return {
+    leader,
+    leaderIdentity: readProcessIdentity(leader.pid!)!,
+    members,
+    trace,
+  };
+}
+
+async function exitGroupLeader(leader: ChildProcess): Promise<void> {
+  const exited = once(leader, "exit");
+  leader.kill("SIGTERM");
+  await exited;
+}
+
 async function record(): Promise<ViewerLaunchRecord> {
   const launch = await prepareViewerLaunch(sessionId, registryEnv);
   return {
@@ -540,46 +611,17 @@ describe("viewer teardown", () => {
     "stops surviving browser children with %s after their group leader exits",
     async (mode) => {
       const launchRecord = await record();
-      const trace = path.join(testRoot, "orphan-stop.json");
-      const childScript = `
-const fileSystem = require('node:fs');
-process.on('SIGTERM', () => {
-  fileSystem.writeFileSync(${JSON.stringify(trace)}, JSON.stringify({
-    profileExists: fileSystem.existsSync(${JSON.stringify(launchRecord.profileDir)}),
-  }));
-  if (${JSON.stringify(mode)} === 'term') {
-    process.exit(0);
-  }
-});
-process.stdout.write('ready');
-setInterval(() => {}, 1000);
-`;
-      const leader = spawn(
-        process.execPath,
-        [
-          "-e",
-          `
-const { spawn } = require('node:child_process');
-const child = spawn(process.execPath, ['-e', ${JSON.stringify(childScript)}], {
-  stdio: ['ignore', 'pipe', 'ignore'],
-});
-child.stdout.once('data', () => process.stdout.write(String(child.pid)));
-process.on('SIGTERM', () => process.exit(0));
-setInterval(() => {}, 1000);
-`,
-        ],
-        { detached: true, stdio: ["ignore", "pipe", "ignore"] },
+      const group = await viewerProcessGroup(
+        launchRecord,
+        [[`--user-data-dir=${launchRecord.profileDir}`]],
+        mode,
       );
-      children.push(leader);
-      const [ready] = await once(leader.stdout!, "data");
-      const childIdentity = readProcessIdentity(Number(ready.toString()))!;
-      survivors.push(childIdentity);
-      const leaderIdentity = readProcessIdentity(leader.pid!)!;
+      const childIdentity = group.members[0]!;
+      const leaderIdentity = group.leaderIdentity;
       Object.assign(launchRecord, leaderIdentity);
       await writeViewerLaunchRecord(launchRecord, registryEnv);
-      const exited = once(leader, "exit");
-      leader.kill("SIGTERM");
-      await exited;
+      await exitGroupLeader(group.leader);
+      const signal = vi.spyOn(process, "kill");
       expect(listProcessGroupMembers(leaderIdentity.pid)).toContain(
         childIdentity.pid,
       );
@@ -595,32 +637,205 @@ setInterval(() => {}, 1000);
         false,
       );
       expect(listProcessGroupMembers(leaderIdentity.pid)).toEqual([]);
-      expect(JSON.parse(await fs.readFile(trace, "utf8"))).toEqual({
+      expect(JSON.parse(await fs.readFile(group.trace, "utf8"))).toEqual({
+        pid: childIdentity.pid,
         profileExists: true,
       });
+      expect(signal).toHaveBeenCalledWith(childIdentity.pid, "SIGTERM");
+      expect(signal.mock.calls.some(([pid]) => pid < 0)).toBe(false);
       await expect(fs.lstat(launchRecord.profileDir)).rejects.toThrow();
     },
   );
-  it("accepts a reused PID only when its recorded group is empty", async () => {
+  it.each(["remove", "prune"] as const)(
+    "%s treats a reused live group leader as gone without signalling it",
+    async (operation) => {
+      const launchRecord = await record();
+      const identity = await browser();
+      Object.assign(launchRecord, {
+        pid: identity.pid,
+        startTicks: identity.startTicks + 1,
+      });
+      await writeViewerLaunchRecord(launchRecord, registryEnv);
+      expect(listProcessGroupMembers(identity.pid)).toEqual([identity.pid]);
+      const signal = vi.spyOn(process, "kill");
+      if (operation === "remove") {
+        await removeViewerLaunch(sessionId, launchRecord.launchId, registryEnv);
+      } else {
+        await prepareViewerLaunch(sessionId, registryEnv);
+      }
+      await expect(fs.lstat(launchRecord.profileDir)).rejects.toThrow();
+      expect(identityIsAlive(identity.pid, identity.startTicks)).toBe(true);
+      expect(signal.mock.calls.filter(([, sent]) => sent !== 0)).toEqual([]);
+    },
+  );
+  it.each(["browser", "bridge"] as const)(
+    "ignores a reused live %s leader without blocking teardown",
+    async (owner) => {
+      const launchRecord = await record();
+      const identity = await browser();
+      const stale = { pid: identity.pid, startTicks: identity.startTicks + 1 };
+      if (owner === "browser") {
+        Object.assign(launchRecord, stale);
+        await writeViewerLaunchRecord(launchRecord, registryEnv);
+      }
+      const desktop =
+        owner === "bridge"
+          ? {
+              display: ":991",
+              viewerBridgePid: stale.pid,
+              viewerBridgeStartTimeTicks: stale.startTicks,
+            }
+          : undefined;
+      const signal = vi.spyOn(process, "kill");
+      expect(await stopSessionViewer(sessionId, desktop, registryEnv)).toEqual(
+        [],
+      );
+      expect(identityIsAlive(identity.pid, identity.startTicks)).toBe(true);
+      expect(signal.mock.calls.filter(([, sent]) => sent !== 0)).toEqual([]);
+      await expect(fs.lstat(launchRecord.profileDir)).rejects.toThrow();
+    },
+  );
+  it.each(["browser", "bridge"] as const)(
+    "never signals children of an exited reused %s leader",
+    async (owner) => {
+      const launchRecord = await record();
+      const group = await viewerProcessGroup(
+        launchRecord,
+        owner === "bridge"
+          ? [[`--user-data-dir=${launchRecord.profileDir}`]]
+          : [[]],
+      );
+      const stale = {
+        pid: group.leaderIdentity.pid,
+        startTicks: group.leaderIdentity.startTicks + 1,
+      };
+      if (owner === "browser") {
+        Object.assign(launchRecord, stale);
+        await writeViewerLaunchRecord(launchRecord, registryEnv);
+      }
+      await exitGroupLeader(group.leader);
+      const desktop =
+        owner === "bridge"
+          ? {
+              display: ":991",
+              viewerBridgePid: stale.pid,
+              viewerBridgeStartTimeTicks: stale.startTicks,
+            }
+          : undefined;
+      const signal = vi.spyOn(process, "kill");
+      const failures = await stopSessionViewer(sessionId, desktop, registryEnv);
+      expect(signal.mock.calls.filter(([, sent]) => sent !== 0)).toEqual([]);
+      expect(failures).toHaveLength(1);
+      expect(failures[0]!.message).toContain(String(group.members[0]!.pid));
+      if (owner === "browser") {
+        expect(failures[0]!.message).toContain(launchRecord.launchId);
+        const removal = removeViewerLaunch(
+          sessionId,
+          launchRecord.launchId,
+          registryEnv,
+        );
+        await expect(removal).rejects.toThrow(String(group.members[0]!.pid));
+        await expect(removal).rejects.toThrow(launchRecord.launchId);
+      }
+      expect(
+        identityIsAlive(group.members[0]!.pid, group.members[0]!.startTicks),
+      ).toBe(true);
+      expect(await fs.lstat(launchRecord.profileDir)).toBeDefined();
+      await expect(fs.lstat(group.trace)).rejects.toThrow();
+    },
+  );
+  it("stops an orphan with the exact Firefox profile argument", async () => {
     const launchRecord = await record();
-    const child = spawn(
-      process.execPath,
-      ["-e", "setInterval(() => {}, 1000)"],
-      { stdio: "ignore" },
-    );
-    children.push(child);
-    await once(child, "spawn");
-    const identity = readProcessIdentity(child.pid!)!;
-    Object.assign(launchRecord, {
-      pid: identity.pid,
-      startTicks: identity.startTicks + 1,
-    });
+    const group = await viewerProcessGroup(launchRecord, [
+      ["--profile", launchRecord.profileDir],
+    ]);
+    Object.assign(launchRecord, group.leaderIdentity);
     await writeViewerLaunchRecord(launchRecord, registryEnv);
-    expect(listProcessGroupMembers(identity.pid)).toEqual([]);
+    await exitGroupLeader(group.leader);
     expect(await stopSessionViewer(sessionId, undefined, registryEnv)).toEqual(
       [],
     );
-    expect(identityIsAlive(identity.pid, identity.startTicks)).toBe(true);
+    expect(
+      identityIsAlive(group.members[0]!.pid, group.members[0]!.startTicks),
+    ).toBe(false);
+    await expect(fs.lstat(launchRecord.profileDir)).rejects.toThrow();
+  });
+  it("uses a matching live leader as evidence to stop its group", async () => {
+    const launchRecord = await record();
+    const group = await viewerProcessGroup(launchRecord, [[]]);
+    Object.assign(launchRecord, group.leaderIdentity);
+    await writeViewerLaunchRecord(launchRecord, registryEnv);
+    const signal = vi.spyOn(process, "kill");
+    expect(await stopSessionViewer(sessionId, undefined, registryEnv)).toEqual(
+      [],
+    );
+    expect(signal).toHaveBeenCalledWith(-group.leaderIdentity.pid, "SIGTERM");
+    expect(
+      identityIsAlive(group.members[0]!.pid, group.members[0]!.startTicks),
+    ).toBe(false);
+    await expect(fs.lstat(launchRecord.profileDir)).rejects.toThrow();
+  });
+  it("waits for an unverified orphan to exit without signalling it", async () => {
+    const launchRecord = await record();
+    const exitFile = path.join(testRoot, "orphan-exit");
+    const group = await viewerProcessGroup(
+      launchRecord,
+      [[]],
+      "term",
+      exitFile,
+    );
+    Object.assign(launchRecord, group.leaderIdentity);
+    await writeViewerLaunchRecord(launchRecord, registryEnv);
+    await exitGroupLeader(group.leader);
+    expect(
+      identityIsAlive(group.members[0]!.pid, group.members[0]!.startTicks),
+    ).toBe(true);
+    const signal = vi.spyOn(process, "kill");
+    const timer = setTimeout(() => {
+      void fs.writeFile(exitFile, "exit");
+    }, 100);
+    try {
+      expect(
+        await stopSessionViewer(sessionId, undefined, registryEnv),
+      ).toEqual([]);
+    } finally {
+      clearTimeout(timer);
+    }
+    expect(signal.mock.calls.filter(([, sent]) => sent !== 0)).toEqual([]);
+    expect(
+      identityIsAlive(group.members[0]!.pid, group.members[0]!.startTicks),
+    ).toBe(false);
+    await expect(fs.lstat(group.trace)).rejects.toThrow();
+    await expect(fs.lstat(launchRecord.profileDir)).rejects.toThrow();
+  });
+  it("signals only profile-proven members of a mixed orphaned group", async () => {
+    const launchRecord = await record();
+    const group = await viewerProcessGroup(launchRecord, [
+      [`--user-data-dir=${launchRecord.profileDir}`],
+      [`--user-data-dir=${launchRecord.profileDir}-other`],
+      [`--user-data-dir=${launchRecord.profileDir}/child`],
+    ]);
+    Object.assign(launchRecord, group.leaderIdentity);
+    await writeViewerLaunchRecord(launchRecord, registryEnv);
+    await exitGroupLeader(group.leader);
+    const signal = vi.spyOn(process, "kill");
+    const failures = await stopSessionViewer(sessionId, undefined, registryEnv);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]!.message).toContain(launchRecord.launchId);
+    expect(
+      identityIsAlive(group.members[0]!.pid, group.members[0]!.startTicks),
+    ).toBe(false);
+    for (const member of group.members.slice(1)) {
+      expect(identityIsAlive(member.pid, member.startTicks)).toBe(true);
+      expect(failures[0]!.message).toContain(String(member.pid));
+      expect(signal.mock.calls.some(([pid]) => pid === member.pid)).toBe(false);
+    }
+    expect(signal.mock.calls.some(([pid]) => pid < 0)).toBe(false);
+    expect(await fs.lstat(launchRecord.profileDir)).toBeDefined();
+    expect(JSON.parse(await fs.readFile(group.trace, "utf8"))).toEqual({
+      pid: group.members[0]!.pid,
+      profileExists: true,
+    });
   });
   it.each(["desktop", "browser"] as const)(
     "stops owned viewers and bridge during %s teardown",
@@ -723,11 +938,11 @@ setInterval(() => {}, 1000);
     expect(await fs.lstat(launchRecord.profileDir)).toBeDefined();
     launchRecord.startTicks = live.startTicks + 1;
     await writeViewerLaunchRecord(launchRecord, registryEnv);
-    expect(
-      await stopSessionViewer(sessionId, undefined, registryEnv),
-    ).toHaveLength(1);
+    expect(await stopSessionViewer(sessionId, undefined, registryEnv)).toEqual(
+      [],
+    );
     expect(identityIsAlive(live.pid, live.startTicks)).toBe(true);
-    expect(await fs.lstat(launchRecord.profileDir)).toBeDefined();
+    await expect(fs.lstat(launchRecord.profileDir)).rejects.toThrow();
   });
   it.each(["desktop", "browser"] as const)(
     "aggregates viewer cleanup failure during %s teardown",

@@ -11,7 +11,6 @@ import {
   processIdentityMatches,
   readProcessIdentity,
   readProcessGroupLeaderIdentity,
-  stopProcessGroupVerified,
 } from "@pickforge/lab-core";
 import type { DesktopSessionInfo, EnvLike } from "@pickforge/lab-core";
 import { withSessionVncLock } from "./session.js";
@@ -443,12 +442,12 @@ async function removeLaunchIn(
       if (!validRecord(launchRecord, sessionId, launchId, registryEnv)) {
         throw new Error("Invalid viewer record prevents removal");
       }
-      if (
-        launchRecord.pid !== undefined &&
-        (identityIsAlive(launchRecord.pid, launchRecord.startTicks) ||
-          listProcessGroupMembers(launchRecord.pid).length !== 0)
-      ) {
-        throw new Error("Viewer browser is still alive");
+      if (remainingViewerProcesses(launchRecord).length !== 0) {
+        await waitForViewerGroupExit(launchRecord);
+        const remaining = remainingViewerProcesses(launchRecord);
+        if (remaining.length !== 0) {
+          throw new ViewerProcessesAliveError(remaining, launchId);
+        }
       }
     }
   });
@@ -625,74 +624,132 @@ export async function connectSessionVncReadOnly(
   });
 }
 
-async function waitForViewerGroupExit(pid: number): Promise<boolean> {
+interface ViewerProcessOwner {
+  pid?: number;
+  startTicks?: number;
+  profileDir?: string;
+}
+
+class ViewerProcessesAliveError extends Error {
+  constructor(pids: number[], launchId?: string) {
+    const launch =
+      launchId === undefined ? "" : ` for launch ${JSON.stringify(launchId)}`;
+    super(`Viewer processes are still alive${launch}: pids ${pids.join(", ")}`);
+    this.name = "ViewerProcessesAliveError";
+  }
+}
+
+function remainingViewerProcesses(owner: ViewerProcessOwner): number[] {
+  if (owner.pid === undefined) {
+    return [];
+  }
+  const current = readProcessIdentity(owner.pid);
+  if (current !== undefined && owner.startTicks !== undefined) {
+    if (current.startTicks !== owner.startTicks) {
+      // Linux cannot reuse a pid while the old group still has members.
+      return [];
+    }
+  }
+  const members = listProcessGroupMembers(owner.pid);
+  if (identityIsAlive(owner.pid) && !members.includes(owner.pid)) {
+    members.push(owner.pid);
+  }
+  return members;
+}
+
+async function waitForViewerGroupExit(
+  owner: ViewerProcessOwner,
+): Promise<boolean> {
   const deadline = Date.now() + 1_000;
   while (Date.now() < deadline) {
-    if (listProcessGroupMembers(pid).length === 0) {
+    if (remainingViewerProcesses(owner).length === 0) {
       return true;
     }
     await sleep(25);
   }
-  return listProcessGroupMembers(pid).length === 0;
+  return remainingViewerProcesses(owner).length === 0;
 }
 
-function viewerGroupCanBeSignaled(pid: number, startTicks: number): boolean {
-  const leader = readProcessGroupLeaderIdentity(pid);
-  if (leader !== undefined) {
-    return leader.startTicks === startTicks;
-  }
-  return readProcessIdentity(pid) === undefined;
-}
-
-async function stopOrphanedViewerGroup(
+function processHasViewerProfile(
   pid: number,
-  startTicks: number,
-): Promise<void> {
-  for (const signal of ["SIGTERM", "SIGKILL"] as const) {
-    if (listProcessGroupMembers(pid).length === 0) {
-      return;
-    }
-    // A surviving pgid cannot be reused. Refuse any replacement leader before signalling.
-    if (!viewerGroupCanBeSignaled(pid, startTicks)) {
-      throw new Error("Viewer process group cannot be verified");
-    }
-    try {
-      process.kill(-pid, signal);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
-        throw error;
-      }
-    }
-    if (await waitForViewerGroupExit(pid)) {
-      return;
-    }
+  profileDir: string | undefined,
+): boolean {
+  if (profileDir === undefined) {
+    return false;
   }
-  throw new Error("Viewer process group is not confirmed gone");
+  try {
+    const argumentsList = fs
+      .readFileSync(`/proc/${pid}/cmdline`, "utf8")
+      .split("\0");
+    return argumentsList.some(
+      (argument) =>
+        argument === profileDir || argument === `--user-data-dir=${profileDir}`,
+    );
+  } catch {
+    return false;
+  }
 }
 
-async function stopViewerProcess(
-  pid: number | undefined,
-  startTicks: number | undefined,
-): Promise<void> {
-  if (pid === undefined) {
-    return;
-  }
-  if (startTicks === undefined) {
-    if (identityIsAlive(pid) || listProcessGroupMembers(pid).length !== 0) {
-      throw new Error("Viewer process identity is missing");
+function signalViewerPid(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(pid, signal);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+      throw error;
     }
+  }
+}
+
+function signalOwnedViewerProcesses(
+  owner: ViewerProcessOwner,
+  signal: NodeJS.Signals,
+): boolean {
+  if (owner.pid === undefined) {
+    return false;
+  }
+  const leader = readProcessGroupLeaderIdentity(owner.pid);
+  if (leader !== undefined && leader.startTicks === owner.startTicks) {
+    if (processIdentityMatches(leader)) {
+      signalViewerPid(-leader.pid, signal);
+      return true;
+    }
+  }
+  let signaled = false;
+  for (const pid of remainingViewerProcesses(owner)) {
+    const identity = readProcessIdentity(pid);
+    if (identity === undefined) {
+      continue;
+    }
+    const recorded =
+      pid === owner.pid && identity.startTicks === owner.startTicks;
+    if (!recorded && !processHasViewerProfile(pid, owner.profileDir)) {
+      continue;
+    }
+    // Recheck the captured identity after reading cmdline and before every signal.
+    if (processIdentityMatches(identity)) {
+      signalViewerPid(pid, signal);
+      signaled = true;
+    }
+  }
+  return signaled;
+}
+
+async function stopViewerProcess(owner: ViewerProcessOwner): Promise<void> {
+  if (remainingViewerProcesses(owner).length === 0) {
     return;
   }
-  const result = await stopProcessGroupVerified({ pid, startTicks });
-  if (result.outcome === "reused") {
-    await stopOrphanedViewerGroup(pid, startTicks);
+  signalOwnedViewerProcesses(owner, "SIGTERM");
+  if (await waitForViewerGroupExit(owner)) {
     return;
   }
-  if (
-    (result.outcome !== "terminated" && result.outcome !== "already-dead") ||
-    listProcessGroupMembers(pid).length !== 0
-  ) {
-    throw new Error("Viewer process group is not confirmed gone");
+  if (signalOwnedViewerProcesses(owner, "SIGKILL")) {
+    if (await waitForViewerGroupExit(owner)) {
+      return;
+    }
+  }
+  const remaining = remainingViewerProcesses(owner);
+  if (remaining.length !== 0) {
+    throw new ViewerProcessesAliveError(remaining);
   }
 }
 
@@ -709,15 +766,19 @@ export async function stopSessionViewer(
   ): Promise<void> => {
     try {
       await operation();
-    } catch {
-      failures.push(new Error(message));
+    } catch (error) {
+      const detail =
+        error instanceof ViewerProcessesAliveError ? `: ${error.message}` : "";
+      failures.push(new Error(`${message}${detail}`));
     }
   };
-  await capture(() =>
-    stopViewerProcess(
-      desktop?.viewerBridgePid,
-      desktop?.viewerBridgeStartTimeTicks,
-    ),
+  await capture(
+    () =>
+      stopViewerProcess({
+        pid: desktop?.viewerBridgePid,
+        startTicks: desktop?.viewerBridgeStartTimeTicks,
+      }),
+    "Viewer bridge cleanup failed",
   );
   if (!fs.existsSync(sessionViewerDir(sessionId, registryEnv))) {
     // lstat also detects a dangling symlink, which must not be treated as absent.
@@ -755,7 +816,7 @@ export async function stopSessionViewer(
                   }
                 });
               } else {
-                await stopViewerProcess(record.pid, record.startTicks);
+                await stopViewerProcess(record);
               }
             },
             `Viewer cleanup failed for launch ${JSON.stringify(name)}`,
