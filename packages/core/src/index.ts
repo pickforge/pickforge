@@ -134,6 +134,8 @@ export {
   type BeginEvidenceRunResult,
   type EvidenceAction,
   type EvidenceActionStatus,
+  type EvidenceCaptureLink,
+  type EvidenceInputState,
   type EvidenceRecord,
   type EvidenceTruncationRecord,
   type PointerResolution,

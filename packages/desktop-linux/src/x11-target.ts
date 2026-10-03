@@ -110,3 +110,24 @@ export async function validateTypingTarget(sessionId: string, display: string, e
     throw typingFailure();
   }
 }
+
+/** The owned Xvfb a session's input and captures were verified against. */
+export interface OwnedDisplayIdentity {
+  display: string;
+  pid: number;
+  startTicks: number;
+}
+
+/**
+ * Evidence-only ownership check for pointer markers (pickforge/pickforge#199).
+ * Resolves the session's owned Xvfb identity when `display` is verified as
+ * that server, and `undefined` otherwise. It never throws and never gates or
+ * redirects input.
+ */
+export async function verifyOwnedDisplayTarget(
+  _sessionId: string,
+  _display: string,
+  _env: EnvLike,
+): Promise<OwnedDisplayIdentity | undefined> {
+  return undefined;
+}

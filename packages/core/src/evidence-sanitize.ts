@@ -110,6 +110,11 @@ export interface SanitizedActionTarget {
   url?: string;
   x?: number;
   y?: number;
+  /** Drag start; `x`/`y` stay the destination. */
+  fromX?: number;
+  fromY?: number;
+  /** Set only when the input target was verified as the session's owned Xvfb. */
+  coordinateSpace?: "xvfb-root";
 }
 
 function sanitizeTargetText(value: unknown): string | undefined {
