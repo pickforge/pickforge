@@ -29,9 +29,24 @@ function pointer(overrides: Partial<EvidenceAction> = {}): EvidenceAction {
   };
 }
 
-function render(records: readonly EvidenceRecord[]): string {
-  const paths = records.flatMap((record) => ("artifacts" in record ? record.artifacts ?? [] : []));
-  return renderEvidenceHtml(manifest(), records, new Set(paths));
+type Size = { width: number; height: number };
+const SCREEN: Size = { width: 1280, height: 800 };
+
+function artifactPaths(records: readonly EvidenceRecord[]): string[] {
+  return records.flatMap((record) => ("artifacts" in record ? record.artifacts ?? [] : []));
+}
+
+function sizes(paths: readonly string[], size: Size = SCREEN): Map<string, Size> {
+  return new Map(paths.map((relative) => [relative, size]));
+}
+
+function render(records: readonly EvidenceRecord[], size: Size = SCREEN): string {
+  const paths = artifactPaths(records);
+  return renderEvidenceHtml(manifest(), records, new Set(paths), undefined, sizes(paths, size));
+}
+
+function renderUnsized(records: readonly EvidenceRecord[]): string {
+  return renderEvidenceHtml(manifest(), records, new Set(artifactPaths(records)));
 }
 
 function count(html: string, text: string): number {
@@ -92,7 +107,7 @@ describe("evidence report pointer markers", () => {
     const corner = (x: number, y: number) => render([pointer({
       target: { x, y, coordinateSpace: "xvfb-root" },
       captures: [{ path: BEFORE, phase: "before", width: 200, height: 120 }],
-    })]);
+    })], { width: 200, height: 120 });
     expect(corner(0, 0)).toContain('style="--x:0.25%;--y:0.4167%"');
     expect(corner(199, 119)).toContain('style="--x:99.75%;--y:99.5833%"');
     expect(corner(199, 119)).toContain('style="--w:200;--h:120"');
@@ -125,6 +140,7 @@ describe("evidence report pointer markers", () => {
     ["a fractional point", { target: { x: 10.4, y: 10, coordinateSpace: "xvfb-root" } }],
     ["a drag start outside the image", { tool: "desktop_drag", target: { fromX: 1280, fromY: 0, x: 10, y: 10, coordinateSpace: "xvfb-root" } }],
     ["a partial drag start", { tool: "desktop_drag", target: { fromX: 5, x: 10, y: 10, coordinateSpace: "xvfb-root" } }],
+    ["a drag without a start point", { tool: "desktop_drag" }],
     ["a link to a path outside the artifacts", { artifacts: [AFTER], captures: [{ path: BEFORE, phase: "before", width: 1280, height: 800 }] }],
     ["a capture with a zero size", { captures: [{ path: BEFORE, phase: "before", width: 0, height: 800 }] }],
   ])("renders %s exactly as an unmarked record", (_label, change) => {
@@ -134,6 +150,40 @@ describe("evidence report pointer markers", () => {
     for (const text of ['class="pointer', "Pointer:", 'id="markers"', "image-frame", "framed", "container-type"]) {
       expect(html).not.toContain(text);
     }
+  });
+
+  it.each<[string, Size]>([
+    ["a cropped PNG", { width: 1279, height: 800 }],
+    ["a shorter PNG", { width: 1280, height: 799 }],
+    ["a larger PNG", { width: 2560, height: 1600 }],
+  ])("renders a link that disagrees with %s exactly as an unmarked record", (_label, size) => {
+    const html = render([pointer()], size);
+    expect(html).toBe(render([unmarked(pointer())], size));
+    expect(html).not.toContain("image-frame");
+  });
+
+  it("renders unmarked without the actual PNG sizes", () => {
+    const html = renderUnsized([pointer()]);
+    expect(html).toBe(renderUnsized([unmarked(pointer())]));
+    expect(html).not.toContain('class="pointer');
+    const partial = renderEvidenceHtml(manifest(), [pointer()], new Set([BEFORE, AFTER]), undefined, sizes([AFTER]));
+    expect(count(partial, "pointer pointer-ring")).toBe(2);
+    expect(partial).toContain(`<span class="stage"><img src="${BEFORE}"`);
+  });
+
+  it.each<[string, (other: EvidenceAction) => EvidenceAction]>([
+    ["artifacts", (other) => ({ ...other, artifacts: [AFTER] })],
+    ["capture links", (other) => ({ ...other, captures: [{ path: AFTER, phase: "after", width: 1280, height: 800 }] })],
+  ])("suppresses markers on a capture another record claims in its %s", (_label, claim) => {
+    const other: EvidenceAction = {
+      actionId: "act-2", source: "mcp", tool: "desktop_screenshot", startedAt: "2026-10-03T12:00:01.000Z", status: "ok",
+    };
+    const html = render([pointer(), claim(other)]);
+    expect(count(html, "pointer pointer-ring")).toBe(2);
+    expect(html).toContain(`<span class="stage framed"><span class="image-frame" style="--w:1280;--h:800"><img src="${BEFORE}"`);
+    expect(html).toContain(`<span class="stage"><img src="${AFTER}"`);
+    const both = [pointer(), claim(pointer({ actionId: "act-2", startedAt: "2026-10-03T12:00:01.000Z" }))];
+    expect(render(both)).toBe(render(both.map(unmarked)));
   });
 
   it("never marks another action's capture", () => {
@@ -173,8 +223,9 @@ describe("evidence report pointer markers", () => {
   it("carries markers into the standalone share report", () => {
     const record = pointer();
     const images = share([BEFORE, AFTER]);
-    const html = renderEvidenceHtml(manifest(), [record], new Set(images.hashes.keys()), images);
-    const plain = renderEvidenceHtml(manifest(), [unmarked(record)], new Set(images.hashes.keys()), images);
+    const actual = sizes([BEFORE, AFTER]);
+    const html = renderEvidenceHtml(manifest(), [record], new Set(images.hashes.keys()), images, actual);
+    const plain = renderEvidenceHtml(manifest(), [unmarked(record)], new Set(images.hashes.keys()), images, actual);
     expect(count(html, "pointer pointer-ring")).toBe(4);
     expect(html).toContain('<span class="image-frame" style="--w:1280;--h:800"><img data-img="h0"');
     expect(html).toContain('id="markers" checked');

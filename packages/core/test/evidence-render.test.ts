@@ -1322,3 +1322,40 @@ describe("standalone evidence report", () => {
     } finally { await dir.close(); }
   });
 });
+
+describe("pointer markers against the PNG on disk", () => {
+  const pointerAction = (name: string, width = 4, height = 3) => action({
+    actionId: name, inputState: "completed", target: { x: 1, y: 1, coordinateSpace: "xvfb-root" },
+    artifacts: [`screenshots/${name}.png`], captures: [{ path: `screenshots/${name}.png`, phase: "after", width, height }],
+  });
+  it("marks only captures whose link size equals the actual PNG header", async () => {
+    const png = encodePng(4, 3, Buffer.alloc(36));
+    const files = { "match.png": png, "cropped.png": encodePng(3, 3, Buffer.alloc(27)), "text.png": Buffer.from("not a png"), "short.png": png.subarray(0, 20) };
+    const records = Object.keys(files).map((file, index) =>
+      ({ ...pointerAction(file.slice(0, -4)), startedAt: `2026-07-13T12:00:0${index}.000Z` }));
+    const { run } = await exportFixture(records, files);
+    const originals = Object.keys(files).map((name) => fs.readFileSync(path.join(run.dir, "screenshots", name)));
+    await writeEvidenceReport(run);
+    const hash = createHash("sha256").update(png).digest("hex");
+    for (const [report, image] of [[EVIDENCE_REPORT, 'src="screenshots/match.png"'], [EVIDENCE_SHARE_REPORT, `data-img="${hash}"`]] as const) {
+      const html = fs.readFileSync(path.join(run.dir, report), "utf8");
+      expect(html).toContain(`<span class="stage framed"><span class="image-frame" style="--w:4;--h:3"><img ${image}`);
+      // Each marked capture renders in the gallery and in its inspect view.
+      expect(html.split('class="pointer pointer-ring"').length - 1).toBe(2);
+      expect(html.split("Pointer: click at 1, 1 · after · completed").length - 1).toBe(2);
+    }
+    const local = fs.readFileSync(path.join(run.dir, EVIDENCE_REPORT), "utf8");
+    for (const name of ["cropped", "text", "short"]) expect(local).toContain(`<span class="stage"><img src="screenshots/${name}.png"`);
+    Object.keys(files).forEach((name, index) => expect(fs.readFileSync(path.join(run.dir, "screenshots", name))).toEqual(originals[index]));
+  });
+
+  it("renders each report unmarked when no capture size matches", async () => {
+    const files = { "wide.png": encodePng(5, 3, Buffer.alloc(45)) };
+    const { run } = await exportFixture([pointerAction("wide")], files);
+    await writeEvidenceReport(run);
+    for (const report of [EVIDENCE_REPORT, EVIDENCE_SHARE_REPORT]) {
+      const html = fs.readFileSync(path.join(run.dir, report), "utf8");
+      for (const text of ['class="pointer', "Pointer:", 'id="markers"', "image-frame", "container-type"]) expect(html).not.toContain(text);
+    }
+  });
+});
