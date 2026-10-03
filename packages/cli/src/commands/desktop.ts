@@ -32,7 +32,9 @@ import {
   screenshotMetadata,
   scroll,
   typeText,
+  verifyOwnedDisplayTarget,
   waitForWindow,
+  type OwnedDisplayIdentity,
   type ScreenshotMetadata,
 } from "@pickforge/lab-desktop-linux";
 import {
@@ -129,6 +131,62 @@ async function focusWithEvidence(
   } finally {
     action.durationMs = Date.now() - startedAt.getTime();
     if (run !== undefined) await appendAction(run, action);
+  }
+}
+
+/** Evidence-only check; it never gates or redirects the input. */
+async function ownedDisplay(sessionId: string, display: string): Promise<OwnedDisplayIdentity | undefined> {
+  try {
+    return await verifyOwnedDisplayTarget(sessionId, display, process.env);
+  } catch {
+    return undefined;
+  }
+}
+
+function reportEvidenceFailure(tool: string, error: unknown): void {
+  const detail = sanitizeErrorText(error instanceof Error ? error.message : String(error));
+  process.stderr.write(`[pickforge-lab evidence] ${tool}: ${detail}\n`);
+}
+
+/** Evidence is best effort: its failures never block the input or change the command result. */
+async function pointerWithEvidence(
+  opts: DesktopCommandOptions, tool: "desktop_click" | "desktop_drag",
+  sessionId: string, display: string, target: Record<string, number>, input: () => Promise<void>,
+): Promise<void> {
+  let run: RunHandle | undefined;
+  try {
+    const projectDir = resolveProjectDir(opts);
+    run = isEvidenceEnabled(await loadConfig(projectDir))
+      ? (await beginEvidenceRun(projectDir, sessionId)).run : undefined;
+  } catch (error) {
+    reportEvidenceFailure(tool, error);
+  }
+  const before = run === undefined ? undefined : await ownedDisplay(sessionId, display);
+  const startedAt = new Date();
+  const action: EvidenceAction = {
+    actionId: crypto.randomUUID(), source: "cli", tool, sessionId,
+    startedAt: startedAt.toISOString(), status: "ok", inputState: "attempted",
+  };
+  try {
+    await input();
+    action.inputState = "completed";
+  } catch (error) {
+    action.error = sanitizeErrorText(error instanceof Error ? error.message : String(error));
+    action.status = /timed out/i.test(action.error) ? "timeout" : "error";
+    throw error;
+  } finally {
+    action.durationMs = Date.now() - startedAt.getTime();
+    if (run !== undefined) {
+      try {
+        const after = before === undefined ? undefined : await ownedDisplay(sessionId, display);
+        const verified = after !== undefined && after.display === before?.display &&
+          after.pid === before.pid && after.startTicks === before.startTicks;
+        action.target = { ...sanitizeActionTarget(verified ? { ...target, coordinateSpace: "xvfb-root" } : target) };
+        await appendAction(run, action);
+      } catch (error) {
+        reportEvidenceFailure(tool, error);
+      }
+    }
   }
 }
 
@@ -460,7 +518,8 @@ export async function runDesktopClick(
     const parsedY = parseIntArg(y, "y");
     const button = parseButtonOption(opts.button);
     const { id, display } = await resolveDesktop(opts);
-    await click({ display, sessionId: id, x: parsedX, y: parsedY, button });
+    await pointerWithEvidence(opts, "desktop_click", id, display, { x: parsedX, y: parsedY }, () =>
+      click({ display, sessionId: id, x: parsedX, y: parsedY, button }));
     return {
       data: { sessionId: id, display, x: parsedX, y: parsedY, button: button ?? 1 },
       lines: [`clicked (${parsedX}, ${parsedY}) on ${display}`],
@@ -559,7 +618,8 @@ export async function runDesktopDrag(
       MAX_DRAG_DURATION_MS,
     );
     const { id, display } = await resolveDesktop(opts);
-    await drag({
+    const target = { fromX: parsedFromX, fromY: parsedFromY, x: parsedToX, y: parsedToY };
+    await pointerWithEvidence(opts, "desktop_drag", id, display, target, () => drag({
       display,
       sessionId: id,
       fromX: parsedFromX,
@@ -568,7 +628,7 @@ export async function runDesktopDrag(
       toY: parsedToY,
       button,
       durationMs,
-    });
+    }));
     return {
       data: {
         sessionId: id,
