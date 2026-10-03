@@ -472,9 +472,11 @@ it lives) contains:
 - `manifest.json` — run identity, status, and evidence metadata
 - `actions.jsonl` — authoritative, append-only sanitized action timeline
 - `report.html` — escaped human viewer generated at finalization: device and
-  outcome summary, device/scenario filters, and a capture inspection view,
-  which stay usable with scripts blocked; text search and arrow-key browsing
-  come from one inline script pinned in the report CSP by hash
+  outcome summary, device/scenario filters, a capture inspection view, and
+  switchable pointer markers drawn over the before and after captures that a
+  desktop input action took, never into the PNGs. These stay usable with
+  scripts blocked; text search and arrow-key browsing come from one inline
+  script pinned in the report CSP by hash
 - `report-share.html`: self-contained gallery with original PNG bytes embedded
   once per unique image; JavaScript is required to display captures
 - `screenshots/` and `logs/` — associated artifacts, when explicitly captured

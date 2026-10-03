@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_ERROR_TEXT_LENGTH,
   sanitizeActionTarget,
+  sanitizeCaptureLinks,
   sanitizeErrorText,
   sanitizeNetworkFailure,
   sanitizeTypedValue,
@@ -185,6 +186,90 @@ describe("sanitizeActionTarget", () => {
     expect(sanitizeActionTarget(null)).toEqual({});
     expect(sanitizeActionTarget("token=abc")).toEqual({});
     expect(sanitizeActionTarget(42)).toEqual({});
+  });
+});
+
+describe("sanitizeActionTarget pointer fields", () => {
+  const root = { x: 640, y: 400, coordinateSpace: "xvfb-root" };
+
+  it("keeps a valid drag start pair and the verified coordinate space", () => {
+    expect(sanitizeActionTarget({ ...root, fromX: 0, fromY: 20 })).toEqual({
+      x: 640, y: 400, fromX: 0, fromY: 20, coordinateSpace: "xvfb-root",
+    });
+    expect(sanitizeActionTarget(root)).toEqual({ x: 640, y: 400, coordinateSpace: "xvfb-root" });
+  });
+
+  it.each([
+    ["only fromX", { fromX: 10 }],
+    ["only fromY", { fromY: 10 }],
+    ["a negative start", { fromX: -1, fromY: 10 }],
+    ["a fractional start", { fromX: 10.4, fromY: 10 }],
+    ["a string start", { fromX: "10", fromY: 10 }],
+    ["a null start", { fromX: null, fromY: 10 }],
+    ["an unsafe integer start", { fromX: Number.MAX_SAFE_INTEGER + 1, fromY: 10 }],
+    ["an infinite start", { fromX: Infinity, fromY: 10 }],
+  ])("drops the drag start and the coordinate space for %s", (_label, start) => {
+    expect(sanitizeActionTarget({ ...root, ...start })).toEqual({ x: 640, y: 400 });
+  });
+
+  it.each([
+    ["an unknown space", { coordinateSpace: "screen" }],
+    ["a differently cased space", { coordinateSpace: "XVFB-ROOT" }],
+    ["a fractional x", { x: 10.4 }],
+    ["a negative y", { y: -3 }],
+    ["a missing y", { y: undefined }],
+    ["a string x", { x: "10" }],
+  ])("drops the coordinate space for %s", (_label, change) => {
+    expect(sanitizeActionTarget({ ...root, ...change })).not.toHaveProperty("coordinateSpace");
+  });
+
+  it("keeps rounding plain x and y for browser targets", () => {
+    expect(sanitizeActionTarget({ x: -10.6, y: 3.5 })).toEqual({ x: -11, y: 4 });
+  });
+});
+
+describe("sanitizeCaptureLinks", () => {
+  const before = { path: "screenshots/a-before.png", phase: "before", width: 1280, height: 800 };
+  const after = { path: "screenshots/a-after.png", phase: "after", width: 200, height: 120 };
+
+  it("keeps well-formed links and copies only the four known fields", () => {
+    expect(sanitizeCaptureLinks([{ ...before, extra: "token" }, after])).toEqual([
+      { path: "screenshots/a-before.png", phase: "before", width: 1280, height: 800 },
+      { path: "screenshots/a-after.png", phase: "after", width: 200, height: 120 },
+    ]);
+  });
+
+  it.each([undefined, null, "screenshots/a.png", {}, 42])("returns no links for %s", (value) => {
+    expect(sanitizeCaptureLinks(value)).toEqual([]);
+  });
+
+  it.each([
+    ["a traversal path", { path: "screenshots/../a.png" }],
+    ["a dotted traversal name", { path: "screenshots/..a.png" }],
+    ["a nested path", { path: "screenshots/x/a.png" }],
+    ["an absolute path", { path: "/screenshots/a.png" }],
+    ["a non-png path", { path: "screenshots/a.jpg" }],
+    ["a non-screenshot path", { path: "report.html" }],
+    ["a non-string path", { path: 7 }],
+    ["an unknown phase", { phase: "during" }],
+    ["a zero width", { width: 0 }],
+    ["a fractional height", { height: 1.5 }],
+    ["a negative width", { width: -1 }],
+    ["a string height", { height: "800" }],
+    ["an unsafe width", { width: Number.MAX_SAFE_INTEGER + 1 }],
+  ])("drops %s", (_label, change) => {
+    expect(sanitizeCaptureLinks([{ ...before, ...change }, after])).toEqual([after]);
+  });
+
+  it("drops every entry for a repeated path or phase as ambiguous", () => {
+    expect(sanitizeCaptureLinks([before, { ...after, path: before.path }])).toEqual([]);
+    expect(sanitizeCaptureLinks([before, after, { ...before, path: "screenshots/b.png" }])).toEqual([after]);
+  });
+
+  it("counts malformed entries when deciding ambiguity", () => {
+    expect(sanitizeCaptureLinks([before, after, { path: before.path, phase: "during" }])).toEqual([after]);
+    expect(sanitizeCaptureLinks([before, after, { phase: "after", width: 0 }])).toEqual([before]);
+    expect(sanitizeCaptureLinks([before, null, "x", after])).toEqual([before, after]);
   });
 });
 

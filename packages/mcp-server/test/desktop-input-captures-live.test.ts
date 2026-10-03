@@ -3,7 +3,6 @@ import path from "node:path";
 import { expect, it } from "vitest";
 import { listRuns, readActions, type EvidenceAction } from "@pickforge/lab-core";
 import { destroyDesktopSession, detectScreenshotTool, findOnPath } from "@pickforge/lab-desktop-linux";
-import { pngPixelDigest } from "../../desktop-linux/src/png.js";
 import { connectLab, makeLabDirs, parseToolJson, PNG_MAGIC, removeLabDirs } from "./helpers.js";
 
 const available = ["Xvfb", "xdotool", "xprop", "zenity"].every((tool) => findOnPath(tool) !== null) && detectScreenshotTool() !== null;
@@ -21,18 +20,23 @@ it.skipIf(!available)("associates real input capture pairs, geometry, inspection
     const created = await call("session_create", { type: "desktop", width: 800, height: 600 });
     expect(created.ok).toBe(true);
     session = created.sessions[0].id;
-    const launched = await call("desktop_exec", { command: "zenity", args: ["--entry", "--title", "Capture Fixture", "--text", "Synthetic input only"], windowTimeoutMs: 10_000 });
+    // Turn off the GTK caret blink in the session's private config home so only input changes pixels (#217).
+    const fixture = ': "${XDG_CONFIG_HOME:?}"; for v in 4.0 3.0; do mkdir -p "$XDG_CONFIG_HOME/gtk-$v" && printf \'[Settings]\\ngtk-cursor-blink=false\\n\' > "$XDG_CONFIG_HOME/gtk-$v/settings.ini" || exit 1; done; exec zenity --entry --title "Capture Fixture" --text "Synthetic input only"';
+    const launched = await call("desktop_exec", { command: "sh", args: ["-c", fixture], windowTimeoutMs: 10_000 });
     expect(launched.ok, JSON.stringify(launched)).toBe(true);
     const windows = await call("desktop_windows");
     const window = windows.windows.find((item: { name: string }) => item.name === "Capture Fixture");
     expect(window).toBeDefined();
     expect((await call("desktop_focus", { id: window.id, capture: "both" })).ok).toBe(true);
+    expect(await call("desktop_wait", { stableMs: 1300, timeoutMs: 8_000 })).toMatchObject({ ok: true, reason: "stable" }); // Longer than a 1.2 s blink cycle and shorter than the 10 s blink timeout, so a live caret fails.
     const marker = "capture-synthetic-value";
     const typed = await call("desktop_type", { text: marker, capture: "both" });
     expect(typed.ok, JSON.stringify(typed)).toBe(true);
     expect(typed.captures).toHaveLength(2);
-    const [before, after] = typed.captures;
-    expect(await pngPixelDigest(before.path)).not.toBe(await pngPixelDigest(after.path));
+    const [before] = typed.captures;
+    // The after capture follows input completion, and the app may not have redrawn yet.
+    // With the caret blink off, the only change from the settled before frame is the typed text.
+    expect(await call("desktop_wait", { baseline: before.path, timeoutMs: 20_000 })).toMatchObject({ ok: true, reason: "changed" });
     for (const shot of typed.captures) {
       expect(shot).toMatchObject({ imageSize: { width: 800, height: 600 }, displaySize: { width: 800, height: 600 }, scale: 1, inputCoordinates: "image-pixels", windowCount: 1 });
       expect(fs.readFileSync(shot.path).subarray(0, PNG_MAGIC.length)).toEqual(PNG_MAGIC);
@@ -74,4 +78,4 @@ it.skipIf(!available)("associates real input capture pairs, geometry, inspection
     await lab.close();
     removeLabDirs(dirs);
   }
-}, 60_000);
+}, 90_000);
