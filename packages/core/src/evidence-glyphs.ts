@@ -76,6 +76,23 @@ const DRAG_ARROW_OFFSET = GLYPH_HALO_WIDTH / 2;
 /** A scroll arrow clear of the ring and its halo, so it reads as a direction. */
 const SCROLL_ARROW_OFFSET = RING_RADIUS + GLYPH_HALO_WIDTH / 2 + 4 + ARROW_SIZE;
 const CARET_SIZE = 16;
+/** Holds the caret, its serif tips and both halos with a clear gap. */
+const CARET_RING_RADIUS = 13;
+/** From the caret marker's centre to the outer edge of its ring halo. */
+const CARET_REACH = CARET_RING_RADIUS + GLYPH_HALO_WIDTH / 2;
+/**
+ * Capture pixels from the visible window corner to the caret marker. At 1:1
+ * the box halo reaches half a halo width inside the window, and 3 px of the
+ * image stays visible between it and the ring halo.
+ */
+const CARET_INSET = CARET_REACH + GLYPH_HALO_WIDTH / 2 + 3;
+/**
+ * The HTML viewer keeps marker sizes fixed on screen, so a scaled-down preview
+ * shrinks only the inset. Report gallery previews are at most this many pixels
+ * tall. The caret marker keeps a matching distance from the capture's top and
+ * left edges, so it stays whole there.
+ */
+const PREVIEW_HEIGHT = 150;
 
 /** desktop_move takes no captures, so it never gets a glyph. */
 const KINDS: ReadonlyMap<unknown, PointerGlyphKind> = new Map([
@@ -173,8 +190,13 @@ function stepText(steps: number, negative: string, positive: string): string {
 }
 
 /**
- * The focused window and a caret at the middle of its visible part. The caret
- * marks the window, not a text position, and the label names no text or length.
+ * The focused window, and a caret in a ring just inside the top-left corner of
+ * its visible part. The marker keeps clear of the capture's top and left edges
+ * in a gallery preview, and never passes the middle of the visible part. It
+ * tags the window. It claims no text position and no landing point, so the
+ * result phase adds no dot and shows only in the label. Attempted input dashes
+ * the ring as well as the box, so the state stays visible when the box falls
+ * outside the capture. The label names no text or length.
  */
 function typeFocus(input: GlyphInput): Drawing | undefined {
   const { focus } = input.target;
@@ -184,9 +206,17 @@ function typeFocus(input: GlyphInput): Drawing | undefined {
   const right = Math.min(focus.x + focus.width, input.width);
   const bottom = Math.min(focus.y + focus.height, input.height);
   if (left >= right || top >= bottom) return undefined;
-  const at = { x: (left + right) / 2, y: (top + bottom) / 2 };
-  const parts: GlyphPart[] = [{ shape: "box", ...focus, dashed: input.dashed }, { shape: "caret", at, size: CARET_SIZE }];
-  return { parts: [...parts, ...landed(input, at)], label: "Keyboard: type into the focused window" };
+  const edge = Math.ceil(CARET_REACH * input.height / PREVIEW_HEIGHT);
+  const at = { x: tagCoordinate(left, right, edge), y: tagCoordinate(top, bottom, edge) };
+  return {
+    parts: [{ shape: "box", ...focus, dashed: input.dashed }, ring(at, CARET_RING_RADIUS, input.dashed), { shape: "caret", at, size: CARET_SIZE }],
+    label: "Keyboard: type into the focused window",
+  };
+}
+
+/** Inset from the start of a visible span and from the capture edge, at most to the span's middle. */
+function tagCoordinate(start: number, end: number, edge: number): number {
+  return Math.min(Math.max(start + CARET_INSET, edge), (start + end) / 2);
 }
 
 /** The result phase adds a filled dot where the input landed. */

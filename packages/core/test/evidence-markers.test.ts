@@ -86,6 +86,13 @@ function area(body: string, width = 1280, height = 800): string {
 const CENTRE_RING = anchored("50.0391%", "50.0625%", 18, '<circle class="h" r="7"/><circle class="s" r="7"/>');
 const CENTRE_DOT = anchored("50.0391%", "50.0625%", 10, '<circle class="hf" r="3"/><circle class="f" r="3"/>');
 
+/** The ringed caret that tags a focused window; the ring is dashed for attempted input. */
+function typeTag(x: string, y: string, dashed = false): string {
+  const dash = dashed ? " d" : "";
+  const caret = '<path class="h" d="M-4 -8H4M0 -8V8M-4 8H4"/><path class="s" d="M-4 -8H4M0 -8V8M-4 8H4"/>';
+  return anchored(x, y, 30, `<circle class="h${dash}" r="13"/><circle class="s${dash}" r="13"/>`) + anchored(x, y, 20, caret);
+}
+
 /** One record per kind, each with its own before and after captures. */
 function everyKind(): EvidenceAction[] {
   const kinds: Array<[string, Record<string, unknown>]> = [
@@ -297,12 +304,28 @@ describe("evidence report glyph parts", () => {
     expect(count(html, anchored("70.3516%", "75.0625%", 66, '<polygon class="hf" points="-6.957,20.871 -8.38,10.9099 0.1581,13.7559"/><polygon class="f" points="-6.957,20.871 -8.38,10.9099 0.1581,13.7559"/>'))).toBe(4);
     expect(count(html, anchored("70.3516%", "75.0625%", 18, ring))).toBe(4);
     expect(html).toContain("Pointer: scroll down 3 and left 1 at 900, 600 · before · completed");
-    // The window keeps its root rect; the caret centres on its visible part.
+    // The window keeps its root rect; a ringed caret tags the top-left of its visible part, with no landing dot.
     expect(count(html, area('<rect class="h" x="-40" y="100" width="600" height="400"/><rect class="s" x="-40" y="100" width="600" height="400"/>'))).toBe(4);
-    expect(count(html, anchored("21.875%", "37.5%", 20, '<path class="h" d="M-4 -8H4M0 -8V8M-4 8H4"/><path class="s" d="M-4 -8H4M0 -8V8M-4 8H4"/>'))).toBe(4);
-    expect(count(html, anchored("21.875%", "37.5%", 10, '<circle class="hf" r="3"/><circle class="f" r="3"/>'))).toBe(2);
+    expect(count(html, typeTag("6.25%", "15%"))).toBe(4);
+    expect(html).not.toContain(anchored("6.25%", "15%", 10, '<circle class="hf" r="3"/><circle class="f" r="3"/>'));
     expect(html).toContain("Keyboard: type into the focused window · after · completed");
     expect(count(html, anchored("23.4766%", "27.5625%", 18, ring) + anchored("23.4766%", "27.5625%", 28, '<circle class="h" r="12"/><circle class="s" r="12"/>'))).toBe(4);
+  });
+
+  it.each<[string, Record<string, number>]>([
+    ["covers", { x: 0, y: 0, width: 1280, height: 800 }],
+    ["exceeds", { x: -8, y: -30, width: 1300, height: 850 }],
+  ])("draws attempted typing apart from completed typing when the window %s the capture", (_label, focus) => {
+    const typed = (inputState: "attempted" | "completed") => render([pointer({
+      tool: "desktop_type", inputState, target: { focus, coordinateSpace: "xvfb-root" },
+    })]);
+    const [completed, attempted] = [typed("completed"), typed("attempted")];
+    // Both captures, in the gallery and in the inspect view, carry the tag at capture point (80, 80).
+    expect(count(completed, typeTag("6.25%", "10%"))).toBe(4);
+    expect(count(attempted, typeTag("6.25%", "10%", true))).toBe(4);
+    expect(completed).not.toContain(typeTag("6.25%", "10%", true));
+    expect(attempted).not.toContain(typeTag("6.25%", "10%"));
+    for (const html of [completed, attempted]) expect(html).not.toContain('<circle class="hf" r="3"/>');
   });
 
   it("styles parts with the shared glyph constants and clips them to the image", () => {

@@ -7,6 +7,7 @@ import {
   type EvidenceRecord,
   type GlyphPart,
 } from "../src/index.js";
+import { decodePng, drawPointerGlyph, encodePng, type PngRaster } from "../src/png-raster.js";
 
 const BEFORE = "screenshots/act-before.png";
 const AFTER = "screenshots/act-after.png";
@@ -121,17 +122,17 @@ describe("pointer glyphs per action kind", () => {
   });
 
   describe("type", () => {
-    const focus = { x: 100, y: 50, width: 600, height: 400 };
+    const focus = { x: 300, y: 200, width: 400, height: 300 };
     const typed = (window: Record<string, number> = focus, change: Partial<EvidenceAction> = {}) => action({
       tool: "desktop_type", target: { length: 12, inputType: "text", focus: window, coordinateSpace: "xvfb-root" }, ...change,
     });
     const box = (window = focus, dashed = false): GlyphPart => ({ shape: "box", ...window, dashed });
-    const caret = (at: { x: number; y: number }): GlyphPart => ({ shape: "caret", at, size: 16 });
+    const marker = (at: { x: number; y: number }, dashed = false): GlyphPart[] => [ring(at, 13, dashed), { shape: "caret", at, size: 16 }];
 
-    it("marks the focused window with a caret, and the result with a dot", () => {
-      const at = { x: 400, y: 250 };
-      expect(parts(typed(), BEFORE)).toEqual([box(), caret(at)]);
-      expect(parts(typed(), AFTER)).toEqual([box(), caret(at), dot(at)]);
+    it("tags the focused window with a ringed caret inside its top-left corner, and adds no landing dot", () => {
+      const at = { x: 320, y: 220 };
+      expect(parts(typed(), BEFORE)).toEqual([box(), ...marker(at)]);
+      expect(parts(typed(), AFTER)).toEqual([box(), ...marker(at)]);
       expect(label(typed(), AFTER)).toBe("Keyboard: type into the focused window · after · completed");
     });
 
@@ -141,13 +142,44 @@ describe("pointer glyphs per action kind", () => {
       expect(JSON.stringify(glyph)).not.toMatch(/length|inputType|text"/);
     });
 
-    it("dashes the box of attempted input", () => {
-      expect(parts(typed(focus, { inputState: "attempted" }))?.[0]).toEqual(box(focus, true));
+    it("dashes the box and the caret ring of attempted input, and adds no landing dot", () => {
+      const attempted = typed(focus, { inputState: "attempted" });
+      const at = { x: 320, y: 220 };
+      expect(parts(attempted, BEFORE)).toEqual([box(focus, true), ...marker(at, true)]);
+      expect(parts(attempted, AFTER)).toEqual([box(focus, true), ...marker(at, true)]);
+      expect(label(attempted, AFTER)).toBe("Keyboard: type into the focused window · after · attempted");
     });
 
-    it("centres the caret on the visible part of a window that leaves the capture", () => {
-      const window = { x: -200, y: 600, width: 400, height: 1000 };
-      expect(parts(typed(window))).toEqual([box(window), caret({ x: 100, y: 700 })]);
+    it.each<[string, typeof focus, { x: number; y: number }]>([
+      ["a window near the capture's top edge", { x: 100, y: 50, width: 600, height: 400 }, { x: 120, y: 80 }],
+      ["a window off the left and bottom", { x: -200, y: 600, width: 400, height: 1000 }, { x: 80, y: 620 }],
+      ["a window larger than the capture", { x: -8, y: -30, width: 1300, height: 850 }, { x: 80, y: 80 }],
+      ["a small visible part", { x: 1250, y: 780, width: 100, height: 100 }, { x: 1265, y: 790 }],
+    ])("insets the caret marker on the visible part of %s", (_label, window, at) => {
+      expect(parts(typed(window), AFTER)).toEqual([box(window), ...marker(at)]);
+    });
+
+    it.each<[number, number, number]>([
+      [200, 120, 20],
+      [1280, 800, 80],
+      [1920, 1080, 108],
+    ])("keeps the caret marker clear of the edges of a %ix%i capture", (width, height, inset) => {
+      const window = { x: -10, y: -10, width: width + 20, height: height + 20 };
+      const record = typed(window, { captures: [{ path: AFTER, phase: "after", width, height }] });
+      expect(pointerGlyph(record, AFTER, { width, height })?.parts).toEqual([box(window), ...marker({ x: inset, y: inset })]);
+    });
+
+    it.each<[string, Record<string, number>]>([
+      ["covers", { x: 0, y: 0, width: 1280, height: 800 }],
+      ["exceeds", { x: -8, y: -30, width: 1300, height: 850 }],
+    ])("keeps attempted typing apart from completed typing when the window %s the capture", (_label, window) => {
+      for (const capture of [BEFORE, AFTER]) {
+        const completed = parts(typed(window), capture)!;
+        const attempted = parts(typed(window, { inputState: "attempted" }), capture)!;
+        expect(completed[1]).toEqual(ring({ x: 80, y: 80 }, 13, false));
+        expect(attempted[1]).toEqual(ring({ x: 80, y: 80 }, 13, true));
+        expect(attempted[2]).toEqual(completed[2]);
+      }
     });
 
     it.each<[string, Record<string, number>]>([
@@ -168,6 +200,60 @@ describe("pointer glyphs per action kind", () => {
     ])("draws nothing for %s", (_label, target) => {
       expect(parts(action({ tool: "desktop_type", target }))).toBeUndefined();
     });
+  });
+});
+
+describe("type glyph pixels", () => {
+  const size = { width: 160, height: 100 };
+  const typed = (focus: Record<string, number>, inputState: "attempted" | "completed") => action({
+    tool: "desktop_type", inputState, target: { focus, coordinateSpace: "xvfb-root" },
+    captures: [{ path: AFTER, phase: "after", ...size }],
+  });
+  /** A synthetic capture with a gradient, so a drawn pixel never matches by chance. */
+  const capture = (() => {
+    const pixels = Buffer.alloc(size.width * size.height * 4);
+    for (let y = 0; y < size.height; y += 1) {
+      for (let x = 0; x < size.width; x += 1) pixels.set([200, 80 + x, 60 + y, 255], (y * size.width + x) * 4);
+    }
+    return encodePng({ ...size, pixels });
+  })();
+  const drawn = (record: EvidenceAction): PngRaster => {
+    const image = decodePng(capture);
+    drawPointerGlyph(image, pointerGlyph(record, AFTER, size)!);
+    return image;
+  };
+  /** The pixels that differ from the capture. */
+  const changed = (image: PngRaster): Array<[number, number]> => {
+    const base = decodePng(capture).pixels;
+    const points: Array<[number, number]> = [];
+    for (let y = 0; y < size.height; y += 1) {
+      for (let x = 0; x < size.width; x += 1) {
+        const at = (y * size.width + x) * 4;
+        if (!base.subarray(at, at + 4).equals(image.pixels.subarray(at, at + 4))) points.push([x, y]);
+      }
+    }
+    return points;
+  };
+  const exceeding = { x: -10, y: -10, width: 180, height: 120 };
+
+  it.each<[string, Record<string, number>]>([
+    ["covers", { x: 0, y: 0, width: 160, height: 100 }],
+    ["exceeds", exceeding],
+  ])("draws attempted typing apart from completed typing when the window %s the capture", (_label, focus) => {
+    const completed = drawn(typed(focus, "completed"));
+    const attempted = drawn(typed(focus, "attempted"));
+    expect(attempted.pixels.equals(completed.pixels)).toBe(false);
+  });
+
+  it("draws the whole caret marker inside a capture that the window exceeds", () => {
+    for (const state of ["completed", "attempted"] as const) {
+      // The box falls outside the capture. The marker sits at (20, 20) and reaches 15 px.
+      const points = changed(drawn(typed(exceeding, state)));
+      expect(points.length).toBeGreaterThan(0);
+      for (const [x, y] of points) {
+        expect(Math.hypot(x + 0.5 - 20, y + 0.5 - 20)).toBeLessThanOrEqual(16);
+      }
+    }
   });
 });
 
