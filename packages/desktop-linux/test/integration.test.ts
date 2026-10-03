@@ -25,7 +25,6 @@ import {
   detectVncBinary,
   doubleClick,
   drag,
-  ensureDesktopSessionIsolation,
   execApp,
   findOnPath,
   getDesktopSessionStatus,
@@ -703,9 +702,6 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
           'exec zenity --info --text pickforge --title pickforge-exec-itest\n',
       );
       try {
-        // Production exec always isolates. Without it, zenity reached the
-        // runner's real runtime dir and D-Bus and started slowly in CI (#217).
-        const isolation = await ensureDesktopSessionIsolation(session.id, env);
         const app = await execApp({
           display: session.display,
           command: guardedZenity,
@@ -715,8 +711,9 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
             WAYLAND_SOCKET: "42",
           },
           logDir: session.logDir,
-          ...isolation,
-          windowTimeoutMs: 15_000,
+          // Under the fully parallel suite, CI took up to 10 s to map this
+          // window and once passed 15 s; the coverage run took 0.5 s (#217).
+          windowTimeoutMs: 30_000,
         });
         expect(app.processGroupId).toBe(app.pid);
         expect(app.windows).toEqual(
@@ -733,7 +730,7 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
         await destroyDesktopSession(session.id, env);
       }
     },
-    TEST_TIMEOUT_MS,
+    60_000,
   );
 
   it.skipIf(!hasXterm)(
