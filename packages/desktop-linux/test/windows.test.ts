@@ -1,6 +1,8 @@
+import fs from "node:fs";
+import path from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { acquireHumanLease, releaseHumanLease } from "@pickforge/lab-core";
-import { desktopWindows, focusWindow, listWindows, selectDesktopWindow } from "../src/index.js";
+import { desktopWindows, focusedWindowGeometry, focusWindow, listWindows, selectDesktopWindow } from "../src/index.js";
 import { windowFixture } from "./windows-fixture.js";
 
 let fixture: Awaited<ReturnType<typeof windowFixture>>;
@@ -80,4 +82,48 @@ it("redacts inventory and successful focus responses but selects the raw exact n
   expect(JSON.stringify(await desktopWindows(":42", fixture.env))).not.toContain(secret);
   const window = await selectDesktopWindow(":42", { name: secret }, fixture.env);
   expect(JSON.stringify(await focusWindow({ display: ":42", sessionId: fixture.session.id, env: fixture.env, window }))).not.toContain(secret);
+});
+
+it("reads the focused window rect for evidence without mutation", async () => {
+  expect(await focusedWindowGeometry(":42", fixture.env)).toEqual({ x: -4, y: 12, width: 300, height: 200 });
+  expect(fixture.calls()).toEqual([["getwindowfocus", "-f"], ["getwindowfocus"], ["getwindowgeometry", "--shell", "11"]]);
+});
+
+it("returns no rect for None or PointerRoot focus", async () => {
+  for (const focused of ["0", "1"]) {
+    fixture.state({ focused });
+    expect(await focusedWindowGeometry(":42", fixture.env)).toBeUndefined();
+  }
+  expect(fixture.calls().some(([command]) => command === "getwindowgeometry")).toBe(false);
+});
+
+it("rejects a malformed focus id and bounds hung focus and geometry queries", async () => {
+  fixture.state({ focused: "--sync" });
+  await expect(focusedWindowGeometry(":42", fixture.env)).rejects.toThrow("Invalid xdotool focused window id");
+  expect(fixture.calls().some(([command]) => command === "getwindowgeometry")).toBe(false);
+  fixture.state({ focused: "11" });
+  for (const hang of ["getwindowfocus", "getwindowgeometry"]) {
+    fixture.state({ hang });
+    const started = Date.now();
+    await expect(focusedWindowGeometry(":42", fixture.env, 200)).rejects.toThrow(/timed out/i);
+    expect(Date.now() - started).toBeLessThan(2_000);
+  }
+});
+
+it("targets the session display with an empty X authority and rejects bad geometry", async () => {
+  const bin = path.join(fixture.root, "env-bin");
+  const log = path.join(fixture.root, "env.jsonl");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, "xdotool"), `#!/usr/bin/env node
+const fs = require('node:fs');
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify([process.env.DISPLAY, process.env.XAUTHORITY]) + '\\n');
+if (process.argv[2] === 'getwindowfocus') console.log('11');
+else console.log(process.env.GEOMETRY);
+`, { mode: 0o700 });
+  const env = { ...fixture.env, PATH: `${bin}:${fixture.env.PATH}`, DISPLAY: ":0", XAUTHORITY: "/home/user/.Xauthority" };
+  await expect(focusedWindowGeometry(":42", { ...env, GEOMETRY: "X=1\nY=2\nWIDTH=3\nHEIGHT=4" })).resolves.toEqual({ x: 1, y: 2, width: 3, height: 4 });
+  const seen = fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  expect(seen).toEqual([[":42", "/dev/null"], [":42", "/dev/null"], [":42", "/dev/null"]]);
+  await expect(focusedWindowGeometry(":42", { ...env, GEOMETRY: "X=1\nY=2\nWIDTH=wide\nHEIGHT=4" })).rejects.toThrow("Invalid xdotool window geometry");
+  await expect(focusedWindowGeometry("not-a-display", env)).rejects.toThrow();
 });

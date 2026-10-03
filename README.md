@@ -473,13 +473,15 @@ it lives) contains:
 - `actions.jsonl` — authoritative, append-only sanitized action timeline
 - `report.html` — escaped human viewer generated at finalization: device and
   outcome summary, device/scenario filters, a capture inspection view, and
-  switchable pointer markers drawn over the before and after captures that a
-  desktop input action took, never into the PNGs. These stay usable with
+  switchable pointer glyphs drawn over the before and after captures that a
+  desktop input action took, never into the PNGs. Click, double click, drag,
+  scroll and typing each have their own glyph. These stay usable with
   scripts blocked; text search and arrow-key browsing come from one inline
   script pinned in the report CSP by hash
 - `report-share.html`: self-contained gallery with original PNG bytes embedded
   once per unique image; JavaScript is required to display captures
 - `screenshots/` and `logs/` — associated artifacts, when explicitly captured
+- `exports/` — derived copies made by `artifacts export`, only when requested
 
 Download and open `report-share.html` in a browser. It works offline with no
 adjacent files. If a channel blocks HTML attachments, ZIP the single file.
@@ -489,6 +491,19 @@ PNGs, are listed as not included.
 Quality is never reduced to fit. Base64 adds about one third to image size, so
 large runs produce large files. Original screenshots, `manifest.json` and
 `actions.jsonl` remain authoritative. Logs and other attachments are not embedded.
+
+`pickforge-lab artifacts export [runId] [--video] [--frame-ms <ms>]` writes a
+new `exports/<exportId>/` directory inside the run. It holds a copy of each
+screenshot with its pointer glyph drawn in, a `pointer-track.json` of pointer
+events, and an `export.json` manifest with source and output hashes. The
+pointer track holds pointer events only, never keyboard data; its schema is in
+[docs/pointer-track.md](docs/pointer-track.md). `--video` also builds
+`slideshow.mp4` from the frames with ffmpeg, which is needed only then. The
+video is a slideshow of stills, not a screen recording. `export.json` is
+written last, so an export without it is incomplete; a failed `--video` keeps
+the frames and pointer track and reports the error. Exports never change the
+screenshots, the journal or the reports, and they do not count toward the
+evidence size cap. Pruning a run removes its exports.
 
 Runs may include optional device metadata from the session, including known
 viewport dimensions. Missing device metadata means unknown; existing runs need
@@ -805,7 +820,7 @@ pickforge-lab agents add --name my-agent --mcp-command "pickforge-lab mcp serve"
 | Takeover | `takeover status [--session <id>]` |
 | Desktop | `desktop windows`, `desktop focus --id <id>` / `--name <name>`, `desktop launch <cmd>`, `desktop exec <cmd>`, `desktop env`, `desktop screenshot`, `desktop wait`, `desktop click <x> <y>`, `desktop move <x> <y>`, `desktop scroll <deltaX> <deltaY>`, `desktop drag <fromX> <fromY> <toX> <toY>`, `desktop double-click <x> <y>`, `desktop type <text>`, `desktop key <keys>` |
 | Android | `android start`, `android install-apk <apk> [--wait-ready <s>]`, `android launch-app <pkg> [--wait-ready <s>]`, `android screenshot`, `android tap <x> <y>`, `android type <text>`, `android back`, `android home`, `android ui-tree`, `android logcat`, `android adb [args...]` |
-| Artifacts | `artifacts list`, `artifacts open <runId>`, `artifacts report [runId]` (shareable HTML path and size; JSON includes `shareReportPath`, `shareReportBytes`, `reportPath`, `outcome`, `device`) |
+| Artifacts | `artifacts list`, `artifacts open <runId>`, `artifacts report [runId]` (shareable HTML path and size; JSON includes `shareReportPath`, `shareReportBytes`, `reportPath`, `outcome`, `device`), `artifacts export [runId]` (glyph frames, pointer track, optional `--video` slideshow) |
 | Agents | `agents list`, `agents install <agent> [--browser]`, `agents link <agent> [--browser]`, `agents unlink <agent>`, `agents doctor`, `agents add` |
 | Browser | `browser devtools-mcp` |
 | MCP | `mcp serve` |

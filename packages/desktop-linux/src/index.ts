@@ -2,6 +2,7 @@ export const packageName = "@pickforge/lab-desktop-linux";
 
 export {
   desktopWindows, selectDesktopWindow, focusWindow, MAX_FOCUS_TIMEOUT_MS,
+  focusedWindowGeometry, FOCUSED_WINDOW_TIMEOUT_MS,
   type DesktopWindow, type WindowSelector, type FocusWindowOptions,
 } from "./windows.js";
 

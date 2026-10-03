@@ -1,5 +1,17 @@
 export const packageName = "@pickforge/lab-core";
 
+export {
+  DEFAULT_EXPORT_FRAME_MS,
+  exportEvidenceRun,
+  exportFrameMilliseconds,
+  type EvidenceExportOptions,
+  type EvidenceExportResult,
+  type EvidenceExportManifest,
+  type ExportFrame,
+  type ExportVideo,
+  type GlyphSource,
+} from "./evidence-export.js";
+
 export { readPickforgeEnv, type EnvLike } from "./env-compat.js";
 
 export {
@@ -154,6 +166,21 @@ export {
   reportContentSecurityPolicy,
   writeEvidenceReport,
 } from "./evidence-render.js";
+
+export {
+  GLYPH_COLOR,
+  GLYPH_DASH,
+  GLYPH_HALO_COLOR,
+  GLYPH_HALO_WIDTH,
+  GLYPH_STROKE_WIDTH,
+  POINTER_GLYPH_VERSION,
+  pointerGlyph,
+  runPointerGlyphs,
+  type GlyphPart,
+  type GlyphPoint,
+  type PointerGlyph,
+  type PointerGlyphKind,
+} from "./evidence-glyphs.js";
 
 export {
   finalizeOrphanedEvidenceRuns,

@@ -1344,7 +1344,7 @@ describe("pointer markers against the PNG on disk", () => {
       const html = fs.readFileSync(path.join(run.dir, report), "utf8");
       expect(html).toContain(`<span class="stage framed"><span class="image-frame" style="--w:4;--h:3"><img ${image}`);
       // Each marked capture renders in the gallery and in its inspect view.
-      expect(html.split('class="pointer pointer-ring"').length - 1).toBe(2);
+      expect(html.split('<circle class="s" r="7"/>').length - 1).toBe(2);
       expect(html.split("Pointer: click at 1, 1 · after · completed").length - 1).toBe(2);
     }
     const local = fs.readFileSync(path.join(run.dir, EVIDENCE_REPORT), "utf8");

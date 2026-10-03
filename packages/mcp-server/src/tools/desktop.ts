@@ -9,6 +9,7 @@ import {
   desktopWait,
   desktopWindows,
   focusWindow,
+  focusedWindowGeometry,
   selectDesktopWindow,
   MAX_FOCUS_TIMEOUT_MS,
   desktopSessionLogDir,
@@ -46,7 +47,10 @@ import {
   type ServerContext,
   type ToolReport,
 } from "../context.js";
-import { evidenceStatus, withMcpEvidence, type EvidenceRecordMeta, type McpEvidenceOptions } from "../evidence.js";
+import {
+  evidenceStatus, withMcpEvidence,
+  type EvidenceOperationContext, type EvidenceRecordMeta, type McpEvidenceOptions,
+} from "../evidence.js";
 
 const sessionArg = {
   session: z
@@ -412,6 +416,15 @@ function ownedDisplay(ctx: ServerContext, sessionId: string, display: string) {
   return () => verifyOwnedDisplayTarget(sessionId, display, ctx.env);
 }
 
+/** Evidence-only focused window rect; any failure leaves it out. */
+async function focusEvidence(display: string, ctx: ServerContext): Promise<EvidenceRecordMeta["focus"]> {
+  try {
+    return await focusedWindowGeometry(display, ctx.env);
+  } catch {
+    return undefined;
+  }
+}
+
 async function trackInput(
   record: EvidenceRecordMeta,
   input: () => Promise<ToolReport>,
@@ -427,15 +440,16 @@ async function withInputCapture(
   options: McpEvidenceOptions<ToolReport>,
   display: string,
   capture: "after" | "both" | undefined,
-  input: () => Promise<ToolReport>,
+  input: (evidence: EvidenceOperationContext) => Promise<ToolReport>,
 ): Promise<ToolReport> {
   if (capture === undefined) {
-    return withMcpEvidence(ctx, { ...options, input: true }, ({ record }) => trackInput(record, input));
+    return withMcpEvidence(ctx, { ...options, input: true }, (evidence) => trackInput(evidence.record, () => input(evidence)));
   }
   const artifacts: string[] = [];
   return withMcpEvidence(ctx, {
     ...options, input: true, artifacts: () => artifacts, onRecordingFailure: failedCaptureRecording,
-  }, async ({ actionId, run, record }) => {
+  }, async (evidence) => {
+    const { actionId, run, record } = evidence;
     if (run === undefined) throw new Error("Explicit input capture requires available, enabled evidence; input was not attempted");
     const captures: Record<string, unknown>[] = [];
     let inputState: EvidenceInputState = "not-attempted";
@@ -462,7 +476,7 @@ async function withInputCapture(
       if (capture === "both") await take("before");
       stage = "input";
       inputState = record.inputState = "attempted";
-      const result = await input();
+      const result = await input(evidence);
       if ((result.errors?.length ?? 0) > 0) return { ...result, data: { ...result.data, capture, captures, inputState, artifacts } };
       inputState = record.inputState = "completed";
       stage = "after capture";
@@ -610,7 +624,7 @@ function registerScrollTool(server: McpServer, ctx: ServerContext): void {
           {
             sessionId: id,
             tool: "desktop_scroll",
-            target: point ? { x: args.x, y: args.y } : undefined,
+            target: { ...(point ? { x: args.x, y: args.y } : {}), wheelX: args.deltaX, wheelY: args.deltaY },
             ownedDisplay: point ? ownedDisplay(ctx, id, display) : undefined,
           },
           display, args.capture,
@@ -786,9 +800,11 @@ function registerTypeTool(server: McpServer, ctx: ServerContext): void {
             sessionId: id,
             tool: "desktop_type",
             typedValue: { value: args.text, inputType: "text" },
+            ownedDisplay: ownedDisplay(ctx, id, display),
           },
           display, args.capture,
-          async () => {
+          async ({ run, record }) => {
+            if (run !== undefined) record.focus = await focusEvidence(display, ctx);
             await typeText({ display, sessionId: id, env: ctx.env, text: args.text });
             return {
               data: { sessionId: id, display, length: args.text.length },

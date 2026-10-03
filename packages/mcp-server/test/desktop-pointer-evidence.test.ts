@@ -5,10 +5,13 @@ import { beginEvidenceRun, EVIDENCE_MAX_BYTES, listRuns, readActions, saveProjec
 import { connectLab, makeLabDirs, MINI_PNG, parseToolJson, removeLabDirs, writeDesktopSessionRecord, type ConnectedLab, type LabDirs } from "./helpers.js";
 
 type Identity = { display: string; pid: number; startTicks: number } | undefined | "reject";
+type Focus = { x: number; y: number; width: number; height: number } | undefined | "reject" | Record<string, unknown>;
 const IDENTITY = vi.hoisted(() => ({ display: ":99", pid: 4242, startTicks: 777 }));
+const FOCUS = vi.hoisted(() => ({ x: -4, y: 12, width: 300, height: 200 }));
 const state = vi.hoisted(() => ({
   order: [] as string[], fail: "", publishedFailure: false, captureBytes: 0,
   verify: [] as Identity[], verifyArgs: [] as unknown[][], inputDisplays: [] as string[],
+  focus: FOCUS as Focus, focusArgs: [] as unknown[][],
 }));
 vi.mock("@pickforge/lab-desktop-linux", async (original) => {
   const actual = await original<typeof import("@pickforge/lab-desktop-linux")>();
@@ -17,7 +20,13 @@ vi.mock("@pickforge/lab-desktop-linux", async (original) => {
     state.inputDisplays.push(opts.display);
     if (state.fail === "input") throw new Error("synthetic input failure");
   });
-  return { ...actual, click: input, doubleClick: input, drag: input, scroll: input, move: input,
+  return { ...actual, click: input, doubleClick: input, drag: input, scroll: input, move: input, typeText: input,
+    focusedWindowGeometry: vi.fn(async (...args: unknown[]) => {
+      state.order.push("focus");
+      state.focusArgs.push(args);
+      if (state.focus === "reject") throw new Error("synthetic focus query timed out");
+      return state.focus;
+    }),
     verifyOwnedDisplayTarget: vi.fn(async (...args: unknown[]) => {
       state.order.push("verify");
       state.verifyArgs.push(args);
@@ -46,6 +55,7 @@ beforeEach(async () => {
   session = writeDesktopSessionRecord(dirs.home, dirs.projectDir);
   lab = await connectLab({ projectDir: dirs.projectDir, env });
   state.order = []; state.fail = ""; state.publishedFailure = false; state.captureBytes = 0; state.verify = []; state.verifyArgs = []; state.inputDisplays = [];
+  state.focus = FOCUS; state.focusArgs = [];
 });
 afterEach(async () => { await lab.close(); removeLabDirs(dirs); });
 
@@ -70,7 +80,7 @@ const pointer: [string, Record<string, unknown>, Record<string, number>, string[
   ["desktop_click", { x: 2, y: 3 }, { x: 2, y: 3 }, ["button", "x", "y"]],
   ["desktop_double_click", { x: 2, y: 3 }, { x: 2, y: 3 }, ["button", "x", "y"]],
   ["desktop_drag", { fromX: 1, fromY: 4, toX: 2, toY: 3 }, { fromX: 1, fromY: 4, x: 2, y: 3 }, ["button", "fromX", "fromY", "toX", "toY"]],
-  ["desktop_scroll", { deltaX: 0, deltaY: 1, x: 5, y: 6 }, { x: 5, y: 6 }, ["deltaX", "deltaY", "x", "y"]],
+  ["desktop_scroll", { deltaX: 0, deltaY: 1, x: 5, y: 6 }, { x: 5, y: 6, wheelX: 0, wheelY: 1 }, ["deltaX", "deltaY", "x", "y"]],
 ];
 const captureKeys = ["display", "displaySize", "imageSize", "inlineImage", "inputCoordinates", "path", "phase", "runDir", "runId", "scale", "sessionId", "tool", "windowCount"];
 
@@ -162,12 +172,14 @@ it.each<[string, Identity[]]>([
   expect(action).toMatchObject({ status: "ok", inputState: "completed" });
 });
 
-it("records no coordinates, no space and no verification for a scroll without a point", async () => {
-  const result = await call("desktop_scroll", { deltaX: 0, deltaY: 1, capture: "after" });
+it("records only wheel steps, no space and no verification for a scroll without a point", async () => {
+  const result = await call("desktop_scroll", { deltaX: -3, deltaY: 0, capture: "after" });
   expect(result.ok).toBe(true);
+  expect(Object.keys(result).sort()).toEqual(["artifacts", "capture", "captures", "deltaX", "deltaY", "display", "errors", "inputState", "ok", "sessionId"]);
+  expect(JSON.stringify(result)).not.toContain("wheel");
   expect(state.order).toEqual(["input", "after"]);
   const action = await last();
-  expect(action.target).toBeUndefined();
+  expect(action.target).toEqual({ wheelX: -3, wheelY: 0 });
   expect(action.inputState).toBe("completed");
   expect(action.captures).toEqual(links(action, ["after"]));
 });
@@ -222,4 +234,73 @@ it("never links a later screenshot to an earlier action", async () => {
   expect(screenshot!.captures).toBeUndefined();
   expect(screenshot!.inputState).toBeUndefined();
   expect(fs.readFileSync(shot.path)).toEqual(MINI_PNG);
+});
+
+const TEXT = "synthetic typed marker";
+
+it("desktop_type records the verified focus rect without changing the response", async () => {
+  for (const capture of [undefined, "after", "both"]) {
+    state.order = [];
+    const response = await raw("desktop_type", { text: TEXT, capture });
+    expect((response.content as unknown[]).length).toBe(1);
+    const result = parseToolJson(response);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    const base = ["display", "errors", "length", "ok", "sessionId"];
+    expect(Object.keys(result).sort()).toEqual((capture === undefined ? base : [...base, "artifacts", "capture", "captures", "inputState"]).sort());
+    expect(JSON.stringify(result)).not.toContain("focus");
+    expect(JSON.stringify(result)).not.toContain(TEXT);
+    const phases = capture === undefined ? [] : capture === "both" ? ["before", "after"] : ["after"];
+    expect(state.order).toEqual(["verify", ...phases.filter((phase) => phase === "before"), "focus", "input", ...phases.filter((phase) => phase === "after"), "verify"]);
+    const action = await last();
+    expect(action).toMatchObject({ tool: "desktop_type", status: "ok", inputState: "completed" });
+    expect(action.target).toEqual({ focus: FOCUS, coordinateSpace: "xvfb-root", length: TEXT.length, inputType: "text" });
+    expect(action.captures).toEqual(capture === undefined ? undefined : links(action, phases));
+    expect(JSON.stringify(await actions())).not.toContain(TEXT);
+  }
+});
+
+it("desktop_type queries focus on the session display with the server env, not a host DISPLAY", async () => {
+  await lab.close();
+  lab = await connectLab({ projectDir: dirs.projectDir, env: { ...env, DISPLAY: ":7" } });
+  expect((await call("desktop_type", { text: TEXT })).ok).toBe(true);
+  expect(state.focusArgs).toHaveLength(1);
+  const [display, focusEnv] = state.focusArgs[0]!;
+  expect(display).toBe(":987");
+  expect(focusEnv).toMatchObject({ PICKFORGE_HOME: dirs.home, DISPLAY: ":7" });
+  expect(state.inputDisplays).toEqual([":987"]);
+});
+
+it.each<[string, Focus]>([
+  ["a failed query", "reject"],
+  ["no focused window", undefined],
+  ["a malformed rect", { x: 0, y: 0, width: 0, height: 10 }],
+  ["a partial rect", { x: 0, y: 0, width: 10 }],
+])("desktop_type still types and records no focus or space after %s", async (_name, focus) => {
+  state.focus = focus;
+  const result = await call("desktop_type", { text: TEXT, capture: "after" });
+  expect(result.ok).toBe(true);
+  expect(state.order).toEqual(["verify", "focus", "input", "after", "verify"]);
+  const action = await last();
+  expect(action).toMatchObject({ status: "ok", inputState: "completed" });
+  expect(action.target).toEqual({ length: TEXT.length, inputType: "text" });
+});
+
+it("desktop_type keeps the focus but drops the space when verification fails", async () => {
+  state.verify = [IDENTITY, { ...IDENTITY, pid: 4243 }];
+  expect((await call("desktop_type", { text: TEXT })).ok).toBe(true);
+  expect((await last()).target).toEqual({ focus: FOCUS, length: TEXT.length, inputType: "text" });
+});
+
+it("desktop_type records the focus on attempted input that throws", async () => {
+  state.fail = "input";
+  expect((await call("desktop_type", { text: TEXT })).ok).toBe(false);
+  expect(await last()).toMatchObject({ status: "error", inputState: "attempted", target: { focus: FOCUS, coordinateSpace: "xvfb-root" } });
+});
+
+it("desktop_type skips the focus query without an evidence run", async () => {
+  await saveProjectConfig(dirs.projectDir, { evidence: { enabled: false } });
+  expect((await call("desktop_type", { text: TEXT })).ok).toBe(true);
+  expect(state.order).toEqual(["input"]);
+  expect(state.focusArgs).toEqual([]);
+  expect(await listRuns(dirs.projectDir, env)).toEqual([]);
 });

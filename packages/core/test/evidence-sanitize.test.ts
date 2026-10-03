@@ -228,6 +228,86 @@ describe("sanitizeActionTarget pointer fields", () => {
   });
 });
 
+describe("sanitizeActionTarget wheel and focus fields", () => {
+  const focus = { x: -4, y: 12, width: 300, height: 200 };
+
+  it("keeps signed wheel steps as a pair, zero included", () => {
+    expect(sanitizeActionTarget({ wheelX: 0, wheelY: 3 })).toEqual({ wheelX: 0, wheelY: 3 });
+    expect(sanitizeActionTarget({ wheelX: -1000, wheelY: 1000 })).toEqual({ wheelX: -1000, wheelY: 1000 });
+    expect(sanitizeActionTarget({ x: 10, y: 20, coordinateSpace: "xvfb-root", wheelX: -2, wheelY: 0 })).toEqual({
+      x: 10, y: 20, wheelX: -2, wheelY: 0, coordinateSpace: "xvfb-root",
+    });
+  });
+
+  it.each([
+    ["only wheelX", { wheelX: 1 }],
+    ["only wheelY", { wheelY: 1 }],
+    ["a fractional step", { wheelX: 0.5, wheelY: 1 }],
+    ["a string step", { wheelX: "1", wheelY: 1 }],
+    ["a null step", { wheelX: null, wheelY: 1 }],
+    ["an infinite step", { wheelX: 0, wheelY: -Infinity }],
+    ["NaN", { wheelX: Number.NaN, wheelY: 1 }],
+    ["an oversize step", { wheelX: 0, wheelY: 1001 }],
+    ["an oversize negative step", { wheelX: -1001, wheelY: 0 }],
+    ["an unsafe integer", { wheelX: Number.MAX_SAFE_INTEGER + 1, wheelY: 0 }],
+  ])("drops both wheel steps for %s", (_label, wheel) => {
+    expect(sanitizeActionTarget(wheel)).toEqual({});
+  });
+
+  it("keeps a whole focus rect with negative position and copies only its four fields", () => {
+    expect(sanitizeActionTarget({ focus })).toEqual({ focus });
+    expect(sanitizeActionTarget({ focus: { ...focus, name: "token=abc", id: "11" } })).toEqual({ focus });
+    expect(sanitizeActionTarget({ focus: { x: -32768, y: 32767, width: 65535, height: 1 } })).toEqual({
+      focus: { x: -32768, y: 32767, width: 65535, height: 1 },
+    });
+  });
+
+  it.each([
+    ["a missing width", { x: 0, y: 0, height: 10 }],
+    ["a missing x", { y: 0, width: 10, height: 10 }],
+    ["a zero width", { ...focus, width: 0 }],
+    ["a negative height", { ...focus, height: -1 }],
+    ["a fractional x", { ...focus, x: 1.5 }],
+    ["a fractional width", { ...focus, width: 10.5 }],
+    ["a string y", { ...focus, y: "12" }],
+    ["a null height", { ...focus, height: null }],
+    ["an oversize width", { ...focus, width: 65536 }],
+    ["an oversize x", { ...focus, x: 32768 }],
+    ["an undersize y", { ...focus, y: -32769 }],
+    ["an unsafe integer", { ...focus, x: Number.MAX_SAFE_INTEGER + 1 }],
+    ["an array", [0, 0, 10, 10]],
+    ["a string", "0,0,10,10"],
+    ["null", null],
+  ])("drops the whole focus for %s", (_label, value) => {
+    expect(sanitizeActionTarget({ focus: value })).toEqual({});
+    expect(sanitizeActionTarget({ focus: value, coordinateSpace: "xvfb-root" })).toEqual({});
+  });
+
+  it("keeps the verified coordinate space for a focus without a point", () => {
+    expect(sanitizeActionTarget({ focus, coordinateSpace: "xvfb-root" })).toEqual({ focus, coordinateSpace: "xvfb-root" });
+  });
+
+  it.each([
+    ["no coordinate space", { coordinateSpace: undefined }],
+    ["an unknown space", { coordinateSpace: "screen" }],
+    ["only x", { x: 10 }],
+    ["only y", { y: 10 }],
+    ["a malformed x", { x: "10", y: 10 }],
+    ["a drag start", { fromX: 1, fromY: 2 }],
+  ])("drops the coordinate space with a focus and %s", (_label, change) => {
+    expect(sanitizeActionTarget({ focus, coordinateSpace: "xvfb-root", ...change })).not.toHaveProperty("coordinateSpace");
+  });
+
+  it("leaves old pointer and browser targets unchanged", () => {
+    expect(sanitizeActionTarget({ x: 640, y: 400, coordinateSpace: "xvfb-root" })).toEqual({ x: 640, y: 400, coordinateSpace: "xvfb-root" });
+    expect(sanitizeActionTarget({ x: 640, y: 400, coordinateSpace: "xvfb-root", fromX: 1, fromY: 2 })).toEqual({
+      x: 640, y: 400, fromX: 1, fromY: 2, coordinateSpace: "xvfb-root",
+    });
+    expect(sanitizeActionTarget({ coordinateSpace: "xvfb-root" })).toEqual({});
+    expect(sanitizeActionTarget({ x: -10.6, y: 3.5 })).toEqual({ x: -11, y: 4 });
+  });
+});
+
 describe("sanitizeCaptureLinks", () => {
   const before = { path: "screenshots/a-before.png", phase: "before", width: 1280, height: 800 };
   const after = { path: "screenshots/a-after.png", phase: "after", width: 200, height: 120 };

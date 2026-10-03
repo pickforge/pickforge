@@ -15,6 +15,7 @@ import {
 } from "./commands/android.js";
 import {
   runArtifactsList,
+  runArtifactsExport,
   runArtifactsOutcome,
   runArtifactsOpen,
   runArtifactsReport,
@@ -714,6 +715,15 @@ function registerArtifactCommands(program: Command): void {
     ),
   ).action(async (runId, opts) => {
     process.exitCode = await runArtifactsReport(runId, opts);
+  });
+
+  withJson(withProjectDir(artifacts.command("export")
+    .description("Export derived frames and a pointer track for a lab evidence run")
+    .argument("[runId]", "run id (default: latest)")
+    .option("--video", "Also create a slideshow with ffmpeg")
+    .option("--frame-ms <ms>", "Still frame duration, 40 to 60000 milliseconds (default: 1000)"),
+  )).action(async (runId, opts) => {
+    process.exitCode = await runArtifactsExport(runId, opts);
   });
 }
 
