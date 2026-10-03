@@ -499,8 +499,10 @@ events, and an `export.json` manifest with source and output hashes. The
 pointer track holds pointer events only, never keyboard data; its schema is in
 [docs/pointer-track.md](docs/pointer-track.md). `--video` also builds
 `slideshow.mp4` from the frames with ffmpeg, which is needed only then. The
-video is a slideshow of stills, not a screen recording. Exports never change
-the screenshots, the journal or the reports, and they do not count toward the
+video is a slideshow of stills, not a screen recording. `export.json` is
+written last, so an export without it is incomplete; a failed `--video` keeps
+the frames and pointer track and reports the error. Exports never change the
+screenshots, the journal or the reports, and they do not count toward the
 evidence size cap. Pruning a run removes its exports.
 
 Runs may include optional device metadata from the session, including known

@@ -19,9 +19,10 @@
   click, a double ring for a double click, a line with an arrow for a drag, an
   arrow for the scroll direction, and a box with a caret for the window that
   received typing. The before capture shows what was intended, and the after
-  capture shows where the input landed. Typing records the focused window's
-  position and size, never the text. `desktop_move` takes no captures, so it
-  has no glyph. (#200)
+  capture adds a dot where pointer input landed. Typing marks only the focused
+  window, never a text position; Pickforge records the window's position and
+  size, never the text. `desktop_move` takes no captures, so it has no
+  glyph. (#200)
 - `pickforge-lab artifacts export` writes copies of a run's screenshots with
   the glyphs drawn in, a `pointer-track.json` of pointer events for demo
   videos, and a manifest with hashes, into `exports/` inside the run.
