@@ -1,9 +1,7 @@
 import { deflateSync, inflateSync, crc32 } from "node:zlib";
 import { completePngSize, MAX_SHARE_IMAGE_BYTES, PNG_SIGNATURE } from "./evidence-png.js";
-import {
-  GLYPH_COLOR, GLYPH_HALO_COLOR, GLYPH_STROKE_WIDTH, GLYPH_HALO_WIDTH, GLYPH_DASH,
-  type GlyphPart, type GlyphPoint, type PointerGlyph,
-} from "./evidence-glyphs.js";
+import { GLYPH_COLOR, GLYPH_HALO_COLOR, GLYPH_STROKE_WIDTH, GLYPH_HALO_WIDTH, GLYPH_DASH } from "./evidence-glyph-style.js";
+import type { GlyphPart, GlyphPoint, PointerGlyph } from "./evidence-glyphs.js";
 
 /** Each RGBA or scanline buffer is bounded to about 32 MiB. */
 export const MAX_RASTER_PIXELS = 8 * 1024 * 1024;

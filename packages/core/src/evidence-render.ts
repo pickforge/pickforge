@@ -24,6 +24,8 @@ import {
   GLYPH_HALO_COLOR,
   GLYPH_HALO_WIDTH,
   GLYPH_STROKE_WIDTH,
+} from "./evidence-glyph-style.js";
+import {
   runPointerGlyphs,
   type GlyphPart,
   type GlyphPoint,
