@@ -17,7 +17,18 @@ import {
   readShareScreenshot,
   type PngSize,
 } from "./evidence-png.js";
-import { isSafeScreenshotPath as safeScreenshotPath, sanitizeActionTarget, sanitizeCaptureLinks } from "./evidence-sanitize.js";
+import { isSafeScreenshotPath as safeScreenshotPath } from "./evidence-sanitize.js";
+import {
+  GLYPH_COLOR,
+  GLYPH_DASH,
+  GLYPH_HALO_COLOR,
+  GLYPH_HALO_WIDTH,
+  GLYPH_STROKE_WIDTH,
+  runPointerGlyphs,
+  type GlyphPart,
+  type GlyphPoint,
+  type PointerGlyph,
+} from "./evidence-glyphs.js";
 import {
   EVIDENCE_ACTION_LOG,
   RunHandle,
@@ -33,7 +44,6 @@ import {
   readEvidenceManifestIn,
   withJournalLock,
   type EvidenceAction,
-  type EvidenceCaptureLink,
   type EvidenceRecord,
 } from "./evidence.js";
 import type { RecoveredEvidenceRun } from "./evidence-recovery.js";
@@ -445,18 +455,21 @@ const MARKER_STYLE = `.marker-input{position:absolute;width:1px;height:1px;opaci
 .marker-label{margin-right:auto}
 .pointer-note{display:block}
 .framed{container-type:size}
-.image-frame{position:relative;display:block;flex:none;width:min(100cqw,calc(100cqh * var(--w) / var(--h)),calc(var(--w) * 1px));aspect-ratio:var(--w) / var(--h)}
+.image-frame{position:relative;display:block;flex:none;overflow:hidden;width:min(100cqw,calc(100cqh * var(--w) / var(--h)),calc(var(--w) * 1px));aspect-ratio:var(--w) / var(--h)}
 .image-frame img{display:block;width:100%;height:100%;max-width:none;max-height:none}
 .zoom:checked~.inspect-stage .image-frame{width:calc(var(--w) * 1px)}
 .zoom:checked~.inspect-stage .image-frame img{width:100%;height:100%}
-.pointer-line{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none}
-.pointer-line line{stroke:var(--ember);stroke-width:2;stroke-linecap:round}
-.pointer-line .halo{stroke:var(--bg);stroke-width:4}
-.pointer-ring,.pointer-dot{position:absolute;left:var(--x);top:var(--y);border-radius:50%;transform:translate(-50%,-50%);pointer-events:none}
-.pointer-ring{width:16px;height:16px;border:2px solid var(--ember);box-shadow:0 0 0 1px var(--bg),inset 0 0 0 1px var(--bg)}
-.pointer-dot{width:6px;height:6px;background:var(--ember);box-shadow:0 0 0 1px var(--bg)}
-.attempted .pointer-ring{border-style:dashed}
-.attempted .pointer-line line{stroke-dasharray:6 4;stroke-linecap:butt}
+.glyph{position:absolute;overflow:visible;pointer-events:none}
+.glyph-area{inset:0;width:100%;height:100%}
+.glyph-area *{vector-effect:non-scaling-stroke}
+.glyph-at{left:var(--x);top:var(--y);transform:translate(-50%,-50%)}
+.glyph .h,.glyph .s{fill:none;stroke-linecap:round;stroke-linejoin:round}
+.glyph-area .h,.glyph-area .s{stroke-linejoin:miter}
+.glyph .h{stroke:${GLYPH_HALO_COLOR};stroke-width:${GLYPH_HALO_WIDTH}px}
+.glyph .s{stroke:${GLYPH_COLOR};stroke-width:${GLYPH_STROKE_WIDTH}px}
+.glyph .d{stroke-dasharray:${GLYPH_DASH.join(" ")};stroke-linecap:butt}
+.glyph .hf{fill:${GLYPH_HALO_COLOR};stroke:${GLYPH_HALO_COLOR};stroke-width:${GLYPH_HALO_WIDTH - GLYPH_STROKE_WIDTH}px;stroke-linejoin:round}
+.glyph .f{fill:${GLYPH_COLOR}}
 #markers:not(:checked)~.shell .pointer,#markers:not(:checked)~.inspect .pointer{display:none}
 `;
 
@@ -649,68 +662,11 @@ interface Capture {
   lens: Lens;
   scenarios: number[];
   search: string;
-  marker?: PointerMarker;
+  marker?: PointerGlyph;
 }
 
 /** Actual PNG sizes by capture path; a capture without one is never marked. */
 type ImageSizes = ReadonlyMap<string, Readonly<PngSize>>;
-
-interface PointerMarker {
-  width: number;
-  height: number;
-  x: number;
-  y: number;
-  from?: readonly [number, number];
-  state: "attempted" | "completed";
-  label: string;
-}
-
-/**
- * A marker needs an explicit capture link whose size matches the PNG on disk,
- * a verified xvfb-root point inside that capture and attempted input. Journal
- * fields are re-validated here because the journal is on-disk data; anything
- * else renders unmarked.
- */
-function pointerMarker(record: EvidenceAction, artifact: string, size: Readonly<PngSize> | undefined): PointerMarker | undefined {
-  const state = record.inputState;
-  if (state !== "attempted" && state !== "completed") return undefined;
-  const link = sizedLink(record, artifact, size);
-  if (link === undefined) return undefined;
-  const { width, height } = link;
-  const inside = (px: number, py: number) => px < width && py < height;
-  const { coordinateSpace, x, y, fromX, fromY } = sanitizeActionTarget(record.target);
-  if (coordinateSpace !== "xvfb-root" || x === undefined || y === undefined || !inside(x, y)) return undefined;
-  const from = fromX === undefined || fromY === undefined ? undefined : [fromX, fromY] as const;
-  if (from === undefined ? String(record.tool) === "desktop_drag" : !inside(...from)) return undefined;
-  const verb = shortText(safeText(record.tool).replace(/^desktop_/, "").replaceAll("_", " "), 40);
-  const where = from === undefined ? `at ${x}, ${y}` : `${from[0]}, ${from[1]} → ${x}, ${y}`;
-  return { width, height, x, y, from, state, label: `Pointer: ${verb} ${where} · ${link.phase} · ${state}` };
-}
-
-/** The capture link for `artifact`, only when its size equals the actual PNG. */
-function sizedLink(record: EvidenceAction, artifact: string, size: Readonly<PngSize> | undefined): EvidenceCaptureLink | undefined {
-  const link = sanitizeCaptureLinks(record.captures).find((entry) => entry.path === artifact);
-  if (link === undefined || size === undefined) return undefined;
-  return link.width === size.width && link.height === size.height ? link : undefined;
-}
-
-function claimedPaths(record: EvidenceAction): Set<string> {
-  const artifacts: unknown[] = Array.isArray(record.artifacts) ? record.artifacts : [];
-  const links: unknown[] = Array.isArray(record.captures) ? record.captures : [];
-  const linked = links.map((entry) => (entry as { path?: unknown } | null)?.path);
-  return new Set([...artifacts, ...linked].filter((entry): entry is string => typeof entry === "string"));
-}
-
-/** Paths that more than one record claims; no single action owns them. */
-function contestedPaths(ordered: readonly TimelineRecord[]): Set<string> {
-  const seen = new Set<string>();
-  const contested = new Set<string>();
-  for (const record of ordered) {
-    if (isTruncationRecord(record)) continue;
-    for (const claimed of claimedPaths(record)) (seen.has(claimed) ? contested : seen).add(claimed);
-  }
-  return contested;
-}
 
 function captureScenarios(
   relative: string,
@@ -730,8 +686,9 @@ function collectCaptures(
   safeScreenshots: ReadonlySet<string>,
   outcomes: readonly EvidenceOutcomeRecord[],
   fallback: Lens,
-  sizeOf: (artifact: string) => Readonly<PngSize> | undefined,
+  imageSizes: ImageSizes = new Map(),
 ): Capture[] {
+  const glyphs = runPointerGlyphs(ordered, imageSizes);
   const captures: Capture[] = [];
   ordered.forEach((record, index) => {
     if (isTruncationRecord(record)) return;
@@ -743,7 +700,7 @@ function collectCaptures(
     (record.artifacts ?? [])
       .filter((artifact) => safeScreenshots.has(artifact))
       .forEach((artifact, position) => {
-        const marker = pointerMarker(record, artifact, sizeOf(artifact));
+        const marker = glyphs.get(artifact);
         captures.push({
           ...(marker === undefined ? {} : { marker }),
           id: `cap-${step}-${position + 1}`,
@@ -796,27 +753,79 @@ function captureAlt(capture: Capture): string {
   return description === capture.title ? escapeHtml(description) : `${description}, ${escapeHtml(capture.title)}`;
 }
 
-/** Percent of the image box at the pixel centre; fixed precision keeps output stable. */
-function percent(pixel: number, size: number): string {
-  return `${Number(((pixel + 0.5) / size * 100).toFixed(4))}%`;
+/** Fixed precision keeps output stable. */
+function decimal(value: number): string {
+  return String(Number(value.toFixed(4)));
 }
 
-function pointAt(className: string, marker: PointerMarker, x: number, y: number): string {
-  return `<span class="pointer ${className}" style="--x:${percent(x, marker.width)};--y:${percent(y, marker.height)}" aria-hidden="true"></span>`;
+function percent(value: number, size: number): string {
+  return `${decimal(value / size * 100)}%`;
 }
 
-function pointerLine(marker: PointerMarker): string {
-  if (marker.from === undefined) return "";
-  const [fromX, fromY] = marker.from;
-  const ends = `x1="${fromX + 0.5}" y1="${fromY + 0.5}" x2="${marker.x + 0.5}" y2="${marker.y + 0.5}"`;
-  return `<svg class="pointer pointer-line" viewBox="0 0 ${marker.width} ${marker.height}" preserveAspectRatio="none" aria-hidden="true" focusable="false"><line class="halo" ${ends} vector-effect="non-scaling-stroke"/><line ${ends} vector-effect="non-scaling-stroke"/></svg>${pointAt("pointer-dot", marker, fromX, fromY)}`;
+/** Each part draws its halo, then its stroke, in the glyph's order. */
+function stroked(tag: string, attributes: string, dashed: boolean): string {
+  const dash = dashed ? " d" : "";
+  return `<${tag} class="h${dash}" ${attributes}/><${tag} class="s${dash}" ${attributes}/>`;
+}
+
+function filled(tag: string, attributes: string): string {
+  return `<${tag} class="hf" ${attributes}/><${tag} class="f" ${attributes}/>`;
+}
+
+/** Capture-pixel parts scale with the image; strokes keep their display width. */
+function areaPart(glyph: PointerGlyph, body: string): string {
+  return `<svg class="pointer glyph glyph-area" viewBox="0 0 ${glyph.width} ${glyph.height}" preserveAspectRatio="none" aria-hidden="true" focusable="false">${body}</svg>`;
+}
+
+/** Display-pixel parts keep their size on screen, centred on a capture point. */
+function anchoredPart(glyph: PointerGlyph, at: GlyphPoint, reach: number, body: string): string {
+  const extent = Math.ceil(reach + GLYPH_HALO_WIDTH / 2);
+  const side = 2 * extent;
+  return `<svg class="pointer glyph glyph-at" style="--x:${percent(at.x, glyph.width)};--y:${percent(at.y, glyph.height)}" width="${side}" height="${side}" viewBox="${-extent} ${-extent} ${side} ${side}" aria-hidden="true" focusable="false">${body}</svg>`;
+}
+
+/** Tip `offset` along the direction; base `size` behind it and `size` wide. */
+function arrowPoints(dx: number, dy: number, offset: number, size: number): string {
+  const length = Math.hypot(dx, dy);
+  const [ux, uy] = [dx / length, dy / length];
+  const base = offset - size;
+  const corners: Array<[number, number]> = [
+    [ux * offset, uy * offset],
+    [ux * base - uy * size / 2, uy * base + ux * size / 2],
+    [ux * base + uy * size / 2, uy * base - ux * size / 2],
+  ];
+  return corners.map(([x, y]) => `${decimal(x)},${decimal(y)}`).join(" ");
+}
+
+/** An I-beam: a stem `size` tall with serifs half as wide. */
+function caretPath(size: number): string {
+  const [half, serif] = [decimal(size / 2), decimal(size / 4)];
+  return `M-${serif} -${half}H${serif}M0 -${half}V${half}M-${serif} ${half}H${serif}`;
+}
+
+function partHtml(glyph: PointerGlyph, part: GlyphPart): string {
+  switch (part.shape) {
+    case "line":
+      return areaPart(glyph, stroked("line", `x1="${decimal(part.from.x)}" y1="${decimal(part.from.y)}" x2="${decimal(part.to.x)}" y2="${decimal(part.to.y)}"`, part.dashed));
+    case "box":
+      return areaPart(glyph, stroked("rect", `x="${part.x}" y="${part.y}" width="${part.width}" height="${part.height}"`, part.dashed));
+    case "ring":
+      return anchoredPart(glyph, part.at, part.radius, stroked("circle", `r="${decimal(part.radius)}"`, part.dashed));
+    case "dot":
+      return anchoredPart(glyph, part.at, part.radius, filled("circle", `r="${decimal(part.radius)}"`));
+    case "arrow":
+      return anchoredPart(glyph, part.at, Math.abs(part.offset) + part.size, filled("polygon", `points="${arrowPoints(part.dx, part.dy, part.offset, part.size)}"`));
+    case "caret":
+      return anchoredPart(glyph, part.at, part.size / 2, stroked("path", `d="${caretPath(part.size)}"`, false));
+  }
 }
 
 /** Image plus overlay; an unmarked capture keeps its original bare markup. */
 function framedImage(capture: Capture, image: string): string {
   const marker = capture.marker;
   if (marker === undefined) return image;
-  return `<span class="image-frame${marker.state === "attempted" ? " attempted" : ""}" style="--w:${marker.width};--h:${marker.height}">${image}${pointerLine(marker)}${pointAt("pointer-ring", marker, marker.x, marker.y)}</span>`;
+  const parts = marker.parts.map((part) => partHtml(marker, part)).join("");
+  return `<span class="image-frame${marker.state === "attempted" ? " attempted" : ""}" style="--w:${marker.width};--h:${marker.height}">${image}${parts}</span>`;
 }
 
 function stageClass(base: string, capture: Capture): string {
@@ -1017,9 +1026,7 @@ export function renderEvidenceHtml(
   const outcomes = sortOutcomes(records.filter(isOutcomeRecord));
   const ordered = timelineRecords(records);
   const fallback = deviceLens(manifest.device);
-  const contested = contestedPaths(ordered);
-  const sizeOf = (artifact: string) => contested.has(artifact) ? undefined : imageSizes?.get(artifact);
-  const captures = collectCaptures(ordered, safeScreenshots, outcomes, fallback, sizeOf);
+  const captures = collectCaptures(ordered, safeScreenshots, outcomes, fallback, imageSizes);
   if (share !== undefined) appendShareCaptures(captures, share, outcomes, fallback);
   const script = share === undefined ? REPORT_SCRIPT : SHARE_REPORT_SCRIPT;
   const steps = ordered
