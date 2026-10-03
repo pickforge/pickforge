@@ -39,6 +39,14 @@ export function viewerWindowApiPath(launchId: string): string {
   return `/api/launches/${launchId}/window`;
 }
 
+/**
+ * `GET` with `Authorization: Bearer <token>`: `204` when the token is the
+ * bridge's current token, `401` otherwise. The page calls it after an
+ * abnormal WebSocket close, because a rejected upgrade looks the same to the
+ * page as an outage.
+ */
+export const VIEWER_STATUS_API_PATH = "/api/status";
+
 /** WebSocket close codes the bridge sends after a successful upgrade. */
 export const VIEWER_CLOSE_CODES = {
   /** No usable read-only VNC server right now. The page retries with backoff. */
