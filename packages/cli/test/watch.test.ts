@@ -4,6 +4,23 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const { ensureViewerBridge, prepareViewerLaunch, writeViewerLaunchRecord, removeViewerLaunch } =
+  vi.hoisted(() => ({
+    ensureViewerBridge: vi.fn(),
+    prepareViewerLaunch: vi.fn(),
+    writeViewerLaunchRecord: vi.fn(),
+    removeViewerLaunch: vi.fn(),
+  }));
+
+vi.mock("../src/viewer/bridge-daemon.js", () => ({ ensureViewerBridge }));
+vi.mock("@pickforge/lab-desktop-linux", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@pickforge/lab-desktop-linux")>()),
+  prepareViewerLaunch,
+  writeViewerLaunchRecord,
+  removeViewerLaunch,
+}));
+
 import {
   createSession,
   destroySessionRecord,
@@ -13,6 +30,13 @@ import {
   stopPid,
 } from "@pickforge/lab-core";
 import { runWatch, watchDesktopSession } from "../src/commands/watch.js";
+import { createViewerFakes, type ViewerFakes } from "./viewer-fakes.js";
+
+const BRIDGE_PORT = 47_123;
+const TOKEN = "watch-test-capability-token";
+const LAUNCH_ID = "00112233445566778899aabbccddeeff";
+let fakes: ViewerFakes;
+const browserPids: number[] = [];
 
 let root: string;
 let binDir: string;
@@ -77,10 +101,25 @@ beforeEach(async () => {
   process.env.PATH = binDir;
   delete process.env.DISPLAY;
   delete process.env.WAYLAND_DISPLAY;
+  fakes = createViewerFakes(root);
+  const profileDir = path.join(root, "launch", "profile");
+  await fs.promises.mkdir(profileDir, { recursive: true });
+  ensureViewerBridge.mockResolvedValue({ pid: 999_999, port: BRIDGE_PORT, token: TOKEN, reused: false });
+  prepareViewerLaunch.mockResolvedValue({ launchId: LAUNCH_ID, launchDir: path.dirname(profileDir), profileDir });
+  writeViewerLaunchRecord.mockResolvedValue(undefined);
+  removeViewerLaunch.mockResolvedValue(undefined);
 });
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.clearAllMocks();
+  for (const pid of browserPids.splice(0)) {
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  }
   for (const record of await listSessions()) {
     const pid = record.desktop?.vncPid;
     if (pid !== undefined && pid !== process.pid && isPidAlive(pid)) {
@@ -124,41 +163,91 @@ describe("watch command in process", () => {
     ).rejects.toThrow(/Multiple running desktop sessions/);
   });
 
-  it("starts VNC headlessly and returns endpoint guidance without a viewer", async () => {
+  it("starts VNC and the bridge headlessly and prints the URL with SSH guidance", async () => {
     await installVnc();
     const id = await createDesktop(syntheticDisplay());
 
     const result = await watchDesktopSession({ session: id, projectDir: root });
 
+    expect(ensureViewerBridge).toHaveBeenCalledWith(id);
     expect(result.data).toMatchObject({
       sessionId: id,
       opened: false,
+      bridgePort: BRIDGE_PORT,
+      bridgeReused: false,
       vncReused: false,
     });
-    expect(result.lines?.join("\n")).toContain("viewer not opened");
-    expect(result.lines?.join("\n")).toContain("ssh -N -L");
+    const url = String(result.data?.url);
+    expect(url).toMatch(new RegExp(`^http://127\\.0\\.0\\.1:${BRIDGE_PORT}/viewer/[0-9a-f]{32}#token=${TOKEN}$`));
+    const text = result.lines?.join("\n") ?? "";
+    expect(text).toContain("viewer not opened");
+    expect(text).toContain(url);
+    expect(text).toContain(`ssh -N -L ${BRIDGE_PORT}:127.0.0.1:${BRIDGE_PORT} <host>`);
+    expect(text).toContain("No graphical host session");
+    expect(prepareViewerLaunch).not.toHaveBeenCalled();
   });
 
-  it("opens a viewer, waits for exit, then reuses the same VNC server", async () => {
+  it("prints the URL when a GUI has no supported browser", async () => {
     await installVnc();
-    await executable(
-      "remote-viewer",
-      `process.stdout.write("ignored viewer output\\n");\nprocess.exit(0);\n`,
-    );
     process.env.DISPLAY = ":0";
     const id = await createDesktop(syntheticDisplay());
+
+    const result = await watchDesktopSession({ session: id, projectDir: root });
+
+    expect(result.data).toMatchObject({ opened: false });
+    expect(result.lines?.join("\n")).toContain("No supported browser was found on PATH");
+  });
+
+  it("opens a browser viewer, waits for exit, removes the launch and reuses VNC", async () => {
+    await installVnc();
+    fakes.installBrowser("chromium");
+    fakes.setBrowser({ exitAfterMs: 20, exitCode: 0 });
+    process.env.DISPLAY = ":0";
+    const id = await createDesktop(syntheticDisplay(), { width: 1920, height: 1080 });
 
     const first = await watchDesktopSession({ session: id, projectDir: root });
     const second = await watchDesktopSession({ session: id, projectDir: root });
 
-    expect(first.data).toMatchObject({
+    expect(first.data).toEqual({
+      sessionId: id,
       opened: true,
-      viewer: "remote-viewer",
-      viewerExitCode: 0,
+      browser: "chromium",
+      launchId: LAUNCH_ID,
+      adapter: "none",
+      bridgePort: BRIDGE_PORT,
+      bridgeReused: false,
+      vncPid: expect.any(Number),
+      vncPort: syntheticVncPort(),
       vncReused: false,
+      exitCode: 0,
     });
     expect(second.data).toMatchObject({ opened: true, vncReused: true });
     expect(first.lines?.join("\n")).toContain("viewer closed");
+    expect(JSON.stringify(first)).not.toContain(TOKEN);
+    expect(removeViewerLaunch).toHaveBeenCalledWith(id, LAUNCH_ID, undefined);
+    const record = writeViewerLaunchRecord.mock.calls[0]?.[0];
+    expect(record).toMatchObject({ thumbnail: { width: 384, height: 216 }, expanded: { width: 1920, height: 1080 } });
+    const browser = fakes.calls().find((call) => call.tool === "browser");
+    expect(browser?.args).toContain(`--app=http://127.0.0.1:${BRIDGE_PORT}/viewer/${LAUNCH_ID}#token=${TOKEN}`);
+  });
+
+  it("returns right after spawn when not waiting, without the token", async () => {
+    await installVnc();
+    fakes.installBrowser("chromium");
+    fakes.setBrowser({});
+    process.env.WAYLAND_DISPLAY = "wayland-1";
+    const id = await createDesktop(syntheticDisplay());
+
+    const result = await watchDesktopSession({ session: id, projectDir: root, waitForViewerExit: false });
+
+    expect(result.data).toMatchObject({ opened: true, browser: "chromium", adapter: "none" });
+    expect(result.data).not.toHaveProperty("exitCode");
+    expect(result.lines?.join("\n")).toContain("viewer opened");
+    expect(JSON.stringify(result)).not.toContain(TOKEN);
+    expect(removeViewerLaunch).not.toHaveBeenCalled();
+    const pid = writeViewerLaunchRecord.mock.calls[1]?.[0]?.pid as number;
+    browserPids.push(pid);
+    expect(isPidAlive(pid)).toBe(true);
   });
 
   it("rejects a writable VNC server instead of attaching a viewer", async () => {
@@ -178,7 +267,8 @@ describe("watch command in process", () => {
 
   it("fails when an explicit viewer exits nonzero without stopping VNC", async () => {
     await installVnc();
-    await executable("remote-viewer", "process.exit(7);\n");
+    fakes.installBrowser("chromium");
+    fakes.setBrowser({ exitAfterMs: 20, exitCode: 7 });
     process.env.DISPLAY = ":0";
     const id = await createDesktop(syntheticDisplay());
 
@@ -199,10 +289,8 @@ describe("watch command in process", () => {
 
   it("fails when an explicit viewer exits on a signal without stopping VNC", async () => {
     await installVnc();
-    await executable(
-      "remote-viewer",
-      'process.kill(process.pid, "SIGTERM");\n',
-    );
+    fakes.installBrowser("chromium");
+    fakes.setBrowser({ exitAfterMs: 20, exitSignal: "SIGTERM" });
     process.env.DISPLAY = ":0";
     const id = await createDesktop(syntheticDisplay());
 
