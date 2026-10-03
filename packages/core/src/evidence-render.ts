@@ -19,6 +19,8 @@ import {
 } from "./evidence-png.js";
 import { isSafeScreenshotPath as safeScreenshotPath } from "./evidence-sanitize.js";
 import {
+  GALLERY_STAGE_HEIGHT,
+  GALLERY_STAGE_PADDING,
   GLYPH_COLOR,
   GLYPH_DASH,
   GLYPH_HALO_COLOR,
@@ -419,7 +421,7 @@ body:not(.js) .search-wrap,body:not(.js) .js-only{display:none}
 .cap{margin:0;border:1px solid var(--line);border-radius:12px;background:var(--p1);overflow:hidden}
 .cap:hover{border-color:var(--line2)}
 .cap a{display:block;text-decoration:none}
-.stage{height:170px;background:var(--p2);display:flex;align-items:center;justify-content:center;padding:10px;overflow:hidden}
+.stage{height:${GALLERY_STAGE_HEIGHT}px;background:var(--p2);display:flex;align-items:center;justify-content:center;padding:${GALLERY_STAGE_PADDING}px;overflow:hidden}
 .stage img{max-width:100%;max-height:100%;object-fit:contain;object-position:top}
 figcaption{padding:12px;font-size:12px;line-height:1.5;color:var(--dim)}
 figcaption b{display:block;color:var(--text);font-weight:550;overflow-wrap:anywhere}

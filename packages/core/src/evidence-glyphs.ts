@@ -1,6 +1,6 @@
 import { isTruncationRecord, type EvidenceAction, type EvidenceCaptureLink, type EvidenceRecord } from "./evidence.js";
 import { isOutcomeRecord } from "./evidence-outcome.js";
-import { GLYPH_HALO_WIDTH } from "./evidence-glyph-style.js";
+import { GALLERY_STAGE_HEIGHT, GALLERY_STAGE_PADDING, GLYPH_HALO_WIDTH } from "./evidence-glyph-style.js";
 import type { PngSize } from "./evidence-png.js";
 import { sanitizeActionTarget, sanitizeCaptureLinks, type SanitizedActionTarget } from "./evidence-sanitize.js";
 
@@ -92,7 +92,7 @@ const CARET_INSET = CARET_REACH + GLYPH_HALO_WIDTH / 2 + 3;
  * tall. The caret marker keeps a matching distance from the capture's top and
  * left edges, so it stays whole there.
  */
-const PREVIEW_HEIGHT = 150;
+const PREVIEW_HEIGHT = GALLERY_STAGE_HEIGHT - 2 * GALLERY_STAGE_PADDING;
 
 /** desktop_move takes no captures, so it never gets a glyph. */
 const KINDS: ReadonlyMap<unknown, PointerGlyphKind> = new Map([

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { GALLERY_STAGE_HEIGHT, GALLERY_STAGE_PADDING } from "../src/evidence-glyph-style.js";
 import {
   GLYPH_COLOR,
   GLYPH_DASH,
@@ -326,6 +327,22 @@ describe("evidence report glyph parts", () => {
     expect(completed).not.toContain(typeTag("6.25%", "10%", true));
     expect(attempted).not.toContain(typeTag("6.25%", "10%"));
     for (const html of [completed, attempted]) expect(html).not.toContain('<circle class="hf" r="3"/>');
+  });
+
+  it("sizes every gallery stage from the constants that place the typing tag", () => {
+    const html = render(everyKind());
+    expect(html).toContain("*{box-sizing:border-box}");
+    expect(html).toContain(`.stage{height:${GALLERY_STAGE_HEIGHT}px;background:var(--p2);display:flex;align-items:center;justify-content:center;padding:${GALLERY_STAGE_PADDING}px;overflow:hidden}`);
+    // No other rule may shrink a gallery stage below the height the tag rule assumes.
+    const style = /<style>([\s\S]*?)<\/style>/.exec(html)![1]!;
+    const stages = [...style.matchAll(/([^{}]*)\{([^{}]*)\}/g)]
+      .filter(([, selector]) => selector!.split(",").some((part) => /(^|\s)\.stage$/.test(part.trim())))
+      .map(([, , body]) => body!);
+    expect(stages.length).toBeGreaterThan(1);
+    for (const body of stages) {
+      for (const padding of body.match(/padding[^:]*:[^;]*/g) ?? []) expect(padding).toBe(`padding:${GALLERY_STAGE_PADDING}px`);
+      for (const [, height] of body.matchAll(/(?:^|;)(?:max-|min-)?height:(\d+)px/g)) expect(Number(height)).toBeGreaterThanOrEqual(GALLERY_STAGE_HEIGHT);
+    }
   });
 
   it("styles parts with the shared glyph constants and clips them to the image", () => {
