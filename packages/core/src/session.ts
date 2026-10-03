@@ -31,6 +31,9 @@ export interface DesktopSessionInfo {
   vncStartTimeTicks?: number;
   vncPort?: number;
   vncViewOnly?: boolean;
+  viewerBridgePid?: number;
+  viewerBridgeStartTimeTicks?: number;
+  viewerBridgePort?: number;
   width?: number;
   height?: number;
 }

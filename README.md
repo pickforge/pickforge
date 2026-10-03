@@ -588,7 +588,9 @@ pickforge-lab takeover status --session <id>   # check whether a session is unde
 `pickforge-lab watch --control` pauses Pickforge-managed agent input for a session,
 grants a temporary writable VNC viewer for a human, and hands control back
 with a fresh screenshot and an evidence record once the viewer closes (or the
-terminal is interrupted). Unlike `--vnc-control`'s persistent writable
+terminal is interrupted). It still opens an external VNC client, `remote-viewer`
+from virt-viewer or a TigerVNC-compatible `vncviewer`, not the browser view of
+plain `watch`. Unlike `--vnc-control`'s persistent writable
 session, control here is leased: while a human holds it, every desktop input
 tool (`desktop_click`/`move`/`scroll`/`drag`/`double_click`/`type`/`key`),
 `desktop_launch`/`desktop_exec` (a newly launched client could otherwise grab
@@ -830,15 +832,44 @@ Android sessions boot from the AVD's saved state when it has one; the session su
 `session create --vnc` is read-only. `--vnc-control` creates an explicitly writable VNC session up front and does not coordinate with agent input — pause agent activity yourself while using it. For a coordinated, leased handoff instead, use `pickforge-lab watch --control` (see [Supervised pause and human takeover](#supervised-pause-and-human-takeover)), which fails agent input closed for the lease's duration and hands back a fresh screenshot automatically.
 
 Scroll deltas are integer wheel steps: positive `deltaY` scrolls down, negative up; positive `deltaX` scrolls right, negative left (put negative values after `--`, e.g. `pickforge-lab desktop scroll -- 0 -3`). `desktop scroll` accepts `--at <x,y>` to position the pointer first; `desktop drag` accepts `--button` and `--duration <ms>`; `desktop double-click` accepts `--button` and `--interval <ms>`.
-`pickforge-lab watch [--session <id>]` attaches a normal host-side VNC window to an
+`pickforge-lab watch [--session <id>]` opens a small live view of an
 already-running desktop-capable session. It lazily starts one loopback-only,
-server-enforced read-only x11vnc server and reuses it on later watches. Closing
-the viewer leaves x11vnc, Xvfb, and the session running. With no matching
-session it prints the create command; with multiple matches it fails closed
-until `--session` selects one.
+server-enforced read-only x11vnc server and reuses it on later watches. A
+loopback bridge serves a bundled, pinned noVNC 1.7.0 page and connects it to
+that server. The page opens in Chromium or Google Chrome as a chromeless app
+window, or in Firefox as an ordinary window. Each launch gets a fresh private
+browser profile. Frames never reach the agent. Closing the window leaves the
+bridge, x11vnc, Xvfb and the session running. The bridge and x11vnc then stay
+idle, and the bridge exits after 10 minutes without a viewer or request.
+With no matching session it prints the create command; with multiple matches
+it fails closed until `--session` selects one.
 Desktop capability is resolved from the persisted desktop leg rather than the
 session type, so browser sessions are watchable without watch-specific browser
 contracts.
+
+The window opens as a thumbnail, 384 logical pixels wide, that shows the whole
+scaled desktop and has no controls. A click anywhere expands it to the session
+size, capped to the screen. The click is consumed by the page: it never reaches
+the session and never grants control. The expanded window shows one Collapse
+button; Escape also collapses it. In Firefox a click shows the Collapse
+button, but the window keeps its size, because Firefox refuses to resize a
+window that a script did not open. Status text shows connecting, reconnecting,
+human control active, session ended, viewer stopped and link expired.
+
+On Hyprland with a Lua config, the window opens floating and pinned in the
+bottom-right corner, 24 pixels from the edges, and does not take focus when it
+opens. Pickforge adds a named runtime window rule just before the launch and
+disables it as soon as the window appears, the browser exits or 10 seconds
+pass. Expand and collapse then resize the window through `hyprctl`. Hyprland is
+the only placement adapter. Elsewhere, including Hyprland with a hyprlang
+config, the window is an ordinary resizable window placed by the compositor.
+
+Hyprland has no way to delete a runtime rule, so a disabled rule stays
+registered until the Hyprland config reloads. The browser gets the bridge URL,
+with its capability token in the fragment, on its command line. Other
+processes on the same host can read that command line unless `/proc` is
+mounted with `hidepid`. The window does not take focus when it opens, but it
+is not guaranteed never to take focus.
 
 Viewer launch defaults to manual. Set it globally or in
 `.picklab/config.json` for a project:
@@ -852,15 +883,18 @@ Viewer launch defaults to manual. Set it globally or in
 ```
 
 `session create --viewer` and `session create --no-viewer` override that mode
-for one desktop or browser creation. If the host has no graphical session or
-supported client
-(`remote-viewer` from virt-viewer, or a TigerVNC-compatible `vncviewer`),
-Pickforge opens nothing and prints the loopback endpoint, install guidance, and
-an SSH tunnel command instead.
-Explicit `pickforge-lab watch` waits until the viewer closes and fails if the client
+for one desktop or browser creation. Pickforge looks for `chromium`,
+`chromium-browser`, `google-chrome-stable`, `google-chrome` and then `firefox`
+on PATH. If the host has no graphical session (`DISPLAY` or `WAYLAND_DISPLAY`)
+or no supported browser, Pickforge opens nothing. It prints the viewer URL and
+an SSH tunnel command instead, `ssh -N -L <port>:127.0.0.1:<port> <host>`, so
+you can open the URL in a browser on another machine. That URL holds the
+capability token; keep it private.
+Explicit `pickforge-lab watch` waits until the browser closes and fails if it
 exits nonzero or on a signal, while leaving the session and VNC running.
-Automatic or `session create --viewer` launch returns as soon as the client
-starts, so the viewer never owns or delays session creation. A requested attach
+Automatic or `session create --viewer` launch returns as soon as the browser
+starts and the bounded Hyprland placement wait ends, so the viewer never owns
+or delays session creation beyond that wait. A requested attach
 failure is reported alongside the successfully created session. `--viewer` and
 `--vnc-control` are rejected together before creation; `viewer.mode: "auto"` is
 reported as suppressed for an explicitly writable `--vnc-control` session.
@@ -920,7 +954,7 @@ bundles the TypeScript packages; the installer adds the separate Rust binary.
 - All user inputs are spawned as argument arrays — never interpolated into shell strings.
 - The DevTools relay validates the installed upstream package name, exact version, declared bin, and confined real path before spawning Node with an argument array. Its browser URL is always derived as `http://127.0.0.1:<session-cdp-port>`.
 - Relay stdout is protocol-only. A pending JSON-RPC record is capped at 16 MiB. Upstream diagnostic lines are capped at 64 KiB, redacted, and forwarded only to stderr; an over-limit line is dropped with a safe notice. Upstream update checks and usage statistics are disabled.
-- VNC binds to loopback only by default: `x11vnc` is started with `-localhost`, so the server listens on `127.0.0.1` and is not reachable from the network. Tunnel over SSH for remote access. Normal `--vnc` and `pickforge-lab watch` observation is server-enforced read-only (`-viewonly`); viewer exit never stops the session or its Xvfb/VNC processes. `--vnc-control` is an explicit, persistent writable escape hatch for human secret entry and does not coordinate with agent input. `pickforge-lab watch --control` is the coordinated alternative: an atomic, TTL-bounded lease gates a temporary writable VNC server, and every agent desktop-input call (including `desktop_launch` and `desktop_exec`, which could otherwise grab input focus on the shared display) and DevTools relay request fails closed (a live human lease is checked immediately before delivery) for as long as it is held. A crash on either side is reclaimed actively — the controlling process force-ends on the first failed lease renewal (never waiting for the viewer to close) and carries a hard deadline timer at the lease's `expiresAt` as a backstop; a detached watchdog process, immune to a `SIGKILL` of its parent, independently polls and stops a stale writable VNC. Writable VNC never outlives its lease in wall-clock terms, on any exit path.
+- VNC binds to loopback only by default: `x11vnc` is started with `-localhost`, so the server listens on `127.0.0.1` and is not reachable from the network. Tunnel over SSH for remote access. Normal `--vnc` and `pickforge-lab watch` observation is server-enforced read-only (`-viewonly`); viewer exit never stops the session or its Xvfb/VNC processes. The `watch` page also sets noVNC to view-only and catches every pointer event above the canvas, but the read-only server is the boundary. Its bridge listens on `127.0.0.1` only and needs a per-bridge capability token for the WebSocket and the window API. The token travels in the URL fragment, so page requests never carry it, but it is on the viewer browser's command line, which other local processes can read. The page loads only bundled same-origin files under a restrictive Content Security Policy. `--vnc-control` is an explicit, persistent writable escape hatch for human secret entry and does not coordinate with agent input. `pickforge-lab watch --control` is the coordinated alternative: an atomic, TTL-bounded lease gates a temporary writable VNC server, and every agent desktop-input call (including `desktop_launch` and `desktop_exec`, which could otherwise grab input focus on the shared display) and DevTools relay request fails closed (a live human lease is checked immediately before delivery) for as long as it is held. A crash on either side is reclaimed actively — the controlling process force-ends on the first failed lease renewal (never waiting for the viewer to close) and carries a hard deadline timer at the lease's `expiresAt` as a backstop; a detached watchdog process, immune to a `SIGKILL` of its parent, independently polls and stops a stale writable VNC. Writable VNC never outlives its lease in wall-clock terms, on any exit path.
 - Artifacts are redacted by default: logcat output strips tokens and secrets before it is stored or returned. Only `android adb` is raw, and it says so.
 - Evidence timelines persist only allowlisted metadata; typed values become length/type metadata, and network headers, bodies, and URL queries are dropped. Static HTML reports escape page-controlled text and use a no-network CSP that admits exactly one inline script by sha256 hash. Device and scenario filters, capture inspection, and the navigation links stay usable with scripts blocked; text search and arrow-key browsing need that pinned script.
 - Screenshot files contain raw pixels and cannot be redacted. Avoid explicit captures on screens containing secrets, and use `evidence.enabled: false` when an action timeline is not appropriate. See [SECURITY.md](SECURITY.md#recorded-evidence-and-screenshots).

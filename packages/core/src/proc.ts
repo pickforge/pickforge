@@ -461,6 +461,10 @@ async function confirmOwnedGroupGone(pgid: number): Promise<boolean> {
  *   identity is obtainable. The `isProcessGroupAlive` pre-check avoids
  *   signalling a group that is already empty but does not close the gap.
  *
+ * A leader closing after SIGTERM does not prove its group is empty. Surviving
+ * members keep the original group id reserved after the leader exits, so they
+ * still require group SIGKILL escalation before confirmation.
+ *
  * Callers with a verified `ProcessIdentity` must use `stopProcessGroupVerified`
  * instead, which refuses a reused pid outright.
  */
@@ -483,7 +487,7 @@ export async function stopOwnedDaemonGroup(
         closed.then(() => true),
         sleep(OWNED_GROUP_CONFIRM_TIMEOUT_MS).then(() => false),
       ]);
-      if (!exitedInTime) {
+      if (!exitedInTime || isProcessGroupAlive(daemon.pid)) {
         killOwnedDaemonGroup(daemon, "SIGKILL");
         await closed;
       }
