@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { resolveDesktopCapableSession } from "@pickforge/lab-core";
+import { randomBytes } from "node:crypto";
+import { getSession, resolveDesktopCapableSession, type DesktopSessionInfo } from "@pickforge/lab-core";
 import {
   endHumanTakeover,
   ensureSessionVnc,
@@ -8,7 +9,16 @@ import {
   startHumanTakeover,
   type HumanTakeoverHandle,
   type TakeoverEndReason,
+  withSessionVncLock,
 } from "@pickforge/lab-desktop-linux";
+import { ensureViewerBridge, type EnsuredViewerBridge } from "../viewer/bridge-daemon.js";
+import { buildViewerUrl } from "../viewer/contract.js";
+import {
+  detectViewerBrowser,
+  hasGraphicalSession,
+  launchViewerWindow,
+  type LaunchedViewerWindow,
+} from "../viewer/launch.js";
 import {
   resolveProjectDir,
   runReported,
@@ -238,6 +248,113 @@ async function watchWithControl(
   return { data, lines };
 }
 
+function remoteViewerResult(
+  sessionId: string,
+  bridge: EnsuredViewerBridge,
+  data: Record<string, unknown>,
+  reason: "no-graphical-session" | "no-browser",
+): CommandResult {
+  // Not a launch: no profile and no record. The page still loads and shows
+  // the live view; it simply has no window to resize.
+  const url = buildViewerUrl(bridge.port, randomBytes(16).toString("hex"), bridge.token);
+  const tunnel =
+    `ssh -N -L ${bridge.port}:127.0.0.1:${bridge.port} <host> and open the URL ` +
+    "in a browser on that machine. The URL holds a capability token; keep it private.";
+  const guidance =
+    reason === "no-graphical-session"
+      ? `No graphical host session is available. Connect remotely with ${tunnel}`
+      : "No supported browser was found on PATH. Install Chromium or Google Chrome, " +
+        `or connect remotely with ${tunnel}`;
+  return {
+    data: { sessionId, opened: false, ...data, url, guidance },
+    lines: [`viewer not opened for session ${sessionId}`, `viewer URL: ${url}`, guidance],
+  };
+}
+
+/**
+ * Whether the session ended. Teardown holds the VNC lock until the record
+ * is final, so wait for that lock before reading it.
+ */
+async function sessionEnded(sessionId: string): Promise<boolean> {
+  const read = (): ReturnType<typeof getSession> => getSession(sessionId);
+  const record = await withSessionVncLock(sessionId, process.env, read).catch(read);
+  return record?.status !== "running";
+}
+
+async function assertCleanExit(sessionId: string, launched: LaunchedViewerWindow): Promise<void> {
+  let failure: string | undefined;
+  if (launched.signal !== undefined && launched.signal !== null) {
+    failure = `exited on signal ${launched.signal}`;
+  } else if (launched.exitCode !== undefined && launched.exitCode !== 0) {
+    failure = `exited with code ${String(launched.exitCode)}`;
+  }
+  if (failure === undefined) return;
+  const outcome = (await sessionEnded(sessionId))
+    ? "the session ended"
+    : "the session, VNC server and viewer bridge remain running";
+  throw new Error(`Viewer browser for session ${sessionId} ${failure}; ${outcome}`);
+}
+
+/**
+ * Passive watch (pickforge/pickforge#207): the read-only VNC server, the
+ * loopback viewer bridge, and a browser window on the bundled noVNC page.
+ * The token never appears in the result once a window opened.
+ */
+async function watchWithBrowser(
+  record: { id: string; desktop?: DesktopSessionInfo },
+  waitForExit: boolean,
+): Promise<CommandResult> {
+  const vnc = await ensureSessionVnc(record.id);
+  const bridge = await ensureViewerBridge(record.id);
+  const endpoints = {
+    bridgePort: bridge.port,
+    bridgeReused: bridge.reused,
+    vncPid: vnc.pid,
+    vncPort: vnc.port,
+    vncReused: vnc.reused,
+  };
+  if (!hasGraphicalSession()) {
+    return remoteViewerResult(record.id, bridge, endpoints, "no-graphical-session");
+  }
+  const browser = detectViewerBrowser();
+  if (browser === null) {
+    return remoteViewerResult(record.id, bridge, endpoints, "no-browser");
+  }
+  const launched = await launchViewerWindow({
+    sessionId: record.id,
+    desktop: record.desktop,
+    bridgePort: bridge.port,
+    token: bridge.token,
+    browser,
+    waitForExit,
+  });
+  const data: Record<string, unknown> = {
+    sessionId: record.id,
+    opened: true,
+    browser: launched.browser,
+    launchId: launched.launchId,
+    adapter: launched.adapter,
+    ...endpoints,
+  };
+  if (launched.exitCode !== undefined) data.exitCode = launched.exitCode;
+  if (launched.signal !== undefined && launched.signal !== null) data.signal = launched.signal;
+  // An automatic launch reports an exit only when it saw one during placement.
+  await assertCleanExit(record.id, launched);
+  if (!waitForExit) {
+    return {
+      data,
+      lines: [
+        `viewer opened for session ${record.id} (${launched.browser}, adapter ${launched.adapter}); ` +
+          "the session and VNC server remain independent",
+      ],
+    };
+  }
+  return {
+    data,
+    lines: [`viewer closed for session ${record.id}; the session and VNC server remain running`],
+  };
+}
+
 export async function watchDesktopSession(
   opts: WatchOptions,
 ): Promise<CommandResult> {
@@ -252,54 +369,7 @@ export async function watchDesktopSession(
     }
     return watchWithControl(record.id, process.env, opts._spawnWatchdog ?? defaultSpawnWatchdog);
   }
-  const vnc = await ensureSessionVnc(record.id);
-  const viewer = await openVncViewer({
-    port: vnc.port,
-    waitForExit: opts.waitForViewerExit !== false,
-  });
-  const data: Record<string, unknown> = {
-    sessionId: record.id,
-    opened: viewer.opened,
-    endpoint: viewer.endpoint,
-    vncPid: vnc.pid,
-    vncPort: vnc.port,
-    vncReused: vnc.reused,
-  };
-  if (viewer.viewer !== undefined) data.viewer = viewer.viewer;
-  if (viewer.exitCode !== undefined) data.viewerExitCode = viewer.exitCode;
-  if (viewer.signal !== undefined) data.viewerSignal = viewer.signal;
-  if (viewer.guidance !== undefined) data.guidance = viewer.guidance;
-
-  if (!viewer.opened) {
-    return {
-      data,
-      lines: [
-        `viewer not opened for session ${record.id}`,
-        `VNC endpoint: ${viewer.endpoint}`,
-        viewer.guidance as string,
-      ],
-    };
-  }
-  if (opts.waitForViewerExit !== false) {
-    if (viewer.signal !== undefined && viewer.signal !== null) {
-      throw new Error(
-        `VNC viewer for session ${record.id} exited on signal ${viewer.signal}; the session and VNC server remain running`,
-      );
-    }
-    if (viewer.exitCode !== undefined && viewer.exitCode !== 0) {
-      throw new Error(
-        `VNC viewer for session ${record.id} exited with code ${String(viewer.exitCode)}; the session and VNC server remain running`,
-      );
-    }
-  }
-  return {
-    data,
-    lines: [
-      opts.waitForViewerExit === false
-        ? `viewer opened for session ${record.id}; the session and VNC server remain independent`
-        : `viewer closed for session ${record.id}; the session and VNC server remain running`,
-    ],
-  };
+  return watchWithBrowser(record, opts.waitForViewerExit !== false);
 }
 
 export async function runWatch(opts: WatchOptions): Promise<number> {

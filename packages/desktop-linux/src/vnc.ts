@@ -92,9 +92,10 @@ export function buildVncArgs(opts: VncArgsOptions): string[] {
     "-forever",
     "-shared",
     "-nopw",
+    "-nosel",
   ];
   if (opts.viewOnly !== false) {
-    args.push("-viewonly");
+    args.push("-viewonly", "-nocursorshape");
   }
   args.push("-quiet");
   return args;

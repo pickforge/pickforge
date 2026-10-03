@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   isProcessGroupAlive,
   listProcessGroupMembers,
+  processIdentityMatches,
+  readProcessIdentity,
   startDaemon,
   stopOwnedDaemonGroup,
 } from "../src/index.js";
@@ -106,6 +108,40 @@ describe("stopOwnedDaemonGroup", () => {
     expect(await waitUntil(() => daemon.child.exitCode !== null)).toBe(true);
 
     expect(await stopOwnedDaemonGroup(daemon)).toBe(true);
+    expect(isProcessGroupAlive(daemon.pid)).toBe(false);
+  }, 20_000);
+
+  it("kills a surviving member when its leader exits on SIGTERM", async () => {
+    const readyFile = path.join(root, "stubborn-member.pid");
+    const memberScript = `
+const fs = require('node:fs');
+process.on('SIGTERM', () => {});
+fs.writeFileSync(${JSON.stringify(readyFile)}, String(process.pid));
+setInterval(() => {}, 1000);
+`;
+    const leaderScript = `
+const { spawn } = require('node:child_process');
+spawn(process.execPath, ['-e', ${JSON.stringify(memberScript)}], { stdio: 'ignore' });
+process.on('SIGTERM', () => process.exit(0));
+setInterval(() => {}, 1000);
+`;
+    const daemon = await startDaemon(process.execPath, ["-e", leaderScript], {
+      logDir,
+      name: "exiting-leader-stubborn-member",
+      owned: true,
+    });
+    groups.add(daemon.pid);
+    expect(await waitUntil(() => fs.existsSync(readyFile))).toBe(true);
+    const memberPid = Number(fs.readFileSync(readyFile, "utf8"));
+    expect(listProcessGroupMembers(daemon.pid)).toContain(memberPid);
+    const memberIdentity = readProcessIdentity(memberPid)!;
+    expect(memberIdentity).toBeDefined();
+
+    expect(await stopOwnedDaemonGroup(daemon)).toBe(true);
+    expect(daemon.child.exitCode).toBe(0);
+    expect(daemon.child.signalCode).toBeNull();
+    expect(processIdentityMatches(memberIdentity)).toBe(false);
+    expect(listProcessGroupMembers(daemon.pid)).toEqual([]);
     expect(isProcessGroupAlive(daemon.pid)).toBe(false);
   }, 20_000);
 
