@@ -1,0 +1,230 @@
+import fs from "node:fs";
+import path from "node:path";
+import { createHash, randomBytes } from "node:crypto";
+import { spawn } from "node:child_process";
+import type { DirHandle } from "./dir-handle.js";
+import { withDirHandle } from "./dir-handle.js";
+import { isEvidenceRun, isTruncationRecord, parseActionsJournal, type EvidenceAction, type EvidenceRecord } from "./evidence.js";
+import { isOutcomeRecord } from "./evidence-outcome.js";
+import { sortEvidenceRecords } from "./evidence-render.js";
+import { completePngSize, openScreenshotsDir, PNG_SIGNATURE, readShareScreenshot, type PngSize } from "./evidence-png.js";
+import { sanitizeCaptureLinks } from "./evidence-sanitize.js";
+import { POINTER_GLYPH_VERSION, runPointerGlyphs, type PointerGlyph } from "./evidence-glyphs.js";
+import { assertRasterSize, decodePng, drawPointerGlyph, encodePng } from "./png-raster.js";
+import { createPointerTrack } from "./pointer-track.js";
+import { EVIDENCE_ACTION_LOG } from "./run.js";
+import type { RunCatalog, RunCatalogEntry } from "./run-catalog.js";
+
+export const DEFAULT_EXPORT_FRAME_MS = 1000;
+export type GlyphSource = (records: readonly EvidenceRecord[], sizes: ReadonlyMap<string, Readonly<PngSize>>) => ReadonlyMap<string, PointerGlyph>;
+export interface EvidenceExportOptions { video?: boolean; frameMs?: number; glyphSource?: GlyphSource }
+export interface ExportFrame {
+  file: string; source: string; sourceSha256: string; outputSha256: string; size: PngSize;
+  actionId: string | null; phase: "before" | "after" | null; glyphKind: PointerGlyph["kind"] | null;
+  annotated: boolean; reason?: string;
+}
+export interface ExportVideo {
+  file: "slideshow.mp4"; kind: "slideshow-of-stills"; frameMs: number; width: 1280; height: 720;
+}
+export interface EvidenceExportManifest {
+  schema: "pickforge.evidence-export"; version: 1; runId: string; exportId: string; createdAt: string;
+  runStatus: string; pointerGlyphVersion: number; journal: { bytes: number; sha256: string };
+  frames: ExportFrame[]; skipped: { source: string; reason: string }[]; pointerTrack: "pointer-track.json";
+  video: ExportVideo | null;
+}
+export interface EvidenceExportResult {
+  runId: string; exportId: string; exportDir: string; frameCount: number; annotatedCount: number;
+  pointerTrackPath: string; videoPath: string | null; complete: boolean; videoError?: string;
+}
+const sha256 = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+
+export function exportFrameMilliseconds(value: number = DEFAULT_EXPORT_FRAME_MS): number {
+  if (!Number.isSafeInteger(value) || value < 40 || value > 60_000) throw new Error("--frame-ms must be an integer from 40 to 60000");
+  return value;
+}
+
+function sourceRecords(records: readonly EvidenceRecord[]): Map<string, EvidenceAction[]> {
+  const result = new Map<string, EvidenceAction[]>();
+  for (const record of sortEvidenceRecords(records)) {
+    if (isTruncationRecord(record) || isOutcomeRecord(record)) continue;
+    const captures = Array.isArray(record.captures) ? record.captures.flatMap(link => typeof link?.path === "string" ? [link.path] : []) : [];
+    for (const source of new Set([...(record.artifacts ?? []), ...captures])) {
+      // Artifact lists also contain logs. Only screenshot candidates belong in a frame export.
+      if (!source.startsWith("screenshots/") && !source.toLowerCase().endsWith(".png")) continue;
+      const owners = result.get(source) ?? [];
+      owners.push(record); result.set(source, owners);
+    }
+  }
+  return result;
+}
+
+async function readSource(screenshots: DirHandle | undefined, source: string): Promise<Buffer | string> {
+  try { return await readShareScreenshot(screenshots, source); }
+  catch { return "Screenshot could not be read safely"; }
+}
+
+function validatedSize(bytes: Buffer): PngSize | string {
+  if (bytes.length < 33 || !bytes.subarray(0, 8).equals(PNG_SIGNATURE)) return "Corrupt PNG";
+  try { assertRasterSize(bytes.readUInt32BE(16), bytes.readUInt32BE(20)); }
+  catch { return "Over raster pixel cap or invalid dimensions"; }
+  return completePngSize(bytes) ?? "Corrupt PNG";
+}
+
+async function writeExclusive(dir: DirHandle, name: string, bytes: Buffer | string): Promise<void> {
+  const file = await dir.openFile(name, "wx", 0o600);
+  const identity = await file.stat();
+  try { await file.writeFile(bytes); }
+  catch (error) {
+    // A partial final manifest must never make an export look complete.
+    await dir.unlinkOwnedFile(name, identity).catch(() => {});
+    throw error;
+  } finally { await file.close(); }
+}
+
+async function findFfmpeg(): Promise<string> {
+  for (const directory of (process.env.PATH ?? "").split(path.delimiter)) {
+    const candidate = path.resolve(directory, "ffmpeg");
+    try { await fs.promises.access(candidate, fs.constants.X_OK); if ((await fs.promises.stat(candidate)).isFile()) return candidate; }
+    catch { /* Try the next PATH entry. */ }
+  }
+  throw new Error("--video requires ffmpeg on PATH");
+}
+
+async function writeVideo(dir: DirHandle, ffmpeg: string, frames: ExportFrame[], frameMs: number): Promise<void> {
+  if (frames.length === 0) throw new Error("Video requires at least one exported frame");
+  // The child reads the parent's pinned directory, never a run pathname.
+  const framePath = (file: string) => dir.resolve(file).replace("/proc/self/", `/proc/${process.pid}/`);
+  const concat = "ffconcat version 1.0\n" + frames.map(frame => `file 'file:${framePath(frame.file)}'\nduration ${frameMs / 1000}\n`).join("") +
+    `file 'file:${framePath(frames.at(-1)!.file)}'\n`;
+  await writeExclusive(dir, "slideshow.ffconcat", concat);
+  const file = await dir.openFile("slideshow.mp4", "wx", 0o600);
+  try {
+    // ffmpeg writes only to stdout. The parent owns the exclusive output descriptor.
+    const child = spawn(ffmpeg, ["-nostdin", "-n", "-v", "error", "-protocol_whitelist", "file,pipe", "-f", "concat", "-safe", "0", "-i", "pipe:0",
+      "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p",
+      "-an", "-c:v", "libx264", "-threads", "1", "-preset", "veryfast", "-r", "25", "-t", String(frames.length * frameMs / 1000),
+      "-movflags", "frag_keyframe+empty_moov", "-f", "mp4", "pipe:1"], { stdio: ["pipe", "pipe", "ignore"] });
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, 120_000);
+    const exited = new Promise<void>((resolve, reject) => {
+      child.once("error", () => reject(new Error("ffmpeg could not start")));
+      child.once("close", code => code === 0 && !timedOut ? resolve() : reject(new Error(timedOut ? "ffmpeg timed out" : "ffmpeg failed")));
+    });
+    child.stdin.on("error", () => {});
+    child.stdin.end(concat);
+    const output = (async () => {
+      let bytes = 0;
+      for await (const chunk of child.stdout) {
+        bytes += chunk.length;
+        if (bytes > 256 * 1024 * 1024) throw new Error("Video exceeds 256 MiB output cap");
+        await file.writeFile(chunk);
+      }
+      if (bytes === 0) throw new Error("ffmpeg produced no video");
+    })();
+    try { await Promise.all([exited, output]); }
+    catch (error) { child.kill("SIGKILL"); await Promise.allSettled([exited, output]); throw error; }
+    finally { clearTimeout(timer); }
+  } finally { await file.close(); }
+}
+
+interface Sources {
+  sizes: Map<string, PngSize>; hashes: Map<string, string>;
+  skipped: EvidenceExportManifest["skipped"];
+}
+async function inspectSources(screenshots: DirHandle | undefined, sources: Map<string, EvidenceAction[]>): Promise<Sources> {
+  const sizes = new Map<string, PngSize>(), hashes = new Map<string, string>(), skipped: Sources["skipped"] = [];
+  for (const source of sources.keys()) {
+    const bytes = await readSource(screenshots, source);
+    const size = typeof bytes === "string" ? bytes : validatedSize(bytes);
+    if (typeof size === "string") { skipped.push({ source, reason: size }); continue; }
+    sizes.set(source, size); hashes.set(source, sha256(bytes as Buffer));
+  }
+  return { sizes, hashes, skipped };
+}
+
+async function writeFrames(dir: DirHandle, screenshots: DirHandle | undefined, sources: Map<string, EvidenceAction[]>, inspected: Sources, glyphs: ReadonlyMap<string, PointerGlyph>): Promise<ExportFrame[]> {
+  const frames: ExportFrame[] = [];
+  for (const [source, size] of inspected.sizes) {
+    const bytes = await readSource(screenshots, source);
+    if (typeof bytes === "string" || sha256(bytes) !== inspected.hashes.get(source)) {
+      inspected.skipped.push({ source, reason: typeof bytes === "string" ? bytes : "Screenshot changed during export" }); continue;
+    }
+    const glyph = glyphs.get(source);
+    let output = bytes, annotated = false, reason = copyReason(bytes);
+    if (glyph !== undefined) {
+      try { const raster = decodePng(bytes); drawPointerGlyph(raster, glyph); output = encodePng(raster); annotated = true; }
+      catch (error) {
+        if (!(error instanceof Error) || error.message !== "Unsupported PNG raster layout") throw error;
+        reason = "Unsupported PNG raster layout; source copied without annotation";
+      }
+    }
+    const frame: ExportFrame = {
+      file: `frame-${String(frames.length + 1).padStart(4, "0")}.png`, source, sourceSha256: sha256(bytes), outputSha256: sha256(output), size,
+      ...frameOwnership(sources.get(source)!, source), glyphKind: glyph?.kind ?? null, annotated,
+      ...(annotated ? {} : { reason }),
+    };
+    await writeExclusive(dir, frame.file, output); frames.push(frame);
+  }
+  return frames;
+}
+
+function copyReason(bytes: Buffer): string {
+  const supported = bytes[24] === 8 && (bytes[25] === 2 || bytes[25] === 6) && bytes[28] === 0;
+  return supported ? "No eligible pointer glyph" : "Unsupported PNG raster layout; source copied without annotation";
+}
+
+function frameOwnership(owners: EvidenceAction[], source: string): Pick<ExportFrame, "actionId" | "phase"> {
+  const owner = owners.length === 1 ? owners[0] : undefined;
+  const link = owner === undefined ? undefined : sanitizeCaptureLinks(owner.captures).find(c => c.path === source);
+  return { actionId: owner?.actionId ?? null, phase: link?.phase ?? null };
+}
+
+/**
+ * All writes stay under one new export directory. Failures preserve that directory
+ * without export.json; the missing final manifest marks it as incomplete.
+ * Neither evidence files nor earlier exports are changed or removed.
+ */
+export async function exportEvidenceRun(catalog: RunCatalog, entry: RunCatalogEntry, options: EvidenceExportOptions = {}): Promise<EvidenceExportResult> {
+  const manifest = await catalog.refresh(entry);
+  if (manifest === undefined) throw new Error("Run changed before export");
+  if (!isEvidenceRun(manifest)) throw new Error("Export requires a lab evidence run; Rust and non-evidence runs are unsupported");
+  if (manifest.evidenceRecovery === "corrupt") throw new Error("Cannot export a corrupt evidence journal");
+  const frameMs = exportFrameMilliseconds(options.frameMs);
+  const ffmpeg = options.video === true ? await findFfmpeg() : undefined;
+  const journal = await catalog.readRootFile(entry, EVIDENCE_ACTION_LOG);
+  const records = parseActionsJournal(journal.toString("utf8"), entry.dir);
+  const createdAt = new Date().toISOString(), exportId = `${createdAt.replace(/[:.]/g, "-")}-${randomBytes(4).toString("hex")}`;
+  const result = await catalog.withRunDir(entry, async runDir => {
+    const screenshots = await openScreenshotsDir(runDir);
+    try {
+      const sources = sourceRecords(records), inspected = await inspectSources(screenshots, sources);
+      const glyphs = (options.glyphSource ?? runPointerGlyphs)(records, inspected.sizes);
+      return await withDirHandle(runDir.ensureChildDir("exports", 0o700), async exports => {
+        await exports.mkdirChild(exportId, 0o700);
+        return withDirHandle(exports.openChild(exportId), async dir => {
+          const exportDir = path.join(entry.dir, "exports", exportId);
+          try {
+            const frames = await writeFrames(dir, screenshots, sources, inspected, glyphs);
+            await writeExclusive(dir, "pointer-track.json", JSON.stringify(createPointerTrack(manifest.runId, records), null, 2) + "\n");
+            const output: EvidenceExportResult = { runId: manifest.runId, exportId, exportDir, frameCount: frames.length,
+              annotatedCount: frames.filter(f => f.annotated).length, pointerTrackPath: path.join(exportDir, "pointer-track.json"), videoPath: null, complete: true };
+            let video: ExportVideo | null = null;
+            if (ffmpeg !== undefined) {
+              try { await writeVideo(dir, ffmpeg, frames, frameMs); }
+              catch (error) { return { ...output, complete: false, videoError: `${(error as Error).message}; frames and pointer track preserved in incomplete export: ${exportDir}` }; }
+              video = { file: "slideshow.mp4", kind: "slideshow-of-stills", frameMs, width: 1280, height: 720 };
+              output.videoPath = path.join(exportDir, video.file);
+            }
+            const exportManifest: EvidenceExportManifest = { schema: "pickforge.evidence-export", version: 1, runId: manifest.runId, exportId, createdAt,
+              runStatus: manifest.status, pointerGlyphVersion: POINTER_GLYPH_VERSION, journal: { bytes: journal.length, sha256: sha256(journal) },
+              frames, skipped: inspected.skipped, pointerTrack: "pointer-track.json", video };
+            await writeExclusive(dir, "export.json", JSON.stringify(exportManifest, null, 2) + "\n");
+            return output;
+          } catch (error) { throw new Error(`Export incomplete at ${exportDir}: ${(error as Error).message}`); }
+        });
+      });
+    } finally { await screenshots?.close(); }
+  });
+  if (result === undefined) throw new Error("Run changed before export");
+  return result;
+}

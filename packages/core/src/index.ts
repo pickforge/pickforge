@@ -1,5 +1,17 @@
 export const packageName = "@pickforge/lab-core";
 
+export {
+  DEFAULT_EXPORT_FRAME_MS,
+  exportEvidenceRun,
+  exportFrameMilliseconds,
+  type EvidenceExportOptions,
+  type EvidenceExportResult,
+  type EvidenceExportManifest,
+  type ExportFrame,
+  type ExportVideo,
+  type GlyphSource,
+} from "./evidence-export.js";
+
 export { readPickforgeEnv, type EnvLike } from "./env-compat.js";
 
 export {
