@@ -12,6 +12,10 @@ const LAUNCH_ID_PATTERN = /^[0-9a-f]{32}$/;
 const RETRY_MIN_MS = 1000;
 const RETRY_MAX_MS = 10000;
 const WRITABLE_RETRY_MS = 5000;
+const STATUS_API_PATH = "/api/status";
+const STATUS_TIMEOUT_MS = 5000;
+/** Consecutive failed status probes that mean the bridge is gone for good. */
+const MAX_PROBE_FAILURES = 2;
 
 const STATUS_TEXT = {
   connecting: "Connecting",
@@ -52,6 +56,7 @@ const state = {
   attempts: 0,
   connectedOnce: false,
   retryTimer: undefined,
+  probeFailures: 0,
 };
 
 function element(id) {
@@ -140,10 +145,48 @@ function onSocketClose(socket, code) {
     finish("stopped");
   } else if (code === CLOSE_CODES.vncWritable) {
     scheduleRetry(WRITABLE_RETRY_MS, "control");
+  } else if (code === CLOSE_CODES.vncUnavailable) {
+    retryWithBackoff();
   } else {
-    // 4001 and abnormal closes: the server may come back.
-    scheduleRetry(backoffMs(), state.connectedOnce ? "reconnecting" : "connecting");
+    void probeThenRetry();
   }
+}
+
+function retryWithBackoff() {
+  scheduleRetry(backoffMs(), state.connectedOnce ? "reconnecting" : "connecting");
+}
+
+/**
+ * An abnormal close looks the same for a rejected token and an outage. A
+ * restarted bridge has a new token and a new port, so ask before retrying.
+ */
+async function probeThenRetry() {
+  setStatus(state.connectedOnce ? "reconnecting" : "connecting");
+  let response;
+  try {
+    response = await fetch(STATUS_API_PATH, {
+      headers: { Authorization: `Bearer ${state.token}` },
+      cache: "no-store",
+      signal: AbortSignal.timeout(STATUS_TIMEOUT_MS),
+    });
+  } catch {
+    response = null;
+  }
+  if (FINAL_STATES.has(state.status)) return;
+  if (response === null) {
+    state.probeFailures += 1;
+    if (state.probeFailures >= MAX_PROBE_FAILURES) {
+      finish("stopped");
+      return;
+    }
+  } else {
+    state.probeFailures = 0;
+    if (response.status === 401 || response.status === 403) {
+      finish("expired");
+      return;
+    }
+  }
+  retryWithBackoff();
 }
 
 function configure(rfb) {
