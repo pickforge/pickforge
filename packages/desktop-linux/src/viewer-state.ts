@@ -7,11 +7,15 @@ import {
   getSession,
   sessionDataDir,
   identityIsAlive,
+  listProcessGroupMembers,
   processIdentityMatches,
+  readProcessIdentity,
+  readProcessGroupLeaderIdentity,
   stopProcessGroupVerified,
 } from "@pickforge/lab-core";
 import type { DesktopSessionInfo, EnvLike } from "@pickforge/lab-core";
 import { withSessionVncLock } from "./session.js";
+import { sleep } from "./util.js";
 
 /**
  * Private per-session state of the passive browser viewer
@@ -135,7 +139,12 @@ export async function withViewerDir<T>(
   operation: (directoryHandle: DirHandle) => Promise<T>,
 ): Promise<T> {
   const viewer = sessionViewerDir(sessionId, registryEnv);
-  const registryRoot = await DirHandle.open(path.dirname(path.dirname(viewer)));
+  const registryRoot = await DirHandle.open(
+    path.dirname(path.dirname(viewer)),
+    {
+      followFinal: true,
+    },
+  );
   let sessionDirectory: DirHandle | undefined;
   let directoryHandle: DirHandle | undefined;
   try {
@@ -436,7 +445,8 @@ async function removeLaunchIn(
       }
       if (
         launchRecord.pid !== undefined &&
-        identityIsAlive(launchRecord.pid, launchRecord.startTicks)
+        (identityIsAlive(launchRecord.pid, launchRecord.startTicks) ||
+          listProcessGroupMembers(launchRecord.pid).length !== 0)
       ) {
         throw new Error("Viewer browser is still alive");
       }
@@ -461,6 +471,30 @@ export async function removeViewerLaunch(
   );
 }
 
+async function pruneLaunchEntry(
+  directoryHandle: DirHandle,
+  launches: DirHandle,
+  sessionId: string,
+  name: string,
+  registryEnv: EnvLike,
+): Promise<void> {
+  const stats = await launches.lstatChild(name);
+  const record = await readViewerLaunchRecord(sessionId, name, registryEnv);
+  const gone =
+    record?.pid !== undefined &&
+    !identityIsAlive(record.pid, record.startTicks);
+  const old =
+    record?.pid === undefined &&
+    Date.now() -
+      (record === undefined
+        ? (stats?.mtimeMs ?? Date.now())
+        : Date.parse(record.createdAt)) >
+      600_000;
+  if (gone || old) {
+    await removeLaunchIn(directoryHandle, sessionId, name, registryEnv);
+  }
+}
+
 async function pruneLaunches(
   directoryHandle: DirHandle,
   sessionId: string,
@@ -472,20 +506,16 @@ async function pruneLaunches(
       if (!VIEWER_LAUNCH_ID_PATTERN.test(name)) {
         continue;
       }
-      const stats = await launches.lstatChild(name);
-      const record = await readViewerLaunchRecord(sessionId, name, registryEnv);
-      const gone =
-        record?.pid !== undefined &&
-        !identityIsAlive(record.pid, record.startTicks);
-      const old =
-        record?.pid === undefined &&
-        Date.now() -
-          (record === undefined
-            ? (stats?.mtimeMs ?? Date.now())
-            : Date.parse(record.createdAt)) >
-          600_000;
-      if (gone || old) {
-        await removeLaunchIn(directoryHandle, sessionId, name, registryEnv);
+      try {
+        await pruneLaunchEntry(
+          directoryHandle,
+          launches,
+          sessionId,
+          name,
+          registryEnv,
+        );
+      } catch {
+        // Keep unsafe entries for teardown to report; they must not block a new launch.
       }
     }
   } finally {
@@ -595,6 +625,51 @@ export async function connectSessionVncReadOnly(
   });
 }
 
+async function waitForViewerGroupExit(pid: number): Promise<boolean> {
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) {
+    if (listProcessGroupMembers(pid).length === 0) {
+      return true;
+    }
+    await sleep(25);
+  }
+  return listProcessGroupMembers(pid).length === 0;
+}
+
+function viewerGroupCanBeSignaled(pid: number, startTicks: number): boolean {
+  const leader = readProcessGroupLeaderIdentity(pid);
+  if (leader !== undefined) {
+    return leader.startTicks === startTicks;
+  }
+  return readProcessIdentity(pid) === undefined;
+}
+
+async function stopOrphanedViewerGroup(
+  pid: number,
+  startTicks: number,
+): Promise<void> {
+  for (const signal of ["SIGTERM", "SIGKILL"] as const) {
+    if (listProcessGroupMembers(pid).length === 0) {
+      return;
+    }
+    // A surviving pgid cannot be reused. Refuse any replacement leader before signalling.
+    if (!viewerGroupCanBeSignaled(pid, startTicks)) {
+      throw new Error("Viewer process group cannot be verified");
+    }
+    try {
+      process.kill(-pid, signal);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+        throw error;
+      }
+    }
+    if (await waitForViewerGroupExit(pid)) {
+      return;
+    }
+  }
+  throw new Error("Viewer process group is not confirmed gone");
+}
+
 async function stopViewerProcess(
   pid: number | undefined,
   startTicks: number | undefined,
@@ -603,16 +678,19 @@ async function stopViewerProcess(
     return;
   }
   if (startTicks === undefined) {
-    if (identityIsAlive(pid)) {
+    if (identityIsAlive(pid) || listProcessGroupMembers(pid).length !== 0) {
       throw new Error("Viewer process identity is missing");
     }
     return;
   }
   const result = await stopProcessGroupVerified({ pid, startTicks });
+  if (result.outcome === "reused") {
+    await stopOrphanedViewerGroup(pid, startTicks);
+    return;
+  }
   if (
-    result.outcome !== "terminated" &&
-    result.outcome !== "already-dead" &&
-    result.outcome !== "reused"
+    (result.outcome !== "terminated" && result.outcome !== "already-dead") ||
+    listProcessGroupMembers(pid).length !== 0
   ) {
     throw new Error("Viewer process group is not confirmed gone");
   }
@@ -625,11 +703,14 @@ export async function stopSessionViewer(
   registryEnv: EnvLike = process.env,
 ): Promise<Error[]> {
   const failures: Error[] = [];
-  const capture = async (operation: () => Promise<void>): Promise<void> => {
+  const capture = async (
+    operation: () => Promise<void>,
+    message = "Viewer cleanup failed",
+  ): Promise<void> => {
     try {
       await operation();
     } catch {
-      failures.push(new Error("Viewer cleanup failed"));
+      failures.push(new Error(message));
     }
   };
   await capture(() =>
@@ -656,26 +737,29 @@ export async function stopSessionViewer(
       const launches = await privateChild(directoryHandle, "launches", false);
       try {
         for (const name of await launches.readEntryNames()) {
-          await capture(async () => {
-            if (!VIEWER_LAUNCH_ID_PATTERN.test(name)) {
-              throw new Error("Unknown viewer state");
-            }
-            const record = await readRecord(
-              directoryHandle,
-              sessionId,
-              name,
-              registryEnv,
-            );
-            if (record === undefined) {
-              await withLaunch(directoryHandle, name, async (launch) => {
-                if ((await launch.lstatChild("launch.json")) !== undefined) {
-                  throw new Error("Invalid viewer record");
-                }
-              });
-            } else {
-              await stopViewerProcess(record.pid, record.startTicks);
-            }
-          });
+          await capture(
+            async () => {
+              if (!VIEWER_LAUNCH_ID_PATTERN.test(name)) {
+                throw new Error("Unknown viewer state");
+              }
+              const record = await readRecord(
+                directoryHandle,
+                sessionId,
+                name,
+                registryEnv,
+              );
+              if (record === undefined) {
+                await withLaunch(directoryHandle, name, async (launch) => {
+                  if ((await launch.lstatChild("launch.json")) !== undefined) {
+                    throw new Error("Invalid viewer record");
+                  }
+                });
+              } else {
+                await stopViewerProcess(record.pid, record.startTicks);
+              }
+            },
+            `Viewer cleanup failed for launch ${JSON.stringify(name)}`,
+          );
         }
       } finally {
         await launches.close();

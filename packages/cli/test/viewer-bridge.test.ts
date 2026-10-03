@@ -271,7 +271,7 @@ describe("bridge socket lifecycle", () => {
 });
 
 describe("bridge supervision", () => {
-  it.each(["stopped", "deleted", "replaced"])(
+  it.each(["stopped", "error", "deleted", "replaced"] as const)(
     "exits when the session is %s",
     async (reason) => {
       vi.spyOn(desktop, "connectSessionVncReadOnly").mockResolvedValue(
@@ -282,8 +282,8 @@ describe("bridge supervision", () => {
       const close = once(webSocket, "close");
       if (reason === "deleted") {
         await destroySessionRecord(sessionId, registryEnv);
-      } else if (reason === "stopped") {
-        await updateSession(sessionId, { status: "stopped" }, registryEnv);
+      } else if (reason !== "replaced") {
+        await updateSession(sessionId, { status: reason }, registryEnv);
       } else {
         await updateSession(
           sessionId,
@@ -291,25 +291,30 @@ describe("bridge supervision", () => {
           registryEnv,
         );
       }
-      expect((await close)[0]).toBe(4004);
+      expect((await close)[0]).toBe(reason === "replaced" ? 4004 : 4003);
       await vi.waitFor(async () =>
         expect(await closedPort(bridge.port)).toBe(true),
       );
     },
   );
   it("exits after idle time and counts requests and connected peers as activity", async () => {
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
     vi.spyOn(desktop, "connectSessionVncReadOnly").mockResolvedValue(fakeTcp());
     const bridge = await start({ idleMs: 80 });
     const webSocket = await open(bridge);
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    now += 100;
+    await new Promise((resolve) => setTimeout(resolve, 20));
     expect(webSocket.readyState).toBe(WebSocket.OPEN);
     webSocket.close();
     await once(webSocket, "close");
-    await new Promise((resolve) => setTimeout(resolve, 40));
+    now += 40;
     const response = await fetch(`http://127.0.0.1:${bridge.port}/unknown`);
     expect(response.status).toBe(404);
-    await new Promise((resolve) => setTimeout(resolve, 45));
+    now += 45;
+    await new Promise((resolve) => setTimeout(resolve, 20));
     expect(await closedPort(bridge.port)).toBe(false);
+    now += 36;
     await vi.waitFor(async () =>
       expect(await closedPort(bridge.port)).toBe(true),
     );
@@ -318,10 +323,12 @@ describe("bridge supervision", () => {
     "closes on %s without changing the host session",
     async (signal) => {
       const bridge = await start();
+      const sessionBefore = await getSession(sessionId, registryEnv);
       process.emit(signal, signal);
       await vi.waitFor(async () =>
         expect(await closedPort(bridge.port)).toBe(true),
       );
+      expect(await getSession(sessionId, registryEnv)).toEqual(sessionBefore);
     },
   );
   it("gives daemon registration a bounded startup grace", async () => {
@@ -338,18 +345,32 @@ describe("bridge supervision", () => {
 });
 
 async function daemonEntry(
-  kind: "ready" | "hang" | "exit" = "ready",
+  kind: "ready" | "hang" | "exit" | "unauthorized" | "stall" = "ready",
 ): Promise<string> {
   const entry = path.join(testRoot, "daemon.cjs");
   const viewer = desktop.sessionViewerDir(sessionId, registryEnv);
   await fs.writeFile(
     entry,
     `const fileSystem = require('node:fs');
+const http = require('node:http');
 const viewerDirectory = ${JSON.stringify(viewer)};
 if (${JSON.stringify(kind)} === 'exit') {
   process.exit(1);
 }
-if (${JSON.stringify(kind)} === 'ready') {
+if (${JSON.stringify(kind)} !== 'hang') {
+  const server = http.createServer((request, response) => {
+    if (${JSON.stringify(kind)} === 'stall') {
+      return;
+    }
+    const token = fileSystem.readFileSync(viewerDirectory + '/token', 'utf8');
+    const authorized = request.url === '/api/status' &&
+      request.headers.authorization === 'Bearer ' + token &&
+      ${JSON.stringify(kind)} !== 'unauthorized';
+    response.writeHead(authorized ? 204 : 401);
+    response.end();
+  });
+  process.on('SIGUSR1', () => server.close());
+  server.listen(0, '127.0.0.1', () => {
   const stat = fileSystem.readFileSync('/proc/' + process.pid + '/stat', 'utf8');
   const fields = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\\s+/);
   const startTicks = Number(fields[19]);
@@ -357,9 +378,10 @@ if (${JSON.stringify(kind)} === 'ready') {
   fileSystem.writeFileSync(temporaryPath, JSON.stringify({
     pid: process.pid,
     startTicks,
-    port: 45678,
+    port: server.address().port,
   }), { mode: 0o600 });
   fileSystem.renameSync(temporaryPath, viewerDirectory + '/bridge.json');
+  });
 }
 setInterval(() => {}, 1000);
 `,
@@ -368,6 +390,70 @@ setInterval(() => {}, 1000);
 }
 
 describe("detached bridge daemon", () => {
+  it.each(["closed", "unauthorized", "stall"] as const)(
+    "replaces a live bridge when its status endpoint is %s",
+    async (condition) => {
+      await updateSession(
+        sessionId,
+        { desktop: { display: ":991" } },
+        registryEnv,
+      );
+      const entry = await daemonEntry(
+        condition === "closed" ? "ready" : condition,
+      );
+      const first = await ensureViewerBridge(sessionId, {
+        registryEnv,
+        _cliEntry: entry,
+      });
+      const firstIdentity = readProcessIdentity(first.pid)!;
+      owned.push(firstIdentity);
+      if (condition === "closed") {
+        process.kill(first.pid, "SIGUSR1");
+        await vi.waitFor(async () =>
+          expect(await closedPort(first.port)).toBe(true),
+        );
+      }
+      const replacement = await ensureViewerBridge(sessionId, {
+        registryEnv,
+        _cliEntry: entry,
+      });
+      owned.push(readProcessIdentity(replacement.pid)!);
+      expect(replacement.reused).toBe(false);
+      expect(replacement.pid).not.toBe(first.pid);
+      expect(replacement.token).not.toBe(first.token);
+      expect(identityIsAlive(firstIdentity.pid, firstIdentity.startTicks)).toBe(
+        false,
+      );
+    },
+  );
+  it("probes a reused bridge and renews activity just before its idle deadline", async () => {
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const bridge = await start({ idleMs: 600_000 });
+    const identity = readProcessIdentity(process.pid)!;
+    await desktop.withViewerDir(sessionId, registryEnv, false, (directory) =>
+      desktop.writeViewerPrivateFile(directory, "token", token),
+    );
+    await updateSession(
+      sessionId,
+      {
+        desktop: {
+          display: ":991",
+          viewerBridgePid: identity.pid,
+          viewerBridgeStartTimeTicks: identity.startTicks,
+          viewerBridgePort: bridge.port,
+        },
+      },
+      registryEnv,
+    );
+    now += 598_000;
+    const reused = await ensureViewerBridge(sessionId, { registryEnv });
+    expect(reused.reused).toBe(true);
+    expect(reused.port).toBe(bridge.port);
+    now += 3_000;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(await closedPort(bridge.port)).toBe(false);
+  });
   it("runs the built hidden command with bundled assets and stops its detached process", async () => {
     await ensureCliBuilt();
     await fs.copyFile(

@@ -10,6 +10,7 @@ import {
   updateSession,
   readProcessIdentity,
   identityIsAlive,
+  listProcessGroupMembers,
 } from "@pickforge/lab-core";
 import {
   prepareViewerLaunch,
@@ -32,6 +33,7 @@ let registryEnv: NodeJS.ProcessEnv;
 let sessionId: string;
 const children: ChildProcess[] = [];
 const servers: net.Server[] = [];
+const survivors: { pid: number; startTicks: number }[] = [];
 
 beforeEach(async () => {
   testRoot = await fs.mkdtemp(path.join(process.cwd(), ".viewer-state-test-"));
@@ -51,6 +53,11 @@ beforeEach(async () => {
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  for (const identity of survivors.splice(0)) {
+    if (identityIsAlive(identity.pid, identity.startTicks)) {
+      process.kill(identity.pid, "SIGKILL");
+    }
+  }
   for (const child of children.splice(0)) {
     child.kill("SIGKILL");
     if (child.exitCode === null && child.signalCode === null) {
@@ -116,6 +123,71 @@ async function vnc(): Promise<number> {
 }
 
 describe("private viewer state", () => {
+  it("follows a linked registry root while refusing viewer descendants that are links", async () => {
+    const sessions = path.join(testRoot, "sessions");
+    const target = path.join(testRoot, "linked-sessions");
+    await fs.rename(sessions, target);
+    await fs.symlink(target, sessions);
+    const launchRecord = await record();
+    await writeViewerLaunchRecord(launchRecord, registryEnv);
+    expect(
+      await readViewerLaunchRecord(
+        sessionId,
+        launchRecord.launchId,
+        registryEnv,
+      ),
+    ).toEqual(launchRecord);
+    await fs.rm(launchRecord.profileDir, { recursive: true });
+    const foreign = path.join(testRoot, "foreign-profile");
+    await fs.mkdir(foreign, { mode: 0o700 });
+    await fs.symlink(foreign, launchRecord.profileDir);
+    await expect(
+      writeViewerLaunchRecord(launchRecord, registryEnv),
+    ).rejects.toThrow();
+    expect(
+      await readViewerLaunchRecord(
+        sessionId,
+        launchRecord.launchId,
+        registryEnv,
+      ),
+    ).toBeUndefined();
+  });
+  it.each(["invalid-json", "unsafe-mode", "symlink"] as const)(
+    "skips an unprunable %s launch and names it during teardown",
+    async (condition) => {
+      const launchRecord = await record();
+      const launchDirectory = path.dirname(launchRecord.profileDir);
+      if (condition === "invalid-json") {
+        await fs.writeFile(
+          path.join(launchDirectory, "launch.json"),
+          "{broken",
+          { mode: 0o600 },
+        );
+      } else if (condition === "unsafe-mode") {
+        await fs.chmod(launchDirectory, 0o755);
+      } else {
+        await fs.rm(launchDirectory, { recursive: true });
+        const foreign = path.join(testRoot, "foreign-launch");
+        await fs.mkdir(foreign, { mode: 0o700 });
+        await fs.symlink(foreign, launchDirectory);
+      }
+      const stale = new Date(Date.now() - 700_000);
+      await fs.lutimes(launchDirectory, stale, stale);
+      const next = await prepareViewerLaunch(sessionId, registryEnv);
+      expect(await fs.lstat(next.profileDir)).toBeDefined();
+      expect(await fs.lstat(launchDirectory)).toBeDefined();
+      const failures = await stopSessionViewer(
+        sessionId,
+        undefined,
+        registryEnv,
+      );
+      expect(failures).toHaveLength(1);
+      expect(failures[0]!.message).toContain(launchRecord.launchId);
+      expect(
+        await fs.lstat(sessionViewerDir(sessionId, registryEnv)),
+      ).toBeDefined();
+    },
+  );
   it("creates random private profiles and atomic private records", async () => {
     const launchRecord = await record();
     expect(launchRecord.launchId).toMatch(/^[0-9a-f]{32}$/);
@@ -464,6 +536,92 @@ describe("read-only VNC connection", () => {
 });
 
 describe("viewer teardown", () => {
+  it.each(["term", "kill"] as const)(
+    "stops surviving browser children with %s after their group leader exits",
+    async (mode) => {
+      const launchRecord = await record();
+      const trace = path.join(testRoot, "orphan-stop.json");
+      const childScript = `
+const fileSystem = require('node:fs');
+process.on('SIGTERM', () => {
+  fileSystem.writeFileSync(${JSON.stringify(trace)}, JSON.stringify({
+    profileExists: fileSystem.existsSync(${JSON.stringify(launchRecord.profileDir)}),
+  }));
+  if (${JSON.stringify(mode)} === 'term') {
+    process.exit(0);
+  }
+});
+process.stdout.write('ready');
+setInterval(() => {}, 1000);
+`;
+      const leader = spawn(
+        process.execPath,
+        [
+          "-e",
+          `
+const { spawn } = require('node:child_process');
+const child = spawn(process.execPath, ['-e', ${JSON.stringify(childScript)}], {
+  stdio: ['ignore', 'pipe', 'ignore'],
+});
+child.stdout.once('data', () => process.stdout.write(String(child.pid)));
+process.on('SIGTERM', () => process.exit(0));
+setInterval(() => {}, 1000);
+`,
+        ],
+        { detached: true, stdio: ["ignore", "pipe", "ignore"] },
+      );
+      children.push(leader);
+      const [ready] = await once(leader.stdout!, "data");
+      const childIdentity = readProcessIdentity(Number(ready.toString()))!;
+      survivors.push(childIdentity);
+      const leaderIdentity = readProcessIdentity(leader.pid!)!;
+      Object.assign(launchRecord, leaderIdentity);
+      await writeViewerLaunchRecord(launchRecord, registryEnv);
+      const exited = once(leader, "exit");
+      leader.kill("SIGTERM");
+      await exited;
+      expect(listProcessGroupMembers(leaderIdentity.pid)).toContain(
+        childIdentity.pid,
+      );
+      await expect(
+        removeViewerLaunch(sessionId, launchRecord.launchId, registryEnv),
+      ).rejects.toThrow(/alive/);
+      await prepareViewerLaunch(sessionId, registryEnv);
+      expect(await fs.lstat(launchRecord.profileDir)).toBeDefined();
+      expect(
+        await stopSessionViewer(sessionId, undefined, registryEnv),
+      ).toEqual([]);
+      expect(identityIsAlive(childIdentity.pid, childIdentity.startTicks)).toBe(
+        false,
+      );
+      expect(listProcessGroupMembers(leaderIdentity.pid)).toEqual([]);
+      expect(JSON.parse(await fs.readFile(trace, "utf8"))).toEqual({
+        profileExists: true,
+      });
+      await expect(fs.lstat(launchRecord.profileDir)).rejects.toThrow();
+    },
+  );
+  it("accepts a reused PID only when its recorded group is empty", async () => {
+    const launchRecord = await record();
+    const child = spawn(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)"],
+      { stdio: "ignore" },
+    );
+    children.push(child);
+    await once(child, "spawn");
+    const identity = readProcessIdentity(child.pid!)!;
+    Object.assign(launchRecord, {
+      pid: identity.pid,
+      startTicks: identity.startTicks + 1,
+    });
+    await writeViewerLaunchRecord(launchRecord, registryEnv);
+    expect(listProcessGroupMembers(identity.pid)).toEqual([]);
+    expect(await stopSessionViewer(sessionId, undefined, registryEnv)).toEqual(
+      [],
+    );
+    expect(identityIsAlive(identity.pid, identity.startTicks)).toBe(true);
+  });
   it.each(["desktop", "browser"] as const)(
     "stops owned viewers and bridge during %s teardown",
     async (type) => {
@@ -565,10 +723,11 @@ setInterval(() => {}, 1000);
     expect(await fs.lstat(launchRecord.profileDir)).toBeDefined();
     launchRecord.startTicks = live.startTicks + 1;
     await writeViewerLaunchRecord(launchRecord, registryEnv);
-    expect(await stopSessionViewer(sessionId, undefined, registryEnv)).toEqual(
-      [],
-    );
+    expect(
+      await stopSessionViewer(sessionId, undefined, registryEnv),
+    ).toHaveLength(1);
     expect(identityIsAlive(live.pid, live.startTicks)).toBe(true);
+    expect(await fs.lstat(launchRecord.profileDir)).toBeDefined();
   });
   it.each(["desktop", "browser"] as const)(
     "aggregates viewer cleanup failure during %s teardown",

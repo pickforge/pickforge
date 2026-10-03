@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import http from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   getSession,
@@ -20,6 +21,7 @@ import {
   writeViewerPrivateFile,
   sessionViewerDir,
 } from "@pickforge/lab-desktop-linux";
+import { VIEWER_HOST, VIEWER_STATUS_API_PATH } from "./contract.js";
 
 export interface EnsuredViewerBridge {
   pid: number;
@@ -41,6 +43,30 @@ function validPort(port: number | undefined): port is number {
   return (
     port !== undefined && Number.isInteger(port) && port > 0 && port <= 65_535
   );
+}
+
+function probeViewerBridge(port: number, token: string): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const request = http.get(
+      {
+        hostname: VIEWER_HOST,
+        port,
+        path: VIEWER_STATUS_API_PATH,
+        headers: { Authorization: `Bearer ${token}` },
+        agent: false,
+      },
+      (response) => {
+        response.resume();
+        resolve(response.statusCode === 204);
+      },
+    );
+    const deadline = setTimeout(
+      () => request.destroy(new Error("Viewer status deadline")),
+      750,
+    );
+    request.once("error", () => resolve(false));
+    request.once("close", () => clearTimeout(deadline));
+  });
 }
 
 /** Reuse a verified bridge or start and record a detached daemon under the VNC lock. */
@@ -78,12 +104,19 @@ export async function ensureViewerBridge(
           previousToken !== undefined &&
           /^[A-Za-z0-9_-]{43}$/.test(previousToken)
         ) {
-          return {
-            pid: pid!,
-            port: recordedDesktop.viewerBridgePort,
-            token: previousToken,
-            reused: true,
-          };
+          if (
+            await probeViewerBridge(
+              recordedDesktop.viewerBridgePort,
+              previousToken,
+            )
+          ) {
+            return {
+              pid: pid!,
+              port: recordedDesktop.viewerBridgePort,
+              token: previousToken,
+              reused: true,
+            };
+          }
         }
         if (alive) {
           const stopResult = await stopProcessGroupVerified({

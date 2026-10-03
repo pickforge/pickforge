@@ -667,6 +667,22 @@ describe("WebSocket capability and passive upstream", () => {
       webSocket.close();
       await once(webSocket, "close");
     }
+    const unsupported = websocket(undefined, {}, undefined, ["other"]);
+    const handshake = new Promise<http.IncomingMessage>((resolve) =>
+      unsupported.once("upgrade", resolve),
+    );
+    const rejected = once(unsupported, "error");
+    const closed = new Promise<void>((resolve) =>
+      unsupported.once("close", () => resolve()),
+    );
+    const unsupportedResponse = await handshake;
+    expect(unsupportedResponse.statusCode).toBe(101);
+    expect(
+      unsupportedResponse.headers["sec-websocket-protocol"],
+    ).toBeUndefined();
+    expect((await rejected)[0].message).toBe("Server sent no subprotocol");
+    await closed;
+    expect(unsupported.readyState).toBe(WebSocket.CLOSED);
     expect(log).not.toHaveBeenCalled();
     expect(error).not.toHaveBeenCalled();
   });

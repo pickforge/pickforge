@@ -95,7 +95,7 @@ export function buildVncArgs(opts: VncArgsOptions): string[] {
     "-nosel",
   ];
   if (opts.viewOnly !== false) {
-    args.push("-viewonly");
+    args.push("-viewonly", "-nocursorshape");
   }
   args.push("-quiet");
   return args;

@@ -78,11 +78,12 @@ describe("buildVncArgs", () => {
       "-nopw",
       "-nosel",
       "-viewonly",
+      "-nocursorshape",
       "-quiet",
     ]);
     expect(args).toContain("-localhost");
-    expect(args).toContain("-nosel");
     expect(args).toContain("-viewonly");
+    expect(args).not.toContain("-nocursorpos");
   });
 
   it("omits view-only mode for an explicit writable control session", () => {
@@ -92,9 +93,9 @@ describe("buildVncArgs", () => {
       viewOnly: false,
     });
     expect(args).toContain("-localhost");
-    expect(args).toContain("-nosel");
+    expect(args.filter((argument) => argument === "-nosel")).toHaveLength(1);
     expect(args).not.toContain("-viewonly");
-    expect(args).toContain("-nosel");
+    expect(args).not.toContain("-nocursorshape");
   });
 
   it("rejects invalid ports", () => {

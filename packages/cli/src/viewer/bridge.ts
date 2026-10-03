@@ -641,10 +641,11 @@ function installOtherRequests(
 function closeBridgeServers(
   server: http.Server,
   webSocketServer: WebSocketServer,
+  code: number,
 ): Promise<void> {
   return new Promise<void>((resolve) => {
     for (const webSocket of webSocketServer.clients) {
-      webSocket.close(VIEWER_CLOSE_CODES.shuttingDown);
+      webSocket.close(code);
     }
     const timer = setTimeout(() => {
       for (const webSocket of webSocketServer.clients) {
@@ -672,16 +673,18 @@ function superviseViewerBridge(
   options: ViewerBridgeOptions,
   startedAt: number,
   getLastActivity: () => number,
-): { close: () => Promise<void>; isClosing: () => boolean } {
+): { close: (code?: number) => Promise<void>; isClosing: () => boolean } {
   let registered = false;
   let closing: Promise<void> | undefined;
-  const close = (): Promise<void> => {
+  const close = (
+    code: number = VIEWER_CLOSE_CODES.shuttingDown,
+  ): Promise<void> => {
     if (closing === undefined) {
       clearInterval(poll);
       for (const signal of ["SIGTERM", "SIGINT"] as const) {
         process.off(signal, onSignal);
       }
-      closing = closeBridgeServers(server, webSocketServer);
+      closing = closeBridgeServers(server, webSocketServer, code);
     }
     return closing;
   };
@@ -699,6 +702,10 @@ function superviseViewerBridge(
     checking = true;
     void getSession(options.sessionId, options.registryEnv)
       .then((record) => {
+        if (record?.status !== "running") {
+          void close(VIEWER_CLOSE_CODES.sessionEnded);
+          return;
+        }
         const recordedPid = record?.desktop?.viewerBridgePid;
         if (recordedPid === process.pid) {
           registered = true;
@@ -711,7 +718,7 @@ function superviseViewerBridge(
         const idle =
           webSocketServer.clients.size === 0 &&
           Date.now() - getLastActivity() > (options.idleMs ?? 600_000);
-        if (record?.status !== "running" || displaced || idle) {
+        if (displaced || idle) {
           void close();
         }
       })
