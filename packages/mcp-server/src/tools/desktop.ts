@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { isEvidenceTruncated, withAgentPermit } from "@pickforge/lab-core";
-import type { RunHandle, SessionType } from "@pickforge/lab-core";
+import type { EvidenceInputState, RunHandle, SessionType } from "@pickforge/lab-core";
 import { setRunCaptureGeometry } from "@pickforge/lab-core";
 import {
   click,
@@ -29,6 +29,7 @@ import {
   screenshotMetadata,
   scroll,
   typeText,
+  verifyOwnedDisplayTarget,
   waitForWindow,
   type ScreenshotMetadata,
 } from "@pickforge/lab-desktop-linux";
@@ -45,7 +46,7 @@ import {
   type ServerContext,
   type ToolReport,
 } from "../context.js";
-import { evidenceStatus, withMcpEvidence, type McpEvidenceOptions } from "../evidence.js";
+import { evidenceStatus, withMcpEvidence, type EvidenceRecordMeta, type McpEvidenceOptions } from "../evidence.js";
 
 const sessionArg = {
   session: z
@@ -406,6 +407,21 @@ function failedCaptureRecording(
   };
 }
 
+/** Evidence-only check; it never gates or redirects the input. */
+function ownedDisplay(ctx: ServerContext, sessionId: string, display: string) {
+  return () => verifyOwnedDisplayTarget(sessionId, display, ctx.env);
+}
+
+async function trackInput(
+  record: EvidenceRecordMeta,
+  input: () => Promise<ToolReport>,
+): Promise<ToolReport> {
+  record.inputState = "attempted";
+  const result = await input();
+  if ((result.errors?.length ?? 0) === 0) record.inputState = "completed";
+  return result;
+}
+
 async function withInputCapture(
   ctx: ServerContext,
   options: McpEvidenceOptions<ToolReport>,
@@ -413,14 +429,16 @@ async function withInputCapture(
   capture: "after" | "both" | undefined,
   input: () => Promise<ToolReport>,
 ): Promise<ToolReport> {
-  if (capture === undefined) return withMcpEvidence(ctx, options, input);
+  if (capture === undefined) {
+    return withMcpEvidence(ctx, { ...options, input: true }, ({ record }) => trackInput(record, input));
+  }
   const artifacts: string[] = [];
   return withMcpEvidence(ctx, {
-    ...options, artifacts: () => artifacts, onRecordingFailure: failedCaptureRecording,
-  }, async ({ actionId, run }) => {
+    ...options, input: true, artifacts: () => artifacts, onRecordingFailure: failedCaptureRecording,
+  }, async ({ actionId, run, record }) => {
     if (run === undefined) throw new Error("Explicit input capture requires available, enabled evidence; input was not attempted");
     const captures: Record<string, unknown>[] = [];
-    let inputState = "not-attempted";
+    let inputState: EvidenceInputState = "not-attempted";
     let stage = "capture recording preflight";
     const take = async (phase: "before" | "after") => {
       const shot = await captureDesktopScreenshot({
@@ -429,6 +447,8 @@ async function withInputCapture(
         onCaptured: (file) => artifacts.push(file),
       });
       captures.push({ phase, ...shot.data });
+      const { width, height } = shot.data.imageSize as ScreenshotMetadata["imageSize"];
+      record.captures.push({ path: String(shot.data.path), phase, width, height });
     };
     try {
       if (await isEvidenceTruncated(run)) {
@@ -441,10 +461,10 @@ async function withInputCapture(
       stage = "before capture";
       if (capture === "both") await take("before");
       stage = "input";
-      inputState = "attempted";
+      inputState = record.inputState = "attempted";
       const result = await input();
       if ((result.errors?.length ?? 0) > 0) return { ...result, data: { ...result.data, capture, captures, inputState, artifacts } };
-      inputState = "completed";
+      inputState = record.inputState = "completed";
       stage = "after capture";
       await take("after");
       return { ...result, data: { ...result.data, capture, captures, inputState, artifacts } };
@@ -485,6 +505,7 @@ function registerClickTool(server: McpServer, ctx: ServerContext): void {
             sessionId: id,
             tool: "desktop_click",
             target: { x: args.x, y: args.y },
+            ownedDisplay: ownedDisplay(ctx, id, display),
           },
           display, args.capture,
           async () => {
@@ -534,13 +555,15 @@ function registerMoveTool(server: McpServer, ctx: ServerContext): void {
             sessionId: id,
             tool: "desktop_move",
             target: { x: args.x, y: args.y },
+            input: true,
+            ownedDisplay: ownedDisplay(ctx, id, display),
           },
-          async () => {
+          ({ record }) => trackInput(record, async () => {
             await move({ display, sessionId: id, env: ctx.env, x: args.x, y: args.y });
             return {
               data: { sessionId: id, display, x: args.x, y: args.y },
             };
-          },
+          }),
         );
       }),
   );
@@ -581,15 +604,14 @@ function registerScrollTool(server: McpServer, ctx: ServerContext): void {
     (args) =>
       runTool(async () => {
         const { id, display } = await resolveDesktop(ctx, args.session);
+        const point = args.x !== undefined && args.y !== undefined;
         return withInputCapture(
           ctx,
           {
             sessionId: id,
             tool: "desktop_scroll",
-            target:
-              args.x === undefined || args.y === undefined
-                ? undefined
-                : { x: args.x, y: args.y },
+            target: point ? { x: args.x, y: args.y } : undefined,
+            ownedDisplay: point ? ownedDisplay(ctx, id, display) : undefined,
           },
           display, args.capture,
           async () => {
@@ -652,7 +674,8 @@ function registerDragTool(server: McpServer, ctx: ServerContext): void {
           {
             sessionId: id,
             tool: "desktop_drag",
-            target: { x: args.toX, y: args.toY },
+            target: { fromX: args.fromX, fromY: args.fromY, x: args.toX, y: args.toY },
+            ownedDisplay: ownedDisplay(ctx, id, display),
           },
           display, args.capture,
           async () => {
@@ -714,6 +737,7 @@ function registerDoubleClickTool(server: McpServer, ctx: ServerContext): void {
             sessionId: id,
             tool: "desktop_double_click",
             target: { x: args.x, y: args.y },
+            ownedDisplay: ownedDisplay(ctx, id, display),
           },
           display, args.capture,
           async () => {

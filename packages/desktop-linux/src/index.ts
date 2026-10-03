@@ -139,6 +139,11 @@ export {
 } from "./input.js";
 
 export {
+  verifyOwnedDisplayTarget,
+  type OwnedDisplayIdentity,
+} from "./x11-target.js";
+
+export {
   createDesktopSession,
   desktopSessionLogDir,
   destroyDesktopSession,

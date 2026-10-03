@@ -134,6 +134,8 @@ export {
   type BeginEvidenceRunResult,
   type EvidenceAction,
   type EvidenceActionStatus,
+  type EvidenceCaptureLink,
+  type EvidenceInputState,
   type EvidenceRecord,
   type EvidenceTruncationRecord,
   type PointerResolution,
@@ -165,6 +167,7 @@ export { isSecretKey, redactEnv, redactSecrets } from "./redact.js";
 export {
   MAX_ERROR_TEXT_LENGTH,
   sanitizeActionTarget,
+  sanitizeCaptureLinks,
   sanitizeErrorText,
   sanitizeNetworkFailure,
   sanitizeTypedValue,

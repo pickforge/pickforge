@@ -13,14 +13,25 @@ import {
   sanitizeTypedValue,
   writeEvidenceReport,
   type EvidenceAction,
+  type EvidenceCaptureLink,
+  type EvidenceInputState,
   type RunHandle,
   type SanitizedTypedValue,
 } from "@pickforge/lab-core";
+import type { OwnedDisplayIdentity } from "@pickforge/lab-desktop-linux";
 import type { ServerContext, ToolReport } from "./context.js";
+
+/** Private record metadata. It is never copied into tool results. */
+export interface EvidenceRecordMeta {
+  inputState?: EvidenceInputState;
+  /** Capture paths may be absolute; only confirmed artifacts are linked. */
+  captures: EvidenceCaptureLink[];
+}
 
 export interface EvidenceOperationContext {
   actionId: string;
   run?: RunHandle;
+  record: EvidenceRecordMeta;
 }
 
 export interface McpEvidenceOptions<T> {
@@ -30,6 +41,10 @@ export interface McpEvidenceOptions<T> {
   typedValue?: { value: string; inputType?: string };
   artifacts?: (result: T, run: RunHandle) => readonly string[];
   refreshReportAfterRecord?: boolean;
+  /** Records inputState, starting at "not-attempted". */
+  input?: boolean;
+  /** Evidence-only owned display check, run before and after the operation. */
+  ownedDisplay?: () => Promise<OwnedDisplayIdentity | undefined>;
   /** Opt-in: report dropped or unconfirmed attachments without losing input results. */
   onRecordingFailure?: (result: T, reason: "capped" | "unconfirmed") => T;
 }
@@ -77,6 +92,16 @@ async function refreshFinalizedReport(run: RunHandle): Promise<void> {
   await writeEvidenceReport(run, manifest);
 }
 
+function runRelative(run: RunHandle, candidate: string): string | undefined {
+  const absolute = path.isAbsolute(candidate)
+    ? path.resolve(candidate)
+    : path.resolve(run.dir, candidate);
+  const relative = path.relative(run.dir, absolute);
+  return relative === "" || relative.startsWith("..") || path.isAbsolute(relative)
+    ? undefined
+    : relative;
+}
+
 async function confinedArtifacts(
   run: RunHandle,
   candidates: readonly string[],
@@ -84,17 +109,9 @@ async function confinedArtifacts(
   const realRun = await fs.promises.realpath(run.dir);
   const artifacts: string[] = [];
   for (const candidate of candidates) {
-    const absolute = path.isAbsolute(candidate)
-      ? path.resolve(candidate)
-      : path.resolve(run.dir, candidate);
-    const relative = path.relative(run.dir, absolute);
-    if (
-      relative === "" ||
-      relative.startsWith("..") ||
-      path.isAbsolute(relative)
-    ) {
-      continue;
-    }
+    const relative = runRelative(run, candidate);
+    if (relative === undefined) continue;
+    const absolute = path.join(run.dir, relative);
     try {
       const stat = await fs.promises.lstat(absolute);
       if (stat.isSymbolicLink() || !stat.isFile()) continue;
@@ -119,6 +136,21 @@ function sanitizedTarget(
   return Object.keys(sanitized).length === 0 ? undefined : sanitized;
 }
 
+/** Links only captures whose run-relative path is a confirmed artifact. */
+function confirmedCaptures(
+  run: RunHandle,
+  captures: readonly EvidenceCaptureLink[],
+  artifacts: readonly string[],
+): EvidenceCaptureLink[] {
+  const size = (value: number) => Number.isSafeInteger(value) && value > 0;
+  return captures.flatMap(({ path: file, phase, width, height }) => {
+    const relative = runRelative(run, file);
+    return relative !== undefined && artifacts.includes(relative) && size(width) && size(height)
+      ? [{ path: relative, phase, width, height }]
+      : [];
+  });
+}
+
 interface EvidenceAttempt {
   actionId: string;
   startedAt: Date;
@@ -126,6 +158,8 @@ interface EvidenceAttempt {
   sessionId?: string;
   tool: string;
   target?: Record<string, unknown>;
+  typedValue?: SanitizedTypedValue;
+  record: EvidenceRecordMeta;
 }
 
 async function startEvidenceAttempt<T>(
@@ -154,7 +188,33 @@ async function startEvidenceAttempt<T>(
     sessionId: options.sessionId,
     tool: options.tool,
     target: sanitizedTarget(options.target, typedValue),
+    typedValue,
+    record: options.input === true ? { inputState: "not-attempted", captures: [] } : { captures: [] },
   };
+}
+
+async function ownedDisplay<T>(
+  attempt: EvidenceAttempt,
+  options: McpEvidenceOptions<T>,
+): Promise<OwnedDisplayIdentity | undefined> {
+  if (attempt.run === undefined || options.ownedDisplay === undefined) return undefined;
+  try {
+    return await options.ownedDisplay();
+  } catch {
+    return undefined;
+  }
+}
+
+/** Marks the target as xvfb-root only when both checks saw the same server. */
+async function settleCoordinateSpace<T>(
+  attempt: EvidenceAttempt,
+  options: McpEvidenceOptions<T>,
+  before: OwnedDisplayIdentity | undefined,
+): Promise<void> {
+  if (before === undefined) return;
+  const after = await ownedDisplay(attempt, options);
+  if (after?.display !== before.display || after.pid !== before.pid || after.startTicks !== before.startTicks) return;
+  attempt.target = sanitizedTarget({ ...options.target, coordinateSpace: "xvfb-root" }, attempt.typedValue);
 }
 
 function baseAction(
@@ -171,6 +231,7 @@ function baseAction(
   };
   if (attempt.sessionId !== undefined) action.sessionId = attempt.sessionId;
   if (attempt.target !== undefined) action.target = attempt.target;
+  if (attempt.record.inputState !== undefined) action.inputState = attempt.record.inputState;
   return action;
 }
 
@@ -190,6 +251,8 @@ async function successAction<T extends ToolReport>(
       ? []
       : await confinedArtifacts(run, options.artifacts(result, run));
   if (artifacts.length > 0) action.artifacts = artifacts;
+  const captures = confirmedCaptures(run, attempt.record.captures, artifacts);
+  if (captures.length > 0) action.captures = captures;
   if (errors.length > 0) {
     action.error = sanitizeErrorText(errors.join("; "));
   }
@@ -265,14 +328,19 @@ export async function withMcpEvidence<T extends ToolReport>(
   operation: (evidence: EvidenceOperationContext) => Promise<T>,
 ): Promise<T> {
   const attempt = await startEvidenceAttempt(ctx, options);
+  const before = await ownedDisplay(attempt, options);
+  let result: T;
   try {
-    const result = await operation({
+    result = await operation({
       actionId: attempt.actionId,
       run: attempt.run,
+      record: attempt.record,
     });
-    return await recordSuccess(attempt, options, result);
   } catch (error) {
+    await settleCoordinateSpace(attempt, options, before);
     await recordFailure(attempt, error);
     throw error;
   }
+  await settleCoordinateSpace(attempt, options, before);
+  return await recordSuccess(attempt, options, result);
 }
