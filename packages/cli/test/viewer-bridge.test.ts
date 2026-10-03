@@ -249,6 +249,47 @@ describe("bridge socket lifecycle", () => {
     resolve(vncSocket);
     await vi.waitFor(() => expect(vncSocket.destroy).toHaveBeenCalled());
   });
+  it.each(["connected", "failed"] as const)(
+    "waits for a pending upstream that eventually %s during shutdown",
+    async (outcome) => {
+      const vncSocket = fakeTcp();
+      let resolveConnection!: (socket: net.Socket) => void;
+      let rejectConnection!: (error: Error) => void;
+      const connect = vi.spyOn(desktop, "connectSessionVncReadOnly");
+      connect.mockImplementation(
+        () =>
+          new Promise((resolve, reject) => {
+            resolveConnection = resolve;
+            rejectConnection = reject;
+          }),
+      );
+      const bridge = await start();
+      const webSocket = await open(bridge);
+      await vi.waitFor(() => expect(connect).toHaveBeenCalledOnce());
+      const peerClosed = once(webSocket, "close");
+      let finished = false;
+      const closing = bridge.close().then(() => {
+        finished = true;
+      });
+      await peerClosed;
+      await vi.waitFor(async () =>
+        expect(await closedPort(bridge.port)).toBe(true),
+      );
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const finishedBeforeConnect = finished;
+      if (outcome === "connected") {
+        resolveConnection(vncSocket);
+      } else {
+        rejectConnection(new Error("Upstream failed"));
+      }
+      await closing;
+      expect(finishedBeforeConnect).toBe(false);
+      expect(finished).toBe(true);
+      if (outcome === "connected") {
+        expect(vncSocket.destroy).toHaveBeenCalledOnce();
+      }
+    },
+  );
   it("enforces an absolute handshake deadline", async () => {
     const bridge = await start({ handshakeMs: 30 });
     const socket = net.connect({ host: "127.0.0.1", port: bridge.port });

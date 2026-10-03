@@ -3,11 +3,17 @@ import path from "node:path";
 import net from "node:net";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { randomInt } from "node:crypto";
 import { expect, it, vi } from "vitest";
 import { stopProcessGroupVerified } from "@pickforge/lab-core";
 import { buildVncArgs, startVnc, type VncHandle } from "../src/vnc.js";
 import { findOnPath } from "../src/util.js";
+import {
+  allocateDisplay,
+  buildXvfbArgs,
+  startXvfb,
+  stopXvfb,
+  type XvfbHandle,
+} from "../src/index.js";
 
 const pendingBytes = new WeakMap<net.Socket, Buffer>();
 
@@ -265,26 +271,23 @@ it.skipIf(!prerequisites)(
     const directory = await fs.mkdtemp(
       path.join(process.cwd(), ".viewer-cursor-test-"),
     );
-    const displayArgs = [
-      `:${randomInt(1_000, 30_000)}`,
-      "-displayfd",
-      "3",
-      "-screen",
-      "0",
-      "320x200x24",
-      "-nolisten",
-      "tcp",
-      "-noreset",
-    ];
-    const displayServer = spawn("Xvfb", displayArgs, {
-      stdio: ["ignore", "ignore", "ignore", "pipe"],
-    });
+    const allocatedDisplay = allocateDisplay({ start: 1_001 });
+    const displayOptions = {
+      display: allocatedDisplay,
+      width: 320,
+      height: 200,
+      depth: 24,
+      logDir: directory,
+    };
+    const displayArgs = buildXvfbArgs(displayOptions);
+    let displayServer: XvfbHandle | undefined;
     let vnc: VncHandle | undefined;
     let framebuffer: RfbFramebuffer | undefined;
     let cursorClient: ChildProcess | undefined;
     try {
-      const [displayNumber] = await once(displayServer.stdio[3]!, "data");
-      const display = `:${displayNumber.toString().trim()}`;
+      displayServer = await startXvfb(displayOptions);
+      const display = displayServer.display;
+      expect(display).toBe(allocatedDisplay);
       cursorClient = await setVisibleRootCursor(display);
       vnc = await startVnc({
         display,
@@ -329,11 +332,16 @@ it.skipIf(!prerequisites)(
         cursorClient.stdin!.end();
         await cursorClosed;
       }
-      if (displayServer.exitCode === null && displayServer.signalCode === null) {
-        const exited = once(displayServer, "exit");
-        displayServer.kill("SIGKILL");
-        await exited;
+      if (displayServer !== undefined) {
+        expect(
+          await stopXvfb(displayServer.pid, displayServer.startTimeTicks),
+        ).toBe(true);
       }
+      const displayNumber = allocatedDisplay.slice(1);
+      await expect(fs.lstat(`/tmp/.X${displayNumber}-lock`)).rejects.toThrow();
+      await expect(
+        fs.lstat(`/tmp/.X11-unix/X${displayNumber}`),
+      ).rejects.toThrow();
       await fs.rm(directory, { recursive: true, force: true });
     }
   },

@@ -14,7 +14,9 @@ import {
 import {
   prepareViewerLaunch,
   writeViewerLaunchRecord,
+  withSessionVncLock,
 } from "@pickforge/lab-desktop-linux";
+import * as desktop from "@pickforge/lab-desktop-linux";
 import type { WebSocket as ViewerWebSocket } from "../../packages/cli/node_modules/@types/ws/index.js";
 import {
   startViewerBridge,
@@ -685,6 +687,67 @@ describe("WebSocket capability and passive upstream", () => {
     expect(unsupported.readyState).toBe(WebSocket.CLOSED);
     expect(log).not.toHaveBeenCalled();
     expect(error).not.toHaveBeenCalled();
+  });
+  it("settles every queued VNC connect and lock sentinel before shutdown returns", async () => {
+    let releaseLock!: () => void;
+    let lockAcquired!: () => void;
+    const released = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    const acquired = new Promise<void>((resolve) => {
+      lockAcquired = resolve;
+    });
+    const holding = withSessionVncLock(sessionId, registryEnv, async () => {
+      lockAcquired();
+      await released;
+    });
+    await acquired;
+    let completed = 0;
+    const connect = desktop.connectSessionVncReadOnly;
+    vi.spyOn(desktop, "connectSessionVncReadOnly").mockImplementation(
+      async (...args) => {
+        try {
+          return await connect(...args);
+        } finally {
+          completed++;
+        }
+      },
+    );
+    const peers: ViewerWebSocket[] = [];
+    let closing: Promise<number> | undefined;
+    try {
+      for (let index = 0; index < 8; index++) {
+        const peer = websocket();
+        peers.push(peer);
+        await once(peer, "open");
+      }
+      const sessionsDir = path.join(testRoot, "sessions");
+      await vi.waitFor(async () => {
+        const entries = await fs.readdir(sessionsDir);
+        expect(
+          entries.filter((name) =>
+            name.startsWith(`${sessionId}.ensure-vnc.lock.`),
+          ),
+        ).toHaveLength(9);
+      });
+      const peersClosed = Promise.all(peers.map((peer) => once(peer, "close")));
+      closing = bridge.close().then(() => completed);
+      await peersClosed;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      releaseLock();
+      await holding;
+      expect(await closing).toBe(8);
+      expect(
+        (await fs.readdir(sessionsDir)).filter((name) =>
+          name.includes(".ensure-vnc.lock"),
+        ),
+      ).toEqual([]);
+    } finally {
+      releaseLock();
+      await holding;
+      await closing;
+      await vi.waitFor(() => expect(completed).toBe(8), { timeout: 3_000 });
+    }
   });
   it("rejects text frames, oversized frames and excess concurrent connections", async () => {
     let webSocket = websocket();

@@ -50,6 +50,20 @@ export interface ViewerBridge {
   close(): Promise<void>;
 }
 
+interface BridgeActivity {
+  startedAt: number;
+  lastActivity: number;
+  pending: Set<Promise<void>>;
+}
+
+function trackBridgeWork(work: Promise<void>, activity: BridgeActivity): void {
+  activity.pending.add(work);
+  void work.then(
+    () => activity.pending.delete(work),
+    () => activity.pending.delete(work),
+  );
+}
+
 function headerValues(request: http.IncomingMessage, name: string): string[] {
   const values: string[] = [];
   for (
@@ -464,7 +478,7 @@ function relayVncData(
 function relayWebSocket(
   webSocket: WebSocket,
   options: ViewerBridgeOptions,
-): void {
+): Promise<void> {
   let vncSocket: net.Socket | undefined;
   let ended = false;
   let pong = true;
@@ -528,7 +542,7 @@ function relayWebSocket(
     }
   });
   webSocket.pause();
-  void connectSessionVncReadOnly(options.sessionId, options.registryEnv)
+  return connectSessionVncReadOnly(options.sessionId, options.registryEnv)
     .then((socket) => {
       if (ended) {
         socket.destroy();
@@ -559,7 +573,7 @@ function installUpgrades(
   webSocketServer: WebSocketServer,
   port: number,
   options: ViewerBridgeOptions,
-  touch: () => void,
+  activity: BridgeActivity,
   isClosing: () => boolean,
 ): void {
   webSocketServer.on("headers", (headers) => {
@@ -568,7 +582,7 @@ function installUpgrades(
     }
   });
   server.on("upgrade", (request, socket, head) => {
-    touch();
+    activity.lastActivity = Date.now();
     socket.on("error", () => socket.destroy());
     if (!validUpgrade(request, port, options.token)) {
       rejectUpgrade(socket, 403, port);
@@ -581,11 +595,13 @@ function installUpgrades(
     // ws parser rejections use the same response boundary and security headers.
     webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
       webSocketServer.emit("connection", webSocket, request);
-      relayWebSocket(webSocket, options);
+      trackBridgeWork(relayWebSocket(webSocket, options), activity);
     });
   });
   webSocketServer.on("connection", (webSocket: WebSocket) => {
-    webSocket.once("close", touch);
+    webSocket.once("close", () => {
+      activity.lastActivity = Date.now();
+    });
   });
   webSocketServer.on("wsClientError", (_error, socket) =>
     rejectUpgrade(socket, 400, port),
@@ -671,8 +687,7 @@ function superviseViewerBridge(
   server: http.Server,
   webSocketServer: WebSocketServer,
   options: ViewerBridgeOptions,
-  startedAt: number,
-  getLastActivity: () => number,
+  activity: BridgeActivity,
 ): { close: (code?: number) => Promise<void>; isClosing: () => boolean } {
   let registered = false;
   let closing: Promise<void> | undefined;
@@ -684,7 +699,13 @@ function superviseViewerBridge(
       for (const signal of ["SIGTERM", "SIGINT"] as const) {
         process.off(signal, onSignal);
       }
-      closing = closeBridgeServers(server, webSocketServer, code);
+      closing = closeBridgeServers(server, webSocketServer, code).then(
+        async () => {
+          // No new requests or upgrades can start after both servers have closed.
+          // Pending connects include the VNC lock's release and sentinel cleanup.
+          await Promise.allSettled(activity.pending);
+        },
+      );
     }
     return closing;
   };
@@ -711,13 +732,13 @@ function superviseViewerBridge(
           registered = true;
         }
         const startupExpired =
-          Date.now() - startedAt > (options.startupGraceMs ?? 10_000);
+          Date.now() - activity.startedAt > (options.startupGraceMs ?? 10_000);
         const expectedRegistration =
           registered || recordedPid !== undefined || startupExpired;
         const displaced = recordedPid !== process.pid && expectedRegistration;
         const idle =
           webSocketServer.clients.size === 0 &&
-          Date.now() - getLastActivity() > (options.idleMs ?? 600_000);
+          Date.now() - activity.lastActivity > (options.idleMs ?? 600_000);
         if (displaced || idle) {
           void close();
         }
@@ -741,8 +762,11 @@ export async function startViewerBridge(
   }
   const assets = await buildAssets(options.assets ?? resolveViewerAssets());
   let port = 0;
-  let lastActivity = Date.now();
-  const startedAt = Date.now();
+  const activity: BridgeActivity = {
+    startedAt: Date.now(),
+    lastActivity: Date.now(),
+    pending: new Set(),
+  };
   const webSocketServer = new WebSocketServer({
     noServer: true,
     perMessageDeflate: false,
@@ -753,14 +777,17 @@ export async function startViewerBridge(
   const server = http.createServer(
     { requireHostHeader: false },
     (request, response) => {
-      lastActivity = Date.now();
-      void httpRequest(request, response, port, options, assets).catch(() => {
-        if (!response.headersSent) {
-          respond(response, 500);
-        } else {
-          response.destroy();
-        }
-      });
+      activity.lastActivity = Date.now();
+      const work = httpRequest(request, response, port, options, assets).catch(
+        () => {
+          if (!response.headersSent) {
+            respond(response, 500);
+          } else {
+            response.destroy();
+          }
+        },
+      );
+      trackBridgeWork(work, activity);
     },
   );
   server.headersTimeout = 5_000;
@@ -786,19 +813,9 @@ export async function startViewerBridge(
     server,
     webSocketServer,
     options,
-    startedAt,
-    () => lastActivity,
+    activity,
   );
-  installUpgrades(
-    server,
-    webSocketServer,
-    port,
-    options,
-    () => {
-      lastActivity = Date.now();
-    },
-    isClosing,
-  );
+  installUpgrades(server, webSocketServer, port, options, activity, isClosing);
   try {
     const identity = readProcessIdentity(process.pid);
     if (!identity) {
