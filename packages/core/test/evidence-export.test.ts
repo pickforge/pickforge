@@ -12,6 +12,7 @@ import {
   slideshowSize,
   type EvidenceExportManifest,
 } from "../src/evidence-export.js";
+import * as pngRaster from "../src/png-raster.js";
 import { encodePng, MAX_RASTER_PIXELS } from "../src/png-raster.js";
 import { DirHandle } from "../src/dir-handle.js";
 import { PNG_SIGNATURE, completePngSize } from "../src/evidence-png.js";
@@ -680,4 +681,118 @@ it("preserves an unowned replacement when cleaning up a failed video", async () 
     "unowned replacement",
   );
   expect(fs.existsSync(path.join(result.exportDir, "export.json"))).toBe(false);
+});
+
+it.each([5000, 70_000])(
+  "redacts or drops a %i-byte credential before keeping stderr tail",
+  async (length) => {
+    await fakeFfmpeg(
+      `#!${process.execPath}\n` +
+        `process.stdout.write('partial');\n` +
+        `process.stderr.write('token=' + 'CREDENTIAL-VALUE' + 'x'.repeat(${length}) + 'CREDENTIAL-SUFFIX' + '\\nencoder failed\\n');\n` +
+        `process.exitCode = 1;\n`,
+    );
+    const result = await exportEvidenceRun(catalog, entry, { video: true });
+    expect(result.complete).toBe(false);
+    expect(result.videoError).toContain("encoder failed");
+    expect(result.videoError).not.toContain("CREDENTIAL-VALUE");
+    expect(result.videoError).not.toContain("CREDENTIAL-SUFFIX");
+    expect(result.videoError!.length).toBeLessThan(2600);
+  },
+);
+
+it("redacts a secret split across stderr stream chunks before truncation", async () => {
+  await fakeFfmpeg(
+    `#!${process.execPath}\n` +
+      `process.stdout.write('partial');\n` +
+      `process.stderr.write('encoder token=PRIVATE-FIRST-');\n` +
+      `setTimeout(() => {\n` +
+      `  process.stderr.write('PRIVATE-SECOND' + 'SECRET-SUFFIX'.repeat(400) + '\\n');\n` +
+      `  process.exitCode = 1;\n` +
+      `}, 30);\n`,
+  );
+  const result = await exportEvidenceRun(catalog, entry, { video: true });
+  expect(result.videoError).toContain("[REDACTED]");
+  expect(result.videoError).not.toContain("PRIVATE-FIRST");
+  expect(result.videoError).not.toContain("PRIVATE-SECOND");
+  expect(result.videoError).not.toContain("SECRET-SUFFIX");
+});
+
+it("keeps decode failures as byte copies and continues annotating other frames", async () => {
+  const raw = Buffer.alloc(32 * 193);
+  raw[0] = 5;
+  const bytes = customPng(48, 32, 6, raw);
+  expect(completePngSize(bytes)).toEqual({ width: 48, height: 32 });
+  await screenshot("filter.png", bytes);
+  await screenshot("good.png");
+  await journal([
+    action("filter", ["screenshots/filter.png"]),
+    action("good", ["screenshots/good.png"]),
+  ]);
+  const result = await exportEvidenceRun(catalog, entry, {
+    glyphSource: () =>
+      new Map([
+        ["screenshots/filter.png", glyph()],
+        ["screenshots/good.png", glyph()],
+      ]),
+  });
+  expect(result).toMatchObject({ complete: true, frameCount: 2, annotatedCount: 1 });
+  expect((await manifest(result.exportDir)).frames[0]).toMatchObject({
+    annotated: false,
+    reason: expect.stringContaining("Unsupported PNG row filter"),
+  });
+  expect(await fs.promises.readFile(path.join(result.exportDir, "frame-0001.png"))).toEqual(bytes);
+});
+
+it("names the process descriptor limit and closes pinned frames after EMFILE", async () => {
+  await fakeFfmpeg("#!/bin/sh\nprintf video\n");
+  await screenshot("b.png");
+  await journal([action("a", ["screenshots/a.png"]), action("b", ["screenshots/b.png"])]);
+  const open = DirHandle.prototype.openFile;
+  let pinned: fs.promises.FileHandle | undefined;
+  vi.spyOn(DirHandle.prototype, "openFile").mockImplementation(async function (
+    this: DirHandle,
+    name,
+    flags,
+    mode,
+  ) {
+    if (name === "frame-0002.png" && typeof flags === "number") {
+      throw Object.assign(new Error("too many open files"), { code: "EMFILE" });
+    }
+    const file = await open.call(this, name, flags, mode);
+    if (name === "frame-0001.png" && typeof flags === "number") {
+      pinned = file;
+    }
+    return file;
+  });
+  const result = await exportEvidenceRun(catalog, entry, { video: true });
+  expect(result).toMatchObject({ complete: false, frameCount: 2 });
+  expect(result.videoError).toContain("process file descriptor limit reached (EMFILE)");
+  expect(pinned?.fd).toBe(-1);
+  expect(fs.existsSync(result.pointerTrackPath)).toBe(true);
+  expect(fs.existsSync(path.join(result.exportDir, "frame-0002.png"))).toBe(true);
+});
+
+it("does not signal the process group after a successful encode", async () => {
+  await fakeFfmpeg("#!/bin/sh\n/bin/cat >/dev/null\nprintf video\n");
+  const kill = vi.spyOn(process, "kill");
+  const result = await exportEvidenceRun(catalog, entry, { video: true });
+  expect(result.complete, result.videoError).toBe(true);
+  expect(kill).not.toHaveBeenCalled();
+});
+
+it("keeps PNG encoding failures fatal after a successful decode", async () => {
+  await screenshot("a.png");
+  await journal([action("a", ["screenshots/a.png"])]);
+  vi.spyOn(pngRaster, "encodePng").mockImplementation(() => {
+    throw new Error("synthetic PNG encoder failure");
+  });
+  await expect(
+    exportEvidenceRun(catalog, entry, {
+      glyphSource: () => new Map([["screenshots/a.png", glyph()]]),
+    }),
+  ).rejects.toThrow("synthetic PNG encoder failure");
+  const names = await fs.promises.readdir(path.join(run.dir, "exports"));
+  expect(names).toHaveLength(1);
+  expect(fs.existsSync(path.join(run.dir, "exports", names[0]!, "export.json"))).toBe(false);
 });

@@ -240,22 +240,24 @@ async function pinFrames(dir: DirHandle, frames: ExportFrame[]): Promise<PinnedF
     return pinned;
   } catch (error) {
     await Promise.all(pinned.map(({ file }) => file.close()));
+    if ((error as NodeJS.ErrnoException).code === "EMFILE") {
+      throw new Error(
+        "Video cannot pin all frames: process file descriptor limit reached (EMFILE)",
+      );
+    }
     throw error;
   }
 }
 
 function concatInput(paths: string[], frameMs: number): string {
-  const entries = paths.map(
-    (file) => `file '${file}'\noption framerate 1000\nduration ${frameMs / 1000}\n`,
-  );
-  return (
-    "ffconcat version 1.0\n" + entries.join("") + `file '${paths.at(-1)!}'\noption framerate 1000\n`
-  );
+  const entries = paths.map((file) => `file '${file}'\nduration ${frameMs / 1000}\n`);
+  return "ffconcat version 1.0\n" + entries.join("") + `file '${paths.at(-1)!}'\n`;
 }
 
 function videoArguments(size: PngSize, count: number, frameMs: number): string[] {
   const { width, height } = size;
   // Uniform still durations use an exact rational rate, not a fixed 25 fps grid.
+  // Input -r replaces the concat image demuxer's coarse timestamps on older ffmpeg.
   // Millisecond container timestamps preserve every requested duration.
   return [
     "-nostdin",
@@ -268,6 +270,8 @@ function videoArguments(size: PngSize, count: number, frameMs: number): string[]
     "concat",
     "-safe",
     "0",
+    "-r",
+    `1000/${frameMs}`,
     "-i",
     "pipe:0",
     "-vf",
@@ -283,8 +287,6 @@ function videoArguments(size: PngSize, count: number, frameMs: number): string[]
     "veryfast",
     "-bf",
     "0",
-    "-fps_mode",
-    "cfr",
     "-r",
     `1000/${frameMs}`,
     "-enc_time_base",
@@ -343,6 +345,56 @@ async function writeVideoOutput(
   }
 }
 
+/** Keep complete diagnostic lines so truncation never detaches a secret from its key. */
+class VideoDiagnostics {
+  private pending = Buffer.alloc(0);
+  private dropping = false;
+  private tail = Buffer.alloc(0);
+
+  append(chunk: Buffer): void {
+    let start = 0;
+    while (start < chunk.length) {
+      const newline = chunk.indexOf(10, start);
+      const end = newline < 0 ? chunk.length : newline;
+      this.appendPart(chunk.subarray(start, end));
+      if (newline < 0) {
+        return;
+      }
+      this.finishLine();
+      start = end + 1;
+    }
+  }
+
+  private appendPart(part: Buffer): void {
+    if (this.dropping) {
+      return;
+    }
+    // Discard an entire oversized line, including its remaining chunks.
+    if (this.pending.length + part.length > 64 * 1024) {
+      this.pending = Buffer.alloc(0);
+      this.dropping = true;
+      return;
+    }
+    this.pending = Buffer.concat([this.pending, part]);
+  }
+
+  private finishLine(): void {
+    if (!this.dropping) {
+      const line = sanitizeErrorText(this.pending.toString("utf8"), 64 * 1024);
+      this.tail = Buffer.from(Buffer.concat([this.tail, Buffer.from(line + "\n")]).subarray(-2048));
+    }
+    this.pending = Buffer.alloc(0);
+    this.dropping = false;
+  }
+
+  finish(): string {
+    if (this.pending.length > 0) {
+      this.finishLine();
+    }
+    return this.tail.toString("utf8").trim();
+  }
+}
+
 async function encodeVideo(
   ffmpeg: string,
   args: string[],
@@ -350,10 +402,10 @@ async function encodeVideo(
   file: fs.promises.FileHandle,
 ): Promise<void> {
   const child = spawn(ffmpeg, args, { detached: true, stdio: ["pipe", "pipe", "pipe"] });
-  let tail = Buffer.alloc(0);
+  const diagnosticTail = new VideoDiagnostics();
   const diagnostics = (async () => {
     for await (const chunk of child.stderr) {
-      tail = Buffer.concat([tail, chunk]).subarray(-2048);
+      diagnosticTail.append(chunk);
     }
   })();
   const exited = new Promise<void>((resolve, reject) => {
@@ -376,11 +428,10 @@ async function encodeVideo(
     child.stdout.destroy();
     child.stderr.destroy();
     await boundedSettle(tasks, 500);
-    const detail = sanitizeErrorText(tail.toString("utf8"), 2048).trim();
+    const detail = diagnosticTail.finish();
     throw new Error(`${(error as Error).message}${detail === "" ? "" : `: ${detail}`}`);
   } finally {
     clearTimeout(timer);
-    killVideoGroup(child);
   }
 }
 
@@ -516,20 +567,20 @@ function renderFrame(
   if (glyph === undefined) {
     return { output: bytes, annotated: false, reason: copyReason(bytes) };
   }
+  let raster;
   try {
-    const raster = decodePng(bytes);
-    drawPointerGlyph(raster, glyph);
-    return { output: encodePng(raster), annotated: true };
+    raster = decodePng(bytes);
   } catch (error) {
-    if (!(error instanceof Error) || !error.message.includes("raster pixel cap")) {
-      throw error;
-    }
     return {
       output: bytes,
       annotated: false,
-      reason: "Over raster pixel cap; source copied without annotation",
+      reason: sanitizeErrorText(
+        `PNG could not be decoded: ${String(error)}; source copied without annotation`,
+      ),
     };
   }
+  drawPointerGlyph(raster, glyph);
+  return { output: encodePng(raster), annotated: true };
 }
 
 function copyReason(bytes: Buffer): string {
