@@ -69,9 +69,10 @@ interface Lexed {
 /**
  * A small quote-aware lexer. It tracks single, double and backtick quotes
  * and backslash escapes, so terminators and "]" count only outside quotes.
- * Backslash-newline is whitespace. Shell "#" comments and JS "//" and
- * block comments that start a token are dropped. In shell mode a bare word
- * absorbs adjacent quoted parts, so --name="a b" is one token.
+ * Backslash-newline is whitespace. Shell "#" comments that start a token
+ * are dropped. JS "//" and block comments that start a token are dropped
+ * only in JS context. In shell mode a bare word absorbs adjacent quoted
+ * parts, so --name="a b" is one token.
  */
 class CommandLexer {
   private i: number;
@@ -82,6 +83,7 @@ class CommandLexer {
     private readonly text: string,
     from: number,
     private readonly mode: LexMode,
+    private readonly jsComments: boolean,
   ) {
     this.i = from;
   }
@@ -122,12 +124,13 @@ class CommandLexer {
 
   private skipComment(): boolean {
     const rest = this.text.slice(this.i, this.i + 2);
-    if (rest.startsWith("/*")) {
+    if (this.jsComments && rest === "/*") {
       const close = this.text.indexOf("*/", this.i + 2);
       this.i = close === -1 ? this.text.length : close + 2;
       return true;
     }
-    if (rest === "//" || (this.mode === "shell" && rest.startsWith("#"))) {
+    const jsLine = this.jsComments && rest === "//";
+    if (jsLine || (this.mode === "shell" && rest.startsWith("#"))) {
       const newline = this.text.indexOf("\n", this.i);
       this.i = newline === -1 ? this.text.length : newline;
       return true;
@@ -195,13 +198,38 @@ class CommandLexer {
   }
 }
 
-function lex(text: string, from: number, mode: LexMode): Lexed {
-  return new CommandLexer(text, from, mode).run();
+/** Lexes JS array items. JS comments always apply inside an array literal. */
+function lexArray(text: string, from: number): Lexed {
+  return new CommandLexer(text, from, "array", true).run();
 }
 
-/** True when the lexed command has a token that starts at `start`. */
-function hasTokenAt(lexed: Lexed, start: number): boolean {
-  return lexed.tokens.some((token) => token.start === start);
+/**
+ * True when shell text that starts at `start` is JS context: a JS file,
+ * and not the start of a JS string. Shell text in a string is not JS.
+ */
+function isJsContext(text: string, start: number, jsFile: boolean): boolean {
+  return jsFile && !QUOTE_CHARS.has(text[start - 1]);
+}
+
+/** Lexes one shell command that starts at `from`. */
+function lexShell(text: string, from: number, jsFile: boolean, contextStart = from): Lexed {
+  const jsComments = isJsContext(text, contextStart, jsFile);
+  return new CommandLexer(text, from, "shell", jsComments).run();
+}
+
+/** True when the lexed command holds the "-displayfd" at `index`, quoted or not. */
+function holdsDisplayfd(lexed: Lexed, index: number): boolean {
+  return lexed.tokens.some(
+    (token) => token.start === index || (token.quoted && token.start === index - 1),
+  );
+}
+
+/** Index just after the last unescaped newline before `index`, or 0. */
+function logicalLineStart(text: string, index: number): number {
+  for (let i = index - 1; i >= 0; i -= 1) {
+    if (text[i] === "\n" && text[i - 1] !== "\\") return i + 1;
+  }
+  return 0;
 }
 
 /** Index of the "[" that encloses `index`, or -1 when there is none. */
@@ -241,31 +269,45 @@ function hasDisplayArgument(tokens: Token[]): boolean {
   );
 }
 
-/** Tokens of the array that holds the quoted "-displayfd" at `index`. */
-function displayfdArrayTokens(text: string, index: number): Token[] {
+/**
+ * Tokens of the array that holds the quoted "-displayfd" at `index`, or
+ * undefined when it is not inside an unclosed "[".
+ */
+function displayfdArrayTokens(text: string, index: number): Token[] | undefined {
+  if (!QUOTE_CHARS.has(text[index - 1])) return undefined;
   const open = enclosingArrayStart(text, index);
-  if (open !== -1) {
-    const lexed = lex(text, open + 1, "array");
-    if (hasTokenAt(lexed, index - 1)) return lexed.tokens;
-  }
-  return lex(text, index - 1, "array").tokens;
+  if (open === -1) return undefined;
+  const lexed = lexArray(text, open + 1);
+  return holdsDisplayfd(lexed, index) ? lexed.tokens : undefined;
 }
 
-/** Tokens of the shell command, from its X server name, that holds `index`. */
-function displayfdShellTokens(text: string, index: number): Token[] {
+/** Lexes command by command from the logical line start to the one that holds `index`. */
+function lineCommandTokens(text: string, index: number, jsFile: boolean): Token[] | undefined {
+  let from = logicalLineStart(text, index);
+  while (from <= index) {
+    const lexed = lexShell(text, from, jsFile);
+    if (holdsDisplayfd(lexed, index)) return lexed.tokens;
+    from = lexed.end + 1;
+  }
+  return undefined;
+}
+
+/**
+ * Tokens of the shell command that holds `index`: from its X server name,
+ * else the command on the same logical line, else from `index` itself.
+ */
+function displayfdShellTokens(text: string, index: number, jsFile: boolean): Token[] {
   const server = lastXServerName(text, index);
   if (server !== -1) {
-    const lexed = lex(text, server, "shell");
-    if (hasTokenAt(lexed, index)) return lexed.tokens;
+    const lexed = lexShell(text, server, jsFile);
+    if (holdsDisplayfd(lexed, index)) return lexed.tokens;
   }
-  return lex(text, index, "shell").tokens;
+  return lineCommandTokens(text, index, jsFile) ?? lexShell(text, index, jsFile).tokens;
 }
 
 /** The command or argument list that holds the "-displayfd" at `index`. */
-function displayfdTokens(text: string, index: number): Token[] {
-  return QUOTE_CHARS.has(text[index - 1])
-    ? displayfdArrayTokens(text, index)
-    : displayfdShellTokens(text, index);
+function displayfdTokens(text: string, index: number, jsFile: boolean): Token[] {
+  return displayfdArrayTokens(text, index) ?? displayfdShellTokens(text, index, jsFile);
 }
 
 /** Index of the first character at or after `from` that is not space or ",". */
@@ -283,14 +325,18 @@ function isArrayElement(text: string, quote: number): boolean {
 }
 
 /** The xvfb-run arguments that follow the match, and whether they are array items. */
-function xvfbRunArgs(text: string, match: RegExpExecArray): { tokens: Token[]; array: boolean } {
+function xvfbRunArgs(
+  text: string,
+  match: RegExpExecArray,
+  jsFile: boolean,
+): { tokens: Token[]; array: boolean } {
   const end = match.index + match[0].length;
   const next = skipSeparators(text, end);
-  if (text[next] === "[") return { tokens: lex(text, next + 1, "array").tokens, array: true };
+  if (text[next] === "[") return { tokens: lexArray(text, next + 1).tokens, array: true };
   if (match[1] !== "" && isArrayElement(text, match.index - 1)) {
-    return { tokens: lex(text, end, "array").tokens, array: true };
+    return { tokens: lexArray(text, end).tokens, array: true };
   }
-  return { tokens: lex(text, end, "shell").tokens, array: false };
+  return { tokens: lexShell(text, end, jsFile, match.index).tokens, array: false };
 }
 
 type XvfbRunToken = "auto-display" | "command" | "takes-value" | "option";
@@ -344,10 +390,10 @@ function finding(text: string, index: number, rule: DisplayFinding["rule"]): Dis
 }
 
 /** Rule (a): every "-displayfd" command must also pass a display argument. */
-function findDisplayfdWithoutDisplay(text: string): DisplayFinding[] {
+function findDisplayfdWithoutDisplay(text: string, jsFile: boolean): DisplayFinding[] {
   const findings: DisplayFinding[] = [];
   for (const match of text.matchAll(/-displayfd\b/g)) {
-    if (!hasDisplayArgument(displayfdTokens(text, match.index))) {
+    if (!hasDisplayArgument(displayfdTokens(text, match.index, jsFile))) {
       findings.push(finding(text, match.index, "displayfd-without-display"));
     }
   }
@@ -355,10 +401,10 @@ function findDisplayfdWithoutDisplay(text: string): DisplayFinding[] {
 }
 
 /** Rule (b): xvfb-run must not get -d or --auto-display before its command. */
-function findXvfbRunAutoDisplay(text: string): DisplayFinding[] {
+function findXvfbRunAutoDisplay(text: string, jsFile: boolean): DisplayFinding[] {
   const findings: DisplayFinding[] = [];
   for (const match of text.matchAll(/\bxvfb-run\b(["'`]?)/g)) {
-    const { tokens, array } = xvfbRunArgs(text, match);
+    const { tokens, array } = xvfbRunArgs(text, match, jsFile);
     if (xvfbRunUsesAutoDisplay(tokens, array)) {
       findings.push(finding(text, match.index, "xvfb-run-auto-display"));
     }
@@ -366,9 +412,17 @@ function findXvfbRunAutoDisplay(text: string): DisplayFinding[] {
   return findings;
 }
 
-/** Finds unsafe X server starts in one file's text. */
-function findUnsafeDisplayUses(text: string): DisplayFinding[] {
-  return [...findDisplayfdWithoutDisplay(text), ...findXvfbRunAutoDisplay(text)];
+const JS_FILE_RE = /\.(?:[cm]?js|jsx|tsx?)$/;
+
+/**
+ * Finds unsafe X server starts in one file's text. `jsFile` enables JS
+ * comments in shell text outside strings, as in .ts or .js files.
+ */
+function findUnsafeDisplayUses(text: string, jsFile: boolean): DisplayFinding[] {
+  return [
+    ...findDisplayfdWithoutDisplay(text, jsFile),
+    ...findXvfbRunAutoDisplay(text, jsFile),
+  ];
 }
 
 const SKIP_DIRS = new Set(["node_modules", "dist", "coverage", "target", ".git"]);
@@ -420,7 +474,7 @@ describe("static: no X server start can take the host display", () => {
       const text = readTextFile(file);
       if (text === undefined) continue;
       scanned += 1;
-      for (const finding of findUnsafeDisplayUses(text)) {
+      for (const finding of findUnsafeDisplayUses(text, JS_FILE_RE.test(file))) {
         findings.push(
           `${path.relative(repoRoot, file)}:${finding.line} ${finding.rule}: ${finding.text}`,
         );
@@ -430,6 +484,11 @@ describe("static: no X server start can take the host display", () => {
     expect(findings).toEqual([]);
   });
 });
+
+/** Samples that start with JS code are scanned as a JS file, others as shell. */
+function isJsSample(sample: string): boolean {
+  return /^(?:const |[\w.]+\()/.test(sample);
+}
 
 describe("findUnsafeDisplayUses", () => {
   it.each([
@@ -454,13 +513,17 @@ describe("findUnsafeDisplayUses", () => {
     ['xvfb-run -s "-dpi 96" -d cmd', "xvfb-run-auto-display"],
     ['xvfb-run --server-args "-dpi 96" -d cmd', "xvfb-run-auto-display"],
     ["Xvfb -displayfd 3 # :1234", "displayfd-without-display"],
-    ["Xvfb -displayfd 3 // :1234", "displayfd-without-display"],
+    ["Xvfb -displayfd 3", "displayfd-without-display"],
+    ["echo :1234; Xvfb -displayfd 3", "displayfd-without-display"],
+    ['Xvfb "-displayfd" 3', "displayfd-without-display"],
+    ["xvfb-run -e //tmp/errors -d cmd", "xvfb-run-auto-display"],
+    ['execSync("xvfb-run -e //tmp/errors -d cmd");', "xvfb-run-auto-display"],
     ['spawn("Xvfb", [/* ":1234", */ "-displayfd", "3"]);', "displayfd-without-display"],
     ['spawn("Xvfb", ["-displayfd", "3", "-auth", ":1234"]);', "displayfd-without-display"],
     // Deliberate: a display after an option counts as its value. Put the display first.
     ["Xvfb -noreset :1234 -displayfd 3", "displayfd-without-display"],
   ])("flags %s", (sample, rule) => {
-    const findings = findUnsafeDisplayUses(`// first line\n${sample}\n`);
+    const findings = findUnsafeDisplayUses(`// first line\n${sample}\n`, isJsSample(sample));
     expect(findings).toHaveLength(1);
     expect(findings[0]).toMatchObject({ line: 2, rule });
   });
@@ -485,18 +548,31 @@ describe("findUnsafeDisplayUses", () => {
     'xvfb-run -s "-dpi 96 -screen 0 1x1x24" bun run test -d',
     'xvfb-run --server-args "-dpi 96 -screen 0 1x1x24" bun run test -d',
     'execFile("xvfb-run", [...BASE_FLAGS, "bun", "run", "test", "-d"]);',
+    '"$XVFB_BIN" :1234 -displayfd 3 &',
+    "echo Xvfb; wrapper :1234 -displayfd 3",
+    'which Xvfb\n"$XVFB_BIN" :1234 -displayfd 3 &',
+    'Xvfb :1234 "-displayfd" 3',
   ])("allows %s", (sample) => {
-    expect(findUnsafeDisplayUses(sample)).toEqual([]);
+    expect(findUnsafeDisplayUses(sample, isJsSample(sample))).toEqual([]);
   });
 
   it("ignores a display from an earlier line or statement", () => {
     const shell = "x11vnc -connect localhost:5900\nsleep 1\nXvfb -displayfd 3\n";
-    expect(findUnsafeDisplayUses(shell)).toMatchObject([
+    expect(findUnsafeDisplayUses(shell, false)).toMatchObject([
       { line: 3, rule: "displayfd-without-display" },
     ]);
     const code = 'const display = [":1234"];\nconst args = ["-displayfd", "3"];\n';
-    expect(findUnsafeDisplayUses(code)).toMatchObject([
+    expect(findUnsafeDisplayUses(code, true)).toMatchObject([
       { line: 2, rule: "displayfd-without-display" },
     ]);
+  });
+
+  it("drops JS comments only in JS context", () => {
+    const sample = "Xvfb -displayfd 3 // :1234\n";
+    expect(findUnsafeDisplayUses(sample, true)).toMatchObject([
+      { line: 1, rule: "displayfd-without-display" },
+    ]);
+    // In shell, "//" is a path argument, so the display after it counts.
+    expect(findUnsafeDisplayUses(sample, false)).toEqual([]);
   });
 });
