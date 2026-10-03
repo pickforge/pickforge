@@ -10,7 +10,9 @@
   expands it to the session size; Collapse or Escape shrinks it again. The
   click never reaches the session and never grants control. Chromium and
   Google Chrome open a chromeless app window; Firefox opens an ordinary
-  window. Each launch uses a fresh private profile. With no graphical session
+  window. In Firefox a click shows the Collapse button, but the window keeps
+  its size, because Firefox refuses to resize a window that a script did not
+  open. Each launch uses a fresh private profile. With no graphical session
   or browser, `watch` prints the URL and an SSH tunnel command. On Hyprland
   with a Lua config, the window opens floating and pinned in the bottom-right
   corner without taking focus. `session create --viewer` and

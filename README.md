@@ -836,7 +836,9 @@ The window opens as a thumbnail, 384 logical pixels wide, that shows the whole
 scaled desktop and has no controls. A click anywhere expands it to the session
 size, capped to the screen. The click is consumed by the page: it never reaches
 the session and never grants control. The expanded window shows one Collapse
-button; Escape also collapses it. Status text shows connecting, reconnecting,
+button; Escape also collapses it. In Firefox a click shows the Collapse
+button, but the window keeps its size, because Firefox refuses to resize a
+window that a script did not open. Status text shows connecting, reconnecting,
 human control active, session ended, viewer stopped and link expired.
 
 On Hyprland with a Lua config, the window opens floating and pinned in the
