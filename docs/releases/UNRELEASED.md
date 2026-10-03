@@ -4,6 +4,17 @@
 
 ## Changes
 
+- Evidence reports now show where the agent clicked, double-clicked,
+  scrolled or dragged on desktop captures. The viewer draws the marker from
+  the recorded action and never paints it into the PNGs, so screenshots and
+  MCP tool responses are unchanged. A hollow ring marks the point, and a line
+  joins the start and end of a drag. A dashed marker means the input started
+  but did not complete. Markers appear only on the before and after captures
+  that an input action took with its `capture` option, and only when
+  Pickforge verified the session's own Xvfb before and after the action. The
+  Pointer markers switch hides them. Older runs show no markers. The CLI
+  `desktop click` and `desktop drag` commands now record evidence actions
+  too. (#199)
 - Lab evidence finalization now writes `report-share.html` alongside the linked
   `report.html`. Download and open the share report in a browser, or ZIP the
   single file if a channel blocks HTML attachments. Original PNGs are embedded
