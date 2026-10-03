@@ -29,6 +29,7 @@ export default defineConfig({
     },
   },
   test: {
+    globalSetup: ["./test/host-display-guard.ts"],
     include: ["packages/*/test/**/*.test.ts", "test/**/*.test.ts"],
     exclude: runLiveAndroid ? [] : ["packages/android/test/integration.test.ts"],
     coverage: {
