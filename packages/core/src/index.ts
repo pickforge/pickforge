@@ -167,6 +167,7 @@ export { isSecretKey, redactEnv, redactSecrets } from "./redact.js";
 export {
   MAX_ERROR_TEXT_LENGTH,
   sanitizeActionTarget,
+  sanitizeCaptureLinks,
   sanitizeErrorText,
   sanitizeNetworkFailure,
   sanitizeTypedValue,

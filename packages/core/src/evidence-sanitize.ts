@@ -1,3 +1,4 @@
+import type { EvidenceCaptureLink } from "./evidence.js";
 import { redactSecrets } from "./redact.js";
 
 /**
@@ -157,7 +158,69 @@ export function sanitizeActionTarget(target: unknown): SanitizedActionTarget {
   if (x !== undefined) result.x = x;
   const y = sanitizeCoordinate(source.y);
   if (y !== undefined) result.y = y;
+  return Object.assign(result, sanitizePointer(source));
+}
+
+function pixelIndex(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
+ * Drag start and coordinate space are exact pixel facts: kept only when the
+ * raw values are already non-negative integers, never rounded or completed.
+ */
+function sanitizePointer(source: Record<string, unknown>): SanitizedActionTarget {
+  const { fromX, fromY } = source;
+  const result: SanitizedActionTarget = {};
+  const start = pixelIndex(fromX) && pixelIndex(fromY);
+  if (start) {
+    result.fromX = fromX;
+    result.fromY = fromY;
+  }
+  const noStart = fromX === undefined && fromY === undefined;
+  if (source.coordinateSpace === "xvfb-root" && pixelIndex(source.x) && pixelIndex(source.y) && (start || noStart)) {
+    result.coordinateSpace = "xvfb-root";
+  }
   return result;
+}
+
+/** The report's only admissible capture path shape. */
+export function isSafeScreenshotPath(value: unknown): value is string {
+  return typeof value === "string" && /^screenshots\/[A-Za-z0-9._-]+\.png$/.test(value) && !value.includes("..");
+}
+
+function captureLink(entry: unknown): EvidenceCaptureLink[] {
+  if (typeof entry !== "object" || entry === null) return [];
+  const { path, phase, width, height } = entry as Record<string, unknown>;
+  const size = (value: unknown): value is number => pixelIndex(value) && value > 0;
+  return isSafeScreenshotPath(path) && (phase === "before" || phase === "after") && size(width) && size(height)
+    ? [{ path, phase, width, height }]
+    : [];
+}
+
+function repeatedValues(entries: readonly unknown[], key: string): Set<unknown> {
+  const seen = new Set<unknown>();
+  const repeated = new Set<unknown>();
+  for (const entry of entries) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const value = (entry as Record<string, unknown>)[key];
+    if (typeof value !== "string") continue;
+    if (seen.has(value)) repeated.add(value);
+    seen.add(value);
+  }
+  return repeated;
+}
+
+/**
+ * Keep only well-formed capture links. A path or phase named by more than one
+ * entry, malformed entries included, is ambiguous, so every entry naming it
+ * is dropped rather than guessing which one is right.
+ */
+export function sanitizeCaptureLinks(value: unknown): EvidenceCaptureLink[] {
+  if (!Array.isArray(value)) return [];
+  const paths = repeatedValues(value, "path");
+  const phases = repeatedValues(value, "phase");
+  return value.flatMap(captureLink).filter((link) => !paths.has(link.path) && !phases.has(link.phase));
 }
 
 const HTTP_METHODS = [
