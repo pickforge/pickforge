@@ -1,4 +1,4 @@
-# gitleaks configuration. CI scans the whole history of every branch on the remote.
+# CI scans checked-out commit history: full main history on pushes, main plus PR commits on pull requests.
 #
 # Test fixtures need secret-shaped strings so the redaction code has something to catch.
 # Each one is listed here by its exact value, so the allowlist follows the string rather

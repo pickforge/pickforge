@@ -27,11 +27,12 @@ jobs:
           fetch-depth: 0
 
       - name: Scan Git history for secrets
+        # Scan HEAD with its config so unrelated remote branches cannot fail this job.
         run: |
           docker run --rm \
             -v "$PWD:/repo" \
             ghcr.io/gitleaks/gitleaks:v8.30.1 \
-            git --redact --no-banner /repo
+            git --redact --no-banner --log-opts=HEAD /repo
 
   # Independent of the Bun job: the experimental `pickforge` Rust binary has no
   # shared toolchain or artifacts with the TypeScript packages.
