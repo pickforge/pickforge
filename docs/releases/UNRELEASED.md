@@ -15,6 +15,20 @@
   Pointer markers switch hides them. Older runs show no markers. The CLI
   `desktop click` and `desktop drag` commands now record evidence actions
   too. (#199)
+- Each pointer action now has its own glyph in evidence reports: a ring for a
+  click, a double ring for a double click, a line with an arrow for a drag, an
+  arrow for the scroll direction, and a box with a caret for the window that
+  received typing. The before capture shows what was intended, and the after
+  capture shows where the input landed. Typing records the focused window's
+  position and size, never the text. `desktop_move` takes no captures, so it
+  has no glyph. (#200)
+- `pickforge-lab artifacts export` writes copies of a run's screenshots with
+  the glyphs drawn in, a `pointer-track.json` of pointer events for demo
+  videos, and a manifest with hashes, into `exports/` inside the run.
+  `--video` adds an ffmpeg slideshow of the frames. Originals are never
+  changed, and exports do not count toward the evidence size cap. The pointer
+  track holds no keyboard data, and its timing comes from action records, so
+  it is approximate. (#200)
 - Lab evidence finalization now writes `report-share.html` alongside the linked
   `report.html`. Download and open the share report in a browser, or ZIP the
   single file if a channel blocks HTML attachments. Original PNGs are embedded
