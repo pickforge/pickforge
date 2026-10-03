@@ -26,6 +26,8 @@ export interface EvidenceRecordMeta {
   inputState?: EvidenceInputState;
   /** Capture paths may be absolute; only confirmed artifacts are linked. */
   captures: EvidenceCaptureLink[];
+  /** Focused window rect learned during the operation; only the sanitized target keeps it. */
+  focus?: { x: number; y: number; width: number; height: number };
 }
 
 export interface EvidenceOperationContext {
@@ -205,16 +207,21 @@ async function ownedDisplay<T>(
   }
 }
 
-/** Marks the target as xvfb-root only when both checks saw the same server. */
-async function settleCoordinateSpace<T>(
+/**
+ * Adds the focus learned during the operation, and marks the target as
+ * xvfb-root only when both checks saw the same server.
+ */
+async function settleTarget<T>(
   attempt: EvidenceAttempt,
   options: McpEvidenceOptions<T>,
   before: OwnedDisplayIdentity | undefined,
 ): Promise<void> {
-  if (before === undefined) return;
-  const after = await ownedDisplay(attempt, options);
-  if (after?.display !== before.display || after.pid !== before.pid || after.startTicks !== before.startTicks) return;
-  attempt.target = sanitizedTarget({ ...options.target, coordinateSpace: "xvfb-root" }, attempt.typedValue);
+  const { focus } = attempt.record;
+  const after = before === undefined ? undefined : await ownedDisplay(attempt, options);
+  const verified = after !== undefined && after.display === before?.display && after.pid === before.pid && after.startTicks === before.startTicks;
+  if (!verified && focus === undefined) return;
+  const target = { ...options.target, ...(focus === undefined ? {} : { focus }) };
+  attempt.target = sanitizedTarget(verified ? { ...target, coordinateSpace: "xvfb-root" } : target, attempt.typedValue);
 }
 
 function baseAction(
@@ -337,10 +344,10 @@ export async function withMcpEvidence<T extends ToolReport>(
       record: attempt.record,
     });
   } catch (error) {
-    await settleCoordinateSpace(attempt, options, before);
+    await settleTarget(attempt, options, before);
     await recordFailure(attempt, error);
     throw error;
   }
-  await settleCoordinateSpace(attempt, options, before);
+  await settleTarget(attempt, options, before);
   return await recordSuccess(attempt, options, result);
 }

@@ -76,6 +76,27 @@ export async function desktopWindows(display: string, env?: EnvLike): Promise<De
   return result;
 }
 
+/** Bound for the evidence-only focused window query. */
+export const FOCUSED_WINDOW_TIMEOUT_MS = 1_000;
+
+/**
+ * The X input focus window rect in root pixels, or undefined when focus is
+ * None or PointerRoot. It queries the given display only, with an empty X
+ * authority, so the host DISPLAY and XAUTHORITY are never used.
+ */
+export async function focusedWindowGeometry(
+  display: string, env?: EnvLike, timeoutMs = FOCUSED_WINDOW_TIMEOUT_MS,
+): Promise<DesktopWindow["geometry"] | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  const sessionEnv = { ...env, XAUTHORITY: "/dev/null" };
+  const id = await focusedWindow(display, sessionEnv, timeoutMs);
+  if (id === "0" || id === "1") return undefined;
+  if (!/^[1-9]\d*$/.test(id)) throw new Error("Invalid xdotool focused window id");
+  const left = deadline - Date.now();
+  if (left <= 0) throw new Error(`Focused window query timed out after ${timeoutMs}ms`);
+  return geometryFromShell(await query(display, ["getwindowgeometry", "--shell", id], sessionEnv, left));
+}
+
 export async function selectDesktopWindow(display: string, selector: WindowSelector, env?: EnvLike): Promise<WindowInfo> {
   if ((selector.id === undefined) === (selector.name === undefined)) {
     throw new Error("Specify exactly one window id or exact name");

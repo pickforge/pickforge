@@ -171,24 +171,59 @@ function pixelIndex(value: unknown): value is number {
 }
 
 /**
- * Drag start and coordinate space are exact pixel facts: kept only when the
- * raw values are already non-negative integers, never rounded or completed.
+ * Wheel steps kept per axis. Desktop producers cap a scroll at 100 steps; this
+ * looser bound only rejects absurd values without coupling core to them.
+ */
+const MAX_WHEEL_STEPS = 1_000;
+
+/** X11 protocol ranges: window positions are INT16, sizes are CARD16. */
+const MIN_ROOT_POSITION = -32_768;
+const MAX_ROOT_POSITION = 32_767;
+const MAX_ROOT_EXTENT = 65_535;
+
+function inRange(value: unknown, min: number, max: number): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= min && value <= max;
+}
+
+/**
+ * Drag start, wheel steps, focus and coordinate space are exact facts: kept
+ * only when the raw values already have the right shape, never rounded,
+ * clamped or completed.
  */
 function sanitizePointer(source: Record<string, unknown>): SanitizedActionTarget {
-  const { fromX, fromY } = source;
+  const { fromX, fromY, wheelX, wheelY } = source;
   const result: SanitizedActionTarget = {};
   const start = pixelIndex(fromX) && pixelIndex(fromY);
   if (start) {
     result.fromX = fromX;
     result.fromY = fromY;
   }
+  // Both axes or neither, so a lost axis never reads as zero steps.
+  if (inRange(wheelX, -MAX_WHEEL_STEPS, MAX_WHEEL_STEPS) && inRange(wheelY, -MAX_WHEEL_STEPS, MAX_WHEEL_STEPS)) {
+    result.wheelX = wheelX;
+    result.wheelY = wheelY;
+  }
+  const focus = focusRect(source.focus);
+  if (focus !== undefined) result.focus = focus;
   const noStart = fromX === undefined && fromY === undefined;
+  // A verified record needs a root point, or no point at all and a focus rect.
+  const noPoint = source.x === undefined && source.y === undefined && noStart;
   if (isRootPoint(source) && (start || noStart)) result.coordinateSpace = "xvfb-root";
+  if (source.coordinateSpace === "xvfb-root" && noPoint && focus !== undefined) result.coordinateSpace = "xvfb-root";
   return result;
 }
 
 function isRootPoint(source: Record<string, unknown>): boolean {
   return source.coordinateSpace === "xvfb-root" && pixelIndex(source.x) && pixelIndex(source.y);
+}
+
+/** The whole rect or nothing; unknown keys are never copied. */
+function focusRect(value: unknown): SanitizedActionTarget["focus"] {
+  if (typeof value !== "object" || value === null) return undefined;
+  const { x, y, width, height } = value as Record<string, unknown>;
+  const position = (v: unknown): v is number => inRange(v, MIN_ROOT_POSITION, MAX_ROOT_POSITION);
+  const extent = (v: unknown): v is number => inRange(v, 1, MAX_ROOT_EXTENT);
+  return position(x) && position(y) && extent(width) && extent(height) ? { x, y, width, height } : undefined;
 }
 
 /** The report's only admissible capture path shape. */
