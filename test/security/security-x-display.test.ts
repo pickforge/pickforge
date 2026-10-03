@@ -44,26 +44,29 @@ function lineText(text: string, index: number): string {
   return text.slice(start, end === -1 ? text.length : end).trim();
 }
 
+type XvfbRunToken = "auto-display" | "command" | "takes-value" | "option";
+
+/** Classifies one xvfb-run token that appears before the command. */
+function classifyXvfbRunToken(token: string): XvfbRunToken {
+  if (token === "--auto-display") return "auto-display";
+  if (/^-[adhl]+$/.test(token) && token.includes("d")) return "auto-display";
+  if (XVFB_RUN_ARG_OPTIONS.has(token) || XVFB_RUN_ARG_LONG_OPTIONS.has(token)) {
+    return "takes-value";
+  }
+  if (token === "--" || !token.startsWith("-")) return "command";
+  return "option";
+}
+
 /** True when xvfb-run options before the command include -d or --auto-display. */
 function xvfbRunUsesAutoDisplay(rest: string): boolean {
   const tokens = (rest.match(TOKEN_RE) ?? []).map((token) =>
     /^["'`]/.test(token) ? token.slice(1, -1) : token,
   );
   for (let i = 0; i < tokens.length; i += 1) {
-    const token = tokens[i];
-    if (token === "--") return false;
-    if (token === "--auto-display") return true;
-    if (XVFB_RUN_ARG_OPTIONS.has(token) || XVFB_RUN_ARG_LONG_OPTIONS.has(token)) {
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--")) continue;
-    if (/^-[adhl]+$/.test(token)) {
-      if (token.includes("d")) return true;
-      continue;
-    }
-    if (token.startsWith("-")) continue;
-    return false;
+    const kind = classifyXvfbRunToken(tokens[i]);
+    if (kind === "auto-display") return true;
+    if (kind === "command") return false;
+    if (kind === "takes-value") i += 1;
   }
   return false;
 }
