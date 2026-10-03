@@ -12,7 +12,9 @@ function chunk(type: string, data: Buffer): Buffer {
   const bytes = Buffer.alloc(data.length + 12); bytes.writeUInt32BE(data.length); bytes.write(type, 4); data.copy(bytes, 8);
   bytes.writeUInt32BE(crc32(bytes.subarray(4, -4)) >>> 0, bytes.length - 4); return bytes;
 }
-function png(raw: Buffer, width: number, height: number, color = 2, depth = 8, interlace = 0, transparency?: Buffer): Buffer {
+interface PngOptions { color?: number; depth?: number; interlace?: number; transparency?: Buffer }
+function png(raw: Buffer, width: number, height: number, options: PngOptions = {}): Buffer {
+  const { color = 2, depth = 8, interlace = 0, transparency } = options;
   const header = Buffer.alloc(13); header.writeUInt32BE(width); header.writeUInt32BE(height, 4); header[8] = depth; header[9] = color; header[12] = interlace;
   return Buffer.concat([PNG_SIGNATURE, chunk("IHDR", header), ...(transparency ? [chunk("tRNS", transparency)] : []), chunk("IDAT", deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]);
 }
@@ -28,13 +30,13 @@ it("decodes RGB and every PNG filter, including transparent RGB", () => {
   const image = decodePng(bytes);
   for (let y = 0; y < 5; y += 1) expect([...image.pixels.subarray(y * 4, y * 4 + 4)]).toEqual([20, 30, 40, 255]);
   const transparent = Buffer.from([0, 20, 0, 30, 0, 40]);
-  expect(decodePng(png(Buffer.from([0, 20, 30, 40]), 1, 1, 2, 8, 0, transparent)).pixels[3]).toBe(0);
+  expect(decodePng(png(Buffer.from([0, 20, 30, 40]), 1, 1, { transparency: transparent })).pixels[3]).toBe(0);
 });
 it("rejects corrupt, unsupported and excessive inputs", () => {
   expect(() => decodePng(Buffer.from("invalid"))).toThrow("Invalid PNG");
   const invalid = encodePng(raster(1, 1)); invalid[invalid.length - 1] ^= 1;
   expect(() => decodePng(invalid)).toThrow("Invalid PNG");
-  expect(() => decodePng(png(Buffer.from([0, 1]), 1, 1, 0))).toThrow("Unsupported PNG raster layout");
+  expect(() => decodePng(png(Buffer.from([0, 1]), 1, 1, { color: 0 }))).toThrow("Unsupported PNG raster layout");
   expect(() => decodePng(png(Buffer.from([5, 1, 2, 3]), 1, 1))).toThrow("filter");
   expect(() => assertRasterSize(MAX_RASTER_PIXELS + 1, 1)).toThrow("cap");
   expect(() => assertRasterSize(0, 1)).toThrow();

@@ -7,8 +7,12 @@ import type { GlyphPart, GlyphPoint, PointerGlyph } from "./evidence-glyphs.js";
 export const MAX_RASTER_PIXELS = 8 * 1024 * 1024;
 export interface PngRaster { width: number; height: number; pixels: Buffer }
 
+function validRasterDimension(value: number): boolean {
+  return Number.isSafeInteger(value) && value > 0;
+}
+
 export function assertRasterSize(width: number, height: number): void {
-  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1 || width * height > MAX_RASTER_PIXELS) {
+  if (!validRasterDimension(width) || !validRasterDimension(height) || width * height > MAX_RASTER_PIXELS) {
     throw new Error("PNG exceeds raster pixel cap or has invalid dimensions");
   }
 }

@@ -1,7 +1,7 @@
 import { isTruncationRecord, type EvidenceAction, type EvidenceRecord } from "./evidence.js";
 import { isOutcomeRecord } from "./evidence-outcome.js";
 import { sortEvidenceRecords } from "./evidence-render.js";
-import { sanitizeActionTarget } from "./evidence-sanitize.js";
+import { sanitizeActionTarget, type SanitizedActionTarget } from "./evidence-sanitize.js";
 
 export type PointerEventKind = "move" | "click" | "double-click" | "drag" | "scroll";
 export interface PointerTrackEvent {
@@ -44,14 +44,20 @@ function optionalTimingAndWheel(record: EvidenceAction, kind: PointerEventKind):
   return fields;
 }
 
+function rootPointerPoint(target: SanitizedActionTarget): PointerTrackEvent["point"] | undefined {
+  if (target.coordinateSpace !== "xvfb-root" || target.x === undefined || target.y === undefined) return undefined;
+  return { x: target.x, y: target.y };
+}
+
 function pointerEvent(record: EvidenceAction): Omit<PointerTrackEvent, "sequence" | "milliseconds"> | undefined {
   const kind = Object.hasOwn(KINDS, record.tool) ? KINDS[record.tool] : undefined;
   const target = sanitizeActionTarget(record.target);
   const state = record.inputState;
-  if (kind === undefined || target.coordinateSpace !== "xvfb-root" || target.x === undefined || target.y === undefined ||
-      (state !== "attempted" && state !== "completed")) return undefined;
+  if (kind === undefined || (state !== "attempted" && state !== "completed")) return undefined;
+  const point = rootPointerPoint(target);
+  if (point === undefined) return undefined;
   const event: Omit<PointerTrackEvent, "sequence" | "milliseconds"> = {
-    actionId: record.actionId, kind, point: { x: target.x, y: target.y }, inputState: state, ...optionalTimingAndWheel(record, kind),
+    actionId: record.actionId, kind, point, inputState: state, ...optionalTimingAndWheel(record, kind),
   };
   if (kind === "drag" && target.fromX !== undefined && target.fromY !== undefined) event.dragStart = { x: target.fromX, y: target.fromY };
   return event;

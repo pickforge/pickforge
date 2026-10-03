@@ -161,22 +161,26 @@ async function writeFrames(dir: DirHandle, screenshots: DirHandle | undefined, s
       inspected.skipped.push({ source, reason: typeof bytes === "string" ? bytes : "Screenshot changed during export" }); continue;
     }
     const glyph = glyphs.get(source);
-    let output = bytes, annotated = false, reason = copyReason(bytes);
-    if (glyph !== undefined) {
-      try { const raster = decodePng(bytes); drawPointerGlyph(raster, glyph); output = encodePng(raster); annotated = true; }
-      catch (error) {
-        if (!(error instanceof Error) || error.message !== "Unsupported PNG raster layout") throw error;
-        reason = "Unsupported PNG raster layout; source copied without annotation";
-      }
-    }
+    const { output, ...annotation } = renderFrame(bytes, glyph);
     const frame: ExportFrame = {
       file: `frame-${String(frames.length + 1).padStart(4, "0")}.png`, source, sourceSha256: sha256(bytes), outputSha256: sha256(output), size,
-      ...frameOwnership(sources.get(source)!, source), glyphKind: glyph?.kind ?? null, annotated,
-      ...(annotated ? {} : { reason }),
+      ...frameOwnership(sources.get(source)!, source), glyphKind: glyph?.kind ?? null, ...annotation,
     };
     await writeExclusive(dir, frame.file, output); frames.push(frame);
   }
   return frames;
+}
+
+function renderFrame(bytes: Buffer, glyph: PointerGlyph | undefined): Pick<ExportFrame, "annotated" | "reason"> & { output: Buffer } {
+  if (glyph === undefined) return { output: bytes, annotated: false, reason: copyReason(bytes) };
+  try {
+    const raster = decodePng(bytes);
+    drawPointerGlyph(raster, glyph);
+    return { output: encodePng(raster), annotated: true };
+  } catch (error) {
+    if (!(error instanceof Error) || error.message !== "Unsupported PNG raster layout") throw error;
+    return { output: bytes, annotated: false, reason: "Unsupported PNG raster layout; source copied without annotation" };
+  }
 }
 
 function copyReason(bytes: Buffer): string {
