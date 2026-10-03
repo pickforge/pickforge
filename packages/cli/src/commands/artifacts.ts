@@ -50,24 +50,36 @@ export async function runArtifactsList(opts: BaseCliOptions): Promise<number> {
 
 export async function runArtifactsExport(
   runId: string | undefined,
-  opts: BaseCliOptions & { video?: boolean; frameMs?: string },
+  opts: BaseCliOptions & {
+    video?: boolean;
+    frameMs?: string;
+  },
 ): Promise<number> {
   return runReported(opts, async () => {
     const projectDir = resolveProjectDir(opts);
     const catalog = await openRunCatalog(projectDir);
     const entries = await catalog.list();
     const rust = await listRustEvidenceRuns(catalog, entries);
-    if (rust.some(run => run.runId === runId) || (runId === undefined && entries.length === 0 && rust.length > 0)) {
+    if (
+      rust.some((run) => run.runId === runId) ||
+      (runId === undefined && entries.length === 0 && rust.length > 0)
+    ) {
       throw new Error("Export requires a lab evidence run; Rust runs are unsupported");
     }
     const { entry } = await findRun(projectDir, runId, catalog);
     const result = await exportEvidenceRun(catalog, entry, {
-      video: opts.video, frameMs: opts.frameMs === undefined ? undefined : Number(opts.frameMs),
+      video: opts.video,
+      frameMs: opts.frameMs === undefined ? undefined : Number(opts.frameMs),
     });
     return {
       data: { ...result },
-      lines: [`Export: ${result.exportDir}`, `Frames: ${result.frameCount}`, `Annotated: ${result.annotatedCount}`,
-        `Pointer track: ${result.pointerTrackPath}`, `Video: ${result.videoPath ?? "none"}`],
+      lines: [
+        `Export: ${result.exportDir}`,
+        `Frames: ${result.frameCount}`,
+        `Annotated: ${result.annotatedCount}`,
+        `Pointer track: ${result.pointerTrackPath}`,
+        `Video: ${result.videoPath ?? "none"}`,
+      ],
       errors: result.videoError === undefined ? [] : [result.videoError],
     };
   });
