@@ -45,13 +45,10 @@ const KINDS: Readonly<Record<string, PointerEventKind>> = {
   desktop_scroll: "scroll",
 };
 
-function wheelStep(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isSafeInteger(value) ? value : undefined;
-}
-
 function optionalTimingAndWheel(
   record: EvidenceAction,
   kind: PointerEventKind,
+  target: SanitizedActionTarget,
 ): Pick<PointerTrackEvent, "durationMs" | "wheelSteps"> {
   const fields: Pick<PointerTrackEvent, "durationMs" | "wheelSteps"> = {};
   if (
@@ -62,11 +59,10 @@ function optionalTimingAndWheel(
     fields.durationMs = record.durationMs;
   }
   if (kind === "scroll") {
-    // Recheck the signed-step allowlist independently for older sanitizer versions.
-    const x = wheelStep(record.target?.wheelX);
-    const y = wheelStep(record.target?.wheelY);
-    if (x !== undefined || y !== undefined) {
-      fields.wheelSteps = { ...(x === undefined ? {} : { x }), ...(y === undefined ? {} : { y }) };
+    const x = target.wheelX;
+    const y = target.wheelY;
+    if (x !== undefined && y !== undefined) {
+      fields.wheelSteps = { x, y };
     }
   }
   return fields;
@@ -97,7 +93,7 @@ function pointerEvent(
     kind,
     point,
     inputState: state,
-    ...optionalTimingAndWheel(record, kind),
+    ...optionalTimingAndWheel(record, kind, target),
   };
   if (kind === "drag" && target.fromX !== undefined && target.fromY !== undefined) {
     event.dragStart = { x: target.fromX, y: target.fromY };

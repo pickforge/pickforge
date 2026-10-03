@@ -121,3 +121,14 @@ it("omits invalid optional values and excludes non-actions", () => {
   expect(event).not.toHaveProperty("durationMs");
   expect(event).not.toHaveProperty("wheelSteps");
 });
+
+it.each([{ wheelX: 1 }, { wheelY: -1 }, { wheelX: 1001, wheelY: 0 }, { wheelX: 0, wheelY: -1001 }])(
+  "omits wheel steps when the pair is invalid: %j",
+  (steps) => {
+    const record = action({
+      tool: "desktop_scroll",
+      target: { x: 4, y: 5, coordinateSpace: "xvfb-root", ...steps },
+    });
+    expect(createPointerTrack("run", [record]).events[0]).not.toHaveProperty("wheelSteps");
+  },
+);
