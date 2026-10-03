@@ -28,6 +28,7 @@ import {
   listSessions,
   readProcessIdentity,
   stopPid,
+  updateSession,
 } from "@pickforge/lab-core";
 import { runWatch, watchDesktopSession } from "../src/commands/watch.js";
 import { createViewerFakes, type ViewerFakes } from "./viewer-fakes.js";
@@ -54,6 +55,8 @@ const originalEnv = {
   PATH: process.env.PATH,
   DISPLAY: process.env.DISPLAY,
   WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY,
+  HYPRLAND_INSTANCE_SIGNATURE: process.env.HYPRLAND_INSTANCE_SIGNATURE,
+  XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
 };
 
 function restoreEnv(name: keyof typeof originalEnv): void {
@@ -101,6 +104,7 @@ beforeEach(async () => {
   process.env.PATH = binDir;
   delete process.env.DISPLAY;
   delete process.env.WAYLAND_DISPLAY;
+  delete process.env.HYPRLAND_INSTANCE_SIGNATURE;
   fakes = createViewerFakes(root);
   const profileDir = path.join(root, "launch", "profile");
   await fs.promises.mkdir(profileDir, { recursive: true });
@@ -131,6 +135,8 @@ afterEach(async () => {
   restoreEnv("PATH");
   restoreEnv("DISPLAY");
   restoreEnv("WAYLAND_DISPLAY");
+  restoreEnv("HYPRLAND_INSTANCE_SIGNATURE");
+  restoreEnv("XDG_RUNTIME_DIR");
   await fs.promises.rm(root, { recursive: true, force: true });
 });
 
@@ -307,5 +313,43 @@ describe("watch command in process", () => {
       record?.desktop?.vncPid !== undefined &&
         isPidAlive(record.desktop.vncPid),
     ).toBe(true);
+  });
+
+  it("says the session ended when teardown stops an explicit viewer", async () => {
+    await installVnc();
+    fakes.installBrowser("chromium");
+    fakes.setBrowser({});
+    process.env.DISPLAY = ":0";
+    const id = await createDesktop(syntheticDisplay());
+
+    const pending = watchDesktopSession({ session: id, projectDir: root });
+    void pending.catch(() => {});
+    await vi.waitFor(() => expect(fakes.calls().some((call) => call.tool === "browser")).toBe(true));
+    const pid = writeViewerLaunchRecord.mock.calls[1]?.[0]?.pid as number;
+    browserPids.push(pid);
+    // What `session destroy` does: end the session, then stop the browser group.
+    await updateSession(id, { status: "stopped" });
+    process.kill(-pid, "SIGTERM");
+
+    await expect(pending).rejects.toThrow(
+      new RegExp(`^Viewer browser for session ${id} exited on signal SIGTERM; the session ended$`),
+    );
+  });
+
+  it("fails an automatic launch whose browser exits nonzero during placement", async () => {
+    await installVnc();
+    fakes.installBrowser("chromium");
+    fakes.installHyprctl();
+    fakes.setState({ status: { configProvider: "lua" }, monitors: [] });
+    fakes.setBrowser({ exitAfterMs: 50, exitCode: 5 });
+    process.env.WAYLAND_DISPLAY = "wayland-1";
+    process.env.HYPRLAND_INSTANCE_SIGNATURE = "sig_1";
+    process.env.XDG_RUNTIME_DIR = path.join(root, "runtime");
+    const id = await createDesktop(syntheticDisplay());
+
+    await expect(
+      watchDesktopSession({ session: id, projectDir: root, waitForViewerExit: false }),
+    ).rejects.toThrow(/exited with code 5; the session, VNC server and viewer bridge remain running$/);
+    expect(removeViewerLaunch).toHaveBeenCalledWith(id, LAUNCH_ID, undefined);
   });
 });

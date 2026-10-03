@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { resolveDesktopCapableSession, type DesktopSessionInfo } from "@pickforge/lab-core";
+import { getSession, resolveDesktopCapableSession, type DesktopSessionInfo } from "@pickforge/lab-core";
 import {
   endHumanTakeover,
   ensureSessionVnc,
@@ -9,6 +9,7 @@ import {
   startHumanTakeover,
   type HumanTakeoverHandle,
   type TakeoverEndReason,
+  withSessionVncLock,
 } from "@pickforge/lab-desktop-linux";
 import { ensureViewerBridge, type EnsuredViewerBridge } from "../viewer/bridge-daemon.js";
 import { buildViewerUrl } from "../viewer/contract.js";
@@ -270,18 +271,28 @@ function remoteViewerResult(
   };
 }
 
-function assertCleanExit(sessionId: string, launched: LaunchedViewerWindow): void {
-  const remain = "the session, VNC server and viewer bridge remain running";
+/**
+ * Whether the session ended. Teardown holds the VNC lock until the record
+ * is final, so wait for that lock before reading it.
+ */
+async function sessionEnded(sessionId: string): Promise<boolean> {
+  const read = (): ReturnType<typeof getSession> => getSession(sessionId);
+  const record = await withSessionVncLock(sessionId, process.env, read).catch(read);
+  return record?.status !== "running";
+}
+
+async function assertCleanExit(sessionId: string, launched: LaunchedViewerWindow): Promise<void> {
+  let failure: string | undefined;
   if (launched.signal !== undefined && launched.signal !== null) {
-    throw new Error(
-      `Viewer browser for session ${sessionId} exited on signal ${launched.signal}; ${remain}`,
-    );
+    failure = `exited on signal ${launched.signal}`;
+  } else if (launched.exitCode !== undefined && launched.exitCode !== 0) {
+    failure = `exited with code ${String(launched.exitCode)}`;
   }
-  if (launched.exitCode !== undefined && launched.exitCode !== 0) {
-    throw new Error(
-      `Viewer browser for session ${sessionId} exited with code ${String(launched.exitCode)}; ${remain}`,
-    );
-  }
+  if (failure === undefined) return;
+  const outcome = (await sessionEnded(sessionId))
+    ? "the session ended"
+    : "the session, VNC server and viewer bridge remain running";
+  throw new Error(`Viewer browser for session ${sessionId} ${failure}; ${outcome}`);
 }
 
 /**
@@ -327,6 +338,8 @@ async function watchWithBrowser(
   };
   if (launched.exitCode !== undefined) data.exitCode = launched.exitCode;
   if (launched.signal !== undefined && launched.signal !== null) data.signal = launched.signal;
+  // An automatic launch reports an exit only when it saw one during placement.
+  await assertCleanExit(record.id, launched);
   if (!waitForExit) {
     return {
       data,
@@ -336,7 +349,6 @@ async function watchWithBrowser(
       ],
     };
   }
-  assertCleanExit(record.id, launched);
   return {
     data,
     lines: [`viewer closed for session ${record.id}; the session and VNC server remain running`],
