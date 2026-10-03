@@ -27,9 +27,9 @@ const XVFB_RUN_ARG_LONG_OPTIONS = new Set([
   "--server-args",
   "--wait",
 ]);
-const TOKEN_RE = /"[^"]*"|'[^']*'|`[^`]*`|[^\s,[\]()"'`]+/g;
 const QUOTE_CHARS = new Set(['"', "'", "`"]);
-const COMMAND_END_CHARS = new Set([";", "|", "&", "\n"]);
+const SHELL_END_CHARS = new Set([";", "|", "&", "\n"]);
+const SEPARATOR_CHARS = new Set([",", "(", ")"]);
 const X_SERVER_RE = /\b(?:Xvfb|Xephyr|Xwayland|Xorg)\b/g;
 
 function lineAt(text: string, index: number): number {
@@ -46,25 +46,162 @@ function lineText(text: string, index: number): string {
   return text.slice(start, end === -1 ? text.length : end).trim();
 }
 
-/** True when text[i] ends a shell command: ";", "|", "&" or a newline, not escaped. */
-function isCommandEnd(text: string, i: number): boolean {
-  return COMMAND_END_CHARS.has(text[i]) && text[i - 1] !== "\\";
+/**
+ * "shell" reads one shell command: it ends at ";", "|", "&" or a newline
+ * outside quotes. "array" reads JS array items: it ends at the "]" that
+ * closes the array, and each quoted string is one token.
+ */
+type LexMode = "shell" | "array";
+
+interface Token {
+  /** The word with quotes removed. */
+  value: string;
+  /** True when the word holds a quoted part. */
+  quoted: boolean;
+  start: number;
 }
 
-/** Index of the first command end at or after `from`, or the text length. */
-function shellCommandEnd(text: string, from: number): number {
-  for (let i = from; i < text.length; i += 1) {
-    if (isCommandEnd(text, i)) return i;
-  }
-  return text.length;
+interface Lexed {
+  tokens: Token[];
+  end: number;
 }
 
-/** Index just after the last command end before `index`, or 0. */
-function shellCommandStart(text: string, index: number): number {
-  for (let i = index - 1; i >= 0; i -= 1) {
-    if (isCommandEnd(text, i)) return i + 1;
+/**
+ * A small quote-aware lexer. It tracks single, double and backtick quotes
+ * and backslash escapes, so terminators and "]" count only outside quotes.
+ * Backslash-newline is whitespace. Shell "#" comments and JS "//" and
+ * block comments that start a token are dropped. In shell mode a bare word
+ * absorbs adjacent quoted parts, so --name="a b" is one token.
+ */
+class CommandLexer {
+  private i: number;
+  private depth = 0;
+  private readonly tokens: Token[] = [];
+
+  constructor(
+    private readonly text: string,
+    from: number,
+    private readonly mode: LexMode,
+  ) {
+    this.i = from;
   }
-  return 0;
+
+  run(): Lexed {
+    while (this.i < this.text.length && !this.atCommandEnd()) this.step();
+    return { tokens: this.tokens, end: this.i };
+  }
+
+  private atCommandEnd(): boolean {
+    const c = this.text[this.i];
+    if (this.mode === "shell") return SHELL_END_CHARS.has(c);
+    return c === "]" && this.depth === 0;
+  }
+
+  private step(): void {
+    if (this.skipContinuation() || this.skipComment() || this.skipNesting()) return;
+    const c = this.text[this.i];
+    if (/\s/.test(c) || SEPARATOR_CHARS.has(c)) {
+      this.i += 1;
+      return;
+    }
+    this.readWord();
+  }
+
+  /** Length of a backslash-newline at `at`, or 0. */
+  private continuationLength(at: number): number {
+    if (this.text[at] !== "\\") return 0;
+    if (this.text[at + 1] === "\n") return 2;
+    return this.text.startsWith("\r\n", at + 1) ? 3 : 0;
+  }
+
+  private skipContinuation(): boolean {
+    const length = this.continuationLength(this.i);
+    this.i += length;
+    return length > 0;
+  }
+
+  private skipComment(): boolean {
+    const rest = this.text.slice(this.i, this.i + 2);
+    if (rest.startsWith("/*")) {
+      const close = this.text.indexOf("*/", this.i + 2);
+      this.i = close === -1 ? this.text.length : close + 2;
+      return true;
+    }
+    if (rest === "//" || (this.mode === "shell" && rest.startsWith("#"))) {
+      const newline = this.text.indexOf("\n", this.i);
+      this.i = newline === -1 ? this.text.length : newline;
+      return true;
+    }
+    return false;
+  }
+
+  /** Tracks nested arrays in array mode. */
+  private skipNesting(): boolean {
+    if (this.mode !== "array") return false;
+    const c = this.text[this.i];
+    if (c === "[") this.depth += 1;
+    else if (c === "]") this.depth -= 1;
+    else return false;
+    this.i += 1;
+    return true;
+  }
+
+  private atWordEnd(start: number): boolean {
+    const c = this.text[this.i];
+    if (/\s/.test(c) || SEPARATOR_CHARS.has(c)) return true;
+    if (this.mode === "array") {
+      return c === "[" || c === "]" || (QUOTE_CHARS.has(c) && this.i > start);
+    }
+    return SHELL_END_CHARS.has(c) || this.continuationLength(this.i) > 0;
+  }
+
+  private readWord(): void {
+    const start = this.i;
+    let value = "";
+    let quoted = false;
+    while (this.i < this.text.length && !this.atWordEnd(start)) {
+      const c = this.text[this.i];
+      if (QUOTE_CHARS.has(c)) {
+        value += this.readQuoted(c);
+        quoted = true;
+        if (this.mode === "array") break;
+      } else {
+        value += this.readPlainChar(c);
+      }
+    }
+    this.tokens.push({ value, quoted, start });
+  }
+
+  /** Reads one unquoted character. A backslash escapes the next one. */
+  private readPlainChar(c: string): string {
+    const step = c === "\\" ? 2 : 1;
+    const value = this.text.slice(this.i + step - 1, this.i + step);
+    this.i += step;
+    return value;
+  }
+
+  /** Reads a quoted part from its opening quote and returns its content. */
+  private readQuoted(quote: string): string {
+    const escapes = !(this.mode === "shell" && quote === "'");
+    let value = "";
+    this.i += 1;
+    while (this.i < this.text.length && this.text[this.i] !== quote) {
+      const step = escapes && this.text[this.i] === "\\" ? 2 : 1;
+      value += this.text.slice(this.i + step - 1, this.i + step);
+      this.i += step;
+    }
+    this.i += 1;
+    return value;
+  }
+}
+
+function lex(text: string, from: number, mode: LexMode): Lexed {
+  return new CommandLexer(text, from, mode).run();
+}
+
+/** True when the lexed command has a token that starts at `start`. */
+function hasTokenAt(lexed: Lexed, start: number): boolean {
+  return lexed.tokens.some((token) => token.start === start);
 }
 
 /** Index of the "[" that encloses `index`, or -1 when there is none. */
@@ -79,29 +216,11 @@ function enclosingArrayStart(text: string, index: number): number {
   return -1;
 }
 
-/** Index of the "]" that closes the "[" at `open`, or the text length. */
-function arrayEnd(text: string, open: number): number {
-  let depth = 0;
-  for (let i = open + 1; i < text.length; i += 1) {
-    if (text[i] === "[") depth += 1;
-    if (text[i] !== "]") continue;
-    if (depth === 0) return i;
-    depth -= 1;
-  }
-  return text.length;
-}
-
-/** The items of the array that opens at `open`, without the brackets. */
-function arrayItems(text: string, open: number): string {
-  return text.slice(open + 1, arrayEnd(text, open));
-}
-
-/** Splits a command into unquoted tokens. Backslash-newline counts as space. */
-function tokenize(command: string): string[] {
-  const joined = command.replace(/\\\r?\n/g, " ");
-  return (joined.match(TOKEN_RE) ?? []).map((token) =>
-    QUOTE_CHARS.has(token[0]) ? token.slice(1, -1) : token,
-  );
+/** Index of the start of the last X server name before `index`, or -1. */
+function lastXServerName(text: string, index: number): number {
+  let last = -1;
+  for (const match of text.slice(0, index).matchAll(X_SERVER_RE)) last = match.index;
+  return last;
 }
 
 /** True for an exact display argument: ":<digits>" or a template ":${...}". */
@@ -109,30 +228,44 @@ function isDisplayToken(token: string): boolean {
   return /^:\d+$/.test(token) || token.startsWith(":${");
 }
 
-/** Index of the start of the last X server name in text[start, end), or -1. */
-function lastXServerName(text: string, start: number, end: number): number {
-  let last = -1;
-  for (const match of text.slice(start, end).matchAll(X_SERVER_RE)) {
-    last = start + match.index;
-  }
-  return last;
+/**
+ * True when the command passes a display as an argument. A display counts
+ * when it is the first argument or follows a token that is not an option,
+ * so "-auth :1234" does not count. This also flags "Xvfb -noreset :1234
+ * -displayfd 3"; the fix is to put the display first.
+ */
+function hasDisplayArgument(tokens: Token[]): boolean {
+  return tokens.some(
+    (token, i) =>
+      isDisplayToken(token.value) && (i === 0 || !tokens[i - 1].value.startsWith("-")),
+  );
 }
 
-/**
- * The command or argument list that holds the "-displayfd" at `index`.
- * A quoted option inside an array gives the array items. Otherwise it is a
- * shell command from the nearest X server name (or the command start) to the
- * command end.
- */
-function displayfdCommand(text: string, index: number): string {
-  if (QUOTE_CHARS.has(text[index - 1])) {
-    const open = enclosingArrayStart(text, index);
-    if (open !== -1) return arrayItems(text, open);
+/** Tokens of the array that holds the quoted "-displayfd" at `index`. */
+function displayfdArrayTokens(text: string, index: number): Token[] {
+  const open = enclosingArrayStart(text, index);
+  if (open !== -1) {
+    const lexed = lex(text, open + 1, "array");
+    if (hasTokenAt(lexed, index - 1)) return lexed.tokens;
   }
-  const commandStart = shellCommandStart(text, index);
-  const server = lastXServerName(text, commandStart, index);
-  const start = server === -1 ? commandStart : server;
-  return text.slice(start, shellCommandEnd(text, index));
+  return lex(text, index - 1, "array").tokens;
+}
+
+/** Tokens of the shell command, from its X server name, that holds `index`. */
+function displayfdShellTokens(text: string, index: number): Token[] {
+  const server = lastXServerName(text, index);
+  if (server !== -1) {
+    const lexed = lex(text, server, "shell");
+    if (hasTokenAt(lexed, index)) return lexed.tokens;
+  }
+  return lex(text, index, "shell").tokens;
+}
+
+/** The command or argument list that holds the "-displayfd" at `index`. */
+function displayfdTokens(text: string, index: number): Token[] {
+  return QUOTE_CHARS.has(text[index - 1])
+    ? displayfdArrayTokens(text, index)
+    : displayfdShellTokens(text, index);
 }
 
 /** Index of the first character at or after `from` that is not space or ",". */
@@ -142,19 +275,22 @@ function skipSeparators(text: string, from: number): number {
   return i;
 }
 
-/**
- * The arguments that follow an "xvfb-run" match that ends at `end`.
- * `quoted` is true when the name was a quoted string. Arguments are the next
- * array, the rest of the enclosing array, or the rest of the shell command.
- */
-function xvfbRunArgs(text: string, end: number, quoted: boolean): string {
+/** True when the quoted name that opens at `quote` follows "[" or ",". */
+function isArrayElement(text: string, quote: number): boolean {
+  let i = quote - 1;
+  while (i >= 0 && /\s/.test(text[i])) i -= 1;
+  return text[i] === "[" || text[i] === ",";
+}
+
+/** The xvfb-run arguments that follow the match, and whether they are array items. */
+function xvfbRunArgs(text: string, match: RegExpExecArray): { tokens: Token[]; array: boolean } {
+  const end = match.index + match[0].length;
   const next = skipSeparators(text, end);
-  if (text[next] === "[") return arrayItems(text, next);
-  if (quoted && text[end] === ",") {
-    const open = enclosingArrayStart(text, end);
-    if (open !== -1) return text.slice(end, arrayEnd(text, open));
+  if (text[next] === "[") return { tokens: lex(text, next + 1, "array").tokens, array: true };
+  if (match[1] !== "" && isArrayElement(text, match.index - 1)) {
+    return { tokens: lex(text, end, "array").tokens, array: true };
   }
-  return text.slice(end, shellCommandEnd(text, end));
+  return { tokens: lex(text, end, "shell").tokens, array: false };
 }
 
 type XvfbRunToken = "auto-display" | "command" | "takes-value" | "option";
@@ -183,11 +319,19 @@ function classifyXvfbRunToken(token: string): XvfbRunToken {
   return classifyShortCluster(token);
 }
 
+/**
+ * Classifies one token in context. An unquoted array item is a spread or a
+ * variable, so it counts as options; only a quoted string ends the options.
+ */
+function classifyXvfbRunArg(token: Token, array: boolean): XvfbRunToken {
+  if (array && !token.quoted) return "option";
+  return classifyXvfbRunToken(token.value);
+}
+
 /** True when xvfb-run options before the command include -d or --auto-display. */
-function xvfbRunUsesAutoDisplay(args: string): boolean {
-  const tokens = tokenize(args);
+function xvfbRunUsesAutoDisplay(tokens: Token[], array: boolean): boolean {
   for (let i = 0; i < tokens.length; i += 1) {
-    const kind = classifyXvfbRunToken(tokens[i]);
+    const kind = classifyXvfbRunArg(tokens[i], array);
     if (kind === "auto-display") return true;
     if (kind === "command") return false;
     if (kind === "takes-value") i += 1;
@@ -199,11 +343,11 @@ function finding(text: string, index: number, rule: DisplayFinding["rule"]): Dis
   return { line: lineAt(text, index), rule, text: lineText(text, index) };
 }
 
-/** Rule (a): every "-displayfd" command must also pass an exact display. */
+/** Rule (a): every "-displayfd" command must also pass a display argument. */
 function findDisplayfdWithoutDisplay(text: string): DisplayFinding[] {
   const findings: DisplayFinding[] = [];
   for (const match of text.matchAll(/-displayfd\b/g)) {
-    if (!tokenize(displayfdCommand(text, match.index)).some(isDisplayToken)) {
+    if (!hasDisplayArgument(displayfdTokens(text, match.index))) {
       findings.push(finding(text, match.index, "displayfd-without-display"));
     }
   }
@@ -214,8 +358,8 @@ function findDisplayfdWithoutDisplay(text: string): DisplayFinding[] {
 function findXvfbRunAutoDisplay(text: string): DisplayFinding[] {
   const findings: DisplayFinding[] = [];
   for (const match of text.matchAll(/\bxvfb-run\b(["'`]?)/g)) {
-    const end = match.index + match[0].length;
-    if (xvfbRunUsesAutoDisplay(xvfbRunArgs(text, end, match[1] !== ""))) {
+    const { tokens, array } = xvfbRunArgs(text, match);
+    if (xvfbRunUsesAutoDisplay(tokens, array)) {
       findings.push(finding(text, match.index, "xvfb-run-auto-display"));
     }
   }
@@ -303,6 +447,18 @@ describe("findUnsafeDisplayUses", () => {
     ["Xvfb -auth /tmp/auth:1234 -displayfd 3", "displayfd-without-display"],
     ["Xephyr -displayfd 3 &", "displayfd-without-display"],
     ["echo :1234; Xwayland -displayfd 3", "displayfd-without-display"],
+    ["xvfb-run -e '/tmp/log;a' -d cmd", "xvfb-run-auto-display"],
+    ['spawn("xvfb-run", ["-e", "/tmp/log]a", "-d", "cmd"]);', "xvfb-run-auto-display"],
+    ['execFile("xvfb-run", [...BASE_FLAGS, "-d", "bun", "run", "test"]);', "xvfb-run-auto-display"],
+    ['spawn("env", ["xvfb-run", flags, "-d", "cmd"]);', "xvfb-run-auto-display"],
+    ['xvfb-run -s "-dpi 96" -d cmd', "xvfb-run-auto-display"],
+    ['xvfb-run --server-args "-dpi 96" -d cmd', "xvfb-run-auto-display"],
+    ["Xvfb -displayfd 3 # :1234", "displayfd-without-display"],
+    ["Xvfb -displayfd 3 // :1234", "displayfd-without-display"],
+    ['spawn("Xvfb", [/* ":1234", */ "-displayfd", "3"]);', "displayfd-without-display"],
+    ['spawn("Xvfb", ["-displayfd", "3", "-auth", ":1234"]);', "displayfd-without-display"],
+    // Deliberate: a display after an option counts as its value. Put the display first.
+    ["Xvfb -noreset :1234 -displayfd 3", "displayfd-without-display"],
   ])("flags %s", (sample, rule) => {
     const findings = findUnsafeDisplayUses(`// first line\n${sample}\n`);
     expect(findings).toHaveLength(1);
@@ -324,6 +480,11 @@ describe("findUnsafeDisplayUses", () => {
     "Xvfb :0 -displayfd 3",
     "Xvfb \\\n  :1234 \\\n  -displayfd 3",
     "const args = [\n  `:${randomInt(1_000, 30_000)}`,\n  \"-displayfd\",\n  \"3\",\n];",
+    'Xvfb :1234 -auth "/tmp/auth;file" -displayfd 3',
+    'xvfb-run -a --server-args="-dpi 96 -screen 0 1x1x24" bun run test',
+    'xvfb-run -s "-dpi 96 -screen 0 1x1x24" bun run test -d',
+    'xvfb-run --server-args "-dpi 96 -screen 0 1x1x24" bun run test -d',
+    'execFile("xvfb-run", [...BASE_FLAGS, "bun", "run", "test", "-d"]);',
   ])("allows %s", (sample) => {
     expect(findUnsafeDisplayUses(sample)).toEqual([]);
   });
