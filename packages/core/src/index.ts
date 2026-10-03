@@ -156,6 +156,20 @@ export {
 } from "./evidence-render.js";
 
 export {
+  GLYPH_COLOR,
+  GLYPH_DASH,
+  GLYPH_HALO_COLOR,
+  GLYPH_HALO_WIDTH,
+  GLYPH_STROKE_WIDTH,
+  POINTER_GLYPH_VERSION,
+  pointerGlyph,
+  type GlyphPart,
+  type GlyphPoint,
+  type PointerGlyph,
+  type PointerGlyphKind,
+} from "./evidence-glyphs.js";
+
+export {
   finalizeOrphanedEvidenceRuns,
   type EvidenceRecoveryResult,
   type RecoveredEvidenceRun,

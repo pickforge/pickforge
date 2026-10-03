@@ -116,6 +116,11 @@ export interface SanitizedActionTarget {
   fromY?: number;
   /** Set only when the input target was verified as the session's owned Xvfb. */
   coordinateSpace?: "xvfb-root";
+  /** Signed wheel steps: positive scrolls right or down, negative left or up. */
+  wheelX?: number;
+  wheelY?: number;
+  /** Focused window at input time, in root pixels; x and y may be negative. */
+  focus?: { x: number; y: number; width: number; height: number };
 }
 
 function sanitizeTargetText(value: unknown): string | undefined {
