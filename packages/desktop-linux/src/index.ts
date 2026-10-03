@@ -182,3 +182,24 @@ export {
   runTakeoverWatchdogLoop,
   type RunTakeoverWatchdogLoopOptions,
 } from "./takeover-watchdog.js";
+
+export {
+  withViewerDir,
+  readViewerPrivateFile,
+  writeViewerPrivateFile,
+  VIEWER_LAUNCH_ID_PATTERN,
+  ViewerVncUnavailableError,
+  connectSessionVncReadOnly,
+  prepareViewerLaunch,
+  readViewerLaunchRecord,
+  removeViewerLaunch,
+  sessionViewerDir,
+  stopSessionViewer,
+  writeViewerLaunchRecord,
+  type PreparedViewerLaunch,
+  type ViewerBrowserKind,
+  type ViewerHyprlandLaunch,
+  type ViewerLaunchRecord,
+  type ViewerVncUnavailableReason,
+  type ViewerWindowSize,
+} from "./viewer-state.js";

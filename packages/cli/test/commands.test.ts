@@ -459,14 +459,14 @@ describe("pickforge-lab session (desktop)", () => {
     60_000,
   );
   it(
-    "watches with exact viewer argv and leaves VNC alive after viewer exit",
+    "watches in a browser viewer and leaves VNC alive after the browser exits",
     async () => {
       const viewerArgs = path.join(tmpDir, "viewer-args");
+      // A fake browser first on PATH, so no real browser ever opens.
       const env = makeEnv({
         realPath: true,
         bins: {
-          "remote-viewer":
-            `printf 'viewer noise\\n'; printf '%s\\n' "$@" > "${viewerArgs}"`,
+          chromium: `printf '%s\\n' "$@" > "${viewerArgs}"`,
         },
         extra: { DISPLAY: ":0" },
       });
@@ -479,21 +479,29 @@ describe("pickforge-lab session (desktop)", () => {
         ),
       ).sessions[0];
 
-      const watched = parseJson(
-        await runCli(
-          ["watch", "--session", created.id, "--json"],
-          env,
-          tmpDir,
+      const watchedResult = await runCli(
+        ["watch", "--session", created.id, "--json"],
+        env,
+        tmpDir,
+      );
+      const watched = parseJson(watchedResult);
+      expect(watched.ok).toBe(true);
+      expect(watched).toMatchObject({
+        opened: true,
+        browser: "chromium",
+        adapter: "none",
+        exitCode: 0,
+        vncReused: false,
+      });
+      expect(watchedResult.stdout).not.toContain("#token=");
+      const args = fs.readFileSync(viewerArgs, "utf8").trim().split("\n");
+      expect(args[0]).toMatch(
+        new RegExp(
+          `^--app=http://127\\.0\\.0\\.1:${watched.bridgePort}/viewer/${watched.launchId}#token=[A-Za-z0-9_-]+$`,
         ),
       );
-      expect(watched.ok).toBe(true);
-      expect(watched.opened).toBe(true);
-      expect(watched.endpoint).toBe(
-        `vnc://127.0.0.1:${watched.vncPort}`,
-      );
-      expect(fs.readFileSync(viewerArgs, "utf8").trim().split("\n")).toEqual([
-        watched.endpoint,
-      ]);
+      expect(args).toContain(`--class=pickforge-viewer-${watched.launchId}`);
+      expect(args).not.toContain("--no-sandbox");
 
       const headlessEnv = { ...env };
       delete headlessEnv.DISPLAY;
@@ -505,9 +513,13 @@ describe("pickforge-lab session (desktop)", () => {
         ),
       );
       expect(headless.opened).toBe(false);
-      expect(headless.endpoint).toBe(watched.endpoint);
+      expect(headless.bridgePort).toBe(watched.bridgePort);
+      expect(headless.bridgeReused).toBe(true);
+      expect(headless.url).toContain(`http://127.0.0.1:${watched.bridgePort}/viewer/`);
       expect(headless.guidance).toContain("No graphical host session");
-      expect(headless.guidance).toContain("ssh -N -L");
+      expect(headless.guidance).toContain(
+        `ssh -N -L ${watched.bridgePort}:127.0.0.1:${watched.bridgePort}`,
+      );
 
       const status = parseJson(
         await runCli(["session", "status", created.id, "--json"], env),
@@ -517,7 +529,7 @@ describe("pickforge-lab session (desktop)", () => {
       expect(status.desktop.vncAlive).toBe(true);
       expect(status.desktop.vncViewOnly).toBe(true);
       expect(status.viewer).toMatchObject({
-        endpoint: watched.endpoint,
+        endpoint: `vnc://127.0.0.1:${watched.vncPort}`,
         ready: true,
         readOnly: true,
       });
@@ -532,7 +544,7 @@ describe("pickforge-lab session (desktop)", () => {
       const env = makeEnv({
         realPath: true,
         bins: {
-          "remote-viewer": `printf '%s\\n' "$1" >> "${opens}"; sleep 3`,
+          chromium: `printf '%s\\n' "$1" >> "${opens}"; sleep 10`,
         },
         extra: { DISPLAY: ":0" },
       });
@@ -551,7 +563,8 @@ describe("pickforge-lab session (desktop)", () => {
         ),
       );
       expect(automatic.viewer.opened).toBe(true);
-      expect(Date.now() - automaticStartedAt).toBeLessThan(2_500);
+      // Returned without waiting for the 10 s browser.
+      expect(Date.now() - automaticStartedAt).toBeLessThan(8_000);
       await waitFor(() => fs.existsSync(opens));
       expect(fs.readFileSync(opens, "utf8").trim().split("\n")).toHaveLength(1);
 
@@ -655,7 +668,7 @@ describe("pickforge-lab session (desktop)", () => {
         realPath: true,
         bins: {
           x11vnc: "exit 1",
-          "remote-viewer": "exit 0",
+          chromium: "exit 0",
         },
         extra: { DISPLAY: ":0" },
       });

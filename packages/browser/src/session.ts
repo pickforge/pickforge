@@ -30,6 +30,7 @@ import {
   isDisplayAlive,
   startXvfb,
   stopOwnedSessionVnc,
+  stopSessionViewer,
   withSessionVncLock,
   type XvfbHandle,
   type XvfbPartialStart,
@@ -793,6 +794,7 @@ export async function teardownBrowserSession(
       );
     }
 
+    failures.push(...await stopSessionViewer(id, record.desktop, registryEnv));
     await stopBrowserVnc(record, gone, failures);
     await stopBrowserDisplay(record, gone, failures);
 

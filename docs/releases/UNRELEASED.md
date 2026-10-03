@@ -4,6 +4,19 @@
 
 ## Changes
 
+- `pickforge-lab watch` now opens a small live view in a browser instead of
+  an external VNC client. A loopback bridge serves a bundled noVNC page that
+  shows the whole session scaled into a 384 pixel wide thumbnail. A click
+  expands it to the session size; Collapse or Escape shrinks it again. The
+  click never reaches the session and never grants control. Chromium and
+  Google Chrome open a chromeless app window; Firefox opens an ordinary
+  window. Each launch uses a fresh private profile. With no graphical session
+  or browser, `watch` prints the URL and an SSH tunnel command. On Hyprland
+  with a Lua config, the window opens floating and pinned in the bottom-right
+  corner without taking focus. `session create --viewer` and
+  `viewer.mode: "auto"` use the same viewer. `watch --control` is unchanged.
+  After the window closes, the bridge and the read-only x11vnc keep running
+  idle. The bridge exits after 10 minutes without a viewer or request. (#207)
 - Evidence reports now show where the agent clicked, double-clicked,
   scrolled or dragged on desktop captures. The viewer draws the marker from
   the recorded action and never paints it into the PNGs, so screenshots and
@@ -59,6 +72,12 @@
   `actions.jsonl` stays authoritative.
 
 - <What this release does not do, and what is not proven yet.>
+- Hyprland with a Lua config is the only window placement adapter. Elsewhere
+  the `watch` window is an ordinary window. Pickforge disables its Hyprland
+  runtime rule after launch, but Hyprland keeps a disabled rule registered
+  until the config reloads. The viewer token is on the browser's command
+  line, which other processes on the same host can read. The window does not
+  take focus when it opens, but it is not guaranteed never to. (#207)
 - Browser lab sessions still send Chrome's activity ping to
   `update.googleapis.com` when a browser session ends. It has a hardcoded URL
   and no switch to disable it. (#139)
