@@ -1,4 +1,5 @@
-import type { EvidenceAction } from "./evidence.js";
+import type { EvidenceAction, EvidenceRecord } from "./evidence.js";
+import type { PngSize } from "./evidence-png.js";
 
 /**
  * Shared pointer glyph geometry. The HTML viewer and the raster export both
@@ -77,10 +78,27 @@ export interface PointerGlyph {
 export function pointerGlyph(
   record: EvidenceAction,
   artifact: string,
-  size: Readonly<{ width: number; height: number }> | undefined,
+  size: Readonly<PngSize> | undefined,
 ): PointerGlyph | undefined {
   void record;
   void artifact;
   void size;
   return undefined;
+}
+
+/**
+ * Glyphs for a whole run, keyed by run-relative capture path. A path claimed
+ * by more than one action record, through `artifacts` or `captures`, gets no
+ * glyph because no single action owns it. `sizes` holds validated PNG sizes;
+ * a path without one gets no glyph. Outcome and truncation records are skipped.
+ * The HTML viewer and the raster export both use this, so they mark the same
+ * captures.
+ */
+export function runPointerGlyphs(
+  records: readonly EvidenceRecord[],
+  sizes: ReadonlyMap<string, Readonly<PngSize>>,
+): Map<string, PointerGlyph> {
+  void records;
+  void sizes;
+  return new Map();
 }

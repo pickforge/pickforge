@@ -163,6 +163,7 @@ export {
   GLYPH_STROKE_WIDTH,
   POINTER_GLYPH_VERSION,
   pointerGlyph,
+  runPointerGlyphs,
   type GlyphPart,
   type GlyphPoint,
   type PointerGlyph,
