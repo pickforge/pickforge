@@ -251,15 +251,19 @@ function remoteViewerResult(
   sessionId: string,
   bridge: EnsuredViewerBridge,
   data: Record<string, unknown>,
-  reason: string,
+  reason: "no-graphical-session" | "no-browser",
 ): CommandResult {
   // Not a launch: no profile and no record. The page still loads and shows
   // the live view; it simply has no window to resize.
   const url = buildViewerUrl(bridge.port, randomBytes(16).toString("hex"), bridge.token);
-  const guidance =
-    `${reason} Install Chromium or Google Chrome, or connect remotely with ` +
+  const tunnel =
     `ssh -N -L ${bridge.port}:127.0.0.1:${bridge.port} <host> and open the URL ` +
     "in a browser on that machine. The URL holds a capability token; keep it private.";
+  const guidance =
+    reason === "no-graphical-session"
+      ? `No graphical host session is available. Connect remotely with ${tunnel}`
+      : "No supported browser was found on PATH. Install Chromium or Google Chrome, " +
+        `or connect remotely with ${tunnel}`;
   return {
     data: { sessionId, opened: false, ...data, url, guidance },
     lines: [`viewer not opened for session ${sessionId}`, `viewer URL: ${url}`, guidance],
@@ -299,11 +303,11 @@ async function watchWithBrowser(
     vncReused: vnc.reused,
   };
   if (!hasGraphicalSession()) {
-    return remoteViewerResult(record.id, bridge, endpoints, "No graphical host session is available.");
+    return remoteViewerResult(record.id, bridge, endpoints, "no-graphical-session");
   }
   const browser = detectViewerBrowser();
   if (browser === null) {
-    return remoteViewerResult(record.id, bridge, endpoints, "No supported browser was found on PATH.");
+    return remoteViewerResult(record.id, bridge, endpoints, "no-browser");
   }
   const launched = await launchViewerWindow({
     sessionId: record.id,

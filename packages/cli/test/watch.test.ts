@@ -184,6 +184,7 @@ describe("watch command in process", () => {
     expect(text).toContain(url);
     expect(text).toContain(`ssh -N -L ${BRIDGE_PORT}:127.0.0.1:${BRIDGE_PORT} <host>`);
     expect(text).toContain("No graphical host session");
+    expect(text).not.toContain("Install Chromium");
     expect(prepareViewerLaunch).not.toHaveBeenCalled();
   });
 
@@ -195,7 +196,10 @@ describe("watch command in process", () => {
     const result = await watchDesktopSession({ session: id, projectDir: root });
 
     expect(result.data).toMatchObject({ opened: false });
-    expect(result.lines?.join("\n")).toContain("No supported browser was found on PATH");
+    const text = result.lines?.join("\n") ?? "";
+    expect(text).toContain("No supported browser was found on PATH");
+    expect(text).toContain("Install Chromium or Google Chrome");
+    expect(text).toContain(`ssh -N -L ${BRIDGE_PORT}:127.0.0.1:${BRIDGE_PORT} <host>`);
   });
 
   it("opens a browser viewer, waits for exit, removes the launch and reuses VNC", async () => {
