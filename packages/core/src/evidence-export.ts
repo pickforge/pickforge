@@ -21,6 +21,7 @@ import {
   type PngSize,
 } from "./evidence-png.js";
 import { sanitizeCaptureLinks, sanitizeErrorText } from "./evidence-sanitize.js";
+import { redactSecrets } from "./redact.js";
 import { POINTER_GLYPH_VERSION, runPointerGlyphs, type PointerGlyph } from "./evidence-glyphs.js";
 import { assertRasterSize, decodePng, drawPointerGlyph, encodePng } from "./png-raster.js";
 import { createPointerTrack } from "./pointer-track.js";
@@ -345,53 +346,37 @@ async function writeVideoOutput(
   }
 }
 
-/** Keep complete diagnostic lines so truncation never detaches a secret from its key. */
+const MAX_VIDEO_DIAGNOSTIC_BYTES = 64 * 1024;
+const MAX_VIDEO_DIAGNOSTIC_TAIL_BYTES = 2048;
+
+/** Redact the entire bounded block so keys and values can span lines and chunks. */
 class VideoDiagnostics {
-  private pending = Buffer.alloc(0);
-  private dropping = false;
-  private tail = Buffer.alloc(0);
+  private raw = Buffer.alloc(MAX_VIDEO_DIAGNOSTIC_BYTES);
+  private length = 0;
+  private dropped = false;
 
   append(chunk: Buffer): void {
-    let start = 0;
-    while (start < chunk.length) {
-      const newline = chunk.indexOf(10, start);
-      const end = newline < 0 ? chunk.length : newline;
-      this.appendPart(chunk.subarray(start, end));
-      if (newline < 0) {
-        return;
-      }
-      this.finishLine();
-      start = end + 1;
-    }
-  }
-
-  private appendPart(part: Buffer): void {
-    if (this.dropping) {
+    if (this.dropped) {
       return;
     }
-    // Discard an entire oversized line, including its remaining chunks.
-    if (this.pending.length + part.length > 64 * 1024) {
-      this.pending = Buffer.alloc(0);
-      this.dropping = true;
+    if (this.length + chunk.length > MAX_VIDEO_DIAGNOSTIC_BYTES) {
+      // Drop the whole block. Retaining a suffix could detach a value from its key.
+      this.raw = Buffer.alloc(0);
+      this.length = 0;
+      this.dropped = true;
       return;
     }
-    this.pending = Buffer.concat([this.pending, part]);
-  }
-
-  private finishLine(): void {
-    if (!this.dropping) {
-      const line = sanitizeErrorText(this.pending.toString("utf8"), 64 * 1024);
-      this.tail = Buffer.from(Buffer.concat([this.tail, Buffer.from(line + "\n")]).subarray(-2048));
-    }
-    this.pending = Buffer.alloc(0);
-    this.dropping = false;
+    chunk.copy(this.raw, this.length);
+    this.length += chunk.length;
   }
 
   finish(): string {
-    if (this.pending.length > 0) {
-      this.finishLine();
+    if (this.dropped) {
+      return "ffmpeg diagnostics exceeded 64 KiB and were omitted";
     }
-    return this.tail.toString("utf8").trim();
+    const block = this.raw.subarray(0, this.length).toString("utf8");
+    const redacted = Buffer.from(redactSecrets(block));
+    return redacted.subarray(-MAX_VIDEO_DIAGNOSTIC_TAIL_BYTES).toString("utf8").trim();
   }
 }
 

@@ -688,12 +688,18 @@ it.each([5000, 70_000])(
     await fakeFfmpeg(
       `#!${process.execPath}\n` +
         `process.stdout.write('partial');\n` +
-        `process.stderr.write('token=' + 'CREDENTIAL-VALUE' + 'x'.repeat(${length}) + 'CREDENTIAL-SUFFIX' + '\\nencoder failed\\n');\n` +
+        `process.stderr.write('token=' + 'CREDENTIAL-VALUE' + 'x'.repeat(${length}) + ` +
+        `'CREDENTIAL-SUFFIX' + '\\nencoder failed\\n');\n` +
         `process.exitCode = 1;\n`,
     );
     const result = await exportEvidenceRun(catalog, entry, { video: true });
     expect(result.complete).toBe(false);
-    expect(result.videoError).toContain("encoder failed");
+    if (length > 64 * 1024) {
+      expect(result.videoError).toContain("diagnostics exceeded 64 KiB and were omitted");
+      expect(result.videoError).not.toContain("encoder failed");
+    } else {
+      expect(result.videoError).toContain("encoder failed");
+    }
     expect(result.videoError).not.toContain("CREDENTIAL-VALUE");
     expect(result.videoError).not.toContain("CREDENTIAL-SUFFIX");
     expect(result.videoError!.length).toBeLessThan(2600);
@@ -794,4 +800,72 @@ it("keeps PNG encoding failures fatal after a successful decode", async () => {
   const names = await fs.promises.readdir(path.join(run.dir, "exports"));
   expect(names).toHaveLength(1);
   expect(fs.existsSync(path.join(run.dir, "exports", names[0]!, "export.json"))).toBe(false);
+});
+
+it.each([20, 3000])(
+  "redacts multiline JSON credentials of length %i before truncation",
+  async (length) => {
+    const secret = "MULTILINE-SECRET-" + "x".repeat(length) + "-PRIVATE-SUFFIX";
+    const diagnostic = `{\n  "token":\n  "${secret}"\n}\nencoder failed to open output\n`;
+    await fakeFfmpeg(
+      `#!${process.execPath}\n` +
+        `process.stdout.write('partial');\n` +
+        `process.stderr.write(${JSON.stringify(diagnostic)});\n` +
+        `process.exitCode = 1;\n`,
+    );
+    const result = await exportEvidenceRun(catalog, entry, { video: true });
+    expect(result.complete).toBe(false);
+    expect(result.videoError).toContain("[REDACTED]");
+    expect(result.videoError).toContain("encoder failed to open output");
+    expect(result.videoError).not.toContain("MULTILINE-SECRET");
+    expect(result.videoError).not.toContain("PRIVATE-SUFFIX");
+    expect(result.videoError!.length).toBeLessThan(2600);
+  },
+);
+
+it("redacts a multiline credential whose key and value arrive in separate chunks", async () => {
+  await fakeFfmpeg(
+    `#!${process.execPath}\n` +
+      `process.stdout.write('partial');\n` +
+      `process.stderr.write('{\\n  "token":\\n');\n` +
+      `setTimeout(() => {\n` +
+      `  process.stderr.write('"CROSS-LINE-PRIVATE-' + 'x'.repeat(3000) + ` +
+      `'-SECRET-SUFFIX"\\n}\\nencoder failed\\n');\n` +
+      `  process.exitCode = 1;\n` +
+      `}, 30);\n`,
+  );
+  const result = await exportEvidenceRun(catalog, entry, { video: true });
+  expect(result.videoError).toContain("[REDACTED]");
+  expect(result.videoError).toContain("encoder failed");
+  expect(result.videoError).not.toContain("CROSS-LINE-PRIVATE");
+  expect(result.videoError).not.toContain("SECRET-SUFFIX");
+});
+
+it("drops an oversized multiline block instead of retaining a credential suffix", async () => {
+  await fakeFfmpeg(
+    `#!${process.execPath}\n` +
+      `process.stdout.write('partial');\n` +
+      `process.stderr.write('{\\n  "token":\\n');\n` +
+      `setTimeout(() => {\n` +
+      `  process.stderr.write('"PRIVATE-PREFIX-' + 'x'.repeat(70_000) + '-PRIVATE-SUFFIX"\\n}\\n');\n` +
+      `  process.exitCode = 1;\n` +
+      `}, 30);\n`,
+  );
+  const result = await exportEvidenceRun(catalog, entry, { video: true });
+  expect(result.videoError).toContain("diagnostics exceeded 64 KiB and were omitted");
+  expect(result.videoError).not.toContain("PRIVATE-PREFIX");
+  expect(result.videoError).not.toContain("PRIVATE-SUFFIX");
+  expect(result.videoError).not.toContain('"token"');
+});
+
+it("keeps an ordinary multiline ffmpeg diagnostic useful", async () => {
+  const diagnostic = "Cannot open output file.\nInvalid argument: requested encoder unavailable.\n";
+  await fakeFfmpeg(
+    `#!${process.execPath}\n` +
+      `process.stdout.write('partial');\n` +
+      `process.stderr.write(${JSON.stringify(diagnostic)});\n` +
+      `process.exitCode = 1;\n`,
+  );
+  const result = await exportEvidenceRun(catalog, entry, { video: true });
+  expect(result.videoError).toContain(diagnostic.trim());
 });
