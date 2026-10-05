@@ -59,7 +59,19 @@ function childExit(child: ChildProcess): Promise<number | null> {
   });
 }
 
-function writeContendedXvfb(binDir: string, spawnLog: string): void {
+/**
+ * Fake Xvfb for the race test. Each fake appends `<kind> <display> <pid>`
+ * lines to `eventLog`: "spawn" on start, "claim" once it holds the X lock and
+ * before its socket can be seen, "fail <why>" before it exits without a
+ * display, and "overlap" when another fake from this test is alive on the same
+ * display. Every record lands before startXvfb can observe the outcome, so the
+ * test can read the log as soon as all workers report.
+ */
+function writeContendedXvfb(
+  binDir: string,
+  eventLog: string,
+  activePrefix: string,
+): void {
   const server = path.join(binDir, "fake-xvfb.cjs");
   fs.mkdirSync(binDir, { recursive: true });
   fs.writeFileSync(
@@ -68,27 +80,47 @@ function writeContendedXvfb(binDir: string, spawnLog: string): void {
       'const fs = require("node:fs");',
       'const net = require("node:net");',
       'const display = process.argv[2].slice(1);',
-      `fs.appendFileSync(${JSON.stringify(spawnLog)}, display + "\\n");`,
+      "const record = (kind, detail = '') => fs.appendFileSync(",
+      `  ${JSON.stringify(eventLog)},`,
+      "  `${kind} ${display} ${process.pid} ${detail}`.trimEnd() + '\\n',",
+      ");",
+      "record('spawn');",
+      `const active = ${JSON.stringify(activePrefix)} + display;`,
+      "let activeOwned = false;",
+      "try {",
+      '  fs.closeSync(fs.openSync(active, "wx"));',
+      "  activeOwned = true;",
+      "} catch { record('overlap'); }",
       'const lock = `/tmp/.X${display}-lock`;',
       'const socket = `/tmp/.X11-unix/X${display}`;',
       "let owns = false;",
+      "let claimed = false;",
+      "const fail = (why, code) => { record('fail', why); process.exit(code); };",
       "const cleanup = () => {",
+      "  if (activeOwned) fs.rmSync(active, { force: true });",
+      "  activeOwned = false;",
       "  if (!owns) return;",
       "  fs.rmSync(lock, { force: true });",
       "  fs.rmSync(socket, { force: true });",
       "};",
-      "const stop = () => { cleanup(); process.exit(0); };",
+      "const stop = () => {",
+      "  if (!claimed) record('fail', 'stopped');",
+      "  cleanup();",
+      "  process.exit(0);",
+      "};",
       'for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, stop);',
       "setTimeout(() => {",
       "  try {",
       '    const fd = fs.openSync(lock, "wx", 0o444);',
       "    fs.writeFileSync(fd, `${process.pid}\\n`);",
       "    fs.closeSync(fd);",
-      '    fs.mkdirSync("/tmp/.X11-unix", { recursive: true });',
-      "    const server = net.createServer(() => {});",
-      "    server.once('error', () => process.exit(18));",
-      "    server.listen(socket, () => { owns = true; });",
-      "  } catch { process.exit(17); }",
+      "  } catch { fail('lock', 17); }",
+      "  claimed = true;",
+      "  record('claim');",
+      '  fs.mkdirSync("/tmp/.X11-unix", { recursive: true });',
+      "  const server = net.createServer(() => {});",
+      "  server.once('error', () => fail('socket', 18));",
+      "  server.listen(socket, () => { owns = true; });",
       "}, 350);",
       "process.on('exit', cleanup);",
       "setInterval(() => {}, 1000);",
@@ -120,6 +152,36 @@ function writeStubbornXvfb(binDir: string): void {
     path.join(binDir, "Xvfb"),
     `#!/bin/sh\nexec '${process.execPath}' '${server}' "$@"\n`,
   );
+}
+
+/**
+ * Read the fake Xvfb event log. Each spawn must end in a held display or a
+ * recorded failure, so `unsettled` lists spawns that did neither.
+ */
+function summarizeDisplayEvents(log: string): {
+  overlaps: string[];
+  unsettled: string[];
+  claimed: string[];
+} {
+  const outcomes = new Map<string, "claim" | "fail" | undefined>();
+  const overlaps: string[] = [];
+  for (const line of log.trim().split("\n")) {
+    const [kind, display, pid] = line.split(" ");
+    const key = `${display} ${pid}`;
+    if (kind === "spawn") outcomes.set(key, undefined);
+    else if (kind === "overlap") overlaps.push(key);
+    else if (kind === "fail") outcomes.set(key, "fail");
+    else if (kind === "claim" && outcomes.get(key) !== "fail") {
+      outcomes.set(key, "claim");
+    }
+  }
+  const unsettled: string[] = [];
+  const claimed: string[] = [];
+  for (const [key, outcome] of outcomes) {
+    if (outcome === undefined) unsettled.push(key);
+    if (outcome === "claim") claimed.push(`:${key.split(" ")[0]}`);
+  }
+  return { overlaps, unsettled, claimed };
 }
 
 afterEach(() => {
@@ -254,13 +316,13 @@ describe("cross-process display allocation", () => {
   it("starts twelve synchronized sessions without cross-file display collisions", async () => {
     const root = makeRoot("pickforge-display-race-");
     const binDir = path.join(root, "bin");
-    const spawnLog = path.join(root, "spawns.log");
+    const eventLog = path.join(root, "events.log");
     const gate = path.join(root, "gate");
     const release = path.join(root, "release");
     const start = testDisplay();
     const count = 12;
     for (let offset = 0; offset < count + 5; offset += 1) displays.add(start + offset);
-    writeContendedXvfb(binDir, spawnLog);
+    writeContendedXvfb(binDir, eventLog, path.join(root, "active-"));
 
     const readyFiles = Array.from({ length: count }, (_, index) =>
       path.join(root, `ready-${index}`),
@@ -297,12 +359,18 @@ describe("cross-process display allocation", () => {
           error?: string;
         },
       );
-      expect(results.filter((result) => !result.ok)).toEqual([]);
+      const log = fs.existsSync(eventLog) ? fs.readFileSync(eventLog, "utf8") : "";
+      const context = `results: ${JSON.stringify(results)}\nevents:\n${log}`;
+      expect(results.filter((result) => !result.ok), context).toEqual([]);
       const allocated = results.map((result) => result.display);
-      expect(new Set(allocated).size).toBe(count);
-      const spawns = fs.readFileSync(spawnLog, "utf8").trim().split("\n");
-      expect(spawns).toHaveLength(count);
-      expect(new Set(spawns).size).toBe(count);
+      expect(new Set(allocated).size, context).toBe(count);
+      // A stale or foreign lock or socket on a reserved display makes that
+      // spawn fail, and startXvfb then retries the next display. That retry is
+      // allowed, but two fakes from this test must never share a display.
+      const events = summarizeDisplayEvents(log);
+      expect(events.overlaps, context).toEqual([]);
+      expect(events.unsettled, context).toEqual([]);
+      expect(events.claimed.sort(), context).toEqual([...allocated].sort());
     } finally {
       fs.writeFileSync(release, "release");
       const codes = await Promise.all(exits);
