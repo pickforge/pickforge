@@ -224,3 +224,57 @@ it("passive mode refuses further requests and requires completed ungrab sync", a
   expect(anchor.signal.aborted).toBe(true);
   expect(vi.getTimerCount()).toBe(0);
 });
+
+async function grabRetry(drops: number[], before = 0) {
+  const start = now;
+  const live: number[] = [];
+  let maps = 0;
+  server.fault = (opcode, reply) => {
+    if (opcode === -1) live.push([...server.wires].filter((s) => !s.destroyed).length);
+    if (opcode === 135 && reply.length === 32 && reply[1] === 1) now += before;
+    return opcode === 101 && drops.includes(++maps) ? undefined : reply;
+  };
+  const result = prepare().then((anchor) => anchor, (error: Error) => error);
+  for (const drop of drops) {
+    while (maps < drop) await new Promise<void>((resolve) => setImmediate(resolve));
+    const grab = Math.min(250, start + 3000 - now);
+    now += grab; await vi.advanceTimersByTimeAsync(grab);
+    const gap = Math.min(100, start + 3000 - now);
+    if (gap > 0) { now += gap; await vi.advanceTimersByTimeAsync(gap); }
+  }
+  return { outcome: await result, live };
+}
+
+it("retries an expired grab bound on one fresh connection at a time and keeps the failed attempt's bindings", async () => {
+  const { outcome, live } = await grabRetry([2]); // Expires while verifying attempt one's changes.
+  if (outcome instanceof Error) throw outcome;
+  expect(server.connections).toBe(2);
+  expect(live).toEqual([1, 1]);
+  expect(server.requests.filter((opcode) => opcode === 36)).toHaveLength(2);
+  expect(server.changes).toEqual([255, 254]);
+  expect(server.grab).toBeUndefined();
+  outcome.close();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it.each([[[1, 2, 3], 0, 3], [[1], 2700, 1]])("stops retrying an expired grab at the attempt cap or preparation expiry %#", async (drops, before, connections) => {
+  const { outcome, live } = await grabRetry(drops, before);
+  expect(outcome).toEqual(new Error("Desktop text preparation failed; no text was sent"));
+  expect(server.connections).toBe(connections);
+  expect(live).toEqual(Array(connections).fill(1));
+  expect(server.changes).toEqual([]);
+  expect([...server.wires].every((s) => s.destroyed)).toBe(true);
+  expect(vi.getTimerCount()).toBe(0);
+});
+it.each(["capacity", "malformed", "dead"])("does not retry a deterministic grabbed failure: %s", async (kind) => {
+  if (kind === "capacity") for (let code = 9; code <= 255; code++) if (!server.rows.has(code)) server.rows.set(code, [0xffe1]);
+  server.fault = (opcode, reply) => {
+    if (opcode === 101 && kind === "malformed") reply[1] = 0;
+    if (opcode === 119 && kind === "dead") vi.mocked(processIdentityMatches).mockReturnValue(false);
+    return reply;
+  };
+  await expect(prepare()).rejects.toThrow(kind === "capacity" ? "capacity exhausted" : /^Desktop text preparation failed; no text was sent$/);
+  expect(server.connections).toBe(1);
+  expect(server.changes).toEqual([]);
+  expect(vi.getTimerCount()).toBe(0);
+});

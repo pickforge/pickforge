@@ -5,6 +5,9 @@ import { negotiateXkb, readKeyboard, usableCodepoints, type Keyboard, type Xdoto
 import { validateTypingTarget } from "./x11-target.js";
 import { remaining, request, typingFailure, X11_SETUP_MS, X11Wire } from "./x11-wire.js";
 
+const GRAB_ATTEMPTS = 3;
+const GRAB_RETRY_GAP_MS = 100;
+
 export function typingEnvironment(display?: string): Record<string, string | undefined> {
   return { PATH: process.env.PATH, LANG: "C.UTF-8", LC_ALL: "C.UTF-8", DISPLAY: display, XAUTHORITY: "/dev/null" };
 }
@@ -80,26 +83,32 @@ export async function prepareText(sessionId: string, display: string, text: stri
   const family = await clientFamily(preparationDeadline);
   // Ownership, version and protocol work share one preparation expiry.
   const target = await validateTypingTarget(sessionId, display, env, preparationDeadline);
-  remaining(preparationDeadline);
-  if (!target.alive()) throw typingFailure();
-  const wire = new X11Wire(target.path, deadline, target.alive, preparationDeadline);
-  try {
-    const { min, max } = await wire.hello();
-    const opcode = await negotiateXkb(wire);
-    wire.boundGrab(preparationDeadline);
-    wire.send(request(36));
-    const keyboard = await readKeyboard(wire, opcode, min, max);
-    const bindings = planBindings(keyboard, desired, family, points, () => wire.check());
-    for (const binding of bindings) changeBinding(wire, binding);
-    const verified = bindings.length === 0 ? keyboard : await readKeyboard(wire, opcode, min, max);
-    verifyBindings(verified, bindings, points, family, () => wire.check());
-    wire.send(request(37));
-    if ((await wire.reply(request(43))).length !== 32) throw typingFailure();
-    return wire.retain();
-  } catch (error) {
-    // Failure closes even a queued/active grab. Success transfers ownership
-    // to the caller until dispatch settles, without retaining a server grab.
-    wire.close();
-    throw error;
+  for (let attempt = 1; ; attempt++) {
+    remaining(preparationDeadline);
+    if (!target.alive()) throw typingFailure();
+    const wire = new X11Wire(target.path, deadline, target.alive, preparationDeadline);
+    try {
+      const { min, max } = await wire.hello();
+      const opcode = await negotiateXkb(wire);
+      wire.boundGrab(preparationDeadline);
+      wire.send(request(36));
+      const keyboard = await readKeyboard(wire, opcode, min, max);
+      const bindings = planBindings(keyboard, desired, family, points, () => wire.check());
+      for (const binding of bindings) changeBinding(wire, binding);
+      const verified = bindings.length === 0 ? keyboard : await readKeyboard(wire, opcode, min, max);
+      verifyBindings(verified, bindings, points, family, () => wire.check());
+      wire.send(request(37));
+      if ((await wire.reply(request(43))).length !== 32) throw typingFailure();
+      return wire.retain();
+    } catch (error) {
+      // Failure closes even a queued/active grab. Success transfers ownership
+      // to the caller until dispatch settles, without retaining a server grab.
+      wire.close();
+      // Only an expired grab bound (CPU contention) retries, on a fresh
+      // connection that rereads the live map within the preparation budget.
+      if (!wire.grabExpired || attempt >= GRAB_ATTEMPTS) throw error;
+    }
+    const gap = Math.min(GRAB_RETRY_GAP_MS, remaining(preparationDeadline));
+    await new Promise((resolve) => setTimeout(resolve, gap));
   }
 }

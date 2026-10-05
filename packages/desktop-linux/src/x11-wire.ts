@@ -53,8 +53,12 @@ export class X11Wire {
   private passive = false;
   private grabState: "none" | "grabbed" | "released" | "synced" = "none";
   private ungrabSync?: number;
+  private bounded = false;
+  private expired = false;
 
   get signal(): AbortSignal { return this.loss.signal; }
+  /** True only when the first failure was the bound from boundGrab running out. */
+  get grabExpired(): boolean { return this.expired; }
 
   constructor(socketPath: string, deadline: number, private readonly alive: () => boolean, preparationDeadline = performance.now() + X11_SETUP_MS) {
     this.overallDeadline = deadline;
@@ -71,18 +75,20 @@ export class X11Wire {
   }
 
   check(): void {
+    let left = 0;
     try {
-      remaining(this.deadline);
+      left = remaining(this.deadline);
       if (this.failed || !this.alive()) throw typingFailure();
     } catch {
-      this.fail();
+      this.fail(left === 0);
       throw typingFailure();
     }
   }
 
-  private fail(): void {
+  private fail(expired = false): void {
     if (this.failed) return;
     this.failed = true;
+    this.expired = expired && this.bounded && !this.passive;
     clearTimeout(this.timer);
     clearInterval(this.healthTimer);
     this.socket.destroy();
@@ -116,8 +122,9 @@ export class X11Wire {
   boundGrab(totalDeadline: number): void {
     this.active();
     this.deadline = Math.min(this.deadline, this.overallDeadline, totalDeadline, performance.now() + X11_GRAB_MS);
+    this.bounded = true;
     clearTimeout(this.timer);
-    this.timer = setTimeout(() => this.fail(), remaining(this.deadline));
+    this.timer = setTimeout(() => this.fail(true), remaining(this.deadline));
   }
 
   private packetLength(): number | undefined {
