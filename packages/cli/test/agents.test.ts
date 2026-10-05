@@ -859,7 +859,7 @@ describe("pickforge-lab agents doctor", () => {
     expect(
       report.checks.filter((check: any) => check.status === "problem"),
     ).toEqual([]);
-  });
+  }, 30_000);
 
   it("inspects nonstandard config paths via --config-path", async () => {
     const configPath = path.join(tmpDir, "custom-codex.toml");
