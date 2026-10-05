@@ -1509,12 +1509,10 @@ describe("scope re-creation", () => {
     // Use a private parent cgroup. A createContainmentScope in another worker
     // prunes empty scopes in the shared delegated cgroup, so it could remove
     // the re-created scope before the assertions run.
-    const parent = path.join(
-      path.dirname(probe.cgroupDir as string),
-      `desk-recreate-${process.pid}`,
+    const parent = fs.mkdtempSync(
+      path.join(path.dirname(probe.cgroupDir as string), "desk-recreate-"),
     );
     const cgroupDir = path.join(parent, "pickforge-desk-recreate");
-    fs.mkdirSync(parent);
     try {
       fs.mkdirSync(cgroupDir);
       const scope: ContainmentScope = {
@@ -1531,7 +1529,7 @@ describe("scope re-creation", () => {
       expect(ensured.token).toBe(scope.token);
       expect(ensured.cgroupDir).toBe(cgroupDir);
       expect(fs.existsSync(cgroupDir)).toBe(true);
-      await destroyContainmentScope(ensured);
+      expect((await destroyContainmentScope(ensured)).confirmed).toBe(true);
     } finally {
       for (const dir of [cgroupDir, parent]) {
         try {
@@ -1541,6 +1539,7 @@ describe("scope re-creation", () => {
         }
       }
     }
+    expect(fs.existsSync(parent)).toBe(false);
   });
 
   it("leaves a marker scope untouched", () => {
