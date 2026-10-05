@@ -21,18 +21,24 @@ jobs:
 
   gitleaks:
     runs-on: ubuntu-latest
+    env:
+      GITLEAKS_LOG_OPTS: "HEAD --diff-merges=first-parent"
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      - name: Check merge resolution scanning
+        run: bash scripts/check-gitleaks-merge.sh "$GITLEAKS_LOG_OPTS"
+
       - name: Scan Git history for secrets
         # Scan HEAD with its config so unrelated remote branches cannot fail this job.
+        # Compare merges with one parent to scan resolutions without per-parent duplicates.
         run: |
           docker run --rm \
             -v "$PWD:/repo" \
             ghcr.io/gitleaks/gitleaks:v8.30.1 \
-            git --redact --no-banner --log-opts=HEAD /repo
+            git --redact --no-banner --log-opts="$GITLEAKS_LOG_OPTS" /repo
 
   # Independent of the Bun job: the experimental `pickforge` Rust binary has no
   # shared toolchain or artifacts with the TypeScript packages.
