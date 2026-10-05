@@ -1207,14 +1207,17 @@ describe("containment initial exec discovery", () => {
     await withOwnedStatFixture("desk-exec-filter", async ({ pid, read }) => {
       const scope = createContainmentScope({ id: "desk-exec-filter-other", useCgroup: false });
       hideEnvironment(pid, read, options);
-      const result = await destroyContainmentScope(scope, { termTimeoutMs: 60, killTimeoutMs: 60 });
+      // Confirmation needs two empty scans of all of /proc, and on a loaded
+      // host one scan can outlast a short deadline. The fixture never
+      // settles, so a misclassified exec still fails after these deadlines.
+      const result = await destroyContainmentScope(scope, { termTimeoutMs: 2_000, killTimeoutMs: 1_000 });
       expect(result.confirmed).toBe(true);
       expect(result.signaled).toEqual([]);
       expect(result.survivors).toEqual([]);
       expect(result.refused).toEqual([]);
       expect(isPidAlive(pid)).toBe(true);
     });
-  });
+  }, 10_000);
 });
 
 describe("containment cleanup failure reporting", () => {
@@ -1503,16 +1506,41 @@ describe("stale scope cgroups", () => {
 
 describe("scope re-creation", () => {
   itWithCgroup("re-creates an empty scope cgroup that was pruned under it", async () => {
-    const scope = createContainmentScope({ id: "desk-recreate" });
-    expect(scope.mechanism).toBe("cgroup");
-    fs.rmdirSync(scope.cgroupDir as string);
-    expect(fs.existsSync(scope.cgroupDir as string)).toBe(false);
+    // Use a private parent cgroup. A createContainmentScope in another worker
+    // prunes empty scopes in the shared delegated cgroup, so it could remove
+    // the re-created scope before the assertions run.
+    const parent = path.join(
+      path.dirname(probe.cgroupDir as string),
+      `desk-recreate-${process.pid}`,
+    );
+    const cgroupDir = path.join(parent, "pickforge-desk-recreate");
+    fs.mkdirSync(parent);
+    try {
+      fs.mkdirSync(cgroupDir);
+      const scope: ContainmentScope = {
+        ...createContainmentScope({ id: "desk-recreate", useCgroup: false }),
+        mechanism: "cgroup",
+        cgroupDir,
+      };
+      expect(scopeCgroupProblem(cgroupDir, scope.id)).toBeUndefined();
+      fs.rmdirSync(cgroupDir);
+      expect(fs.existsSync(cgroupDir)).toBe(false);
 
-    const ensured = ensureContainmentScope(scope);
-    expect(ensured.mechanism).toBe("cgroup");
-    expect(ensured.token).toBe(scope.token);
-    expect(fs.existsSync(ensured.cgroupDir as string)).toBe(true);
-    await destroyContainmentScope(ensured);
+      const ensured = ensureContainmentScope(scope);
+      expect(ensured.mechanism).toBe("cgroup");
+      expect(ensured.token).toBe(scope.token);
+      expect(ensured.cgroupDir).toBe(cgroupDir);
+      expect(fs.existsSync(cgroupDir)).toBe(true);
+      await destroyContainmentScope(ensured);
+    } finally {
+      for (const dir of [cgroupDir, parent]) {
+        try {
+          fs.rmdirSync(dir);
+        } catch {
+          /* already removed */
+        }
+      }
+    }
   });
 
   it("leaves a marker scope untouched", () => {
