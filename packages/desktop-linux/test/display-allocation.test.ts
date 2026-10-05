@@ -59,7 +59,11 @@ function childExit(child: ChildProcess): Promise<number | null> {
   });
 }
 
-function writeContendedXvfb(binDir: string, spawnLog: string): void {
+function writeContendedXvfb(
+  binDir: string,
+  spawnLog: string,
+  claimLog: string,
+): void {
   const server = path.join(binDir, "fake-xvfb.cjs");
   fs.mkdirSync(binDir, { recursive: true });
   fs.writeFileSync(
@@ -87,7 +91,10 @@ function writeContendedXvfb(binDir: string, spawnLog: string): void {
       '    fs.mkdirSync("/tmp/.X11-unix", { recursive: true });',
       "    const server = net.createServer(() => {});",
       "    server.once('error', () => process.exit(18));",
-      "    server.listen(socket, () => { owns = true; });",
+      "    server.listen(socket, () => {",
+      "      owns = true;",
+      `      fs.appendFileSync(${JSON.stringify(claimLog)}, display + "\\n");`,
+      "    });",
       "  } catch { process.exit(17); }",
       "}, 350);",
       "process.on('exit', cleanup);",
@@ -255,12 +262,13 @@ describe("cross-process display allocation", () => {
     const root = makeRoot("pickforge-display-race-");
     const binDir = path.join(root, "bin");
     const spawnLog = path.join(root, "spawns.log");
+    const claimLog = path.join(root, "claims.log");
     const gate = path.join(root, "gate");
     const release = path.join(root, "release");
     const start = testDisplay();
     const count = 12;
     for (let offset = 0; offset < count + 5; offset += 1) displays.add(start + offset);
-    writeContendedXvfb(binDir, spawnLog);
+    writeContendedXvfb(binDir, spawnLog, claimLog);
 
     const readyFiles = Array.from({ length: count }, (_, index) =>
       path.join(root, `ready-${index}`),
@@ -300,9 +308,14 @@ describe("cross-process display allocation", () => {
       expect(results.filter((result) => !result.ok)).toEqual([]);
       const allocated = results.map((result) => result.display);
       expect(new Set(allocated).size).toBe(count);
+      // A stale or foreign lock on a reserved display makes that spawn fail,
+      // and startXvfb then retries the next display. Every extra spawn must be
+      // such a failed attempt: exactly one claim per allocated display.
+      const claims = fs.readFileSync(claimLog, "utf8").trim().split("\n");
+      expect(claims.map((n) => `:${n}`).sort()).toEqual([...allocated].sort());
       const spawns = fs.readFileSync(spawnLog, "utf8").trim().split("\n");
-      expect(spawns).toHaveLength(count);
-      expect(new Set(spawns).size).toBe(count);
+      expect(spawns.length).toBeGreaterThanOrEqual(count);
+      for (const claim of claims) expect(spawns).toContain(claim);
     } finally {
       fs.writeFileSync(release, "release");
       const codes = await Promise.all(exits);
