@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 import { readPickforgeEnv } from "./packages/core/src/env-compat.js";
+import { exitLoggingForksPool } from "./test/worker-exit-pool.js";
 
 const runLiveAndroid =
   readPickforgeEnv(process.env, "LIVE_ANDROID") === "1";
@@ -29,6 +30,7 @@ export default defineConfig({
     },
   },
   test: {
+    pool: exitLoggingForksPool,
     globalSetup: ["./test/host-display-guard.ts"],
     include: ["packages/*/test/**/*.test.ts", "test/**/*.test.ts"],
     exclude: runLiveAndroid ? [] : ["packages/android/test/integration.test.ts"],
