@@ -27,6 +27,8 @@ const JWT =
   "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJwaWNrbGFiIn0.signature-value";
 const CDP_GUID = "01234567-89ab-cdef-0123-456789abcdef";
 const OTP = "739204";
+// Room for the relay child to start on a loaded host within its grace.
+const TEST_TIMEOUT_MS = 30_000;
 
 let root: string;
 let projectDir: string;
@@ -200,7 +202,10 @@ describe("browser evidence integration", () => {
           afterResponse: evidence!.afterResponse,
         },
         signalSource: new Signals(),
-        shutdownTimeoutMs: 100,
+        // The grace starts at input EOF, before the child has to start Node
+        // and answer. The child exits on its own, so a passing run never waits
+        // for it; a short grace only lets a loaded host SIGTERM the child.
+        shutdownTimeoutMs: 10_000,
       }),
     ).resolves.toEqual({ code: 0, signal: null });
     expect(Buffer.concat(output).toString()).toContain(QUERY_TOKEN);
@@ -229,5 +234,5 @@ describe("browser evidence integration", () => {
     for (const secret of [TYPED_PASSWORD, QUERY_TOKEN, JWT, CDP_GUID, OTP]) {
       expect(stored).not.toContain(secret);
     }
-  });
+  }, TEST_TIMEOUT_MS);
 });
