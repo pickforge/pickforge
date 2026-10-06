@@ -42,13 +42,57 @@ function runScopeId(name: string): string {
 // Whether this host delegates a cgroup to us. Cgroup-only tests skip
 // explicitly (visible in the run summary) rather than passing silently, and
 // the mechanism the runner selected is printed so CI logs record it.
-const probe = createContainmentScope({ id: runScopeId("desk-probe") });
+//
+// The probe scope is created by the create worker from inside a private
+// parent cgroup. Created in the shared delegated cgroup, a concurrent
+// creator's prune could remove it between its mkdir and its cgroup.kill
+// check, and the probe would then report "marker" on a delegated host. When
+// the private parent cannot be made, the worker probes in place: a host that
+// refuses that mkdir also refuses the probe's own, so no prune is involved.
+const ownCgroup = readOwnCgroupPath();
+const delegatedDir =
+  ownCgroup === undefined ? undefined : path.resolve(path.join("/sys/fs/cgroup", ownCgroup));
+const probe = probeContainmentScope();
 const cgroupAvailable = probe.mechanism === "cgroup";
-await destroyContainmentScope(probe, { termTimeoutMs: 100, killTimeoutMs: 100 });
 console.log(
   `[containment] mechanism available on this host: ${probe.mechanism}` +
-    (cgroupAvailable ? ` (${path.dirname(probe.cgroupDir as string)})` : ""),
+    (cgroupAvailable ? ` (${delegatedDir})` : ""),
 );
+
+function probeContainmentScope(): ContainmentScope {
+  let parent: string | undefined;
+  try {
+    if (delegatedDir !== undefined) {
+      parent = fs.mkdtempSync(path.join(delegatedDir, "desk-probe-"));
+    }
+  } catch {
+    parent = undefined;
+  }
+  const id = runScopeId("desk-probe");
+  const report = path.join(root, "probe-scope.json");
+  const worker = path.join(here, "workers", "containment-create-worker.ts");
+  try {
+    const result = spawnSync(BUN, [worker, parent ?? "-", id, report], {
+      stdio: ["ignore", "ignore", "pipe"],
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    if (result.status !== 0) {
+      throw new Error(`containment probe worker failed (${result.status}): ${result.stderr}`);
+    }
+    return JSON.parse(fs.readFileSync(report, "utf8")).scope as ContainmentScope;
+  } finally {
+    if (parent !== undefined) {
+      for (const dir of [path.join(parent, `pickforge-${id}`), parent]) {
+        try {
+          fs.rmdirSync(dir);
+        } catch {
+          /* already removed */
+        }
+      }
+    }
+  }
+}
 const itWithCgroup = it.skipIf(!cgroupAvailable);
 
 /**
@@ -283,7 +327,7 @@ describe("containment scope creation", () => {
     // inspected. The worker creates it from inside a private parent cgroup
     // instead; its name has no `pickforge-` prefix, so no prune touches it.
     const parent = cgroupAvailable
-      ? fs.mkdtempSync(path.join(path.dirname(probe.cgroupDir as string), "desk-create-"))
+      ? fs.mkdtempSync(path.join(delegatedDir as string, "desk-create-"))
       : undefined;
     const id = runScopeId("desk-test01");
     const report = path.join(root, "create-scope.json");
@@ -300,7 +344,6 @@ describe("containment scope creation", () => {
       expect(scope.mechanism).toBe(cgroupAvailable ? "cgroup" : "marker");
       if (parent !== undefined) {
         expect(scope.cgroupDir).toBe(path.join(parent, `pickforge-${id}`));
-        expect(scope.cgroupDir).toMatch(/^\/sys\/fs\/cgroup\//);
         expect(existed).toBe(true);
         expect(problem).toBeNull();
       }
@@ -1577,7 +1620,7 @@ describe("scope re-creation", () => {
     // prunes empty scopes in the shared delegated cgroup, so it could remove
     // the re-created scope before the assertions run.
     const parent = fs.mkdtempSync(
-      path.join(path.dirname(probe.cgroupDir as string), "desk-recreate-"),
+      path.join(delegatedDir as string, "desk-recreate-"),
     );
     const cgroupDir = path.join(parent, "pickforge-desk-recreate");
     try {
