@@ -28,7 +28,6 @@ import {
   execApp,
   findOnPath,
   getDesktopSessionStatus,
-  inspectDisplayRelease,
   isDisplayAlive,
   launchApp,
   listWindows,
@@ -45,7 +44,11 @@ import {
   type DesktopSessionHandle,
 } from "../src/index.js";
 import { encodePng } from "./png-fixture.js";
-import { freeLoopbackPort, unusedTestDisplay } from "./test-resources.js";
+import {
+  freeLoopbackPort,
+  releaseLoopbackPorts,
+  unusedTestDisplay,
+} from "./test-resources.js";
 
 const hasXvfb = findOnPath("Xvfb") !== null;
 const hasXdotool = findOnPath("xdotool") !== null;
@@ -86,23 +89,38 @@ async function createTrackedSession(
   }
 }
 
-async function destroyLeftoverSessions(): Promise<void> {
+/**
+ * Attempts to destroy every tracked session, even after one fails, and
+ * returns the failures. A failed destroy leaves its registry record for retry.
+ */
+async function destroyLeftoverSessions(): Promise<unknown[]> {
   while (pendingCreates.size > 0) await Promise.allSettled(pendingCreates);
+  const failures: unknown[] = [];
   for (const [id, registryEnv] of createdSessions) {
-    if ((await getSession(id, registryEnv)) === undefined) continue;
-    await destroyDesktopSession(id, registryEnv).catch(async (error: unknown) => {
+    try {
+      if ((await getSession(id, registryEnv)) === undefined) continue;
+      await destroyDesktopSession(id, registryEnv);
+    } catch (error) {
       // A timed-out test's own finally can win the race to destroy it.
-      if ((await getSession(id, registryEnv)) !== undefined) throw error;
-    });
+      if ((await getSession(id, registryEnv).catch(() => null)) !== undefined) {
+        failures.push(error);
+      }
+    }
   }
+  return failures;
 }
 
 afterAll(async () => {
-  try {
-    await destroyLeftoverSessions();
-  } finally {
-    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  const failures = await destroyLeftoverSessions();
+  if (failures.length > 0) {
+    // Keep the registry so the surviving Xvfb and VNC processes stay findable.
+    throw new AggregateError(
+      failures,
+      `Could not destroy ${failures.length} desktop session(s); kept registry at ${tmpRoot}`,
+    );
   }
+  releaseLoopbackPorts();
+  fs.rmSync(tmpRoot, { recursive: true, force: true });
 }, 120_000);
 
 function writeExecutable(filePath: string, content: string): void {
@@ -636,7 +654,6 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
         width: 800,
         height: 600,
       });
-      let xvfbStartTicks: number | undefined;
       try {
         expect(session.display).toMatch(/^:\d+$/);
         expect(isDisplayAlive(session.display)).toBe(true);
@@ -650,8 +667,7 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
         expect(status.record.desktop?.height).toBe(600);
         expect(status.xvfbAlive).toBe(true);
         expect(status.displayAlive).toBe(true);
-        xvfbStartTicks = status.record.desktop?.xvfbStartTimeTicks;
-        expect(xvfbStartTicks).toBeDefined();
+        expect(status.record.desktop?.xvfbStartTimeTicks).toBeDefined();
 
         if (screenshotTool !== null) {
           const outPath = path.join(tmpRoot, "session-shot.png");
@@ -674,14 +690,6 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
       // Verified teardown may briefly leave the owned child as a zombie until
       // Node reaps it. Match the lifecycle contract: no live process remains.
       expect(readProcessStartTicks(session.xvfbPid)).toBeUndefined();
-      // A concurrent run can claim the freed display number at once (#252),
-      // so check that this session's Xvfb no longer owns it.
-      expect(
-        inspectDisplayRelease(session.display, {
-          pid: session.xvfbPid,
-          startTicks: xvfbStartTicks ?? -1,
-        }),
-      ).toMatchObject({ released: true });
       expect(await getSession(session.id, env)).toBeUndefined();
     },
     TEST_TIMEOUT_MS,

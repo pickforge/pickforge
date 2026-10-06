@@ -12,6 +12,7 @@ import {
   isDisplayAlive,
   startXvfb,
 } from "../src/index.js";
+import { unusedTestDisplay } from "./test-resources.js";
 
 const BUN = /[\\/]bun$/.test(process.execPath) ? process.execPath : "bun";
 const worker = fileURLToPath(
@@ -20,9 +21,13 @@ const worker = fileURLToPath(
 const roots: string[] = [];
 const displays = new Set<number>();
 
-function testDisplay(): number {
-  const display = 10_000 + Math.floor(Math.random() * 40_000);
-  displays.add(display);
+/**
+ * A display whose `span` numbers no lock or socket claims now. Teardown
+ * removes their artifacts, so never pick a number a live server may own.
+ */
+function testDisplay(span = 1): number {
+  const display = Number(unusedTestDisplay(span).slice(1));
+  for (let offset = 0; offset < span; offset += 1) displays.add(display + offset);
   return display;
 }
 
@@ -406,9 +411,8 @@ describe("cross-process display allocation", () => {
     const eventLog = path.join(root, "events.log");
     const gate = path.join(root, "gate");
     const release = path.join(root, "release");
-    const start = testDisplay();
     const count = 12;
-    for (let offset = 0; offset < count + 5; offset += 1) displays.add(start + offset);
+    const start = testDisplay(count + 5);
     writeContendedXvfb(binDir, eventLog, path.join(root, "active-"));
 
     const readyFiles = Array.from({ length: count }, (_, index) =>

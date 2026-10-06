@@ -50,7 +50,7 @@ import {
   startHumanTakeover,
 } from "../src/takeover.js";
 import { startVnc } from "../src/vnc.js";
-import { freeLoopbackPort } from "./test-resources.js";
+import { freeLoopbackPort, releaseLoopbackPorts } from "./test-resources.js";
 
 let root: string;
 let binDir: string;
@@ -185,6 +185,7 @@ afterEach(async () => {
       await stopPid(pid, { timeoutMs: 500 }).catch(() => {});
     }
   }
+  releaseLoopbackPorts();
   await fs.promises.rm(root, { recursive: true, force: true });
 });
 
