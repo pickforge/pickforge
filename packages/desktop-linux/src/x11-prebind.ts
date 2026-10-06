@@ -71,6 +71,25 @@ function verifyBindings(keyboard: Keyboard, bindings: Binding[], points: Set<num
   if (![...points].every((cp) => available.has(cp))) throw typingFailure();
 }
 
+async function prepareWire(wire: X11Wire, desired: number[][], family: XdotoolFamily, points: Set<number>, preparationDeadline: number): Promise<void> {
+  const { min, max } = await wire.hello();
+  const opcode = await negotiateXkb(wire);
+  // Parse and plan before the grab, so contention cannot spend the grab
+  // bound on them. The grabbed reread keeps that plan only when the live
+  // map is byte-identical; any change is planned again under the grab.
+  const free = await readKeymap(wire, opcode, min, max);
+  const planned = planBindings(free.keyboard, desired, family, points, () => wire.check());
+  wire.boundGrab(preparationDeadline);
+  wire.send(request(36));
+  const grabbed = await readKeymap(wire, opcode, min, max, free);
+  const bindings = grabbed === free ? planned : planBindings(grabbed.keyboard, desired, family, points, () => wire.check());
+  for (const binding of bindings) changeBinding(wire, binding);
+  const verified = bindings.length === 0 ? grabbed.keyboard : await readKeyboard(wire, opcode, min, max);
+  verifyBindings(verified, bindings, points, family, () => wire.check());
+  wire.send(request(37));
+  if ((await wire.reply(request(43))).length !== 32) throw typingFailure();
+}
+
 /** Caller holds the agent permit for this entire operation AND dispatch.
  * Bindings are never restored, even on partial failure: queued client events
  * may still reference them. The live map is the only allocation ledger.
@@ -88,22 +107,7 @@ export async function prepareText(sessionId: string, display: string, text: stri
     if (!target.alive()) throw typingFailure();
     const wire = new X11Wire(target.path, deadline, target.alive, preparationDeadline);
     try {
-      const { min, max } = await wire.hello();
-      const opcode = await negotiateXkb(wire);
-      // Parse and plan before the grab, so contention cannot spend the grab
-      // bound on them. The grabbed reread keeps that plan only when the live
-      // map is byte-identical; any change is planned again under the grab.
-      const free = await readKeymap(wire, opcode, min, max);
-      const planned = planBindings(free.keyboard, desired, family, points, () => wire.check());
-      wire.boundGrab(preparationDeadline);
-      wire.send(request(36));
-      const grabbed = await readKeymap(wire, opcode, min, max, free);
-      const bindings = grabbed === free ? planned : planBindings(grabbed.keyboard, desired, family, points, () => wire.check());
-      for (const binding of bindings) changeBinding(wire, binding);
-      const verified = bindings.length === 0 ? grabbed.keyboard : await readKeyboard(wire, opcode, min, max);
-      verifyBindings(verified, bindings, points, family, () => wire.check());
-      wire.send(request(37));
-      if ((await wire.reply(request(43))).length !== 32) throw typingFailure();
+      await prepareWire(wire, desired, family, points, preparationDeadline);
       return wire.retain();
     } catch (error) {
       // Failure closes even a queued/active grab. Success transfers ownership
