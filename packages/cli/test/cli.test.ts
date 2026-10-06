@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ensureCliBuilt } from "./build-once.js";
+import { cliSpawnTimeout } from "./spawn-timeout.js";
 
 const cliPath = fileURLToPath(new URL("../dist/pickforge-lab.js", import.meta.url));
 
@@ -251,7 +252,7 @@ describe("pickforge-lab doctor", () => {
     expect(nonOk).toEqual(labUserExists ? [] : [{ id: "lab-user", status: "warn" }]);
     const text = await runCli(["doctor", ...args], env, tmpDir);
     expect(text.code).toBe(expectedCode);
-  });
+  }, cliSpawnTimeout(2));
 
   it("creates the pickforge-lab home with --fix and skips privileged repairs", async () => {
     const env = makeEnv(tmpDir);

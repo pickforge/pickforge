@@ -6,6 +6,7 @@ import { listRuns, readActions } from "@pickforge/lab-core";
 import { windowFixture } from "../../desktop-linux/test/windows-fixture.js";
 import { buildProgram } from "../src/program.js";
 import { ensureCliBuilt } from "./build-once.js";
+import { cliSpawnTimeout } from "./spawn-timeout.js";
 
 beforeAll(ensureCliBuilt, 300_000);
 
@@ -43,7 +44,7 @@ it("runs the rebuilt CLI with literal selector argv", () => {
   ], { env: fixture.env, timeout: 10_000, encoding: "utf8" });
   expect(result.status, result.stderr).toBe(0);
   expect(JSON.parse(result.stdout)).toMatchObject({ ok: true, window: { id: "22", name } });
-});
+}, cliSpawnTimeout(1));
 
 it("records focus timeout errors and refuses ambiguous names", async () => {
   fixture.state({ ignore: true });

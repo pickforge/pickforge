@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ensureCliBuilt } from "./build-once.js";
+import { cliSpawnTimeout } from "./spawn-timeout.js";
 
 const cliPath = fileURLToPath(new URL("../dist/pickforge-lab.js", import.meta.url));
 
@@ -197,7 +198,7 @@ describe("pickforge-lab agents link cursor", () => {
     const secondReport = parseJson(again);
     expect(secondReport.changed).toBe(false);
     expect(backupsIn(tmpDir)).toHaveLength(1);
-  });
+  }, cliSpawnTimeout(2));
 
   it("registers only the core server by default and the browser relay with --browser", async () => {
     const configPath = path.join(tmpDir, "cursor-mcp.json");
@@ -251,7 +252,7 @@ describe("pickforge-lab agents link cursor", () => {
       ),
     );
     expect(again.changed).toBe(false);
-  });
+  }, cliSpawnTimeout(3));
 
   it("retains a mismatching browser entry and reports it in JSON and human output", async () => {
     const configPath = path.join(tmpDir, "cursor-mcp.json");
@@ -293,7 +294,7 @@ describe("pickforge-lab agents link cursor", () => {
         "pickforge-lab-browser"
       ],
     ).toEqual(stale);
-  });
+  }, cliSpawnTimeout(2));
 
   it("creates a missing cursor config at the default path and unlinks it", async () => {
     const linked = await runCli(["agents", "link", "cursor", "--json"], env);
@@ -314,7 +315,7 @@ describe("pickforge-lab agents link cursor", () => {
     expect(
       JSON.parse(fs.readFileSync(configPath, "utf8")).mcpServers,
     ).toBeUndefined();
-  });
+  }, cliSpawnTimeout(3));
 });
 
 describe("pickforge-lab agents link pi", () => {
@@ -389,7 +390,7 @@ describe("pickforge-lab agents link codex", () => {
     const after = fs.readFileSync(configPath, "utf8");
     expect(after).toContain('model = "gpt-5"');
     expect(after).not.toContain("pickforge-lab");
-  });
+  }, cliSpawnTimeout(2));
 
   it("replaces an owned legacy block and reports the migration", async () => {
     const configPath = path.join(tmpDir, "codex-legacy.toml");
@@ -441,7 +442,7 @@ describe("pickforge-lab agents link codex", () => {
     expect(report.registered).toBe(true);
     expect(report.retainedEntries).toEqual(["pickforge-lab-browser"]);
     expect(fs.readFileSync(configPath, "utf8")).toBe(stale);
-  });
+  }, cliSpawnTimeout(2));
 
   it("refuses a foreign [mcp_servers.picklab] section before backing up", async () => {
     const configPath = path.join(tmpDir, "codex-config.toml");
@@ -480,7 +481,7 @@ describe("pickforge-lab agents link claude-code (claude binary absent)", () => {
     expect(withBrowser.instructions).toContain(
       "claude mcp add --scope user pickforge-lab-browser -- pickforge-lab browser devtools-mcp",
     );
-  });
+  }, cliSpawnTimeout(2));
 
   it("registers into an existing ~/.claude.json with a warning", async () => {
     const configPath = path.join(home, ".claude.json");
@@ -769,7 +770,7 @@ describe("pickforge-lab agents add / unlink (custom)", () => {
     expect(
       after.agents.find((agent: any) => agent.name === "my-agent"),
     ).toBeUndefined();
-  }, 30_000);
+  }, cliSpawnTimeout(4));
 
   it("rejects reserved and invalid names", async () => {
     for (const name of ["codex", "../evil"]) {
@@ -780,7 +781,7 @@ describe("pickforge-lab agents add / unlink (custom)", () => {
       expect(result.code).toBe(1);
       expect(parseJson(result).ok).toBe(false);
     }
-  });
+  }, cliSpawnTimeout(2));
 
   it("refuses to overwrite an existing custom agent without --force", async () => {
     const add = (extra: string[]): Promise<CliResult> =>
@@ -804,7 +805,7 @@ describe("pickforge-lab agents add / unlink (custom)", () => {
     const forced = await add(["--force"]);
     expect(forced.code).toBe(0);
     expect(parseJson(forced).ok).toBe(true);
-  }, 30_000);
+  }, cliSpawnTimeout(3));
 
   it("rejects an empty --mcp-command", async () => {
     const result = await runCli(
@@ -859,7 +860,7 @@ describe("pickforge-lab agents doctor", () => {
     expect(
       report.checks.filter((check: any) => check.status === "problem"),
     ).toEqual([]);
-  }, 30_000);
+  }, cliSpawnTimeout(3));
 
   it("inspects nonstandard config paths via --config-path", async () => {
     const configPath = path.join(tmpDir, "custom-codex.toml");
@@ -874,7 +875,7 @@ describe("pickforge-lab agents doctor", () => {
     );
     expect(overridden.code).toBe(1);
     expect(parseJson(overridden).errors.join("\n")).toContain("stale");
-  });
+  }, cliSpawnTimeout(2));
 
   it("rejects malformed --config-path overrides", async () => {
     const result = await runCli(

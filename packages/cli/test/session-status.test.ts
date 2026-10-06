@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ensureCliBuilt } from "./build-once.js";
+import { cliSpawnTimeout } from "./spawn-timeout.js";
 
 const cliPath = fileURLToPath(new URL("../dist/pickforge-lab.js", import.meta.url));
 const DEAD_PID = 4_194_304;
@@ -102,5 +103,5 @@ describe("pickforge-lab session status", () => {
     expect(text.code).toBe(0);
     expect(text.stdout).toContain(`${id}  desktop  dead`);
     expect(text.stdout).toContain("xvfb=dead");
-  });
+  }, cliSpawnTimeout(2));
 });
