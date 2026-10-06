@@ -89,7 +89,7 @@ it.each(["0", "60001", "1.2", "bad"])("reports invalid frame duration %s", async
     ok: false,
     errors: [expect.stringContaining("--frame-ms")],
   });
-});
+}, cliSpawnTimeout(1));
 it("rejects non-evidence and Rust runs with clear errors", async () => {
   const plain = await createRun(project, "plain");
   expect(JSON.parse(cli([plain.runId, "--json"]).stdout).errors[0]).toMatch(/lab evidence run/);
@@ -133,7 +133,7 @@ it("returns preserved export paths and an error when ffmpeg fails", async () => 
   });
   expect(fs.existsSync(result.pointerTrackPath)).toBe(true);
   expect(fs.existsSync(path.join(result.exportDir, "export.json"))).toBe(false);
-});
+}, cliSpawnTimeout(1));
 it("registers options and uses runReported in the source command", async () => {
   const run = await fixture();
   const output = vi.spyOn(console, "log").mockImplementation(() => {});
