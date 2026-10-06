@@ -79,7 +79,7 @@
 - Desktop typing is more reliable on a busy machine. Pickforge now reads and
   plans the keyboard map before it briefly freezes the display, so CPU
   contention no longer uses up the 250 ms freeze limit. If the limit still
-  expires, preparation retries up to three times within its 3 second budget.
+  expires, preparation makes up to three attempts within its 3 second budget.
   When preparation fails, no text is sent. (#222)
 
 ## Validation
