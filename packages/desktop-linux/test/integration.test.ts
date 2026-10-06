@@ -40,9 +40,11 @@ import {
   startXvfb,
   typeText,
   waitForWindow,
+  type CreateDesktopSessionOptions,
   type DesktopSessionHandle,
 } from "../src/index.js";
 import { encodePng } from "./png-fixture.js";
+import { freeLoopbackPort, unusedTestDisplay } from "./test-resources.js";
 
 const hasXvfb = findOnPath("Xvfb") !== null;
 const hasXdotool = findOnPath("xdotool") !== null;
@@ -63,9 +65,44 @@ fs.mkdirSync(home, { recursive: true });
 fs.mkdirSync(projectDir, { recursive: true });
 const env: EnvLike = { ...process.env, PICKFORGE_HOME: home };
 
-afterAll(() => {
-  fs.rmSync(tmpRoot, { recursive: true, force: true });
-});
+// A test that exceeds its timeout keeps running after vitest moves on. Its own
+// finally then meets a deleted registry or a stopped worker, and the session's
+// Xvfb outlives the run (#252). Track every session so teardown can stop it.
+const pendingCreates = new Set<Promise<DesktopSessionHandle>>();
+const createdSessions = new Map<string, EnvLike>();
+
+async function createTrackedSession(
+  opts: CreateDesktopSessionOptions,
+): Promise<DesktopSessionHandle> {
+  const pending = createDesktopSession(opts);
+  pendingCreates.add(pending);
+  try {
+    const session = await pending;
+    createdSessions.set(session.id, opts.registryEnv ?? process.env);
+    return session;
+  } finally {
+    pendingCreates.delete(pending);
+  }
+}
+
+async function destroyLeftoverSessions(): Promise<void> {
+  while (pendingCreates.size > 0) await Promise.allSettled(pendingCreates);
+  for (const [id, registryEnv] of createdSessions) {
+    if ((await getSession(id, registryEnv)) === undefined) continue;
+    await destroyDesktopSession(id, registryEnv).catch(async (error: unknown) => {
+      // A timed-out test's own finally can win the race to destroy it.
+      if ((await getSession(id, registryEnv)) !== undefined) throw error;
+    });
+  }
+}
+
+afterAll(async () => {
+  try {
+    await destroyLeftoverSessions();
+  } finally {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+}, 120_000);
 
 function writeExecutable(filePath: string, content: string): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -111,8 +148,9 @@ describe("Xvfb startup failure ownership", () => {
   });
 
   it("reports an exited child with its partial ownership state", async () => {
+    const display = unusedTestDisplay();
     const error = await startXvfb({
-      display: ":240",
+      display,
       logDir: path.join(tmpRoot, "xvfb-exit"),
       env: { ...fakeEnv, FAKE_XVFB_MODE: "exit" },
       waitTimeoutMs: 1000,
@@ -121,7 +159,7 @@ describe("Xvfb startup failure ownership", () => {
     expect(error).toMatchObject({
       reason: "exited",
       partial: {
-        display: ":240",
+        display,
         cleanupConfirmed: true,
       },
     });
@@ -129,10 +167,11 @@ describe("Xvfb startup failure ownership", () => {
   });
 
   it("reports abort only after the spawned group is confirmed gone", async () => {
+    const display = unusedTestDisplay();
     const controller = new AbortController();
     setTimeout(() => controller.abort(), 100);
     const error = await startXvfb({
-      display: ":241",
+      display,
       logDir: path.join(tmpRoot, "xvfb-abort"),
       env: { ...fakeEnv, FAKE_XVFB_MODE: "stall" },
       signal: controller.signal,
@@ -142,7 +181,7 @@ describe("Xvfb startup failure ownership", () => {
     expect(error).toMatchObject({
       reason: "aborted",
       partial: {
-        display: ":241",
+        display,
         cleanupConfirmed: true,
       },
     });
@@ -238,7 +277,7 @@ describe("createDesktopSession registry reaping", () => {
       isolatedEnv,
     );
 
-    const session = await createDesktopSession({
+    const session = await createTrackedSession({
       projectDir,
       registryEnv: isolatedEnv,
       env: { PATH: `${binDir}${path.delimiter}/usr/bin${path.delimiter}/bin` },
@@ -249,7 +288,7 @@ describe("createDesktopSession registry reaping", () => {
     } finally {
       await destroyDesktopSession(session.id, isolatedEnv).catch(() => {});
     }
-  });
+  }, TEST_TIMEOUT_MS);
 });
 
 describe("screenshot tool detection failure", () => {
@@ -386,11 +425,6 @@ describe("startVnc startup supervision", () => {
   const dyingBin = path.join(tmpRoot, "fake-vnc-dying");
   const listeningBin = path.join(tmpRoot, "fake-vnc-listening");
   const delayedBin = path.join(tmpRoot, "fake-vnc-delayed");
-  // Below the kernel's local port range (32768-60999 by default), so no
-  // unrelated process on a busy runner can be handed these ports while the
-  // test runs and make the fake server fail to bind.
-  const DYING_VNC_PORT = 21_791;
-  const LISTENING_VNC_PORT = 21_792;
   const BIND_DELAY_MS = 300;
 
   /**
@@ -445,7 +479,7 @@ describe("startVnc startup supervision", () => {
     await expect(
       startVnc({
         display: DEAD_DISPLAY,
-        port: DYING_VNC_PORT,
+        port: await freeLoopbackPort(),
         logDir: path.join(tmpRoot, "vnc-dying"),
         env: { PATH: dyingBin },
       }),
@@ -455,14 +489,15 @@ describe("startVnc startup supervision", () => {
   it("spawns the detected binary and waits for its port to listen", async () => {
     // This fake only binds after a delay, so a supervisor that returned as
     // soon as the process was spawned would leave nothing to connect to.
+    const port = await freeLoopbackPort();
     const handle = await startVnc({
       display: DEAD_DISPLAY,
-      port: LISTENING_VNC_PORT,
+      port,
       logDir: path.join(tmpRoot, "vnc-listening"),
       env: { PATH: delayedBin },
     });
     try {
-      expect(handle.port).toBe(LISTENING_VNC_PORT);
+      expect(handle.port).toBe(port);
       expect(isPidAlive(handle.pid)).toBe(true);
       await expect(portAccepts(handle.port)).resolves.toBe(true);
     } finally {
@@ -473,7 +508,7 @@ describe("startVnc startup supervision", () => {
   it.skipIf(!hasXvfb)(
     "creates an explicitly writable VNC control session",
     async () => {
-      const session = await createDesktopSession({
+      const session = await createTrackedSession({
         projectDir,
         registryEnv: env,
         vncControl: true,
@@ -495,7 +530,7 @@ describe("startVnc startup supervision", () => {
   it.skipIf(!hasXvfb)(
     "threads the spawn env from createDesktopSession through to vnc",
     async () => {
-      const session = await createDesktopSession({
+      const session = await createTrackedSession({
         projectDir,
         registryEnv: env,
         vnc: true,
@@ -527,8 +562,8 @@ describe.skipIf(!hasXvfb)("display allocation under contention", () => {
     "gives concurrent sessions distinct, independently destroyable displays",
     async () => {
       const settled = await Promise.allSettled([
-        createDesktopSession({ projectDir, registryEnv: env }),
-        createDesktopSession({ projectDir, registryEnv: env }),
+        createTrackedSession({ projectDir, registryEnv: env }),
+        createTrackedSession({ projectDir, registryEnv: env }),
       ]);
       const sessions = settled
         .filter(
@@ -570,7 +605,7 @@ describe.skipIf(!hasXvfb)("display allocation under contention", () => {
   it(
     "refuses an explicit display owned by another server",
     async () => {
-      const session = await createDesktopSession({
+      const session = await createTrackedSession({
         projectDir,
         registryEnv: env,
       });
@@ -594,7 +629,7 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
   it(
     "runs an xvfb session and screenshots the display",
     async () => {
-      const session = await createDesktopSession({
+      const session = await createTrackedSession({
         projectDir,
         registryEnv: env,
         width: 800,
@@ -644,7 +679,7 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
   it(
     "keeps a connecting client when the last running client disconnects",
     async () => {
-      const session = await createDesktopSession({ projectDir, registryEnv: env });
+      const session = await createTrackedSession({ projectDir, registryEnv: env });
       const socket = net.createConnection(
         `/tmp/.X11-unix/X${parseDisplayNumber(session.display)}`,
       );
@@ -682,7 +717,7 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
   it.skipIf(!hasZenity)(
     "keeps a GTK exec client on Xvfb despite inherited Wayland variables",
     async () => {
-      const session = await createDesktopSession({
+      const session = await createTrackedSession({
         projectDir,
         registryEnv: env,
       });
@@ -736,7 +771,7 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
   it.skipIf(!hasXterm)(
     "launches xterm and drives click, type, and key input",
     async () => {
-      const session = await createDesktopSession({
+      const session = await createTrackedSession({
         projectDir,
         registryEnv: env,
       });
@@ -819,7 +854,7 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
   it.skipIf(!hasXterm)(
     "matches literal string window patterns containing regex metacharacters",
     async () => {
-      const session = await createDesktopSession({
+      const session = await createTrackedSession({
         projectDir,
         registryEnv: env,
       });
@@ -857,7 +892,7 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
   it.skipIf(screenshotTool === null)(
     "records a screenshot artifact in a run",
     async () => {
-      const session = await createDesktopSession({
+      const session = await createTrackedSession({
         projectDir,
         registryEnv: env,
       });
@@ -899,7 +934,7 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
     "completes repeated-coordinate input and a zero-distance drag",
     async () => {
       // The managed VNC client keeps Xvfb from resetting between input calls.
-      const session = await createDesktopSession({ projectDir, registryEnv: env, vnc: true });
+      const session = await createTrackedSession({ projectDir, registryEnv: env, vnc: true });
       try {
         const repeated = { display: session.display, sessionId: session.id, env, x: 45, y: 45 };
         await move(repeated);
@@ -930,7 +965,7 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
   it.skipIf(!hasVnc)(
     "attaches x11vnc to the session display",
     async () => {
-      const session = await createDesktopSession({
+      const session = await createTrackedSession({
         projectDir,
         registryEnv: env,
         vnc: true,
@@ -953,7 +988,7 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
     "fails session creation cleanly when VNC is requested without x11vnc",
     async () => {
       await expect(
-        createDesktopSession({ projectDir, registryEnv: env, vnc: true }),
+        createTrackedSession({ projectDir, registryEnv: env, vnc: true }),
       ).rejects.toThrow(/x11vnc/);
     },
     TEST_TIMEOUT_MS,
