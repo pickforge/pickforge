@@ -18,6 +18,13 @@ if (
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
+// The test reads the result as soon as the file exists, so it must appear
+// complete: write it aside and rename it into place.
+const writeResult = (value: object): void => {
+  fs.writeFileSync(`${result}.tmp`, JSON.stringify(value));
+  fs.renameSync(`${result}.tmp`, result);
+};
+
 fs.writeFileSync(ready, "ready");
 while (!fs.existsSync(gate)) await sleep(5);
 
@@ -34,17 +41,14 @@ try {
       PATH: `${binDir}:${process.env.PATH ?? ""}`,
     },
   });
-  fs.writeFileSync(result, JSON.stringify({ ok: true, display: xvfb.display }));
+  writeResult({ ok: true, display: xvfb.display });
   while (!fs.existsSync(release)) await sleep(5);
   const stopped = await stopXvfb(xvfb.pid, xvfb.startTimeTicks);
   if (!stopped) process.exitCode = 3;
 } catch (error) {
-  fs.writeFileSync(
-    result,
-    JSON.stringify({
-      ok: false,
-      error: error instanceof Error ? error.message : String(error),
-    }),
-  );
+  writeResult({
+    ok: false,
+    error: error instanceof Error ? error.message : String(error),
+  });
   process.exitCode = 1;
 }

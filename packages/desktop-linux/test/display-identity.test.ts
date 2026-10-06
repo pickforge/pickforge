@@ -11,6 +11,7 @@ vi.mock("@pickforge/lab-core", async (importOriginal) => {
 
 import { isPidAlive, type EnvLike } from "@pickforge/lab-core";
 import { startXvfb, XvfbStartError } from "../src/display.js";
+import { unusedTestDisplay } from "./test-resources.js";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-xvfb-identity-"));
 const binDir = path.join(root, "bin");
@@ -38,7 +39,7 @@ describe("Xvfb identity capture", () => {
   it("reaps the still-owned child instead of handing off an unverifiable PID", async () => {
     const onSpawn = vi.fn();
     const error = await startXvfb({
-      display: ":242",
+      display: unusedTestDisplay(),
       logDir: path.join(root, "logs"),
       env,
       onSpawn,
