@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -27,6 +28,10 @@ const CGROUP_ROOT = "/sys/fs/cgroup";
 const SCOPE_ID = "desk-sim01";
 const SCOPE_DIR = path.join(CGROUP_ROOT, `pickforge-${SCOPE_ID}`);
 const PARENT_PROCS = path.join(CGROUP_ROOT, "cgroup.procs");
+// The marker sweep signals every process on the host that carries the token,
+// so a fixed token would let a concurrent run of this file kill this run's
+// members (#253).
+const TOKEN = randomBytes(32).toString("hex");
 
 interface FakeCgroup {
   members: number[];
@@ -181,7 +186,7 @@ function installFakeCgroup(fake: FakeCgroup): void {
 function scope(): ContainmentScope {
   return {
     id: SCOPE_ID,
-    token: "b".repeat(64),
+    token: TOKEN,
     mechanism: "cgroup",
     cgroupDir: SCOPE_DIR,
   };
