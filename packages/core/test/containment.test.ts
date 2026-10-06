@@ -134,6 +134,14 @@ function spawnSupervised(
   return pid;
 }
 
+/**
+ * Deadlines for cleanups whose outcome does not turn on timing. Confirming an
+ * empty scope takes two full /proc scans, and on a loaded host one scan can
+ * outlast a few hundred milliseconds. A clean run still returns after about
+ * two scans.
+ */
+const SWEEP_BUDGET = { termTimeoutMs: 2_000, killTimeoutMs: 1_000 };
+
 interface Finished {
   code: number | null;
   stderr: string;
@@ -573,7 +581,7 @@ describe("containment refuses to signal anything it does not own", () => {
     // shell and unrelated user processes live) must be refused outright.
     const result = await destroyContainmentScope(
       { id: "desk-own", token: "6".repeat(64), mechanism: "cgroup", cgroupDir: ownDir },
-      { termTimeoutMs: 200, killTimeoutMs: 200 },
+      SWEEP_BUDGET,
     );
     expect(result.confirmed).toBe(false);
     expect(result.reason).toMatch(/refusing cgroup cleanup/);
@@ -597,7 +605,7 @@ describe("containment refuses to signal anything it does not own", () => {
       // tell them apart.
       const result = await destroyContainmentScope(
         { ...mine, cgroupDir: other.cgroupDir as string },
-        { termTimeoutMs: 300, killTimeoutMs: 300 },
+        SWEEP_BUDGET,
       );
       expect(result.confirmed).toBe(false);
       expect(result.reason).toContain(`expected a directory named pickforge-${mine.id}`);
@@ -628,10 +636,7 @@ describe("containment refuses to signal anything it does not own", () => {
         true,
       );
 
-      const result = await destroyContainmentScope(scope, {
-        termTimeoutMs: 300,
-        killTimeoutMs: 300,
-      });
+      const result = await destroyContainmentScope(scope, SWEEP_BUDGET);
       expect(result.confirmed).toBe(false);
       expect(result.reason).toMatch(/do not carry this session's containment token/);
       expect(isPidAlive(supervisor)).toBe(true);
@@ -918,10 +923,7 @@ describe("containment identity safety", () => {
         if (target === pid && signal !== 0) signaledAtReads.push(statReads);
         return kill.call(process, target, signal);
       };
-      const result = await destroyContainmentScope(scope, {
-        termTimeoutMs: 300,
-        killTimeoutMs: 300,
-      });
+      const result = await destroyContainmentScope(scope, SWEEP_BUDGET);
       expect(initialStartTicks).toBe(startTicks);
       expect(statReads).toBeGreaterThanOrEqual(4);
       expect(result.confirmed).toBe(true);
@@ -1001,10 +1003,7 @@ describe("containment identity safety", () => {
         if (target === pid && signal !== 0) terminatingSignals.push(signal);
         return kill.call(process, target, signal);
       };
-      const result = await destroyContainmentScope(scope, {
-        termTimeoutMs: 300,
-        killTimeoutMs: 300,
-      });
+      const result = await destroyContainmentScope(scope, SWEEP_BUDGET);
       expect(initialStartTicks).toBe(startTicks);
       expect(zombieSeen).toBe(true);
       expect(result.confirmed).toBe(true);
@@ -1277,10 +1276,9 @@ describe("containment initial exec discovery", () => {
       const scope = createContainmentScope({ id: "desk-exec-filter-other", useCgroup: false });
       const environReads = hideEnvironment(pid, read, options);
       const procScans = countProcScans();
-      // Confirmation needs two empty scans of all of /proc, and on a loaded
-      // host one scan can outlast a short deadline. The fixture never
-      // settles, so a misclassified exec still fails after these deadlines.
-      const result = await destroyContainmentScope(scope, { termTimeoutMs: 2_000, killTimeoutMs: 1_000 });
+      // The fixture never settles, so a misclassified exec still fails after
+      // these deadlines.
+      const result = await destroyContainmentScope(scope, SWEEP_BUDGET);
       // A misclassified zombie or completed image settles in the same pass,
       // so confirmation alone cannot show the filter held. Only an unresolved
       // exec has its environment read again after the scan.
@@ -1306,10 +1304,7 @@ describe("containment cleanup failure reporting", () => {
       mechanism: "cgroup",
       cgroupDir: fakeCgroup,
     };
-    const result = await destroyContainmentScope(scope, {
-      termTimeoutMs: 200,
-      killTimeoutMs: 200,
-    });
+    const result = await destroyContainmentScope(scope, SWEEP_BUDGET);
     expect(result.confirmed).toBe(false);
     expect(result.reason).toMatch(/refusing cgroup cleanup/);
     // Nothing was written to the impostor.
@@ -1340,17 +1335,14 @@ describe("containment cleanup failure reporting", () => {
       mechanism: "cgroup",
       cgroupDir: "/sys/fs/cgroup/pickforge-gone-cgroup",
     };
-    const result = await destroyContainmentScope(scope, {
-      termTimeoutMs: 200,
-      killTimeoutMs: 200,
-    });
+    const result = await destroyContainmentScope(scope, SWEEP_BUDGET);
     expect(result.confirmed).toBe(true);
   });
 
   it("reports a cgroup scope with no recorded path as unconfirmed", async () => {
     const result = await destroyContainmentScope(
       { id: "desk-nopath", token: "2".repeat(64), mechanism: "cgroup" },
-      { termTimeoutMs: 200, killTimeoutMs: 200 },
+      SWEEP_BUDGET,
     );
     expect(result.confirmed).toBe(false);
     expect(result.reason).toContain("without a cgroup path");
