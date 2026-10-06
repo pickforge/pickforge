@@ -176,6 +176,7 @@ it("checks full capacity before mutation or dispatch", async () => {
   for (let code = 9; code <= 255; code++) server.rows.set(code, [0xffe1]);
   server.rows.delete(254);
   await expect(type("áé")).rejects.toThrow("capacity exhausted");
+  expect(server.requests).not.toContain(36);
   expect(server.changes).toEqual([]);
   expect(server.inputCalls).toBe(0);
 });

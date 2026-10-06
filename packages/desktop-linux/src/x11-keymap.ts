@@ -125,7 +125,7 @@ export async function negotiateXkb(wire: X11Wire): Promise<number> {
 }
 
 /** The parsed map and the raw replies it came from. */
-export interface KeymapRead { keyboard: Keyboard; replies: Buffer[] }
+export interface KeymapRead { keyboard: Keyboard; replies: [Buffer, Buffer, Buffer] }
 
 function sameReply(a: Buffer, b: Buffer): boolean {
   // Bytes 2 and 3 hold the sequence number, which differs between reads.
@@ -147,10 +147,10 @@ export async function readKeymap(wire: X11Wire, opcode: number, min: number, max
   const xkb = request(opcode, 28, 8);
   xkb.writeUInt16LE(0x100, 4); // XkbUseCoreKbd
   xkb.writeUInt16LE(3, 6); // All key types and symbols, no unrelated components.
-  const replies = [modifierReply, coreReply, await wire.reply(xkb)];
+  const replies: KeymapRead["replies"] = [modifierReply, coreReply, await wire.reply(xkb)];
   if (previous && previous.keyboard.min === min && previous.keyboard.max === max
-    && replies.every((reply, i) => sameReply(reply, previous.replies[i]!))) return previous;
-  return { keyboard: { min, max, rows, modifiers, modifierMask, ...parseXkbMap(replies[2]!, min, max, () => wire.check()) }, replies };
+    && replies.every((reply, i) => sameReply(reply, previous.replies[i]))) return previous;
+  return { keyboard: { min, max, rows, modifiers, modifierMask, ...parseXkbMap(replies[2], min, max, () => wire.check()) }, replies };
 }
 
 export async function readKeyboard(wire: X11Wire, opcode: number, min: number, max: number): Promise<Keyboard> {
