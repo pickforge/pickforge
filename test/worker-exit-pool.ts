@@ -25,7 +25,7 @@ function describeWorkerExit(
 class ExitLoggingForksPoolWorker extends ForksPoolWorker {
   override readonly name = POOL_NAME;
   private files: string[] = [];
-  // Vitest posts "stop" first; the worker may then exit by itself with code 0.
+  // Vitest posts "stop" first; the worker may then exit cleanly by itself.
   private stopRequested = false;
   // Vitest's own stop() kills the fork; any exit after that is expected.
   private stopping = false;
@@ -43,7 +43,7 @@ class ExitLoggingForksPoolWorker extends ForksPoolWorker {
     this.stopping = false;
     await super.start();
     const report = (pid: number | undefined, code: number | null, signal: NodeJS.Signals | null): void => {
-      if (this.stopping || (this.stopRequested && signal === null)) return;
+      if (this.stopping || (this.stopRequested && code === 0 && signal === null)) return;
       process.stderr.write(describeWorkerExit(pid, code, signal, this.files));
     };
     // The listener is attached to the child process itself, so `this` is it.
