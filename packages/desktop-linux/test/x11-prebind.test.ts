@@ -176,6 +176,7 @@ it("checks full capacity before mutation or dispatch", async () => {
   for (let code = 9; code <= 255; code++) server.rows.set(code, [0xffe1]);
   server.rows.delete(254);
   await expect(type("áé")).rejects.toThrow("capacity exhausted");
+  expect(server.requests).not.toContain(36);
   expect(server.changes).toEqual([]);
   expect(server.inputCalls).toBe(0);
 });
@@ -445,12 +446,17 @@ const replyFaults: { name: string; opcode: number; mutate: (reply: Buffer, socke
   { name: "timeout", opcode: 101, mutate: () => undefined },
   { name: "death", opcode: 119, mutate: (reply) => { vi.mocked(processIdentityMatches).mockReturnValue(false); return reply; } },
 ];
-it.each(replyFaults)("closes the connection and releases its grab on $name", async (fault) => {
+// A free-read timeout waits for the whole 3 s preparation budget, so only the
+// grabbed read covers it.
+const faultPhases = replyFaults.flatMap((fault) => (["free", "grabbed"] as const)
+  .filter((phase) => phase === "grabbed" || fault.name !== "timeout").map((phase) => ({ ...fault, phase })));
+it.each(faultPhases)("closes the connection and releases any grab on $name in the $phase read", async (fault) => {
   server.fault = (opcode, reply, socket) => {
-    if (opcode === fault.opcode && reply.length > 32) return fault.mutate(reply, socket);
+    if (opcode === fault.opcode && reply.length > 32 && (server.grab !== undefined) === (fault.phase === "grabbed")) return fault.mutate(reply, socket);
     return reply;
   };
   await expect(type("private")).rejects.toThrow("preparation failed");
+  expect(server.requests.includes(36)).toBe(fault.phase === "grabbed");
   expect(server.inputCalls).toBe(0);
   expect(server.changes).toEqual([]);
   const stop = Date.now() + 500;
