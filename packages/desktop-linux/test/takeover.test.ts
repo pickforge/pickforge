@@ -50,20 +50,13 @@ import {
   startHumanTakeover,
 } from "../src/takeover.js";
 import { startVnc } from "../src/vnc.js";
+import { freeLoopbackPort } from "./test-resources.js";
 
 let root: string;
 let binDir: string;
 let env: EnvLike;
 let argvLogPath: string;
 let envLogPath: string;
-// Monotonic across the whole file (never reset per test) so a test that fails
-// before releasing its port never collides with the next test's port.
-let syntheticPort = 15_900;
-
-function nextPort(): number {
-  syntheticPort += 1;
-  return syntheticPort;
-}
 
 async function installFakeVnc(): Promise<void> {
   const script = path.join(binDir, "x11vnc");
@@ -197,7 +190,7 @@ afterEach(async () => {
 
 describe("startHumanTakeover / endHumanTakeover", () => {
   it.each(["private", "inherit"])("switches %s VNC writable and back without changing application policy", async (homePolicy) => {
-    const id = await createDesktop({ vncPort: nextPort(), homePolicy });
+    const id = await createDesktop({ vncPort: await freeLoopbackPort(), homePolicy });
 
     const handle = await startHumanTakeover(id, {
       registryEnv: env,
@@ -238,7 +231,7 @@ describe("startHumanTakeover / endHumanTakeover", () => {
   });
 
   it("records a takeover_start and takeover_<reason> evidence transition, and reverts VNC to read-only on the cancelled path", async () => {
-    const id = await createDesktop({ vncPort: nextPort() });
+    const id = await createDesktop({ vncPort: await freeLoopbackPort() });
     const handle = await startHumanTakeover(id, { registryEnv: env, env });
     await endHumanTakeover(handle, { registryEnv: env, env, reason: "cancelled" });
 
@@ -269,7 +262,7 @@ describe("startHumanTakeover / endHumanTakeover", () => {
   });
 
   it("starts the writable and the reverted read-only x11vnc with the session runtime, never the caller's bus", async () => {
-    const id = await createDesktop({ vncPort: nextPort() });
+    const id = await createDesktop({ vncPort: await freeLoopbackPort() });
     const hostile = hostileCallerEnv();
 
     const handle = await startHumanTakeover(id, { registryEnv: env, env: hostile });
@@ -281,7 +274,7 @@ describe("startHumanTakeover / endHumanTakeover", () => {
   });
 
   it("refuses a second takeover while the first is live", async () => {
-    const id = await createDesktop({ vncPort: nextPort() });
+    const id = await createDesktop({ vncPort: await freeLoopbackPort() });
     const handle = await startHumanTakeover(id, { registryEnv: env, env });
     await expect(
       startHumanTakeover(id, { registryEnv: env, env }),
@@ -290,7 +283,7 @@ describe("startHumanTakeover / endHumanTakeover", () => {
   });
 
   it("renews the lease TTL while control is held, and reverts VNC to read-only on the timeout path", async () => {
-    const id = await createDesktop({ vncPort: nextPort() });
+    const id = await createDesktop({ vncPort: await freeLoopbackPort() });
     const handle = await startHumanTakeover(id, { registryEnv: env, env });
     const before = await readHumanLease(id, env);
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -311,14 +304,14 @@ describe("startHumanTakeover / endHumanTakeover", () => {
   });
 
   it("reports renewal failure once the lease is gone (post-timeout)", async () => {
-    const id = await createDesktop({ vncPort: nextPort() });
+    const id = await createDesktop({ vncPort: await freeLoopbackPort() });
     const handle = await startHumanTakeover(id, { registryEnv: env, env });
     await endHumanTakeover(handle, { registryEnv: env, env, reason: "timeout" });
     expect(await renewHumanTakeover(handle, env)).toBeUndefined();
   });
 
   it("refuses to renew a lease that has gone stale by TTL, even though its owner is alive (P0-B)", async () => {
-    const id = await createDesktop({ vncPort: nextPort() });
+    const id = await createDesktop({ vncPort: await freeLoopbackPort() });
     const handle = await startHumanTakeover(id, { registryEnv: env, env });
     // Force the on-disk lease's TTL into the past directly, rather than
     // racing a real wall-clock sleep against real VNC startup timing: the
@@ -345,7 +338,7 @@ describe("startHumanTakeover / endHumanTakeover", () => {
 
 describe("recoverStaleHumanLease (crash recovery)", () => {
   it("stops an orphaned writable VNC, clears the record, and releases a stale lease", async () => {
-    const id = await createDesktop({ vncPort: nextPort() });
+    const id = await createDesktop({ vncPort: await freeLoopbackPort() });
     const handle = await startHumanTakeover(id, { registryEnv: env, env });
     const vncPid = handle.vncPid;
     expect(isPidAlive(vncPid)).toBe(true);
@@ -372,7 +365,7 @@ describe("recoverStaleHumanLease (crash recovery)", () => {
   });
 
   it("leaves a live lease and its writable VNC untouched", async () => {
-    const id = await createDesktop({ vncPort: nextPort() });
+    const id = await createDesktop({ vncPort: await freeLoopbackPort() });
     const handle = await startHumanTakeover(id, { registryEnv: env, env });
 
     const { recovered } = await recoverStaleHumanLease(id, env);
@@ -384,7 +377,7 @@ describe("recoverStaleHumanLease (crash recovery)", () => {
   });
 
   it("bails without touching VNC when the lease is renewed between the check and the stop (P1-C TOCTOU)", async () => {
-    const id = await createDesktop({ vncPort: nextPort() });
+    const id = await createDesktop({ vncPort: await freeLoopbackPort() });
     const handle = await startHumanTakeover(id, { registryEnv: env, env, drainTimeoutMs: 500 });
 
     // Make the lease appear stale (TTL elapsed) to the cheap *initial*
@@ -435,7 +428,7 @@ describe("recoverStaleHumanLease (crash recovery)", () => {
   });
 
   it("is a no-op when there is no lease at all", async () => {
-    const id = await createDesktop({ vncPort: nextPort() });
+    const id = await createDesktop({ vncPort: await freeLoopbackPort() });
     const { recovered } = await recoverStaleHumanLease(id, env);
     expect(recovered).toBe(false);
   });
@@ -443,7 +436,7 @@ describe("recoverStaleHumanLease (crash recovery)", () => {
 
 describe("startHumanTakeover self-healing", () => {
   it("recovers a stale lease left by a crashed takeover, then proceeds", async () => {
-    const id = await createDesktop({ vncPort: nextPort() });
+    const id = await createDesktop({ vncPort: await freeLoopbackPort() });
     const firstHandle = await startHumanTakeover(id, { registryEnv: env, env });
     const staleVncPid = firstHandle.vncPid;
 
@@ -477,7 +470,7 @@ describe("startHumanTakeover against a pre-existing --vnc-control session", () =
     // from the leased takeover this module implements (#21). The two must
     // never be silently conflated: a takeover attempt against a session
     // already writable this way must not corrupt or hijack it.
-    const port = nextPort();
+    const port = await freeLoopbackPort();
     const preExisting = await startVnc({
       display: ":42",
       port,
@@ -510,7 +503,7 @@ describe("startHumanTakeover against a pre-existing --vnc-control session", () =
 describe("ensureSessionVnc recovery integration", () => {
   it("recovers a crash-orphaned writable VNC instead of refusing to watch", async () => {
     const { ensureSessionVnc } = await import("../src/session.js");
-    const id = await createDesktop({ vncPort: nextPort() });
+    const id = await createDesktop({ vncPort: await freeLoopbackPort() });
     const handle = await startHumanTakeover(id, { registryEnv: env, env });
     const staleVncPid = handle.vncPid;
 
@@ -533,7 +526,7 @@ describe("ensureSessionVnc recovery integration", () => {
 
   it("starts a late (watch-time) x11vnc with the session runtime, never the caller's bus", async () => {
     const { ensureSessionVnc } = await import("../src/session.js");
-    const id = await createDesktop({ vncPort: nextPort() });
+    const id = await createDesktop({ vncPort: await freeLoopbackPort() });
 
     const ensured = await ensureSessionVnc(id, { registryEnv: env, env: hostileCallerEnv() });
     expect(ensured.reused).toBe(false);
@@ -544,7 +537,7 @@ describe("ensureSessionVnc recovery integration", () => {
 
   it("still refuses to watch while a live human lease holds writable VNC", async () => {
     const { ensureSessionVnc } = await import("../src/session.js");
-    const id = await createDesktop({ vncPort: nextPort() });
+    const id = await createDesktop({ vncPort: await freeLoopbackPort() });
     const handle = await startHumanTakeover(id, { registryEnv: env, env });
 
     await expect(ensureSessionVnc(id, { registryEnv: env, env })).rejects.toThrow(
@@ -627,7 +620,7 @@ describe("runTakeoverWatchdogLoop (real separate-process)", () => {
   });
 
   it("keeps polling without touching a live lease (never exits early)", async () => {
-    const id = await createDesktop({ vncPort: nextPort() });
+    const id = await createDesktop({ vncPort: await freeLoopbackPort() });
     const handle = await startHumanTakeover(id, { registryEnv: env, env });
 
     // A live lease never makes the watchdog exit on its own — that only
