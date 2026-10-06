@@ -15,6 +15,7 @@ import {
 } from "@modelcontextprotocol/server";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ensureCliBuilt } from "./build-once.js";
+import { cliSpawnTimeout } from "./spawn-timeout.js";
 
 const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const entry = path.join(repoRoot, "packages", "cli", "dist", "pickforge-mcp.js");
@@ -397,7 +398,7 @@ describe("raw MCP stdio wire", () => {
       data: { requested: "2026-08-01", supported: [MODERN_PROTOCOL_REVISION] },
     });
     expect(await modern.finishInput()).toEqual({ code: 0, signal: null });
-  });
+  }, cliSpawnTimeout(2));
 
   it("drops malformed input while keeping stderr bounded and redacted", async () => {
     const wire = new WireProcess();
