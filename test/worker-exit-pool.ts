@@ -25,10 +25,13 @@ function describeWorkerExit(
 class ExitLoggingForksPoolWorker extends ForksPoolWorker {
   override readonly name = POOL_NAME;
   private files: string[] = [];
+  // Vitest posts "stop" first; the worker may then exit by itself with code 0.
+  private stopRequested = false;
+  // Vitest's own stop() kills the fork; any exit after that is expected.
   private stopping = false;
 
   override send(message: WorkerRequest): void {
-    if (message.type === "stop") this.stopping = true;
+    if (message.type === "stop") this.stopRequested = true;
     if (message.type === "run" || message.type === "collect") {
       this.files = message.context.files.map((file) => file.filepath);
     }
@@ -36,14 +39,17 @@ class ExitLoggingForksPoolWorker extends ForksPoolWorker {
   }
 
   override async start(): Promise<void> {
+    this.stopRequested = false;
     this.stopping = false;
     await super.start();
-    // The base class keeps its child process private; read only its pid.
-    const pid = (Reflect.get(this, "_fork") as ChildProcess | undefined)?.pid;
-    this.on("exit", (...args: unknown[]) => {
-      if (this.stopping) return;
-      const [code, signal] = args as [number | null, NodeJS.Signals | null];
+    const report = (pid: number | undefined, code: number | null, signal: NodeJS.Signals | null): void => {
+      if (this.stopping || (this.stopRequested && signal === null)) return;
       process.stderr.write(describeWorkerExit(pid, code, signal, this.files));
+    };
+    // The listener is attached to the child process itself, so `this` is it.
+    this.on("exit", function (this: ChildProcess, ...args: unknown[]) {
+      const [code, signal] = args as [number | null, NodeJS.Signals | null];
+      report(this.pid, code, signal);
     });
   }
 
