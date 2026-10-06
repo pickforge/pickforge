@@ -9,12 +9,12 @@ const DISPLAY_MIN = 10_000;
 const DISPLAY_MAX = 50_000;
 const PICK_ATTEMPTS = 100;
 const handedOutPorts = new Set<number>();
-// One abstract Unix socket per picked port, shared by every test process of
-// this user on the host, so concurrent suites see each other's reservations
-// until the fake or real VNC server binds the port. The kernel frees a socket
+// One abstract Unix socket per picked port, shared by every test process on
+// the host, so concurrent suites see each other's reservations until the fake
+// or real VNC server binds the port. The kernel frees a socket
 // when its owner exits, so a crashed run leaves nothing stale behind.
 const reservations = new Map<number, net.Server>();
-const RESERVATION_PREFIX = `\0pickforge-test-port-${process.getuid?.() ?? "user"}-`;
+const RESERVATION_PREFIX = "\0pickforge-test-port-";
 
 function randomBetween(min: number, max: number): number {
   return min + Math.floor(Math.random() * (max - min));
@@ -30,7 +30,7 @@ function canListen(port: number): Promise<boolean> {
 
 function tryReserve(port: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const server = net.createServer();
+    const server = net.createServer((socket) => socket.destroy());
     server.once("error", () => resolve(false));
     server.listen({ path: `${RESERVATION_PREFIX}${port}` }, () => {
       server.unref();
