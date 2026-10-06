@@ -9,11 +9,17 @@ vi.mock("@pickforge/lab-core", async (original) => {
   const actual = await original<typeof import("@pickforge/lab-core")>();
   return { ...actual, runCommand: vi.fn(), processIdentityMatches: vi.fn(() => true) };
 });
+vi.mock("../src/x11-keymap.js", async (original) => {
+  const actual = await original<typeof import("../src/x11-keymap.js")>();
+  return { ...actual, usableCodepoints: vi.fn(actual.usableCodepoints) };
+});
 import { AGENT_PERMITS_DIR, sessionDataDir, createSession, runCommand, processIdentityMatches, type EnvLike } from "@pickforge/lab-core";
+import { usableCodepoints } from "../src/x11-keymap.js";
 import { typeText } from "../src/input.js";
 import { prepareText } from "../src/x11-prebind.js";
 import { request, X11Wire } from "../src/x11-wire.js";
 import * as target from "../src/x11-target.js";
+const keymap = await vi.importActual<typeof import("../src/x11-keymap.js")>("../src/x11-keymap.js");
 let root: string;
 let env: EnvLike;
 let server: FakeXServer;
@@ -36,6 +42,7 @@ afterEach(async () => {
   for (const wire of server.wires) wire.destroy();
   await server.stop();
   vi.useRealTimers(); vi.restoreAllMocks();
+  vi.mocked(usableCodepoints).mockImplementation(keymap.usableCodepoints);
   fs.rmSync(root, { recursive: true, force: true });
 });
 const prepare = () => prepareText(id, ":190", "áé", env, now + 60000);
@@ -246,7 +253,7 @@ async function grabRetry(drops: number[], before = 0) {
 }
 
 it("retries an expired grab bound on one fresh connection at a time and keeps the failed attempt's bindings", async () => {
-  const { outcome, live } = await grabRetry([2]); // Expires while verifying attempt one's changes.
+  const { outcome, live } = await grabRetry([3]); // Map reads per attempt: free, grabbed, then verification.
   if (outcome instanceof Error) throw outcome;
   expect(server.connections).toBe(2);
   expect(live).toEqual([1, 1]);
@@ -257,7 +264,7 @@ it("retries an expired grab bound on one fresh connection at a time and keeps th
   expect(vi.getTimerCount()).toBe(0);
 });
 
-it.each([[[1, 2, 3], 0, 3], [[1], 2700, 1]])("stops retrying an expired grab at the attempt cap or preparation expiry %#", async (drops, before, connections) => {
+it.each([[[2, 4, 6], 0, 3], [[2], 2700, 1]])("stops retrying an expired grab at the attempt cap or preparation expiry %#", async (drops, before, connections) => {
   const { outcome, live } = await grabRetry(drops, before);
   expect(outcome).toEqual(new Error("Desktop text preparation failed; no text was sent"));
   expect(server.connections).toBe(connections);
@@ -267,14 +274,57 @@ it.each([[[1, 2, 3], 0, 3], [[1], 2700, 1]])("stops retrying an expired grab at 
   expect(vi.getTimerCount()).toBe(0);
 });
 it.each(["capacity", "malformed", "dead"])("does not retry a deterministic grabbed failure: %s", async (kind) => {
-  if (kind === "capacity") for (let code = 9; code <= 255; code++) if (!server.rows.has(code)) server.rows.set(code, [0xffe1]);
   server.fault = (opcode, reply) => {
+    if (!server.grab) return reply;
+    if (opcode === 119 && kind === "capacity") for (let code = 9; code <= 255; code++) if (!server.rows.has(code)) server.rows.set(code, [0xffe1]);
     if (opcode === 101 && kind === "malformed") reply[1] = 0;
     if (opcode === 119 && kind === "dead") vi.mocked(processIdentityMatches).mockReturnValue(false);
     return reply;
   };
   await expect(prepare()).rejects.toThrow(kind === "capacity" ? "capacity exhausted" : /^Desktop text preparation failed; no text was sent$/);
+  expect(server.requests).toContain(36);
   expect(server.connections).toBe(1);
   expect(server.changes).toEqual([]);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+/** Records whether the server was grabbed at each usable-codepoint scan. */
+function scanPhases(): string[] {
+  const phases: string[] = [];
+  vi.mocked(usableCodepoints).mockImplementation((...args) => {
+    phases.push(server.grab ? "grabbed" : "free");
+    return keymap.usableCodepoints(...args);
+  });
+  return phases;
+}
+
+it("plans before the grab and reuses that plan when the grabbed reread is unchanged", async () => {
+  const phases = scanPhases();
+  const anchor = await prepare();
+  // The grabbed reread has new sequence numbers but the same map, so only
+  // verification scans the map under the grab.
+  expect(phases).toEqual(["free", "grabbed"]);
+  const grab = server.requests.indexOf(36);
+  expect(server.requests.slice(grab, grab + 5)).toEqual([36, 119, 101, 135, 100]);
+  expect(server.changes).toEqual([255, 254]);
+  anchor.close();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it.each(["core", "modifier"])("plans again under the grab when the %s map changed after the free read", async (kind) => {
+  const phases = scanPhases();
+  server.fault = (opcode, reply) => {
+    // Another client changes the map between the free read and the grab.
+    if (opcode === 135 && reply.length > 32 && !server.grab) {
+      if (kind === "core") server.rows.set(255, [0x1234]);
+      else server.modifiers.add(255);
+    }
+    return reply;
+  };
+  const anchor = await prepare();
+  expect(phases).toEqual(["free", "grabbed", "grabbed"]);
+  expect(server.changes).toEqual([254, 253]);
+  expect(server.rows.get(255)).toEqual(kind === "core" ? [0x1234] : undefined);
+  anchor.close();
   expect(vi.getTimerCount()).toBe(0);
 });
