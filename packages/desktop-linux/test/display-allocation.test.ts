@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +12,7 @@ import {
   isDisplayAlive,
   startXvfb,
 } from "../src/index.js";
+import { unusedTestDisplay } from "./test-resources.js";
 
 const BUN = /[\\/]bun$/.test(process.execPath) ? process.execPath : "bun";
 const worker = fileURLToPath(
@@ -19,9 +21,13 @@ const worker = fileURLToPath(
 const roots: string[] = [];
 const displays = new Set<number>();
 
-function testDisplay(): number {
-  const display = 10_000 + Math.floor(Math.random() * 40_000);
-  displays.add(display);
+/**
+ * A display whose `span` numbers no lock or socket claims now. Teardown
+ * removes their artifacts, so never pick a number a live server may own.
+ */
+function testDisplay(span = 1): number {
+  const display = Number(unusedTestDisplay(span).slice(1));
+  for (let offset = 0; offset < span; offset += 1) displays.add(display + offset);
   return display;
 }
 
@@ -48,6 +54,87 @@ async function waitForFiles(paths: string[], timeoutMs = 20_000): Promise<void> 
   const deadline = Date.now() + timeoutMs;
   while (paths.some((file) => !fs.existsSync(file))) {
     if (Date.now() >= deadline) throw new Error("Timed out waiting for display workers");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+function displaySocketInodes(display: number): Set<string> {
+  const inodes = new Set<string>();
+  for (const line of fs.readFileSync("/proc/net/unix", "utf8").split("\n")) {
+    const fields = line.trim().split(/\s+/);
+    if (fields[7] === socketPath(display) && fields[6] !== undefined) {
+      inodes.add(fields[6]);
+    }
+  }
+  return inodes;
+}
+
+function holdsSocket(pid: number, inodes: Set<string>): boolean {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(`/proc/${pid}/fd`);
+  } catch {
+    return false;
+  }
+  return entries.some((entry) => {
+    try {
+      const match = /^socket:\[(\d+)]$/.exec(fs.readlinkSync(`/proc/${pid}/fd/${entry}`));
+      return match !== null && inodes.has(match[1]!);
+    } catch {
+      return false;
+    }
+  });
+}
+
+/** Whether the server answers an X11 setup request, so its startup is done. */
+function acceptsX11Setup(display: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection(socketPath(display));
+    const finish = (accepted: boolean) => {
+      socket.destroy();
+      resolve(accepted);
+    };
+    socket.setTimeout(2_000, () => finish(false));
+    socket.once("error", () => finish(false));
+    socket.once("data", (data) => finish(data[0] === 1));
+    socket.once("connect", () => {
+      // Little-endian X11 setup request for protocol 11.0 without auth.
+      socket.write(Buffer.from([0x6c, 0, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+    });
+  });
+}
+
+/**
+ * Wait until `child` verifiably owns the display: its lock names the child,
+ * the child holds the socket /proc/net/unix lists for the path, and the server
+ * has finished startup. Xvfb creates its lock and socket before startup ends,
+ * so file presence alone can race a server that is still starting (#252).
+ */
+async function waitForDisplayOwner(
+  display: number,
+  child: ChildProcess,
+  stderr: () => string,
+  timeoutMs = 20_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(`Xvfb :${display} exited before it owned the display:\n${stderr()}`);
+    }
+    const lockPid = fs.existsSync(lockPath(display))
+      ? Number.parseInt(fs.readFileSync(lockPath(display), "utf8").trim(), 10)
+      : undefined;
+    if (
+      child.pid !== undefined &&
+      lockPid === child.pid &&
+      holdsSocket(child.pid, displaySocketInodes(display)) &&
+      (await acceptsX11Setup(display))
+    ) {
+      return;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`Xvfb :${display} did not own the display in time:\n${stderr()}`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
@@ -247,15 +334,19 @@ describe("display artifact liveness", () => {
       );
       const unrelated = spawn(
         "/usr/bin/Xvfb",
-        [`:${display}`, "-screen", "0", "64x64x8", "-nolisten", "tcp"],
-        { stdio: "ignore" },
+        [`:${display}`, "-screen", "0", "64x64x8", "-nolisten", "tcp", "-noreset"],
+        { stdio: ["ignore", "ignore", "pipe"] },
       );
+      let stderr = "";
+      unrelated.stderr?.on("data", (chunk: Buffer) => {
+        stderr = (stderr + chunk.toString()).slice(-4_000);
+      });
       const unrelatedExit = childExit(unrelated);
-      await waitForFiles([socketPath(display), lockPath(display)]);
-      const socketIdentity = fs.statSync(socketPath(display)).ino;
-      const lockIdentity = fs.statSync(lockPath(display)).ino;
 
       try {
+        await waitForDisplayOwner(display, unrelated, () => stderr);
+        const socketIdentity = fs.statSync(socketPath(display)).ino;
+        const lockIdentity = fs.statSync(lockPath(display)).ino;
         expect(isDisplayAlive(`:${display}`)).toBe(true);
         await expect(
           startXvfb({
@@ -272,6 +363,7 @@ describe("display artifact liveness", () => {
         await unrelatedExit;
       }
     },
+    30_000,
   );
 
   it("returns from destroy with SIGKILL leftovers classified stale and reusable", async () => {
@@ -319,9 +411,8 @@ describe("cross-process display allocation", () => {
     const eventLog = path.join(root, "events.log");
     const gate = path.join(root, "gate");
     const release = path.join(root, "release");
-    const start = testDisplay();
     const count = 12;
-    for (let offset = 0; offset < count + 5; offset += 1) displays.add(start + offset);
+    const start = testDisplay(count + 5);
     writeContendedXvfb(binDir, eventLog, path.join(root, "active-"));
 
     const readyFiles = Array.from({ length: count }, (_, index) =>
