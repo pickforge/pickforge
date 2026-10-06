@@ -27,7 +27,7 @@ let id: string;
 let now: number;
 const success = { ok: true, code: 0, signal: null, stdout: "xdotool version 3.20160805.1", stderr: "", timedOut: false, stdoutTruncated: false, stderrTruncated: false } as const;
 beforeEach(async () => {
-  now = performance.now();
+  now = Math.floor(performance.now()); // Integer ms keep deadline arithmetic exact.
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
   vi.spyOn(performance, "now").mockImplementation(() => now);
   root = fs.mkdtempSync(path.join(os.tmpdir(), "xa-"));
