@@ -13,8 +13,9 @@ import {
 // A sentinel Xvfb pid/display, standing in for a real X server: this suite
 // only exercises the pre-identity Chrome cleanup path, so Xvfb itself is
 // mocked away (no Xvfb binary required, unlike the fake-binary suites in
-// session.test.ts).
-const FAKE_XVFB_PID = 4_194_301;
+// session.test.ts). The kernel caps pid_max at PID_MAX_LIMIT (4194304 on
+// 64-bit) and allocates pids below pid_max, so this pid can never be live.
+const FAKE_XVFB_PID = 4_194_305;
 const FAKE_DISPLAY = ":244";
 
 vi.mock("@pickforge/lab-desktop-linux", async (importOriginal) => {

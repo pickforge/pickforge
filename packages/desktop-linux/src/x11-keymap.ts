@@ -124,17 +124,37 @@ export async function negotiateXkb(wire: X11Wire): Promise<number> {
   return opcode;
 }
 
-export async function readKeyboard(wire: X11Wire, opcode: number, min: number, max: number): Promise<Keyboard> {
-  const { modifiers, modifierMask } = parseModifiers(await wire.reply(request(119)));
+/** The parsed map and the raw replies it came from. */
+export interface KeymapRead { keyboard: Keyboard; replies: [Buffer, Buffer, Buffer] }
+
+function sameReply(a: Buffer, b: Buffer): boolean {
+  // Bytes 2 and 3 hold the sequence number, which differs between reads.
+  return a.length === b.length && a.subarray(0, 2).equals(b.subarray(0, 2)) && a.subarray(4).equals(b.subarray(4));
+}
+
+/** Returns `previous` itself only when every reply is byte-identical to it,
+ * so a plan made from `previous` also holds for this read.
+ */
+export async function readKeymap(wire: X11Wire, opcode: number, min: number, max: number, previous?: KeymapRead): Promise<KeymapRead> {
+  const modifierReply = await wire.reply(request(119));
+  const { modifiers, modifierMask } = parseModifiers(modifierReply);
   if ([...modifiers.keys()].some((code) => code < min || code > max)) throw typingFailure();
   const core = request(101, 8);
   core[4] = min;
   core[5] = max - min + 1;
-  const rows = parseCoreMap(await wire.reply(core), max - min + 1);
+  const coreReply = await wire.reply(core);
+  const rows = parseCoreMap(coreReply, max - min + 1);
   const xkb = request(opcode, 28, 8);
   xkb.writeUInt16LE(0x100, 4); // XkbUseCoreKbd
   xkb.writeUInt16LE(3, 6); // All key types and symbols, no unrelated components.
-  return { min, max, rows, modifiers, modifierMask, ...parseXkbMap(await wire.reply(xkb), min, max, () => wire.check()) };
+  const replies: KeymapRead["replies"] = [modifierReply, coreReply, await wire.reply(xkb)];
+  if (previous && previous.keyboard.min === min && previous.keyboard.max === max
+    && replies.every((reply, i) => sameReply(reply, previous.replies[i]))) return previous;
+  return { keyboard: { min, max, rows, modifiers, modifierMask, ...parseXkbMap(replies[2], min, max, () => wire.check()) }, replies };
+}
+
+export async function readKeyboard(wire: X11Wire, opcode: number, min: number, max: number): Promise<Keyboard> {
+  return (await readKeymap(wire, opcode, min, max)).keyboard;
 }
 
 function translatedLevel(type: KeyType, mask: number): number {
