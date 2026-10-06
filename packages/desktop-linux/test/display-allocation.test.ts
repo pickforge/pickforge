@@ -120,6 +120,7 @@ async function waitForDisplayOwner(
       ? Number.parseInt(fs.readFileSync(lockPath(display), "utf8").trim(), 10)
       : undefined;
     if (
+      child.pid !== undefined &&
       lockPid === child.pid &&
       holdsSocket(child.pid, displaySocketInodes(display)) &&
       (await acceptsX11Setup(display))

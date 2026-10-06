@@ -28,6 +28,7 @@ import {
   execApp,
   findOnPath,
   getDesktopSessionStatus,
+  inspectDisplayRelease,
   isDisplayAlive,
   launchApp,
   listWindows,
@@ -635,6 +636,7 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
         width: 800,
         height: 600,
       });
+      let xvfbStartTicks: number | undefined;
       try {
         expect(session.display).toMatch(/^:\d+$/);
         expect(isDisplayAlive(session.display)).toBe(true);
@@ -648,6 +650,8 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
         expect(status.record.desktop?.height).toBe(600);
         expect(status.xvfbAlive).toBe(true);
         expect(status.displayAlive).toBe(true);
+        xvfbStartTicks = status.record.desktop?.xvfbStartTimeTicks;
+        expect(xvfbStartTicks).toBeDefined();
 
         if (screenshotTool !== null) {
           const outPath = path.join(tmpRoot, "session-shot.png");
@@ -670,7 +674,14 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
       // Verified teardown may briefly leave the owned child as a zombie until
       // Node reaps it. Match the lifecycle contract: no live process remains.
       expect(readProcessStartTicks(session.xvfbPid)).toBeUndefined();
-      expect(isDisplayAlive(session.display)).toBe(false);
+      // A concurrent run can claim the freed display number at once (#252),
+      // so check that this session's Xvfb no longer owns it.
+      expect(
+        inspectDisplayRelease(session.display, {
+          pid: session.xvfbPid,
+          startTicks: xvfbStartTicks ?? -1,
+        }),
+      ).toMatchObject({ released: true });
       expect(await getSession(session.id, env)).toBeUndefined();
     },
     TEST_TIMEOUT_MS,
