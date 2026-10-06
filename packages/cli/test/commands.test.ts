@@ -8,6 +8,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createRun, recordEvidenceOutcome, writeEvidenceReport, isProcessGroupAlive, readActions, listRuns } from "@pickforge/lab-core";
 import { ensureCliBuilt } from "./build-once.js";
+import { cliSpawnTimeout } from "./spawn-timeout.js";
 import { encodePng } from "../../desktop-linux/test/png-fixture.js";
 
 const require = createRequire(import.meta.url);
@@ -657,7 +658,7 @@ describe("pickforge-lab session (desktop)", () => {
       );
       expect(fs.readFileSync(opens, "utf8").trim().split("\n")).toHaveLength(2);
     },
-    60_000,
+    cliSpawnTimeout(7),
   );
 
 
@@ -796,7 +797,7 @@ describe("pickforge-lab desktop", () => {
     expect(evaluated.stdout).toBe(
       ":98\npickforge-no-wayland\nx11\nx11\nx11\nxcb\n",
     );
-  });
+  }, cliSpawnTimeout(2));
 
   it("executes argv in the isolated environment and reports its process group", async () => {
     const projectDir = makeProjectDir();
@@ -937,7 +938,7 @@ describe("pickforge-lab desktop", () => {
     expect(text.code).toBe(0);
     expect(text.stdout).toContain("warning: xdotool is missing");
     expect(text.stdout).not.toContain("escaped the lab");
-  });
+  }, cliSpawnTimeout(2));
 
   it.each(["query", "capture", "baseline", "raster"])("redacts failed %s observations in text, JSON and journals", async (kind) => {
     const projectDir = makeProjectDir();
@@ -968,7 +969,7 @@ describe("pickforge-lab desktop", () => {
     expect(waits).toHaveLength(2);
     expect(waits).toEqual([expect.objectContaining({ status: "error" }), expect.objectContaining({ status: "error" })]);
     expect(JSON.stringify(waits)).not.toContain(PLANTED_TOKEN);
-  });
+  }, cliSpawnTimeout(2));
 
   it("waits for a window name and times out an unchanged baseline", async () => {
     const projectDir = makeProjectDir();
@@ -1015,7 +1016,7 @@ describe("pickforge-lab desktop", () => {
     expect(redacted.code).toBe(0);
     expect(redacted.stdout).not.toContain(PLANTED_TOKEN);
     expect(parseJson(redacted).window.name).not.toContain(PLANTED_TOKEN);
-  });
+  }, cliSpawnTimeout(3));
 
   it(
     "screenshots into a run directory with a manifest entry",
@@ -1205,7 +1206,7 @@ describe("pickforge-lab desktop", () => {
       expect(keyed.code).toBe(0);
       expect(parseJson(keyed).key).toBe("Return");
     },
-    60_000,
+    cliSpawnTimeout(9),
   );
 
   it("rejects out-of-range --button values", async () => {
@@ -1220,7 +1221,7 @@ describe("pickforge-lab desktop", () => {
         "between 1 and 9",
       );
     }
-  });
+  }, cliSpawnTimeout(2));
 
   it("rejects invalid move coordinates", async () => {
     const env = makeEnv();
@@ -1234,7 +1235,7 @@ describe("pickforge-lab desktop", () => {
         "non-negative integer",
       );
     }
-  });
+  }, cliSpawnTimeout(3));
 
   it("rejects invalid scroll deltas and --at positions", async () => {
     const env = makeEnv();
@@ -1271,7 +1272,7 @@ describe("pickforge-lab desktop", () => {
     );
     expect(badAt.code).toBe(1);
     expect(parseJson(badAt).errors.join("\n")).toContain('--at "10;20"');
-  }, 30_000);
+  }, cliSpawnTimeout(6));
 
   it("rejects invalid drag buttons and durations", async () => {
     const env = makeEnv();
@@ -1302,7 +1303,7 @@ describe("pickforge-lab desktop", () => {
       expect(result.code).toBe(1);
       expect(parseJson(result).errors.join("\n")).toContain("--duration");
     }
-  });
+  }, cliSpawnTimeout(4));
 
   it("rejects invalid double-click buttons and intervals", async () => {
     const env = makeEnv();
@@ -1331,7 +1332,7 @@ describe("pickforge-lab desktop", () => {
       expect(result.code).toBe(1);
       expect(parseJson(result).errors.join("\n")).toContain("--interval");
     }
-  });
+  }, cliSpawnTimeout(4));
 
   it("fails actionably when no desktop session is running", async () => {
     const env = makeEnv();
@@ -1400,7 +1401,7 @@ describe("pickforge-lab android (fake adb)", () => {
       `-s ${FAKE_SERIAL} shell am start -W -n com.example.app/.MainActivity`,
       `-s ${FAKE_SERIAL} shell pidof com.example.app`,
     ]);
-  });
+  }, cliSpawnTimeout(2));
 
   it("waits for guest ready before install and launch when --wait-ready is set", async () => {
     const { env, adbLog } = fakeReadyAdbEnv();
@@ -1462,7 +1463,7 @@ describe("pickforge-lab android (fake adb)", () => {
       `-s ${FAKE_SERIAL} shell am start -W -n com.example.app/.MainActivity`,
       `-s ${FAKE_SERIAL} shell pidof com.example.app`,
     ]);
-  });
+  }, cliSpawnTimeout(2));
 
   it("fails closed with guest-not-ready and does not install or launch", async () => {
     const { env, adbLog } = fakeReadyAdbEnv({
@@ -1509,7 +1510,7 @@ describe("pickforge-lab android (fake adb)", () => {
       "[guest-not-ready]",
     );
     expect(adbLogLines(adbLog).join("\n")).not.toMatch(/install -r|am start/);
-  });
+  }, cliSpawnTimeout(2));
 
   it("treats --wait-ready 0 as the default no-wait", async () => {
     const { env, adbLog } = fakeReadyAdbEnv();
@@ -1555,7 +1556,7 @@ describe("pickforge-lab android (fake adb)", () => {
       expect(parseJson(result).errors.join("\n")).toContain("--wait-ready");
     }
     expect(adbLogLines(adbLog)).toEqual([]);
-  });
+  }, cliSpawnTimeout(3));
 
   it("validates --wait-ready before looking up the session", async () => {
     const { env, adbLog } = fakeReadyAdbEnv();
@@ -1601,7 +1602,7 @@ describe("pickforge-lab android (fake adb)", () => {
         `-s ${FAKE_SERIAL} shell input keyevent KEYCODE_HOME`,
       ]);
     },
-    15_000,
+    cliSpawnTimeout(4),
   );
 
   it("screenshots the device into a run directory", async () => {
@@ -1680,7 +1681,7 @@ describe("pickforge-lab android (fake adb)", () => {
       `-s ${FAKE_SERIAL} exec-out cat /sdcard/pickforge-lab-ui.xml`,
       `-s ${FAKE_SERIAL} shell rm -f /sdcard/pickforge-lab-ui.xml`,
     ]);
-  });
+  }, cliSpawnTimeout(3));
 
   it("redacts secrets from logcat output", async () => {
     const { env, adbLog } = fakeAdbEnv();
@@ -1714,7 +1715,7 @@ describe("pickforge-lab android (fake adb)", () => {
       `-s ${FAKE_SERIAL} logcat -d -t 50`,
       `-s ${FAKE_SERIAL} logcat -c`,
     ]);
-  });
+  }, cliSpawnTimeout(3));
 
   it("passes raw adb commands through, threading the serial when given", async () => {
     const { env, adbLog } = fakeAdbEnv();
@@ -1731,7 +1732,7 @@ describe("pickforge-lab android (fake adb)", () => {
       `-s ${FAKE_SERIAL} shell ls /sdcard`,
       "devices",
     ]);
-  });
+  }, cliSpawnTimeout(2));
 
   it("fails closed on ambiguous default android sessions instead of running raw adb", async () => {
     const { env, adbLog } = fakeAdbEnv();
@@ -2086,7 +2087,7 @@ describe("pickforge-lab artifacts", () => {
     const bareArgs = ["artifacts", "report", bare.runId, "--project-dir", projectDir];
     expect((await runCli(bareArgs, env)).stdout).not.toContain("Report:");
     expect(JSON.parse((await runCli([...bareArgs, "--json"], env)).stdout)).toMatchObject({ device: null, reportPath: null, outcome: null });
-  }, 30_000);
+  }, cliSpawnTimeout(10));
 
 
   it("lists runs with artifact counts", async () => {
@@ -2224,7 +2225,7 @@ describe("pickforge-lab artifacts", () => {
     );
     expect(legacy.code).toBe(0);
     expect(legacy.stdout).not.toContain("## Actions");
-  });
+  }, cliSpawnTimeout(3));
 
   it("explicitly recovers orphan reports and returns a shared session index", async () => {
     const env = makeEnv();
@@ -2251,7 +2252,7 @@ describe("pickforge-lab artifacts", () => {
     expect(fs.readFileSync(path.join(dir, "actions.jsonl"), "utf8")).toBe(journal);
     const text = await runCli(["artifacts", "report", "--project-dir", projectDir, "--finalize-orphans"], env);
     expect(text.stdout).toContain("Session index:");
-  });
+  }, cliSpawnTimeout(3));
 
   it("fails actionably for a corrupt evidence journal", async () => {
     const env = makeEnv();
@@ -2315,7 +2316,7 @@ describe("pickforge-lab artifacts", () => {
     );
     expect(open.code).toBe(1);
     expect(parseJson(open).errors.join("\n")).toContain("Run not found");
-  });
+  }, cliSpawnTimeout(2));
 
   it("rejects manifests whose runId escapes the runs directory", async () => {
     const env = makeEnv();
@@ -2349,7 +2350,7 @@ describe("pickforge-lab artifacts", () => {
     expect(latest.code).toBe(1);
     expect(parseJson(latest).errors.join("\n")).toContain("No runs found");
     expect(latest.stdout).not.toContain(path.join(projectDir, "escape"));
-  });
+  }, cliSpawnTimeout(2));
 
   it("prints the run directory for artifacts open without a display", async () => {
     const env = makeEnv();
@@ -2385,7 +2386,7 @@ describe("pickforge-lab artifacts", () => {
     );
     expect(human.code).toBe(0);
     expect(human.stdout.trim()).toBe(report.dir);
-  });
+  }, cliSpawnTimeout(2));
 });
 
 interface JsonRpcResponse {
@@ -2529,4 +2530,4 @@ it("records an artifacts outcome through the CLI and refuses unsupported accepta
   expect(accepted.stdout).not.toContain(PLANTED_TOKEN);
   expect(fs.readFileSync(path.join(dir, "actions.jsonl"), "utf8")).not.toContain(PLANTED_TOKEN);
   expect(fs.readFileSync(path.join(dir, "report.html"), "utf8")).toContain('class="panel outcome s-pass"');
-});
+}, cliSpawnTimeout(2));

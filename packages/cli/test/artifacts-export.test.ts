@@ -5,6 +5,7 @@ import { beforeAll, beforeEach, afterEach, expect, it, vi } from "vitest";
 import { createRun } from "@pickforge/lab-core";
 import { encodePng } from "../../core/src/png-raster.js";
 import { ensureCliBuilt } from "./build-once.js";
+import { cliSpawnTimeout } from "./spawn-timeout.js";
 import { buildProgram } from "../src/program.js";
 import { runArtifactsExport } from "../src/commands/artifacts.js";
 
@@ -79,7 +80,7 @@ it("exports the latest run in built CLI JSON and supports explicit ids and text"
   expect(text.stdout).toMatch(
     /Export: .*exports\/.*\nFrames: 1\nAnnotated: 0\nPointer track: .*pointer-track.json\nVideo: none/,
   );
-});
+}, cliSpawnTimeout(2));
 it.each(["0", "60001", "1.2", "bad"])("reports invalid frame duration %s", async (duration) => {
   await fixture();
   const result = cli(["--json", "--frame-ms", duration]);
@@ -109,14 +110,14 @@ it("rejects non-evidence and Rust runs with clear errors", async () => {
   const rust = cli(["rust-run", "--json"]);
   expect(rust.status).toBe(1);
   expect(JSON.parse(rust.stdout).errors[0]).toMatch(/Rust runs are unsupported/);
-});
+}, cliSpawnTimeout(2));
 it("returns a clear missing ffmpeg error and exports without video on the same PATH", async () => {
   await fixture();
   const video = cli(["--video", "--json"], { PATH: project });
   expect(video.status).toBe(1);
   expect(JSON.parse(video.stdout).errors[0]).toMatch(/requires ffmpeg on PATH/);
   expect(cli(["--json"], { PATH: project }).status).toBe(0);
-});
+}, cliSpawnTimeout(2));
 it("returns preserved export paths and an error when ffmpeg fails", async () => {
   await fixture();
   await fs.promises.writeFile(path.join(project, "ffmpeg"), "#!/bin/sh\nexit 1\n", { mode: 0o700 });
