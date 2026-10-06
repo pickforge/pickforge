@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   getSession,
   isPidAlive,
@@ -23,6 +23,13 @@ const hasXvfb = findOnPath("Xvfb") !== null;
 const hasChrome = detectChromeBinary() !== null;
 const ready = hasXvfb && hasChrome;
 const TEST_TIMEOUT_MS = 60_000;
+// The first Chrome launch on a fresh CI runner has taken up to 39 s, and three
+// times it passed the 45 s product budget. In those failures Chrome published
+// its DevTools port, but the HTTP endpoint did not answer. Every later launch
+// took about 1 s. The cause is not confirmed. Pay that cost once, with room to
+// spare, so each test's startup budget measures a warm start.
+const WARM_UP_CDP_TIMEOUT_MS = 120_000;
+const WARM_UP_HOOK_TIMEOUT_MS = 150_000;
 const SECRET = "pickforge-lab-integration-secret-should-not-leak";
 
 let tmp: string;
@@ -72,6 +79,31 @@ describe("browser integration prerequisites", () => {
 });
 
 describe.skipIf(!ready)("real headed Chrome under Xvfb", () => {
+  beforeAll(async () => {
+    const warmTmp = fs.mkdtempSync(path.join(os.tmpdir(), "pf-browser-warm-"));
+    const warmHome = path.join(warmTmp, "home");
+    const warmProject = path.join(warmTmp, "project");
+    fs.mkdirSync(warmHome, { recursive: true });
+    fs.mkdirSync(warmProject, { recursive: true });
+    const warmEnv = { PICKFORGE_HOME: warmHome };
+    try {
+      const session = await createBrowserSession({
+        projectDir: warmProject,
+        registryEnv: warmEnv,
+        env: { ...process.env },
+        cdpTimeoutMs: WARM_UP_CDP_TIMEOUT_MS,
+      });
+      await destroyBrowserSession(session.id, warmEnv);
+    } catch (error) {
+      // Chrome or Xvfb may still be alive, and a record can be unreadable, so
+      // keep the temporary home for inspection and a manual teardown.
+      throw new Error(`Chrome warm-up failed; kept ${warmTmp} for inspection`, {
+        cause: error,
+      });
+    }
+    fs.rmSync(warmTmp, { recursive: true, force: true });
+  }, WARM_UP_HOOK_TIMEOUT_MS);
+
   it(
     "starts from a deeply nested home without exceeding Chrome socket limits",
     { timeout: TEST_TIMEOUT_MS },

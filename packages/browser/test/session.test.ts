@@ -958,12 +958,58 @@ describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
 
   it("kills the process group and removes the profile when Chrome stalls", async () => {
     const env = spawnEnvFor("stall");
-    const failure = await rejectionMessage(
-      createBrowserSession({ projectDir, registryEnv, env, cdpTimeoutMs: 500 }),
-    );
+    const stallMessage = "fake Chrome stalled before publishing a port";
+    // The readiness timeout starts right after the starting-browser record is
+    // written. Hold that write until the fake has logged its stall, so a
+    // loaded host cannot expire the short timeout before the fake has run.
+    const realRename = fs.promises.rename.bind(fs.promises);
+    let gated = false;
+    const rename = vi
+      .spyOn(fs.promises, "rename")
+      .mockImplementation(async (source, target) => {
+        await realRename(source, target);
+        const file = String(target);
+        if (gated || !file.endsWith(".json")) return;
+        const written = JSON.parse(fs.readFileSync(file, "utf8")) as {
+          id?: string;
+          status?: string;
+          browser?: unknown;
+        };
+        if (
+          written.id === undefined ||
+          written.browser === undefined ||
+          written.status === "running"
+        ) {
+          return;
+        }
+        gated = true;
+        const logPath = path.join(
+          browserSessionLogDir(written.id, registryEnv),
+          "chrome.log",
+        );
+        const deadline = Date.now() + TEST_TIMEOUT_MS / 2;
+        const logged = (): boolean =>
+          fs.existsSync(logPath) &&
+          fs.readFileSync(logPath, "utf8").includes(stallMessage);
+        while (!logged()) {
+          if (Date.now() >= deadline) {
+            throw new Error("Fake Chrome did not log its stall in time");
+          }
+          await scheduler.wait(10);
+        }
+      });
+    let failure: string;
+    try {
+      failure = await rejectionMessage(
+        createBrowserSession({ projectDir, registryEnv, env, cdpTimeoutMs: 500 }),
+      );
+    } finally {
+      rename.mockRestore();
+    }
+    expect(gated).toBe(true);
     expect(failure).toContain("Chrome startup timed out after 500ms");
     expect(failure).toContain("file was not created before timeout");
-    expect(failure).toContain("fake Chrome stalled before publishing a port");
+    expect(failure).toContain(stallMessage);
 
     const sessions = fs
       .readdirSync(path.join(home, "sessions"))
@@ -972,14 +1018,13 @@ describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
     const id = sessions[0]!.slice(0, -".json".length);
     const sessionDir = browserSessionLogDir(id, registryEnv);
 
-    // The stall fake recorded its pid next to the session; the reaper/cleanup
-    // must have killed that whole group.
-    const pidFile = path.join(sessionDir, "chrome.pid");
-    if (fs.existsSync(pidFile)) {
-      const pid = Number(fs.readFileSync(pidFile, "utf8").trim());
-      expect(isPidAlive(pid)).toBe(false);
-      expect(listProcessGroupMembers(pid)).toEqual([]);
-    }
+    // The stall fake recorded its pid next to the session before it logged the
+    // stall; the reaper/cleanup must have killed that whole group.
+    const pid = Number(
+      fs.readFileSync(path.join(sessionDir, "chrome.pid"), "utf8").trim(),
+    );
+    expect(isPidAlive(pid)).toBe(false);
+    expect(listProcessGroupMembers(pid)).toEqual([]);
     expect(fs.existsSync(path.join(sessionDir, "profile"))).toBe(false);
   }, TEST_TIMEOUT_MS);
 });
