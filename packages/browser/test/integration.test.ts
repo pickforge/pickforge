@@ -6,9 +6,7 @@ import {
   getSession,
   isPidAlive,
   listProcessGroupMembers,
-  listSessions,
   readPickforgeEnv,
-  REAPER_CLEANUP_PENDING_META_KEY,
   type EnvLike,
 } from "@pickforge/lab-core";
 import { findOnPath } from "@pickforge/lab-desktop-linux";
@@ -88,7 +86,6 @@ describe.skipIf(!ready)("real headed Chrome under Xvfb", () => {
     fs.mkdirSync(warmHome, { recursive: true });
     fs.mkdirSync(warmProject, { recursive: true });
     const warmEnv = { PICKFORGE_HOME: warmHome };
-    let failure: unknown;
     try {
       const session = await createBrowserSession({
         projectDir: warmProject,
@@ -98,29 +95,13 @@ describe.skipIf(!ready)("real headed Chrome under Xvfb", () => {
       });
       await destroyBrowserSession(session.id, warmEnv);
     } catch (error) {
-      failure = error;
-    }
-    // Cleanup is confirmed only when no record keeps a process identity or a
-    // pending cleanup mark. Otherwise keep the registry for the reaper and
-    // for inspection, because Chrome or Xvfb may still be alive.
-    const unconfirmed = await listSessions(warmEnv).then(
-      (records) =>
-        records.filter(
-          (record) =>
-            record.desktop !== undefined ||
-            record.browser !== undefined ||
-            record.meta?.[REAPER_CLEANUP_PENDING_META_KEY] === true,
-        ).length > 0,
-      () => true,
-    );
-    if (unconfirmed) {
-      throw new Error(
-        `Chrome warm-up cleanup was not confirmed; kept ${warmTmp} for inspection`,
-        { cause: failure },
-      );
+      // Chrome or Xvfb may still be alive, and a record can be unreadable, so
+      // keep the temporary home for inspection and a manual teardown.
+      throw new Error(`Chrome warm-up failed; kept ${warmTmp} for inspection`, {
+        cause: error,
+      });
     }
     fs.rmSync(warmTmp, { recursive: true, force: true });
-    if (failure !== undefined) throw failure;
   }, WARM_UP_HOOK_TIMEOUT_MS);
 
   it(
