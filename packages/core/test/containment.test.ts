@@ -1,4 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -28,16 +29,70 @@ const BUN = /[\\/]bun$/.test(process.execPath) ? process.execPath : "bun";
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-containment-"));
 const strays = new Set<number>();
 
+// Scope ids that name a directory in the shared delegated cgroup get a
+// per-run suffix. Two concurrent runs of this file would otherwise share one
+// `pickforge-<id>` directory: one run's create prunes the other run's empty
+// scope and re-creates it, and either run's cgroup.kill can then reach the
+// other run's processes. Marker-only ids never touch the cgroup.
+const RUN_SUFFIX = randomBytes(4).toString("hex");
+function runScopeId(name: string): string {
+  return `${name}-${RUN_SUFFIX}`;
+}
+
 // Whether this host delegates a cgroup to us. Cgroup-only tests skip
 // explicitly (visible in the run summary) rather than passing silently, and
 // the mechanism the runner selected is printed so CI logs record it.
-const probe = createContainmentScope({ id: "desk-probe" });
+//
+// The probe scope is created by the create worker from inside a private
+// parent cgroup. Created in the shared delegated cgroup, a concurrent
+// creator's prune could remove it between its mkdir and its cgroup.kill
+// check, and the probe would then report "marker" on a delegated host. When
+// the private parent cannot be made, the worker probes in place: a host that
+// refuses that mkdir also refuses the probe's own, so no prune is involved.
+const ownCgroup = readOwnCgroupPath();
+const delegatedDir =
+  ownCgroup === undefined ? undefined : path.resolve(path.join("/sys/fs/cgroup", ownCgroup));
+const probe = probeContainmentScope();
 const cgroupAvailable = probe.mechanism === "cgroup";
-await destroyContainmentScope(probe, { termTimeoutMs: 100, killTimeoutMs: 100 });
 console.log(
   `[containment] mechanism available on this host: ${probe.mechanism}` +
-    (cgroupAvailable ? ` (${path.dirname(probe.cgroupDir as string)})` : ""),
+    (cgroupAvailable ? ` (${delegatedDir})` : ""),
 );
+
+function probeContainmentScope(): ContainmentScope {
+  let parent: string | undefined;
+  try {
+    if (delegatedDir !== undefined) {
+      parent = fs.mkdtempSync(path.join(delegatedDir, "desk-probe-"));
+    }
+  } catch {
+    parent = undefined;
+  }
+  const id = runScopeId("desk-probe");
+  const report = path.join(root, "probe-scope.json");
+  const worker = path.join(here, "workers", "containment-create-worker.ts");
+  try {
+    const result = spawnSync(BUN, [worker, parent ?? "-", id, report], {
+      stdio: ["ignore", "ignore", "pipe"],
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    if (result.status !== 0) {
+      throw new Error(`containment probe worker failed (${result.status}): ${result.stderr}`);
+    }
+    return JSON.parse(fs.readFileSync(report, "utf8")).scope as ContainmentScope;
+  } finally {
+    if (parent !== undefined) {
+      for (const dir of [path.join(parent, `pickforge-${id}`), parent]) {
+        try {
+          fs.rmdirSync(dir);
+        } catch {
+          /* already removed */
+        }
+      }
+    }
+  }
+}
 const itWithCgroup = it.skipIf(!cgroupAvailable);
 
 /**
@@ -122,6 +177,14 @@ function spawnSupervised(
   strays.add(pid);
   return pid;
 }
+
+/**
+ * Deadlines for cleanups whose outcome does not turn on timing. Confirming an
+ * empty scope takes two full /proc scans, and on a loaded host one scan can
+ * outlast a few hundred milliseconds. A clean run still returns after about
+ * two scans.
+ */
+const SWEEP_BUDGET = { termTimeoutMs: 2_000, killTimeoutMs: 1_000 };
 
 interface Finished {
   code: number | null;
@@ -259,16 +322,44 @@ afterEach(() => {
 
 describe("containment scope creation", () => {
   it("always produces a usable scope, even without a delegated cgroup", async () => {
-    const scope = createContainmentScope({ id: "desk-test01" });
-    expect(scope.token).toMatch(/^[0-9a-f]{64}$/);
-    expect(["cgroup", "marker"]).toContain(scope.mechanism);
-    if (scope.mechanism === "cgroup") {
-      expect(scope.cgroupDir).toMatch(/^\/sys\/fs\/cgroup\//);
-      expect(fs.existsSync(scope.cgroupDir as string)).toBe(true);
-      expect(scopeCgroupProblem(scope.cgroupDir as string, scope.id)).toBeUndefined();
+    // A createContainmentScope in another worker prunes empty scopes in the
+    // shared delegated cgroup, so the fresh scope could vanish before it is
+    // inspected. The worker creates it from inside a private parent cgroup
+    // instead; its name has no `pickforge-` prefix, so no prune touches it.
+    const parent = cgroupAvailable
+      ? fs.mkdtempSync(path.join(delegatedDir as string, "desk-create-"))
+      : undefined;
+    const id = runScopeId("desk-test01");
+    const report = path.join(root, "create-scope.json");
+    const worker = path.join(here, "workers", "containment-create-worker.ts");
+    try {
+      const child = spawn(BUN, [worker, parent ?? "-", id, report], {
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      strays.add(child.pid as number);
+      const { code, stderr } = await finish(child);
+      expect(code, stderr).toBe(0);
+      const { scope, existed, problem } = JSON.parse(fs.readFileSync(report, "utf8"));
+      expect(scope.token).toMatch(/^[0-9a-f]{64}$/);
+      expect(scope.mechanism).toBe(cgroupAvailable ? "cgroup" : "marker");
+      if (parent !== undefined) {
+        expect(scope.cgroupDir).toBe(path.join(parent, `pickforge-${id}`));
+        expect(existed).toBe(true);
+        expect(problem).toBeNull();
+      }
+    } finally {
+      if (parent !== undefined) {
+        for (const dir of [path.join(parent, `pickforge-${id}`), parent]) {
+          try {
+            fs.rmdirSync(dir);
+          } catch {
+            /* already removed */
+          }
+        }
+      }
     }
-    await destroyContainmentScope(scope);
-  });
+    if (parent !== undefined) expect(fs.existsSync(parent)).toBe(false);
+  }, 20_000);
 
   it("forces the marker mechanism when asked", () => {
     const scope = createContainmentScope({ id: "desk-test02", useCgroup: false });
@@ -312,7 +403,7 @@ describe("containment cleanup of daemonising descendants", () => {
   }, 30_000);
 
   itWithCgroup("kills a setsid escapee through the cgroup", async () => {
-    const scope = createContainmentScope({ id: "desk-esc02" });
+    const scope = createContainmentScope({ id: runScopeId("desk-esc02") });
     expect(scope.mechanism).toBe("cgroup");
     const pidFile = path.join(root, "escapee-cgroup.pid");
     const leader = spawnInScope(scope, writeEscapingScript("escape-cgroup.sh", pidFile));
@@ -434,7 +525,7 @@ describe("containment refuses to signal anything it does not own", () => {
   itWithCgroup(
     "survives destroying its own scope from inside the cgroup, and still empties it",
     async () => {
-      const scope = createContainmentScope({ id: "desk-inside01" });
+      const scope = createContainmentScope({ id: runScopeId("desk-inside01") });
       expect(scope.mechanism).toBe("cgroup");
       const victim = spawnInScope(scope, "/bin/sleep", ["300"]);
       expect(await waitFor(() => cgroupMembers(scope).includes(victim))).toBe(true);
@@ -478,7 +569,7 @@ describe("containment refuses to signal anything it does not own", () => {
   itWithCgroup(
     "refuses cleanup rather than migrating an ancestor whose pid may have been recycled",
     async () => {
-      const scope = createContainmentScope({ id: "desk-inside02" });
+      const scope = createContainmentScope({ id: runScopeId("desk-inside02") });
       expect(scope.mechanism).toBe("cgroup");
       const victim = spawnInScope(scope, "/bin/sleep", ["300"]);
       expect(await waitFor(() => cgroupMembers(scope).includes(victim))).toBe(true);
@@ -533,7 +624,7 @@ describe("containment refuses to signal anything it does not own", () => {
     // shell and unrelated user processes live) must be refused outright.
     const result = await destroyContainmentScope(
       { id: "desk-own", token: "6".repeat(64), mechanism: "cgroup", cgroupDir: ownDir },
-      { termTimeoutMs: 200, killTimeoutMs: 200 },
+      SWEEP_BUDGET,
     );
     expect(result.confirmed).toBe(false);
     expect(result.reason).toMatch(/refusing cgroup cleanup/);
@@ -543,8 +634,8 @@ describe("containment refuses to signal anything it does not own", () => {
   itWithCgroup(
     "never kills through another live session's scope cgroup",
     async () => {
-      const mine = createContainmentScope({ id: "desk-sib01" });
-      const other = createContainmentScope({ id: "desk-sib02" });
+      const mine = createContainmentScope({ id: runScopeId("desk-sib01") });
+      const other = createContainmentScope({ id: runScopeId("desk-sib02") });
       expect(other.mechanism).toBe("cgroup");
       const bystander = spawnInScope(other, "/bin/sleep", ["300"]);
       expect(await waitFor(() => cgroupMembers(other).includes(bystander))).toBe(
@@ -557,10 +648,10 @@ describe("containment refuses to signal anything it does not own", () => {
       // tell them apart.
       const result = await destroyContainmentScope(
         { ...mine, cgroupDir: other.cgroupDir as string },
-        { termTimeoutMs: 300, killTimeoutMs: 300 },
+        SWEEP_BUDGET,
       );
       expect(result.confirmed).toBe(false);
-      expect(result.reason).toMatch(/expected a directory named pickforge-desk-sib01/);
+      expect(result.reason).toContain(`expected a directory named pickforge-${mine.id}`);
       expect(result.signaled).toEqual([]);
       expect(isPidAlive(bystander)).toBe(true);
       expect(fs.existsSync(other.cgroupDir as string)).toBe(true);
@@ -577,7 +668,7 @@ describe("containment refuses to signal anything it does not own", () => {
   itWithCgroup(
     "refuses to kill a scope holding a process that carries a different session's token",
     async () => {
-      const scope = createContainmentScope({ id: "desk-sib03" });
+      const scope = createContainmentScope({ id: runScopeId("desk-sib03") });
       const other = createContainmentScope({ id: "desk-sib04", useCgroup: false });
       expect(scope.mechanism).toBe("cgroup");
       // Joins this scope's cgroup but carries another session's token: what a
@@ -588,10 +679,7 @@ describe("containment refuses to signal anything it does not own", () => {
         true,
       );
 
-      const result = await destroyContainmentScope(scope, {
-        termTimeoutMs: 300,
-        killTimeoutMs: 300,
-      });
+      const result = await destroyContainmentScope(scope, SWEEP_BUDGET);
       expect(result.confirmed).toBe(false);
       expect(result.reason).toMatch(/do not carry this session's containment token/);
       expect(isPidAlive(supervisor)).toBe(true);
@@ -878,10 +966,7 @@ describe("containment identity safety", () => {
         if (target === pid && signal !== 0) signaledAtReads.push(statReads);
         return kill.call(process, target, signal);
       };
-      const result = await destroyContainmentScope(scope, {
-        termTimeoutMs: 300,
-        killTimeoutMs: 300,
-      });
+      const result = await destroyContainmentScope(scope, SWEEP_BUDGET);
       expect(initialStartTicks).toBe(startTicks);
       expect(statReads).toBeGreaterThanOrEqual(4);
       expect(result.confirmed).toBe(true);
@@ -961,10 +1046,7 @@ describe("containment identity safety", () => {
         if (target === pid && signal !== 0) terminatingSignals.push(signal);
         return kill.call(process, target, signal);
       };
-      const result = await destroyContainmentScope(scope, {
-        termTimeoutMs: 300,
-        killTimeoutMs: 300,
-      });
+      const result = await destroyContainmentScope(scope, SWEEP_BUDGET);
       expect(initialStartTicks).toBe(startTicks);
       expect(zombieSeen).toBe(true);
       expect(result.confirmed).toBe(true);
@@ -1103,6 +1185,22 @@ describe("containment initial exec discovery", () => {
     return () => scans;
   }
 
+  /**
+   * Count the sweeps' scans of /proc. With `only`, each scan lists just that
+   * pid. On a busy host any scan can catch an unrelated process mid-exec,
+   * and a test that checks the exact cleanup reason must not depend on that.
+   */
+  function countProcScans(only?: number): () => number {
+    const readdir = fs.readdirSync as (dir: fs.PathLike, ...args: unknown[]) => unknown;
+    let scans = 0;
+    vi.spyOn(fs, "readdirSync").mockImplementation(((dir: fs.PathLike, ...args: unknown[]) => {
+      if (dir !== "/proc") return readdir.call(fs, dir, ...args);
+      scans += 1;
+      return only === undefined ? readdir.call(fs, dir, ...args) : [String(only)];
+    }) as never);
+    return () => scans;
+  }
+
   it("fails closed at the existing deadlines without signaling an unowned exec", async () => {
     await withOwnedStatFixture("desk-exec-stalled", async ({ scope, pid, read, kill }) => {
       const scans = hideEnvironment(pid, read);
@@ -1146,13 +1244,16 @@ describe("containment initial exec discovery", () => {
       // Exec finishes between environ and stat: the environment read was
       // empty, but stat already has the completed image's nonzero env_end.
       hideEnvironment(pid, read, { envEnd: "4096" });
+      const procScans = countProcScans(pid);
       const result = await destroyContainmentScope(scope, { termTimeoutMs: 0, killTimeoutMs: 0 });
+      // A zero deadline gives each sweep exactly one scan.
+      expect(procScans()).toBe(2);
       expect(result.confirmed).toBe(false);
       expect(result.reason).toContain("two empty");
       expect(result.signaled).toEqual([]);
       expect(isPidAlive(pid)).toBe(true);
     });
-  });
+  }, 10_000);
 
   it("settles an exec that finishes with an empty environment without signaling it", async () => {
     await withOwnedStatFixture("desk-exec-empty", async ({ pid, read }) => {
@@ -1167,15 +1268,25 @@ describe("containment initial exec discovery", () => {
   });
 
   it("continues discovery in the kill sweep when exec settles at the term deadline", async () => {
-    await withOwnedStatFixture("desk-exec-term-deadline", async ({ scope, pid, read }) => {
+    await withOwnedStatFixture("desk-exec-term-deadline", async ({ scope, pid, read, kill }) => {
       hideEnvironment(pid, read, { settleAfter: 1, envEnd: "4096" });
-      const result = await destroyContainmentScope(scope, { termTimeoutMs: 0, killTimeoutMs: 300 });
+      const signals: Parameters<typeof process.kill>[1][] = [];
+      process.kill = (target, signal) => {
+        if (target === pid && signal !== 0) signals.push(signal);
+        return kill.call(process, target, signal);
+      };
+      // The zero term deadline allows one scan, which sees no token. The kill
+      // sweep must then find, signal and confirm the process, which takes at
+      // least three full /proc scans; give it the product's default deadline
+      // so a loaded host can finish them.
+      const result = await destroyContainmentScope(scope, { termTimeoutMs: 0, killTimeoutMs: 2_000 });
+      expect(signals).toEqual(["SIGKILL"]);
       expect(result.confirmed).toBe(true);
       expect(result.signaled).toContain(pid);
       expect(result.survivors).toEqual([]);
       expect(isPidAlive(pid)).toBe(false);
     });
-  });
+  }, 10_000);
 
   it("waits for an unrelated exec to settle without claiming or signaling it", async () => {
     await withOwnedStatFixture("desk-exec-foreign", async ({ pid, read, kill }) => {
@@ -1206,11 +1317,16 @@ describe("containment initial exec discovery", () => {
   ])("does not classify $name as an unresolved exec", async (options) => {
     await withOwnedStatFixture("desk-exec-filter", async ({ pid, read }) => {
       const scope = createContainmentScope({ id: "desk-exec-filter-other", useCgroup: false });
-      hideEnvironment(pid, read, options);
-      // Confirmation needs two empty scans of all of /proc, and on a loaded
-      // host one scan can outlast a short deadline. The fixture never
-      // settles, so a misclassified exec still fails after these deadlines.
-      const result = await destroyContainmentScope(scope, { termTimeoutMs: 2_000, killTimeoutMs: 1_000 });
+      const environReads = hideEnvironment(pid, read, options);
+      const procScans = countProcScans();
+      // The fixture never settles, so a misclassified exec still fails after
+      // these deadlines.
+      const result = await destroyContainmentScope(scope, SWEEP_BUDGET);
+      // A misclassified zombie or completed image settles in the same pass,
+      // so confirmation alone cannot show the filter held. Only an unresolved
+      // exec has its environment read again after the scan.
+      expect(procScans()).toBeGreaterThanOrEqual(2);
+      expect(environReads()).toBe(procScans());
       expect(result.confirmed).toBe(true);
       expect(result.signaled).toEqual([]);
       expect(result.survivors).toEqual([]);
@@ -1231,10 +1347,7 @@ describe("containment cleanup failure reporting", () => {
       mechanism: "cgroup",
       cgroupDir: fakeCgroup,
     };
-    const result = await destroyContainmentScope(scope, {
-      termTimeoutMs: 200,
-      killTimeoutMs: 200,
-    });
+    const result = await destroyContainmentScope(scope, SWEEP_BUDGET);
     expect(result.confirmed).toBe(false);
     expect(result.reason).toMatch(/refusing cgroup cleanup/);
     // Nothing was written to the impostor.
@@ -1265,17 +1378,14 @@ describe("containment cleanup failure reporting", () => {
       mechanism: "cgroup",
       cgroupDir: "/sys/fs/cgroup/pickforge-gone-cgroup",
     };
-    const result = await destroyContainmentScope(scope, {
-      termTimeoutMs: 200,
-      killTimeoutMs: 200,
-    });
+    const result = await destroyContainmentScope(scope, SWEEP_BUDGET);
     expect(result.confirmed).toBe(true);
   });
 
   it("reports a cgroup scope with no recorded path as unconfirmed", async () => {
     const result = await destroyContainmentScope(
       { id: "desk-nopath", token: "2".repeat(64), mechanism: "cgroup" },
-      { termTimeoutMs: 200, killTimeoutMs: 200 },
+      SWEEP_BUDGET,
     );
     expect(result.confirmed).toBe(false);
     expect(result.reason).toContain("without a cgroup path");
@@ -1485,17 +1595,17 @@ describe("containment supervisor", () => {
 
 describe("stale scope cgroups", () => {
   itWithCgroup("prunes empty leftovers but never a scope that still has members", async () => {
-    const live = createContainmentScope({ id: "desk-gc-live" });
+    const live = createContainmentScope({ id: runScopeId("desk-gc-live") });
     expect(live.mechanism).toBe("cgroup");
     const parent = path.dirname(live.cgroupDir as string);
     spawnInScope(live, "/bin/sleep", ["300"]);
     expect(await waitFor(() => cgroupMembers(live).length > 0)).toBe(true);
 
     // A lab process killed with SIGKILL leaves its (vacated) cgroup behind.
-    const orphan = path.join(parent, "pickforge-desk-gc-orphan");
+    const orphan = path.join(parent, `pickforge-${runScopeId("desk-gc-orphan")}`);
     fs.mkdirSync(orphan);
 
-    const next = createContainmentScope({ id: "desk-gc-next" });
+    const next = createContainmentScope({ id: runScopeId("desk-gc-next") });
     expect(fs.existsSync(orphan)).toBe(false);
     expect(fs.existsSync(live.cgroupDir as string)).toBe(true);
 
@@ -1510,7 +1620,7 @@ describe("scope re-creation", () => {
     // prunes empty scopes in the shared delegated cgroup, so it could remove
     // the re-created scope before the assertions run.
     const parent = fs.mkdtempSync(
-      path.join(path.dirname(probe.cgroupDir as string), "desk-recreate-"),
+      path.join(delegatedDir as string, "desk-recreate-"),
     );
     const cgroupDir = path.join(parent, "pickforge-desk-recreate");
     try {
