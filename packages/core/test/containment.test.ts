@@ -666,6 +666,58 @@ describe("containment refuses to signal anything it does not own", () => {
   );
 
   itWithCgroup(
+    "preserves a foreign supervisor migrated into a frozen scope after proof",
+    async () => {
+      const scope = createContainmentScope({ id: runScopeId("desk-late-join") });
+      const other = createContainmentScope({ id: "desk-late-other", useCgroup: false });
+      const member = spawnInScope(scope, "/bin/sleep", ["300"]);
+      const stranger = spawnSupervised(other, "/bin/sleep", ["300"]);
+      let joined = false;
+      let frozenAtJoin = false;
+      const realKill = process.kill;
+      const realWrite = fs.writeFileSync;
+      const migrate = () => {
+        if (joined) return;
+        joined = true;
+        frozenAtJoin = /^frozen 1$/m.test(
+          fs.readFileSync(path.join(scope.cgroupDir as string, "cgroup.events"), "utf8"),
+        );
+        realWrite(path.join(scope.cgroupDir as string, "cgroup.procs"), String(stranger));
+      };
+      try {
+        expect(await waitFor(() => cgroupMembers(scope).includes(member))).toBe(true);
+        expect(await waitFor(() => processCarriesToken(stranger, other.token))).toBe(true);
+        vi.spyOn(process, "kill").mockImplementation(((pid, signal) => {
+          if (pid === member && signal === "SIGKILL") migrate();
+          return realKill(pid, signal);
+        }) as typeof process.kill);
+        vi.spyOn(fs, "writeFileSync").mockImplementation(((file, ...args) => {
+          if (file === path.join(scope.cgroupDir as string, "cgroup.kill")) migrate();
+          return realWrite(file, ...args);
+        }) as typeof fs.writeFileSync);
+
+        const result = await destroyContainmentScope(scope, SWEEP_BUDGET);
+
+        expect(joined).toBe(true);
+        expect(frozenAtJoin).toBe(true);
+        expect(result.confirmed).toBe(false);
+        expect(result.reason).toMatch(/still has members after verified signals/);
+        expect(result.signaled).toContain(member);
+        expect(result.signaled).not.toContain(stranger);
+        expect(isPidAlive(stranger)).toBe(true);
+        expect(cgroupMembers(scope)).toContain(stranger);
+        expect(fs.readFileSync(path.join(scope.cgroupDir as string, "cgroup.events"), "utf8"))
+          .toMatch(/^frozen 0$/m);
+      } finally {
+        vi.restoreAllMocks();
+        await destroyContainmentScope(other, SWEEP_BUDGET);
+        await destroyContainmentScope(scope, SWEEP_BUDGET);
+      }
+    },
+    30_000,
+  );
+
+  itWithCgroup(
     "refuses to kill a scope holding a process that carries a different session's token",
     async () => {
       const scope = createContainmentScope({ id: runScopeId("desk-sib03") });

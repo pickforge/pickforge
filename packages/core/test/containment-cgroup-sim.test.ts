@@ -36,6 +36,12 @@ const TOKEN = randomBytes(32).toString("hex");
 interface FakeCgroup {
   members: number[];
   killed: boolean;
+  freezeSupported: boolean;
+  frozen: boolean;
+  freezes: string[];
+  freezeEventError?: boolean;
+  beforeFreeze?: () => void;
+  beforeSignal?: () => void;
   migrated: number[];
   removed: boolean;
   /** Relative cgroup path reported for `/proc/self/cgroup`. */
@@ -54,7 +60,13 @@ interface FakeCgroup {
    * Which kernel access removes the directory first, simulating a concurrent
    * session create pruning this (empty) scope during destroy.
    */
-  pruneAt?: "statfs" | "cgroup.procs" | "cgroup.procs (verify)" | "cgroup.kill";
+  pruneAt?:
+    | "statfs"
+    | "cgroup.procs"
+    | "cgroup.procs (verify)"
+    | "cgroup.freeze"
+    | "cgroup.events"
+    | "cgroup.procs (frozen verify)";
   /** Error code the pruned directory's files fail with. */
   pruneCode: string;
   /** How long the pruned directory stays visible after being pruned. */
@@ -95,6 +107,9 @@ function newFake(overrides: Partial<FakeCgroup> = {}): FakeCgroup {
   return {
     members: [],
     killed: false,
+    freezeSupported: true,
+    frozen: false,
+    freezes: [],
     migrated: [],
     removed: false,
     ownPath: "/",
@@ -109,10 +124,25 @@ function newFake(overrides: Partial<FakeCgroup> = {}): FakeCgroup {
   };
 }
 
+function readFakeProcs(fake: FakeCgroup): string {
+  fake.procsReads += 1;
+  if (fake.pruneAt === "cgroup.procs") prune(fake);
+  if (fake.pruneAt === "cgroup.procs (verify)" && fake.procsReads === 2) prune(fake);
+  if (fake.pruneAt === "cgroup.procs (frozen verify)" && fake.procsReads === 3) prune(fake);
+  if (fake.removed) throw pruned(fake, path.join(SCOPE_DIR, "cgroup.procs"));
+  fake.members = fake.members.filter((pid) => isPidAlive(pid));
+  return `${fake.members.join("\n")}\n`;
+}
+
 function installFakeCgroup(fake: FakeCgroup): void {
   const realRead = fs.readFileSync;
   const realExists = fs.existsSync;
   const realWrite = fs.writeFileSync;
+  const realKill = process.kill;
+  vi.spyOn(process, "kill").mockImplementation(((pid, signal) => {
+    if (signal === "SIGKILL" && fake.members.includes(pid)) fake.beforeSignal?.();
+    return realKill(pid, signal);
+  }) as typeof process.kill);
 
   // Like the real one, `existsSync` folds an inspection error into `false`.
   vi.spyOn(fs, "existsSync").mockImplementation(((target: fs.PathLike) =>
@@ -135,11 +165,12 @@ function installFakeCgroup(fake: FakeCgroup): void {
 
   vi.spyOn(fs, "readFileSync").mockImplementation(((file, ...rest) => {
     if (file === path.join(SCOPE_DIR, "cgroup.procs")) {
-      fake.procsReads += 1;
-      if (fake.pruneAt === "cgroup.procs") prune(fake);
-      if (fake.pruneAt === "cgroup.procs (verify)" && fake.procsReads === 2) prune(fake);
-      if (fake.removed) throw pruned(fake, String(file));
-      return `${fake.members.join("\n")}\n`;
+      return readFakeProcs(fake);
+    }
+    if (file === path.join(SCOPE_DIR, "cgroup.events")) {
+      if (fake.pruneAt === "cgroup.events") prune(fake);
+      if (fake.removed || fake.freezeEventError) throw pruned(fake, String(file));
+      return `populated ${Number(fake.members.length > 0)}\nfrozen ${Number(fake.frozen)}\n`;
     }
     if (file === "/proc/self/cgroup") return `0::${fake.ownPath}\n`;
     const proc = /^\/proc\/(\d+)\/(cgroup|environ)$/.exec(String(file));
@@ -159,10 +190,19 @@ function installFakeCgroup(fake: FakeCgroup): void {
 
   vi.spyOn(fs, "writeFileSync").mockImplementation(((file, data, ...rest) => {
     if (file === path.join(SCOPE_DIR, "cgroup.kill")) {
-      if (fake.pruneAt === "cgroup.kill") prune(fake);
+      fake.beforeSignal?.();
       if (fake.removed) throw pruned(fake, String(file));
       fake.killed = true;
+      for (const pid of fake.members) realKill(pid, "SIGKILL");
       fake.members = [];
+      return;
+    }
+    if (file === path.join(SCOPE_DIR, "cgroup.freeze")) {
+      if (fake.pruneAt === "cgroup.freeze") prune(fake);
+      if (fake.removed || !fake.freezeSupported) throw pruned(fake, String(file));
+      if (String(data) === "1") fake.beforeFreeze?.();
+      fake.freezes.push(String(data));
+      fake.frozen = String(data) === "1";
       return;
     }
     if (file === PARENT_PROCS) {
@@ -179,6 +219,9 @@ function installFakeCgroup(fake: FakeCgroup): void {
 
   vi.spyOn(fs, "rmdirSync").mockImplementation(((target: fs.PathLike) => {
     if (target !== SCOPE_DIR) throw new Error(`unexpected rmdir ${String(target)}`);
+    if (fake.members.some((pid) => isPidAlive(pid))) {
+      throw Object.assign(new Error("EBUSY"), { code: "EBUSY" });
+    }
     fake.removed = true;
   }) as typeof fs.rmdirSync);
 }
@@ -254,20 +297,128 @@ afterEach(() => {
 });
 
 describe("cgroup cleanup guards (simulated cgroup)", () => {
-  it("kills the scope when every member carries this session's token", async () => {
+  it.each([true, false])("kills proven members (freeze supported: %s)", async (freezeSupported) => {
     const member = spawnMember(scope());
+    const fake = newFake({ members: [member], freezeSupported });
+    installFakeCgroup(fake);
+
+    const result = await destroy();
+
+    expect(fake.killed).toBe(false);
+    expect(fake.removed).toBe(true);
+    expect(result.confirmed).toBe(true);
+    expect(fake.freezes).toEqual(freezeSupported ? ["1", "0"] : []);
+    expect(result.signaled).toContain(member);
+    expect(isPidAlive(member)).toBe(false);
+  }, 20_000);
+
+  it.each([true, false])(
+    "does not kill a foreign member joining after proof (freeze supported: %s)",
+    async (freezeSupported) => {
+      const member = spawnMember(scope());
+      const stranger = spawnMember({ ...scope(), token: randomBytes(32).toString("hex") });
+      const fake = newFake({ members: [member], freezeSupported });
+      fake.beforeSignal = () => {
+        fake.beforeSignal = undefined;
+        fake.members.push(stranger);
+      };
+      installFakeCgroup(fake);
+
+      const result = await destroy();
+
+      expect(fake.killed).toBe(false);
+      expect(isPidAlive(stranger)).toBe(true);
+      expect(isPidAlive(member)).toBe(false);
+      expect(result.confirmed).toBe(false);
+      expect(result.reason).toMatch(/still has members after verified signals/);
+      expect(result.signaled).toContain(member);
+      expect(result.signaled).not.toContain(stranger);
+      expect(fake.frozen).toBe(false);
+      expect(fake.removed).toBe(false);
+    },
+    20_000,
+  );
+
+  it("refuses a PID recycled after frozen ownership proof", async () => {
+    const member = spawnMember(scope());
+    const fake = newFake({ members: [member] });
+    installFakeCgroup(fake);
+    const read = vi.mocked(fs.readFileSync).getMockImplementation() as typeof fs.readFileSync;
+    let proofRead = false;
+    let recycled = false;
+    vi.mocked(fs.readFileSync).mockImplementation(((file, ...args) => {
+      const content = read(file, ...args);
+      if (file === `/proc/${member}/environ`) {
+        if (recycled) return "PICKFORGE_CONTAINMENT_TOKEN=another-session\0";
+        if (fake.procsReads === 3) proofRead = true;
+      }
+      if (file === `/proc/${member}/stat` && proofRead) {
+        if (!recycled) {
+          // Return the last old identity read, then replace that identity.
+          recycled = true;
+        } else {
+          const stat = String(content);
+          const close = stat.lastIndexOf(")");
+          const fields = stat.slice(close + 1).trim().split(/\s+/);
+          fields[22 - 3] = String(Number(fields[22 - 3]) + 1);
+          return `${stat.slice(0, close + 1)} ${fields.join(" ")}`;
+        }
+      }
+      return content;
+    }) as typeof fs.readFileSync);
+
+    const result = await destroy();
+
+    expect(recycled).toBe(true);
+    expect(result.confirmed).toBe(false);
+    expect(result.reason).toMatch(/refusing to signal recycled cgroup member pid/);
+    expect(result.signaled).not.toContain(member);
+    expect(isPidAlive(member)).toBe(true);
+    expect(fake.freezes).toEqual(["1", "0"]);
+  }, 20_000);
+
+  it("rechecks members after freezing and thaws on a foreign-member refusal", async () => {
+    const stranger = spawnMember(undefined);
+    const fake = newFake();
+    fake.beforeFreeze = () => fake.members.push(stranger);
+    installFakeCgroup(fake);
+
+    const result = await destroy();
+
+    expect(fake.killed).toBe(false);
+    expect(result.confirmed).toBe(false);
+    expect(result.reason).toMatch(/do not carry this session's containment token/);
+    expect(result.signaled).not.toContain(stranger);
+    expect(isPidAlive(stranger)).toBe(true);
+    expect(fake.freezes).toEqual(["1", "0"]);
+  }, 20_000);
+
+  it("thaws an unconfirmed freeze request and still runs the marker sweep", async () => {
+    const member = spawnMember(scope());
+    const fake = newFake({ members: [member], freezeEventError: true });
+    installFakeCgroup(fake);
+
+    const result = await destroy();
+
+    expect(result.confirmed).toBe(false);
+    expect(result.reason).toMatch(/could not confirm .* is frozen/);
+    expect(result.signaled).toContain(member);
+    expect(isPidAlive(member)).toBe(false);
+    expect(fake.freezes).toEqual(["1", "0"]);
+    expect(fake.removed).toBe(false);
+  }, 20_000);
+
+  it("always runs the marker sweep after cgroup signals", async () => {
+    const member = spawnMember(scope());
+    const escaped = spawnMember(scope());
     const fake = newFake({ members: [member] });
     installFakeCgroup(fake);
 
     const result = await destroy();
 
-    expect(fake.killed).toBe(true);
-    expect(fake.removed).toBe(true);
     expect(result.confirmed).toBe(true);
-    // The simulated kill signals nothing, so the marker sweep is what actually
-    // ends the member: cleanup is confirmed by both mechanisms, as designed.
-    expect(result.signaled).toContain(member);
-    expect(isPidAlive(member)).toBe(false);
+    expect(result.signaled).toEqual(expect.arrayContaining([member, escaped]));
+    expect(isPidAlive(escaped)).toBe(false);
   }, 20_000);
 
   it("accepts a member whose in-scope parent carries the token", async () => {
@@ -287,7 +438,7 @@ describe("cgroup cleanup guards (simulated cgroup)", () => {
 
     const result = await destroy();
 
-    expect(fake.killed).toBe(true);
+    expect(fake.killed).toBe(false);
     expect(result.reason).toBeUndefined();
   }, 20_000);
 
@@ -331,7 +482,7 @@ describe("cgroup cleanup guards (simulated cgroup)", () => {
     const result = await destroy();
 
     expect(fake.migrated).toContain(process.pid);
-    expect(fake.killed).toBe(true);
+    expect(fake.killed).toBe(false);
     expect(result.confirmed).toBe(true);
     expect(result.signaled).not.toContain(process.pid);
     expect(isPidAlive(process.pid)).toBe(true);
@@ -372,7 +523,10 @@ describe("cgroup cleanup guards (simulated cgroup)", () => {
     expect(result.reason).toMatch(/after being moved out/);
   }, 20_000);
 
-  it.each(["statfs", "cgroup.procs", "cgroup.procs (verify)", "cgroup.kill"] as const)(
+  it.each([
+    "statfs", "cgroup.procs", "cgroup.procs (verify)",
+    "cgroup.freeze", "cgroup.events", "cgroup.procs (frozen verify)",
+  ] as const)(
     "confirms a scope that a concurrent create pruned during destroy, at %s, without killing or signalling",
     async (pruneAt) => {
       // The scope exists when destroy starts and vanishes before the next
