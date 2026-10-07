@@ -82,6 +82,22 @@ async function waitForExit(child: ChildProcess): Promise<void> {
   ]);
 }
 
+async function waitForReadyFiles(
+  files: readonly string[],
+  children: readonly ChildProcess[],
+): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (!files.every((file) => fs.existsSync(file))) {
+    if (children.some((child) => child.exitCode !== null || child.signalCode !== null)) {
+      throw new Error("a fake process exited before it was ready");
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`fake processes were not ready: ${files.join(", ")}`);
+    }
+    await delay(10);
+  }
+}
+
 describe("session registry", () => {
   it("creates a session record on disk with a typed id", async () => {
     const session = await createSession(
@@ -979,9 +995,15 @@ describe("session registry", () => {
   });
 
   it("stops the browser group before VNC and Xvfb when reaping", async () => {
+    // Covers 10 s readiness plus three sequential 5 s stop budgets, so the
+    // finally cleanup runs before Vitest gives up.
     const orderFile = path.join(home, "stop-order.txt");
+    const readyFile = (label: string) => path.join(home, `${label}.ready`);
+    // Each fake writes its ready file only after it installs its SIGTERM
+    // handler. Under load, Node startup can outlast a fixed delay, and a
+    // SIGTERM before the handler exists kills the fake without a record.
     const stopLogger = (label: string) =>
-      `const fs=require("node:fs");process.on("SIGTERM",()=>{fs.appendFileSync(${JSON.stringify(orderFile)},${JSON.stringify(`${label}\n`)});process.exit(0)});setInterval(()=>{},1000)`;
+      `const fs=require("node:fs");process.on("SIGTERM",()=>{fs.appendFileSync(${JSON.stringify(orderFile)},${JSON.stringify(`${label}\n`)});process.exit(0)});fs.writeFileSync(${JSON.stringify(readyFile(label))},"");setInterval(()=>{},1000)`;
     const browser = spawn(process.execPath, ["-e", stopLogger("browser")], {
       detached: true,
       stdio: "ignore",
@@ -1001,7 +1023,10 @@ describe("session registry", () => {
       throw new Error("child process did not expose a pid");
     }
     try {
-      await delay(100);
+      await waitForReadyFiles(
+        ["browser", "vnc", "xvfb"].map(readyFile),
+        [browser, vnc, xvfb],
+      );
       const identity = readProcessIdentity(browser.pid);
       if (identity === undefined) {
         throw new Error("could not read browser identity");
@@ -1072,7 +1097,7 @@ describe("session registry", () => {
         }
       }
     }
-  });
+  }, 35_000);
 
   it("leaves helpers and profile intact for an unconfirmed browser group", async () => {
     const browser = spawn(
