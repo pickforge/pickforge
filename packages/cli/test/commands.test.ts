@@ -8,6 +8,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createRun, recordEvidenceOutcome, writeEvidenceReport, isProcessGroupAlive, readActions, listRuns } from "@pickforge/lab-core";
 import { ensureCliBuilt } from "./build-once.js";
+import { killProcessesWithEnv } from "./env-process-sweep.js";
 import { cliSpawnTimeout } from "./spawn-timeout.js";
 import { encodePng } from "../../desktop-linux/test/png-fixture.js";
 
@@ -34,11 +35,17 @@ interface CliResult {
 // later CLI calls could create a session after afterEach destroyed the
 // sessions and deleted the registry, so that Xvfb outlived the run (#262).
 // afterEach closes the test's state homes to new CLI calls, waits a bounded
-// time for the running ones, kills the survivors, destroys every session,
-// and keeps the registry on failure. Calls are keyed by PICKFORGE_HOME, so
-// env copies are covered too.
+// time for the running ones, kills the survivors, destroys every session
+// within a time limit, and keeps the registry on failure. Calls are keyed by
+// PICKFORGE_HOME, so env copies are covered too. The CLI starts helpers such
+// as adb in their own process groups, so killing its group misses them.
+// Helpers inherit the test's unique PICKFORGE_HOME, so a last sweep kills
+// every process that still carries it (#288).
 const CLI_DRAIN_MS = 20_000;
 const CLI_KILL_WAIT_MS = 2_000;
+// Above the 5 s `adb emu kill` plus the 30 s exit grace of an Android destroy.
+const CLI_DESTROY_MS = 45_000;
+const HOME_SWEEP_MS = 2_000;
 const closedHomes = new Set<string>();
 
 interface RunningCli {
@@ -89,12 +96,27 @@ async function stopRunningCli(home: string, deadline: number): Promise<void> {
   await settleWithin(Promise.all(survivors.map((entry) => entry.done)), CLI_KILL_WAIT_MS);
 }
 
-function spawnCli(
-  args: string[],
-  env: Record<string, string>,
-  cwd?: string,
-): Promise<CliResult> {
-  return startCli(args, env, cwd).result;
+/** Runs `session destroy --all`, and kills it if it overruns CLI_DESTROY_MS. */
+async function destroyAllSessions(env: Record<string, string>): Promise<CliResult> {
+  const { child, result } = startCli(["session", "destroy", "--all"], env);
+  let destroyed: CliResult | undefined;
+  const done = result.then(
+    (value) => {
+      destroyed = value;
+    },
+    (error: unknown) => {
+      destroyed = { code: null, stdout: "", stderr: String(error) };
+    },
+  );
+  await settleWithin(done, CLI_DESTROY_MS);
+  if (destroyed !== undefined) return destroyed;
+  if (child.pid !== undefined) stopTestProcessGroup(child.pid, "SIGKILL");
+  await settleWithin(done, CLI_KILL_WAIT_MS);
+  return {
+    code: null,
+    stdout: "",
+    stderr: `session destroy --all did not finish within ${CLI_DESTROY_MS} ms and was killed`,
+  };
 }
 
 function startCli(
@@ -360,21 +382,26 @@ afterEach(async () => {
   const failures: string[] = [];
   for (const [home, env] of envsByHome) {
     await stopRunningCli(home, deadline);
-    const destroyed = await spawnCli(["session", "destroy", "--all"], env).catch(
-      (error: unknown): CliResult => ({ code: null, stdout: "", stderr: String(error) }),
-    );
+    const destroyed = await destroyAllSessions(env);
     if (destroyed.code !== 0) {
       failures.push(`${home}: ${destroyed.stdout}${destroyed.stderr}`.trim());
     }
+    if (path.isAbsolute(home)) {
+      const { survivors } = await killProcessesWithEnv("PICKFORGE_HOME", home, HOME_SWEEP_MS);
+      if (survivors.length > 0) {
+        failures.push(`${home}: processes survived SIGKILL: ${survivors.join(", ")}`);
+      }
+    }
   }
   if (failures.length > 0) {
-    // Keep the registry so the surviving Xvfb and VNC processes stay findable.
+    // Keep the registry so surviving session processes stay findable. VNC
+    // and the browser get a clean environment, so the sweep misses them.
     throw new Error(
       `Could not destroy test sessions; kept registry at ${dir}:\n${failures.join("\n")}`,
     );
   }
   fs.rmSync(dir, { recursive: true, force: true });
-}, 60_000);
+}, 90_000);
 
 describe("pickforge-lab session (desktop)", () => {
   it("describes immutable inherited-home consent without disabling takeover", async () => {
