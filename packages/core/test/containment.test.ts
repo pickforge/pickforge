@@ -701,7 +701,7 @@ describe("containment refuses to signal anything it does not own", () => {
         expect(joined).toBe(true);
         expect(frozenAtJoin).toBe(true);
         expect(result.confirmed).toBe(false);
-        expect(result.reason).toMatch(/still has members after verified signals/);
+        expect(result.reason).toMatch(/do not carry this session's containment token/);
         expect(result.signaled).toContain(member);
         expect(result.signaled).not.toContain(stranger);
         expect(isPidAlive(stranger)).toBe(true);

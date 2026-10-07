@@ -39,6 +39,7 @@ interface FakeCgroup {
   freezeSupported: boolean;
   frozen: boolean;
   freezes: string[];
+  thawProcsReads?: number;
   freezeEventError?: boolean;
   beforeFreeze?: () => void;
   beforeSignal?: () => void;
@@ -140,6 +141,7 @@ function writeFakeFreeze(fake: FakeCgroup, data: string): void {
   if (fake.removed || !fake.freezeSupported) throw pruned(fake, file);
   if (String(data) === "1") fake.beforeFreeze?.();
   fake.freezes.push(String(data));
+  if (String(data) === "0") fake.thawProcsReads = fake.procsReads;
   fake.frozen = String(data) === "1";
 }
 
@@ -369,14 +371,62 @@ describe("cgroup cleanup guards (simulated cgroup)", () => {
       expect(isPidAlive(stranger)).toBe(true);
       expect(isPidAlive(member)).toBe(false);
       expect(result.confirmed).toBe(false);
-      expect(result.reason).toMatch(/still has members after verified signals/);
+      expect(result.reason).toMatch(/do not carry this session's containment token/);
       expect(result.signaled).toContain(member);
       expect(result.signaled).not.toContain(stranger);
       expect(fake.frozen).toBe(false);
       expect(fake.removed).toBe(false);
+      // Refuse on the next proof rather than polling for the full 500 ms.
+      if (freezeSupported) expect(fake.thawProcsReads).toBeLessThan(8);
     },
     20_000,
   );
+
+  it.each([true, false])(
+    "signals a same-token member joining after proof (freeze supported: %s)",
+    async (freezeSupported) => {
+      const member = spawnMember(scope());
+      const joiner = spawnMember(scope());
+      const fake = newFake({ members: [member], freezeSupported });
+      fake.beforeSignal = () => {
+        fake.beforeSignal = undefined;
+        fake.members.push(joiner);
+      };
+      installFakeCgroup(fake);
+
+      const result = await destroy();
+
+      expect(result.confirmed).toBe(true);
+      expect(result.reason).toBeUndefined();
+      expect(fake.removed).toBe(true);
+      expect(fake.killed).toBe(false);
+      expect(vi.mocked(process.kill).mock.calls).toContainEqual([joiner, "SIGKILL"]);
+      expect(result.signaled).toEqual(expect.arrayContaining([member, joiner]));
+      expect(isPidAlive(joiner)).toBe(false);
+    },
+    20_000,
+  );
+
+  it("promptly refuses an unreadable member joining after proof", async () => {
+    const member = spawnMember(scope());
+    const joiner = spawnMember(undefined);
+    const fake = newFake({ members: [member], unreadable: new Set([joiner]) });
+    fake.beforeSignal = () => {
+      fake.beforeSignal = undefined;
+      fake.members.push(joiner);
+    };
+    installFakeCgroup(fake);
+
+    const result = await destroy();
+
+    expect(result.confirmed).toBe(false);
+    expect(result.reason).toMatch(/could not verify that process/);
+    expect(result.signaled).not.toContain(joiner);
+    expect(isPidAlive(joiner)).toBe(true);
+    expect(fake.thawProcsReads).toBeLessThan(8);
+    expect(fake.freezes).toEqual(["1", "0"]);
+    expect(fake.removed).toBe(false);
+  }, 20_000);
 
   it("refuses a PID recycled after frozen ownership proof", async () => {
     const member = spawnMember(scope());

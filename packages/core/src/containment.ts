@@ -759,9 +759,25 @@ function verifyCgroupMemberIdentity(
   return { pid, startTicks: identity.startTicks };
 }
 
+function verifyCgroupMemberWithPriorProof(
+  pid: number,
+  token: string,
+  members: Set<number>,
+  priorProof: Map<number, ProcessIdentity>,
+): Exclude<MemberVerdict, "ours"> | ProcessIdentity {
+  const prior = priorProof.get(pid);
+  if (prior !== undefined) {
+    const lifetime = probeCgroupIdentity(prior);
+    if (lifetime === "gone") return "gone";
+    if (lifetime === "match") return prior;
+  }
+  return verifyCgroupMemberIdentity(pid, token, members);
+}
+
 function collectCgroupMembership(
   members: number[],
   token: string,
+  priorProof: Map<number, ProcessIdentity>,
 ): { undecided: number[]; foreign: number[]; proven: ProcessIdentity[] } {
   const chain = selfAndAncestorIdentities();
   const inScope = new Set(members);
@@ -770,7 +786,7 @@ function collectCgroupMembership(
   const proven: ProcessIdentity[] = [];
   for (const pid of members) {
     if (chain.has(pid)) continue;
-    const verdict = verifyCgroupMemberIdentity(pid, token, inScope);
+    const verdict = verifyCgroupMemberWithPriorProof(pid, token, inScope, priorProof);
     if (verdict === "foreign") foreign.push(pid);
     else if (verdict === "unknown") undecided.push(pid);
     else if (verdict !== "gone") proven.push(verdict);
@@ -791,14 +807,16 @@ function collectCgroupMembership(
 async function verifyCgroupMembership(
   cgroupDir: string,
   token: string,
+  priorProof = new Map<number, ProcessIdentity>(),
+  timeoutMs = MEMBER_VERIFY_TIMEOUT_MS,
 ): Promise<KillGuard> {
-  const deadline = Date.now() + MEMBER_VERIFY_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
   for (;;) {
     const members = readCgroupProcs(cgroupDir);
     if (members === undefined) {
       return vacatedOr(cgroupDir, `could not read ${cgroupDir}/cgroup.procs`);
     }
-    const { undecided, foreign, proven } = collectCgroupMembership(members, token);
+    const { undecided, foreign, proven } = collectCgroupMembership(members, token, priorProof);
     if (foreign.length > 0) {
       return {
         refusal:
@@ -926,21 +944,6 @@ function signalCgroupMembers(
     }
   }
   return undefined;
-}
-
-async function waitForCgroupEmpty(
-  cgroupDir: string,
-  timeoutMs: number,
-): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const members = readCgroupProcs(cgroupDir);
-    if (members === undefined ? scopeDirMissing(cgroupDir) : members.length === 0) {
-      return true;
-    }
-    if (Date.now() >= deadline) return false;
-    await sleep(POLL_INTERVAL_MS);
-  }
 }
 
 async function removeCgroupDir(cgroupDir: string): Promise<boolean> {
@@ -1102,18 +1105,30 @@ export interface DestroyContainmentOptions {
 
 async function signalGuardedCgroupMembers(
   cgroupDir: string,
+  token: string,
   guard: KillGuard,
   timeoutMs: number,
   signaled: Set<number>,
 ): Promise<string | undefined> {
-  if (guard === "vacated") return undefined;
-  if ("refusal" in guard) return guard.refusal;
-  const reason = signalCgroupMembers(guard.members, signaled);
-  if (reason !== undefined) return reason;
-  if (!(await waitForCgroupEmpty(cgroupDir, timeoutMs))) {
-    return `cgroup ${cgroupDir} still has members after verified signals`;
+  const deadline = Date.now() + timeoutMs;
+  const priorProof = new Map<number, ProcessIdentity>();
+  for (;;) {
+    if (guard === "vacated") return undefined;
+    if ("refusal" in guard) return guard.refusal;
+    if (guard.members.length === 0) return undefined;
+    const newlyProven = guard.members.filter((identity) =>
+      priorProof.get(identity.pid)?.startTicks !== identity.startTicks);
+    const reason = signalCgroupMembers(newlyProven, signaled);
+    if (reason !== undefined) return reason;
+    for (const identity of newlyProven) priorProof.set(identity.pid, identity);
+    if (Date.now() >= deadline) {
+      return `cgroup ${cgroupDir} still has members after verified signals`;
+    }
+    // Keep proof for signalled lifetimes whose token-bearing parent has exited.
+    // New members need fresh proof. Refuse unknown joiners without a full wait.
+    guard = await verifyCgroupMembership(cgroupDir, token, priorProof, 0);
+    await sleep(POLL_INTERVAL_MS);
   }
-  return undefined;
 }
 
 async function destroyCgroupMembers(
@@ -1137,7 +1152,7 @@ async function destroyCgroupMembers(
     const freeze = await freezeCgroup(cgroupDir);
     frozen = freeze !== "unsupported";
     guard = await verifyCgroupMembership(cgroupDir, scope.token);
-    reason = await signalGuardedCgroupMembers(cgroupDir, guard, timeoutMs, signaled);
+    reason = await signalGuardedCgroupMembers(cgroupDir, scope.token, guard, timeoutMs, signaled);
   } finally {
     if (frozen) reason = unfreezeCgroup(cgroupDir) ?? reason;
   }
