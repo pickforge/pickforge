@@ -32,9 +32,13 @@ const PORT_LOCK_WAIT_MS = 120_000;
 let portLock: net.Server | undefined;
 
 function tryLockPorts(): Promise<net.Server | undefined> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const server = net.createServer((socket) => socket.destroy());
-    server.once("error", () => resolve(undefined));
+    server.once("error", (error: NodeJS.ErrnoException) => {
+      // Only a held lock means "wait"; any other failure is a real error.
+      if (error.code === "EADDRINUSE") resolve(undefined);
+      else reject(new Error(`cannot take the emulator test port lock: ${error.code ?? error.message}`));
+    });
     server.listen({ path: PORT_LOCK }, () => resolve(server));
   });
 }
@@ -158,6 +162,43 @@ async function startFailure(
     return error as EmulatorStartError;
   }
   throw new Error("expected startEmulator to reject");
+}
+
+/** Like startFailure, but stops the emulator if the start wrongly succeeds. */
+async function startFailureStopping(
+  promise: Promise<EmulatorHandle>,
+  sdk: string,
+  registryEnv: EnvLike,
+): Promise<EmulatorStartError> {
+  return startFailure(
+    promise.then(async (handle) => {
+      await stop(handle, sdk, registryEnv);
+      return handle;
+    }),
+  );
+}
+
+/**
+ * Wait until /proc shows the child's new command line. The spawn event can
+ * fire while exec is still setting up the new image, and until then the
+ * kernel reports an empty cmdline (#294). A lock that names such a pid would
+ * read as stale.
+ */
+async function waitForCmdline(pid: number, pattern: RegExp, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let cmdline = "";
+    try {
+      cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, "latin1");
+    } catch {
+      // the process is not visible yet or has gone; keep polling until the deadline
+    }
+    if (pattern.test(cmdline)) return;
+    if (Date.now() > deadline) {
+      throw new Error(`pid ${pid} never showed ${pattern} in /proc cmdline (last: ${JSON.stringify(cmdline)})`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 /**
@@ -484,9 +525,10 @@ describe("AVD pre-flight checks", () => {
     });
     await new Promise((resolve) => holder.once("spawn", resolve));
     const lockPath = avdLockPath("pickforge-avd", toolEnv);
-    fs.writeFileSync(lockPath, `${holder.pid}\0`);
     try {
-      const error = await startFailure(
+      await waitForCmdline(holder.pid as number, /emulator/);
+      fs.writeFileSync(lockPath, `${holder.pid}\0`);
+      const error = await startFailureStopping(
         startEmulator({
           avdName: "pickforge-avd",
           sdk,
@@ -494,6 +536,8 @@ describe("AVD pre-flight checks", () => {
           env: toolEnv,
           registryEnv,
         }),
+        sdk,
+        registryEnv,
       );
       expect(error.kind).toBe("avd-in-use");
       expect(error.message).toContain(`writable emulator pid ${holder.pid}`);
@@ -504,7 +548,7 @@ describe("AVD pre-flight checks", () => {
       expect(fs.existsSync(marker)).toBe(false);
 
       // Pickforge refuses a read-only instance next to a writable one too.
-      const readOnlyError = await startFailure(
+      const readOnlyError = await startFailureStopping(
         startEmulator({
           avdName: "pickforge-avd",
           sdk,
@@ -513,6 +557,8 @@ describe("AVD pre-flight checks", () => {
           env: toolEnv,
           registryEnv,
         }),
+        sdk,
+        registryEnv,
       );
       expect(readOnlyError.kind).toBe("avd-in-use");
       expect(readOnlyError.message).toContain(AVD_SHARING_POLICY);
