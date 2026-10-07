@@ -15,14 +15,14 @@ import { parseProcStat, readProcessStartTicks, type ProcessIdentity } from "./pr
  * - `cgroup`: a private cgroup v2 directory created inside the *delegated*
  *   cgroup this process already lives in. A process cannot leave a cgroup
  *   without privileges, so `fork`/`setsid` descendants stay members, and
- *   `cgroup.kill` terminates every member atomically. Membership is the proof
- *   of ownership, and it is always read back from the kernel rather than
+ *   cleanup freezes members where supported and signals proven identities.
+ *   Ownership is always read back from the kernel rather than
  *   inferred from a successful write: the supervisor confirms its join through
  *   `/proc/self/cgroup`. A scope directory is bound to exactly one session —
  *   it must be named `pickforge-<session id>` on a cgroup v2 filesystem, so a
  *   record naming a *sibling* session's valid-looking scope is refused — and
- *   immediately before `cgroup.kill` every remaining member must be shown to
- *   carry this session's token (or descend from a process that does).
+ *   each signalled identity must carry this session's token, or descend from
+ *   an in-scope process that does. Late joiners are never bulk-killed.
  * - `marker`: a 256-bit random token exported as `PICKFORGE_CONTAINMENT_TOKEN`.
  *   Descendants inherit the environment across `fork`, `setsid` and `exec`, so
  *   `/proc/<pid>/environ` identifies them. The token is unguessable, so a
@@ -42,12 +42,12 @@ import { parseProcStat, readProcessStartTicks, type ProcessIdentity } from "./pr
  * own process chain from every signal: on the marker path by skipping those
  * PIDs, on the cgroup path by moving the chain into the parent cgroup and
  * confirming from `cgroup.procs` that it is no longer a member before
- * `cgroup.kill` is written. If the chain cannot be moved out, cleanup refuses
+ * members are frozen or signalled. If the chain cannot be moved out, cleanup refuses
  * with an actionable reason rather than terminating the caller. The chain is
  * pinned by start time on both paths, so an ancestor that exits mid-cleanup
  * neither exempts nor donates its pid to an unrelated process.
  *
- * The marker sweep always runs, including after a cgroup kill, so cleanup is
+ * The marker sweep always runs, including after cgroup signals, so cleanup is
  * confirmed by a mechanism that does not depend on the cgroup being intact.
  */
 
@@ -156,7 +156,7 @@ function processCgroupDir(pid: number): string | undefined {
 /**
  * Resolve the delegated cgroup directory we may create children in, or
  * undefined when this host gives us none (no cgroup v2, a root-owned cgroup,
- * a container without delegation, or a kernel without `cgroup.kill`).
+ * a container without delegation, or unwritable membership files).
  */
 function findDelegatedCgroupDir(): string | undefined {
   const dir = ownCgroupDir();
@@ -179,10 +179,9 @@ function tryCreateCgroup(parent: string, name: string): string | undefined {
     return undefined;
   }
   try {
-    // `cgroup.kill` (Linux 5.14+) is what makes cleanup atomic and confirmable.
-    // Without it a fork bomb inside the cgroup could outrun a PID-by-PID kill,
-    // so fall back to the marker sweep rather than pretend to contain.
-    fs.accessSync(path.join(dir, "cgroup.kill"), fs.constants.W_OK);
+    // Joining and own-chain evacuation require writable membership files.
+    // Cleanup uses proven PIDs, not cgroup.kill, which can reach late joiners.
+    fs.accessSync(path.join(dir, "cgroup.procs"), fs.constants.W_OK);
     return dir;
   } catch {
     try {
@@ -206,7 +205,7 @@ function tryCreateCgroup(parent: string, name: string): string | undefined {
  * requiring the exact name means a record can only ever act on its own scope,
  * the lab's own delegated cgroup and every directory outside the cgroup
  * filesystem stay unreachable, and a scope nested inside another scope (which
- * `cgroup.kill` would reach through its parent anyway) is refused.
+ * freezing the parent would stop its children too) is refused.
  */
 export function scopeCgroupProblem(
   cgroupDir: string,
@@ -590,7 +589,7 @@ function ownChainInside(
 function insideScopeRefusal(detail: string): string {
   return (
     `this command is running inside the session's containment cgroup and ` +
-    `${detail}; refusing to write cgroup.kill. ${INSIDE_SCOPE_ADVICE}`
+    `${detail}; refusing cgroup cleanup. ${INSIDE_SCOPE_ADVICE}`
   );
 }
 
@@ -665,6 +664,19 @@ function evacuateOwnChain(
 
 type MemberVerdict = "ours" | "gone" | "foreign" | "unknown";
 
+function classifyCgroupEnvironment(
+  pid: number,
+  token: string,
+  midExec: Set<number>,
+): MemberVerdict {
+  const read = readEnviron(pid);
+  if (read.kind !== "entries") return read.kind === "gone" ? "gone" : "unknown";
+  if (read.entries.includes(`${TOKEN_ENV}=${token}`)) return "ours";
+  if (readMidExecIdentity(pid, read.entries) === undefined) return "foreign";
+  midExec.add(pid);
+  return "unknown";
+}
+
 /**
  * Whether a cgroup member belongs to this scope. It does when it carries the
  * token, or when an ancestor *inside the same cgroup* does: a member that
@@ -681,30 +693,27 @@ function classifyCgroupMember(
   pid: number,
   token: string,
   members: Set<number>,
+  midExec: Set<number>,
 ): MemberVerdict {
   let current: number | undefined = pid;
-  let unreadable = false;
+  let uncertain = false;
   for (let depth = 0; current !== undefined && depth < 64; depth += 1) {
-    const read = readEnviron(current);
-    if (read.kind === "entries") {
-      if (read.entries.includes(`${TOKEN_ENV}=${token}`)) return "ours";
-    } else if (read.kind === "unreadable") {
-      unreadable = true;
-    } else if (current === pid) {
-      return "gone";
-    }
+    const verdict = classifyCgroupEnvironment(current, token, midExec);
+    if (verdict === "ours") return "ours";
+    if (verdict === "unknown") uncertain = true;
+    if (verdict === "gone" && current === pid) return "gone";
     const parent = readParentPid(current);
     current = parent !== undefined && members.has(parent) ? parent : undefined;
   }
-  return unreadable ? "unknown" : "foreign";
+  return uncertain ? "unknown" : "foreign";
 }
 
 /**
- * What a pre-kill check decided: `cgroup.kill` may be written, the scope
+ * What a pre-kill check decided: members may be signalled, the scope
  * cgroup has vanished so there is nothing left to kill, or the reason the
- * kill is refused.
+ * cleanup is refused.
  */
-type KillGuard = "kill" | "vacated" | { refusal: string };
+type KillGuard = { members: ProcessIdentity[] } | "vacated" | { refusal: string };
 
 /**
  * Whether the kernel reports no entry at all at `cgroupDir`. Only ENOENT
@@ -744,12 +753,66 @@ async function vacatedOr(
   return "vacated";
 }
 
+/** Pin ownership to the identity read before the token proof. */
+function verifyCgroupMemberIdentity(
+  pid: number,
+  token: string,
+  members: Set<number>,
+  midExec: Set<number>,
+): Exclude<MemberVerdict, "ours"> | ProcessIdentity {
+  const identity = readParentAndStart(pid);
+  const verdict = classifyCgroupMember(pid, token, members, midExec);
+  if (verdict === "foreign" || verdict === "gone") return verdict;
+  if (identity === undefined || readProcessStartTicks(pid) !== identity.startTicks) {
+    return "unknown";
+  }
+  if (verdict === "unknown") return verdict;
+  return { pid, startTicks: identity.startTicks };
+}
+
+function verifyCgroupMemberWithPriorProof(
+  pid: number,
+  token: string,
+  members: Set<number>,
+  priorProof: Map<number, ProcessIdentity>,
+  midExec: Set<number>,
+): Exclude<MemberVerdict, "ours"> | ProcessIdentity {
+  const prior = priorProof.get(pid);
+  if (prior !== undefined) {
+    const lifetime = probeCgroupIdentity(prior);
+    if (lifetime === "gone") return "gone";
+    if (lifetime === "match") return prior;
+  }
+  return verifyCgroupMemberIdentity(pid, token, members, midExec);
+}
+
+function collectCgroupMembership(
+  members: number[],
+  token: string,
+  priorProof: Map<number, ProcessIdentity>,
+): { undecided: number[]; foreign: number[]; proven: ProcessIdentity[]; midExec: Set<number> } {
+  const chain = selfAndAncestorIdentities();
+  const inScope = new Set(members);
+  const undecided: number[] = [];
+  const foreign: number[] = [];
+  const proven: ProcessIdentity[] = [];
+  const midExec = new Set<number>();
+  for (const pid of members) {
+    if (chain.has(pid)) continue;
+    const verdict = verifyCgroupMemberWithPriorProof(pid, token, inScope, priorProof, midExec);
+    if (verdict === "foreign") foreign.push(pid);
+    else if (verdict === "unknown") undecided.push(pid);
+    else if (verdict !== "gone") proven.push(verdict);
+  }
+  return { undecided, foreign, proven, midExec };
+}
+
 /**
- * Prove, immediately before `cgroup.kill`, that every process the kill would
+ * Prove, immediately before cgroup signals, that every process the signals would
  * reach is this session's own. A directory named `pickforge-<id>` on a cgroup
  * v2 filesystem is already bound to one session, so this is the second, live
  * proof: even a record whose id and path were both rewritten cannot make the
- * kill land on processes that carry another session's token. Members whose
+ * signals land on processes that carry another session's token. Members whose
  * ownership is momentarily unreadable (dying, mid-exec) are re-read until they
  * settle or leave; one that never settles fails cleanup instead of being
  * killed unverified.
@@ -757,23 +820,17 @@ async function vacatedOr(
 async function verifyCgroupMembership(
   cgroupDir: string,
   token: string,
+  priorProof = new Map<number, ProcessIdentity>(),
+  timeoutMs = MEMBER_VERIFY_TIMEOUT_MS,
+  retryUnreadable = true,
 ): Promise<KillGuard> {
-  const deadline = Date.now() + MEMBER_VERIFY_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
   for (;;) {
     const members = readCgroupProcs(cgroupDir);
     if (members === undefined) {
       return vacatedOr(cgroupDir, `could not read ${cgroupDir}/cgroup.procs`);
     }
-    const chain = selfAndAncestorIdentities();
-    const inScope = new Set(members);
-    const undecided: number[] = [];
-    const foreign: number[] = [];
-    for (const pid of members) {
-      if (chain.has(pid)) continue;
-      const verdict = classifyCgroupMember(pid, token, inScope);
-      if (verdict === "foreign") foreign.push(pid);
-      else if (verdict === "unknown") undecided.push(pid);
-    }
+    const { undecided, foreign, proven, midExec } = collectCgroupMembership(members, token, priorProof);
     if (foreign.length > 0) {
       return {
         refusal:
@@ -781,8 +838,9 @@ async function verifyCgroupMembership(
           `carry this session's containment token: ${foreign.join(", ")}`,
       };
     }
-    if (undecided.length === 0) return "kill";
-    if (Date.now() >= deadline) {
+    if (undecided.length === 0) return { members: proven };
+    if (Date.now() >= deadline ||
+      (!retryUnreadable && undecided.some((pid) => !midExec.has(pid)))) {
       return {
         refusal:
           `refusing cgroup cleanup: could not verify that process(es) ` +
@@ -794,11 +852,11 @@ async function verifyCgroupMembership(
 }
 
 /**
- * Everything that must hold before `cgroup.kill` may be written: the path is
+ * Everything that must hold before cgroup members may be signalled: the path is
  * a real cgroup, its member list is readable, none of this process's own chain
  * is (any longer) a member, and every remaining member is provably ours.
  */
-async function guardCgroupKill(
+async function guardCgroupSignals(
   cgroupDir: string,
   token: string,
 ): Promise<KillGuard> {
@@ -820,28 +878,95 @@ async function guardCgroupKill(
   return verifyCgroupMembership(cgroupDir, token);
 }
 
-function killCgroup(cgroupDir: string): boolean {
+/**
+ * Freezing stops forks, but it does not stop migrations into the cgroup.
+ * Neither a frozen member check nor an empty post-kill read can prove which
+ * late joiners cgroup.kill reached. Signal only pinned, proven identities.
+ */
+async function freezeCgroup(
+  cgroupDir: string,
+): Promise<"unsupported" | "frozen" | "pending"> {
   try {
-    fs.writeFileSync(path.join(cgroupDir, "cgroup.kill"), "1");
-    return true;
+    fs.writeFileSync(path.join(cgroupDir, "cgroup.freeze"), "1");
   } catch {
-    return false;
+    // Older kernels and hosts without write access use the same PID guards.
+    return "unsupported";
+  }
+  const deadline = Date.now() + MEMBER_VERIFY_TIMEOUT_MS;
+  for (;;) {
+    try {
+      if (/^frozen 1$/m.test(fs.readFileSync(path.join(cgroupDir, "cgroup.events"), "utf8"))) {
+        return "frozen";
+      }
+    } catch {
+      break;
+    }
+    if (Date.now() >= deadline) break;
+    await sleep(POLL_INTERVAL_MS);
+  }
+  // The request may complete later. PID guards still apply; always thaw it.
+  return "pending";
+}
+
+function unfreezeCgroup(cgroupDir: string): string | undefined {
+  try {
+    fs.writeFileSync(path.join(cgroupDir, "cgroup.freeze"), "0");
+    return undefined;
+  } catch {
+    return scopeDirMissing(cgroupDir) ? undefined : `could not unfreeze ${cgroupDir}`;
   }
 }
 
-async function waitForCgroupEmpty(
-  cgroupDir: string,
-  timeoutMs: number,
-): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const members = readCgroupProcs(cgroupDir);
-    if (members === undefined ? !fs.existsSync(cgroupDir) : members.length === 0) {
-      return true;
-    }
-    if (Date.now() >= deadline) return false;
-    await sleep(POLL_INTERVAL_MS);
+function appendThawFailure(
+  reason: string | undefined,
+  thawFailure: string | undefined,
+): string | undefined {
+  if (thawFailure === undefined) return reason;
+  return reason === undefined ? thawFailure : `${reason}; ${thawFailure}`;
+}
+
+/** Recheck the lifetime of an identity whose ownership was already proven. */
+function probeCgroupIdentity(identity: ProcessIdentity): TokenProbe {
+  let stat: ReturnType<typeof parseProcStat>;
+  try {
+    stat = parseProcStat(fs.readFileSync(`/proc/${identity.pid}/stat`, "utf8"));
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ESRCH" ? "gone" : "unverified";
   }
+  if (stat === undefined) return "unverified";
+  if (stat.state === "Z") return "gone";
+  return stat.startTicks === identity.startTicks ? "match" : "mismatch";
+}
+
+function signalCgroupMembers(
+  members: ProcessIdentity[],
+  signaled: Set<number>,
+): string | undefined {
+  for (const identity of members) {
+    // A late joiner is absent from this list. A reused PID is refused, and
+    // cleanup's own chain is excluded even if it migrated back after proof.
+    // Ownership proved for this identity remains valid if its token-bearing
+    // parent was already killed. Only that same identity may be signalled.
+    if (selfAndAncestorIdentities().has(identity.pid)) continue;
+    const current = probeCgroupIdentity(identity);
+    if (current === "gone") continue;
+    if (current === "unverified") {
+      return `could not re-read cgroup member identity for pid ${identity.pid}`;
+    }
+    if (current === "mismatch") {
+      return `refusing to signal recycled cgroup member pid ${identity.pid}`;
+    }
+    try {
+      process.kill(identity.pid, "SIGKILL");
+      signaled.add(identity.pid);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+        return `could not signal cgroup member pid ${identity.pid}: ${errorMessage(error)}`;
+      }
+    }
+  }
+  return undefined;
 }
 
 async function removeCgroupDir(cgroupDir: string): Promise<boolean> {
@@ -1001,9 +1126,42 @@ export interface DestroyContainmentOptions {
   killTimeoutMs?: number;
 }
 
+async function signalGuardedCgroupMembers(
+  cgroupDir: string,
+  token: string,
+  guard: KillGuard,
+  timeoutMs: number,
+  signaled: Set<number>,
+): Promise<string | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  const priorProof = new Map<number, ProcessIdentity>();
+  for (;;) {
+    if (guard === "vacated") return undefined;
+    if ("refusal" in guard) return guard.refusal;
+    if (guard.members.length === 0) return undefined;
+    const newlyProven = guard.members.filter((identity) =>
+      priorProof.get(identity.pid)?.startTicks !== identity.startTicks);
+    const reason = signalCgroupMembers(newlyProven, signaled);
+    if (reason !== undefined) return reason;
+    for (const identity of newlyProven) priorProof.set(identity.pid, identity);
+    if (Date.now() >= deadline) {
+      return `cgroup ${cgroupDir} still has members after verified signals`;
+    }
+    // Keep proof for signalled lifetimes whose token-bearing parent has exited.
+    // New members need fresh proof. Retry mid-exec members within the budget,
+    // but refuse other unknown joiners without a full wait.
+    guard = await verifyCgroupMembership(
+      cgroupDir, token, priorProof,
+      Math.min(MEMBER_VERIFY_TIMEOUT_MS, Math.max(0, deadline - Date.now())), false,
+    );
+    await sleep(POLL_INTERVAL_MS);
+  }
+}
+
 async function destroyCgroupMembers(
   scope: ContainmentScope,
   timeoutMs: number,
+  signaled: Set<number>,
 ): Promise<string | undefined> {
   const problem = containmentScopeProblem(scope);
   if (problem !== undefined) return `refusing cgroup cleanup: ${problem}`;
@@ -1011,15 +1169,21 @@ async function destroyCgroupMembers(
   // Only a scope the kernel reports as absent has nothing to kill. One that
   // merely cannot be inspected goes through the guard and is refused there.
   if (scopeDirMissing(cgroupDir)) return undefined;
-  let guard = await guardCgroupKill(cgroupDir, scope.token);
-  if (guard === "kill" && !killCgroup(cgroupDir)) {
-    guard = await vacatedOr(cgroupDir, `could not write ${cgroupDir}/cgroup.kill`);
-  }
+  let guard = await guardCgroupSignals(cgroupDir, scope.token);
   if (guard === "vacated") return undefined;
-  if (guard !== "kill") return guard.refusal;
-  if (!(await waitForCgroupEmpty(cgroupDir, timeoutMs))) {
-    return `cgroup ${cgroupDir} still has members after cgroup.kill`;
+  if ("refusal" in guard) return guard.refusal;
+  let frozen = false;
+  let reason: string | undefined;
+  try {
+    // Evacuate the caller before freezing. Re-prove ownership afterwards.
+    const freeze = await freezeCgroup(cgroupDir);
+    frozen = freeze !== "unsupported";
+    guard = await verifyCgroupMembership(cgroupDir, scope.token);
+    reason = await signalGuardedCgroupMembers(cgroupDir, scope.token, guard, timeoutMs, signaled);
+  } finally {
+    if (frozen) reason = appendThawFailure(reason, unfreezeCgroup(cgroupDir));
   }
+  if (reason !== undefined) return reason;
   if (!(await removeCgroupDir(cgroupDir))) {
     return `could not remove empty cgroup ${cgroupDir}`;
   }
@@ -1068,7 +1232,7 @@ export async function destroyContainmentScope(
   };
   const cgroupReason =
     scope.mechanism === "cgroup"
-      ? await destroyCgroupMembers(scope, termTimeoutMs)
+      ? await destroyCgroupMembers(scope, termTimeoutMs, state.signaled)
       : undefined;
 
   await sweepUntilEmpty(scope.token, "SIGTERM", termTimeoutMs, state);

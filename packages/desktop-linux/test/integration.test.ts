@@ -26,6 +26,7 @@ import {
   doubleClick,
   drag,
   execApp,
+  ensureDesktopSessionIsolation,
   findOnPath,
   getDesktopSessionStatus,
   isDisplayAlive,
@@ -740,6 +741,14 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
         projectDir,
         registryEnv: env,
       });
+      const isolation = await ensureDesktopSessionIsolation(session.id, env);
+      const busPath = path.join(tmpRoot, "host-atspi-probe");
+      let busConnections = 0;
+      const bus = net.createServer((socket) => {
+        busConnections += 1;
+        socket.destroy();
+      });
+      await new Promise<void>((resolve) => bus.listen(busPath, resolve));
       const guardedZenity = path.join(tmpRoot, "guarded-zenity");
       writeExecutable(
         guardedZenity,
@@ -753,16 +762,33 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
           '[ "$SDL_VIDEODRIVER" = x11 ] || exit 26\n' +
           '[ "$WINIT_UNIX_BACKEND" = x11 ] || exit 27\n' +
           '[ "$XDG_SESSION_TYPE" = x11 ] || exit 28\n' +
+          '[ "$NO_AT_BRIDGE" = 1 ] || exit 29\n' +
+          '[ "$GTK_A11Y" = none ] || exit 30\n' +
+          '[ "$AT_SPI_BUS_ADDRESS" = "unix:path=$XDG_RUNTIME_DIR/at-spi-bus" ] || exit 31\n' +
+          '[ "$DBUS_SESSION_BUS_ADDRESS" = "unix:path=$XDG_RUNTIME_DIR/bus" ] || exit 32\n' +
           'exec zenity --info --text pickforge --title pickforge-exec-itest\n',
       );
       try {
+        if (findOnPath("xprop") !== null) {
+          const property = await runCommand("xprop", [
+            "-root", "-f", "AT_SPI_BUS", "8s", "-set", "AT_SPI_BUS", `unix:path=${busPath}`,
+          ], { env: { DISPLAY: session.display } });
+          expect(property.ok).toBe(true);
+        }
+        // Real sessions already replace runtime and D-Bus paths. This test
+        // previously omitted that environment, and AT-SPI needed its own guard.
         const app = await execApp({
           display: session.display,
           command: guardedZenity,
+          ...isolation,
           env: {
             ...process.env,
             WAYLAND_DISPLAY: "wayland-0",
             WAYLAND_SOCKET: "42",
+            GSK_RENDERER: "cairo",
+            GTK_A11Y: "atspi",
+            NO_AT_BRIDGE: "0",
+            AT_SPI_BUS_ADDRESS: `unix:path=${busPath}`,
           },
           logDir: session.logDir,
           // Under the fully parallel suite, CI took up to 10 s to map this
@@ -781,8 +807,13 @@ describe.skipIf(!hasDesktopStack)("desktop integration (Xvfb + xdotool)", () => 
           ]),
         );
       } finally {
-        await destroyDesktopSession(session.id, env);
+        try {
+          await destroyDesktopSession(session.id, env);
+        } finally {
+          await new Promise<void>((resolve) => bus.close(() => resolve()));
+        }
       }
+      expect(busConnections).toBe(0);
     },
     60_000,
   );

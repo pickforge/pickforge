@@ -36,6 +36,8 @@ describe("createIsolatedDesktopEnvironment", () => {
       SDL_VIDEODRIVER: "x11",
       WINIT_UNIX_BACKEND: "x11",
       XDG_SESSION_TYPE: "x11",
+      NO_AT_BRIDGE: "1",
+      GTK_A11Y: "none",
     });
     expect(Object.keys(result).filter((name) => name.startsWith("WAYLAND_"))).toEqual([
       "WAYLAND_DISPLAY",
@@ -87,6 +89,7 @@ describe("desktopEnvironmentRecipe", () => {
     });
 
     expect(recipe.unset).toEqual([
+      "AT_SPI_BUS_ADDRESS",
       "BUN_OPTIONS",
       "DBUS_SESSION_BUS_PID",
       "DBUS_SESSION_BUS_WINDOWID",
@@ -108,6 +111,8 @@ describe("desktopEnvironmentRecipe", () => {
       SDL_VIDEODRIVER: "x11",
       WINIT_UNIX_BACKEND: "x11",
       XDG_SESSION_TYPE: "x11",
+      NO_AT_BRIDGE: "1",
+      GTK_A11Y: "none",
     });
     expect(recipe.lines.join("\n")).not.toContain("do-not-print");
   });

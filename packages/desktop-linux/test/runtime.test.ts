@@ -469,6 +469,9 @@ describe("isolated desktop environment", () => {
         XDG_RUNTIME_DIR: "/run/user/1000",
         DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
         DBUS_SYSTEM_BUS_ADDRESS: "unix:path=/run/dbus/system_bus_socket",
+        AT_SPI_BUS_ADDRESS: "unix:path=/run/user/1000/at-spi/bus_0",
+        GTK_A11Y: "atspi",
+        NO_AT_BRIDGE: "0",
         DBUS_SESSION_BUS_PID: "1234",
         DBUS_SESSION_BUS_WINDOWID: "5678",
         DBUS_STARTER_ADDRESS: "unix:path=/run/user/1000/bus",
@@ -478,6 +481,9 @@ describe("isolated desktop environment", () => {
     );
 
     expect(env.XDG_RUNTIME_DIR).toBe(layout.runtimeDir);
+    expect(env.AT_SPI_BUS_ADDRESS).toBe(`unix:path=${path.join(layout.runtimeDir, "at-spi-bus")}`);
+    expect(env.GTK_A11Y).toBe("none");
+    expect(env.NO_AT_BRIDGE).toBe("1");
     expect(env.DBUS_SESSION_BUS_ADDRESS).toBe(
       `unix:path=${layout.dbusSessionPath}`,
     );
@@ -524,8 +530,13 @@ describe("isolated desktop environment", () => {
     );
 
     expect(recipe.exports.XDG_RUNTIME_DIR).toBe(layout.runtimeDir);
+    expect(recipe.exports.AT_SPI_BUS_ADDRESS).toBe(`unix:path=${path.join(layout.runtimeDir, "at-spi-bus")}`);
+    expect(recipe.exports.GTK_A11Y).toBe("none");
+    expect(recipe.exports.NO_AT_BRIDGE).toBe("1");
     expect(recipe.exports.PICKFORGE_CONTAINMENT_TOKEN).toBe(scope.token);
     expect(recipe.unset).toContain("DBUS_STARTER_BUS_TYPE");
+    expect(recipe.unset).not.toContain("AT_SPI_BUS_ADDRESS");
+    expect(recipe.unset.filter((name) => Object.hasOwn(recipe.exports, name))).toEqual([]);
     expect(recipe.lines.join("\n")).not.toContain("do-not-print");
   });
 });
