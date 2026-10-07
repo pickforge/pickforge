@@ -6,7 +6,7 @@ Tests and QA must never start an X server without an explicit free display. Do n
 
 CLI tests build into `packages/cli/dist` and spawn with fake adb and SDK scripts. A stale build can masquerade as a runtime failure.
 
-Run the test suites from a shell where `grep 'realtime timeout' /proc/self/limits` shows `unlimited`. With a hard limit of 0, the kernel's CPU-timer check can SIGKILL any test process: a vitest worker (`[worker-exit] ... signal SIGKILL`), Chrome, an X client or a CLI child. On a host without rtkit, some desktop apps set this limit to 0, for example Electron apps, Chromium and Firefox-based browsers. Every process that such an app starts inherits the limit, including a terminal or agent it launches. See #253.
+Run the test suites from a shell where `grep 'realtime timeout' /proc/self/limits` does not show `0`. With a hard limit of 0, the kernel's CPU-timer check can SIGKILL any test process: a vitest worker (`[worker-exit] ... signal SIGKILL`), Chrome, an X client or a CLI child. The usual source is a desktop portal that started before rtkit was installed. The portal then reports a realtime budget of 0, and PipeWire clients, such as a desktop shell, copy it into their own limit. Every app launched from that shell inherits the limit, including a terminal or agent it starts. To fix it, install rtkit, then restart `xdg-desktop-portal`, the shell and the apps. See #253.
 
 `test/security` protects argv arrays rather than shell strings, redaction before storage or return, no sudo from MCP, and loopback-only, read-only VNC. MCP screenshot `out` stays inside the project directory; CLI `--out` is deliberately unrestricted.
 
