@@ -247,6 +247,33 @@ function cgroupMembers(scope: ContainmentScope): number[] {
  * wait for the cgroup to empty, then retry rmdir for a bounded time. A cgroup
  * that still cannot be removed fails the test instead of leaking silently.
  */
+function killCgroup(dir: string): string | undefined {
+  try {
+    fs.writeFileSync(path.join(dir, "cgroup.kill"), "1");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      return `${dir}: cgroup.kill failed: ${(error as Error).message}`;
+    }
+  }
+  return undefined;
+}
+
+async function rmdirWithRetry(dir: string): Promise<string | undefined> {
+  let lastError: unknown;
+  const removed = await waitFor(() => {
+    try {
+      fs.rmdirSync(dir);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+      lastError = error;
+      return false;
+    }
+  }, 10_000);
+  if (removed) return undefined;
+  return `${dir}: ${(lastError as Error | undefined)?.message ?? "not removed"}`;
+}
+
 async function removePrivateCgroups(dirs: string[]): Promise<void> {
   const own = ownCgroup === undefined
     ? undefined
@@ -258,27 +285,10 @@ async function removePrivateCgroups(dirs: string[]): Promise<void> {
       failures.push(`${dir}: this test process runs inside it`);
       continue;
     }
-    try {
-      fs.writeFileSync(path.join(dir, "cgroup.kill"), "1");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        failures.push(`${dir}: cgroup.kill failed: ${(error as Error).message}`);
-      }
-    }
-    let lastError: unknown;
-    const removed = await waitFor(() => {
-      try {
-        fs.rmdirSync(dir);
-        return true;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
-        lastError = error;
-        return false;
-      }
-    }, 10_000);
-    if (!removed) {
-      failures.push(`${dir}: ${(lastError as Error | undefined)?.message ?? "not removed"}`);
-    }
+    const killFailure = killCgroup(dir);
+    if (killFailure !== undefined) failures.push(killFailure);
+    const rmdirFailure = await rmdirWithRetry(dir);
+    if (rmdirFailure !== undefined) failures.push(rmdirFailure);
   }
   if (failures.length > 0) {
     throw new Error(`could not remove private test cgroups:\n${failures.join("\n")}`);
