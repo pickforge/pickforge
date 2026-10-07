@@ -67,3 +67,15 @@ describe("session_status", () => {
     expect(fs.existsSync(marker)).toBe(false);
   });
 });
+
+it("session_status resolves the registry under the env HOME when PICKFORGE_HOME is empty", async () => {
+  const home = path.join(dirs.root, "env-home");
+  const id = writeDesktopSessionRecord(path.join(home, ".pickforge", "lab"), dirs.projectDir);
+  const homeLab = await connectLab({ projectDir: dirs.projectDir, env: { PICKFORGE_HOME: "", HOME: home, PATH: dirs.binDir } });
+  try {
+    const report = parseToolJson(await homeLab.client.callTool({ name: "session_status", arguments: { sessionId: id } }));
+    expect(report.sessions[0].id).toBe(id);
+  } finally {
+    await homeLab.close();
+  }
+});
