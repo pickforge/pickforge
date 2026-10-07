@@ -8,7 +8,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createRun, recordEvidenceOutcome, writeEvidenceReport, isProcessGroupAlive, readActions, listRuns } from "@pickforge/lab-core";
 import { ensureCliBuilt } from "./build-once.js";
-import { killProcessesWithEnv } from "./env-process-sweep.js";
+import { findProcessesWithEnv, killProcessesWithEnv } from "./env-process-sweep.js";
 import { cliSpawnTimeout } from "./spawn-timeout.js";
 import { encodePng } from "../../desktop-linux/test/png-fixture.js";
 
@@ -92,8 +92,11 @@ async function settleWithin(promise: Promise<unknown>, ms: number): Promise<void
   timer.abort();
 }
 
-/** Waits for the home's CLI calls, then SIGKILLs the process group of each survivor. */
-async function stopRunningCli(home: string, deadline: number): Promise<void> {
+/**
+ * Waits for the home's CLI calls, then SIGKILLs the process group of each
+ * survivor. Returns true when it had to kill a CLI call.
+ */
+async function stopRunningCli(home: string, deadline: number): Promise<boolean> {
   const running = runningFor(home);
   await settleWithin(Promise.all(running.map((entry) => entry.done)), deadline - Date.now());
   const survivors = runningFor(home);
@@ -101,6 +104,26 @@ async function stopRunningCli(home: string, deadline: number): Promise<void> {
     if (child.pid !== undefined) stopTestProcessGroup(child.pid, "SIGKILL");
   }
   await settleWithin(Promise.all(survivors.map((entry) => entry.done)), CLI_KILL_WAIT_MS);
+  return survivors.length > 0;
+}
+
+/** Returns "pid cmdline" for each process, with the cmdline cut to 80 characters. */
+function describeProcesses(pids: number[], cmdlines: Map<number, string>): string {
+  return pids.map((pid) => `${pid} ${(cmdlines.get(pid) ?? "?").slice(0, 80)}`).join(", ");
+}
+
+/** Reads the cmdline of each process that carries `name=value`, before a sweep kills it. */
+function cmdlinesWithEnv(name: string, value: string): Map<number, string> {
+  const cmdlines = new Map<number, string>();
+  for (const { pid } of findProcessesWithEnv(name, value)) {
+    try {
+      const raw = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
+      cmdlines.set(pid, raw.split("\0").filter(Boolean).join(" "));
+    } catch {
+      // It exited after the scan.
+    }
+  }
+  return cmdlines;
 }
 
 /** Runs `session destroy --all`, and kills it if it overruns CLI_DESTROY_MS. */
@@ -391,13 +414,22 @@ afterEach(async () => {
   const deadline = Date.now() + CLI_DRAIN_MS;
   const failures: string[] = [];
   for (const [home, env] of envsByHome) {
-    await stopRunningCli(home, deadline);
+    const forced = await stopRunningCli(home, deadline);
     const destroyed = await destroyAllSessions(env);
     if (destroyed.code !== 0) {
       failures.push(`${home}: ${destroyed.stdout}${destroyed.stderr}`.trim());
     }
     if (path.isAbsolute(home)) {
-      const { survivors } = await killProcessesWithEnv("PICKFORGE_HOME", home, HOME_SWEEP_MS);
+      // After a clean CLI run and destroy, no helper may outlive the session.
+      // A killed CLI or a failed destroy already explains any leftovers.
+      const strict = !forced && destroyed.code === 0;
+      const cmdlines = strict ? cmdlinesWithEnv("PICKFORGE_HOME", home) : new Map<number, string>();
+      const { killed, survivors } = await killProcessesWithEnv("PICKFORGE_HOME", home, HOME_SWEEP_MS);
+      if (strict && killed.length > 0) {
+        failures.push(
+          `${home}: processes outlived session destroy: ${describeProcesses(killed, cmdlines)}`,
+        );
+      }
       if (survivors.length > 0) {
         failures.push(`${home}: processes survived SIGKILL: ${survivors.join(", ")}`);
       }
