@@ -36,6 +36,27 @@ describe("pickforgeHome", () => {
   });
 });
 
+describe("pickforgeHome with an env HOME", () => {
+  it("uses the env object's HOME when PICKFORGE_HOME is unset or empty", () => {
+    for (const env of [{ HOME: "/synthetic/home" }, { PICKFORGE_HOME: "", HOME: "/synthetic/home" }]) {
+      expect(pickforgeHome(env)).toBe("/synthetic/home/.pickforge/lab");
+      expect(legacyPickforgeHomes(env)).toEqual(["/synthetic/home/.pickforge/picklab", "/synthetic/home/.picklab"]);
+      expect(sessionsDir(env)).toBe("/synthetic/home/.pickforge/lab/sessions");
+      expect(agentsDir(env)).toBe("/synthetic/home/.pickforge/lab/agents");
+    }
+  });
+
+  it("falls back to os.homedir() when the env HOME is empty, and PICKFORGE_HOME still wins", () => {
+    expect(pickforgeHome({ HOME: "" })).toBe(path.join(os.homedir(), ".pickforge", "lab"));
+    expect(legacyPickforgeHomes({ PICKFORGE_HOME: "", HOME: "" })).toEqual([
+      path.join(os.homedir(), ".pickforge", "picklab"),
+      path.join(os.homedir(), ".picklab"),
+    ]);
+    expect(pickforgeHome({ PICKFORGE_HOME: "/custom/home", HOME: "/synthetic/home" })).toBe("/custom/home");
+    expect(legacyPickforgeHomes({ PICKFORGE_HOME: "/custom/home", HOME: "/synthetic/home" })).toEqual([]);
+  });
+});
+
 describe("legacyPickforgeHomes", () => {
   const expected = [
     path.join(os.homedir(), ".pickforge", "picklab"),

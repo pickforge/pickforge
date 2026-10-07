@@ -13,7 +13,7 @@ import {
 } from "@pickforge/lab-core";
 import { createIsolatedDesktopEnvironment, desktopEnvironmentRecipe } from "../src/environment.js";
 import { desktopRuntimeLayout } from "../src/runtime.js";
-import { ensureDesktopSessionIsolation, getDesktopSessionStatus, startSessionVnc } from "../src/session.js";
+import { desktopSessionLogDir, ensureDesktopSessionIsolation, getDesktopSessionStatus, startSessionVnc } from "../src/session.js";
 import { startHumanTakeover } from "../src/takeover.js";
 
 let root: string;
@@ -100,4 +100,21 @@ describe("immutable managed desktop home policy", () => {
     expect(fs.existsSync(sessionDataDir(record.id, env))).toBe(false);
     expect((await getSession(record.id, env))?.desktop).toEqual(record.desktop);
   });
+});
+
+it("resolves the session registry and runtime under the env HOME when PICKFORGE_HOME is empty", async () => {
+  const homeEnv = { PICKFORGE_HOME: "", HOME: env.HOME! };
+  const sessions = path.join(env.HOME!, ".pickforge", "lab", "sessions");
+  // Check the resolved root before writing, so a regression never writes to the real home.
+  expect(path.dirname(desktopSessionLogDir("desk-probe", homeEnv))).toBe(sessions);
+  const record = await createSession({
+    type: "desktop", projectDir: root, status: "running",
+    desktop: { display: ":987", homePolicy: "private" } as DesktopSessionInfo,
+  }, homeEnv);
+  const sessionDir = path.join(sessions, record.id);
+  expect(fs.existsSync(`${sessionDir}.json`)).toBe(true);
+  const isolation = await ensureDesktopSessionIsolation(record.id, homeEnv);
+  expect(isolation.runtime.runtimeDir).toBe(path.join(sessionDir, "runtime"));
+  expect(fs.statSync(isolation.runtime.runtimeDir).isDirectory()).toBe(true);
+  expect(await getSession(record.id, env)).toBeUndefined();
 });

@@ -6,21 +6,33 @@ import { readPickforgeEnv, type EnvLike } from "./env-compat.js";
 export type { EnvLike } from "./env-compat.js";
 
 /**
+ * The user home for the default state roots: the `HOME` of the given env
+ * object when it is a non-empty string, else `os.homedir()`.
+ */
+function userHome(env: EnvLike): string {
+  const fromEnv = env.HOME;
+  return fromEnv !== undefined && fromEnv !== "" ? fromEnv : os.homedir();
+}
+
+/**
  * The Pickforge Lab state root. `PICKFORGE_HOME` remains the override for
- * automation, tests, and custom installs.
+ * automation, tests, and custom installs. When it is unset or empty, the root
+ * is `.pickforge/lab` under the `HOME` of the given env object, or under
+ * `os.homedir()` when that `HOME` is unset or empty.
  */
 export function pickforgeHome(env: EnvLike = process.env): string {
   const fromEnv = readPickforgeEnv(env, "HOME");
   if (fromEnv !== undefined && fromEnv !== "") {
     return fromEnv;
   }
-  return path.join(os.homedir(), ".pickforge", "lab");
+  return path.join(userHome(env), ".pickforge", "lab");
 }
 
 /**
  * Earlier default state roots, in read precedence order. They apply only when
- * no home override is set. Callers never migrate, rewrite, or remove them as
- * part of fallback discovery.
+ * no home override is set, and resolve under the same home as
+ * `pickforgeHome`: the env object's `HOME`, else `os.homedir()`. Callers
+ * never migrate, rewrite, or remove them as part of fallback discovery.
  */
 export function legacyPickforgeHomes(
   env: EnvLike = process.env,
@@ -29,9 +41,10 @@ export function legacyPickforgeHomes(
   if (fromEnv !== undefined && fromEnv !== "") {
     return [];
   }
+  const home = userHome(env);
   return [
-    path.join(os.homedir(), ".pickforge", "picklab"),
-    path.join(os.homedir(), ".picklab"),
+    path.join(home, ".pickforge", "picklab"),
+    path.join(home, ".picklab"),
   ];
 }
 
