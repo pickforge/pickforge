@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import net from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -36,7 +37,7 @@ const servers: net.Server[] = [];
 const survivors: { pid: number; startTicks: number }[] = [];
 
 beforeEach(async () => {
-  testRoot = await fs.mkdtemp(path.join(process.cwd(), ".viewer-state-test-"));
+  testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pickforge-viewer-state-test-"));
   registryEnv = { ...process.env, PICKFORGE_HOME: testRoot };
   sessionId = (
     await createSession(
@@ -606,7 +607,13 @@ describe("read-only VNC connection", () => {
   });
 });
 
-describe("viewer teardown", () => {
+// Teardown tests wait on fixed 1 s product budgets: launch removal, launch
+// pruning, and the SIGTERM grace before SIGKILL. The kill case spends about
+// 3 s in them and took 4.5 s on an idle host, so vitest's 5 s default timed
+// it out under concurrent suites (#263).
+const TEARDOWN_TIMEOUT_MS = 20_000;
+
+describe("viewer teardown", { timeout: TEARDOWN_TIMEOUT_MS }, () => {
   it.each(["term", "kill"] as const)(
     "stops surviving browser children with %s after their group leader exits",
     async (mode) => {

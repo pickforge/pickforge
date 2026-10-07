@@ -6,6 +6,7 @@ import { setRunCaptureGeometry } from "@pickforge/lab-core";
 import {
   click,
   DEFAULT_DESKTOP_WAIT_TIMEOUT_MS,
+  DesktopTextPreparationError,
   desktopWait,
   desktopWindows,
   focusWindow,
@@ -430,7 +431,13 @@ async function trackInput(
   input: () => Promise<ToolReport>,
 ): Promise<ToolReport> {
   record.inputState = "attempted";
-  const result = await input();
+  let result: ToolReport;
+  try {
+    result = await input();
+  } catch (error) {
+    if (error instanceof DesktopTextPreparationError) record.inputState = "not-attempted";
+    throw error;
+  }
   if ((result.errors?.length ?? 0) === 0) record.inputState = "completed";
   return result;
 }
@@ -483,6 +490,8 @@ async function withInputCapture(
       await take("after");
       return { ...result, data: { ...result.data, capture, captures, inputState, artifacts } };
     } catch (error) {
+      // Preparation failed before any key was sent.
+      if (error instanceof DesktopTextPreparationError) inputState = record.inputState = "not-attempted";
       // Typed values must not reappear through subprocess diagnostics. Keep the
       // existing length/type target, and report only the failed stage here.
       const detail = options.typedValue === undefined

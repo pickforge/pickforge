@@ -17,7 +17,8 @@ import { AGENT_PERMITS_DIR, sessionDataDir, createSession, runCommand, processId
 import { usableCodepoints } from "../src/x11-keymap.js";
 import { typeText } from "../src/input.js";
 import { prepareText } from "../src/x11-prebind.js";
-import { request, X11Wire } from "../src/x11-wire.js";
+import { DesktopTextPreparationError, request, X11Wire } from "../src/x11-wire.js";
+import { DesktopTextPreparationError as ExportedPreparationError } from "../src/index.js";
 import * as target from "../src/x11-target.js";
 const keymap = await vi.importActual<typeof import("../src/x11-keymap.js")>("../src/x11-keymap.js");
 let root: string;
@@ -189,7 +190,9 @@ it.each(["eof", "parser", "flood", "socket-error"])("dispatch loss %s cancels on
     }
     return success; // Race: cancellation wins even against code zero.
   });
-  await expect(type()).rejects.toThrow(/^Desktop text dispatch failed; text may have been partially sent$/);
+  const error = await type().catch((caught: unknown) => caught);
+  expect(error).toEqual(new Error("Desktop text dispatch failed; text may have been partially sent"));
+  expect(error).not.toBeInstanceOf(DesktopTextPreparationError);
   expect(cancellations).toBe(1);
   expect(vi.mocked(runCommand).mock.calls.filter(([, args]) => args[0] === "type")).toHaveLength(1);
   expect(vi.getTimerCount()).toBe(0);
@@ -202,7 +205,8 @@ it("post-preparation validation failure closes the anchor without dispatch", asy
     if (String(args[0]) === "/tmp/.X11-unix/X190" && ++validations === 3) throw new Error("private metadata");
     return Reflect.apply(lstat, fs, args);
   }) as typeof fs.lstatSync);
-  await expect(type()).rejects.toThrow(/^Desktop text preparation failed; no text was sent$/);
+  const error = await type().catch((caught: unknown) => caught);
+  expect(error).toEqual(new DesktopTextPreparationError("Desktop text preparation failed; no text was sent"));
   expect(vi.mocked(runCommand).mock.calls.map(([, args]) => args)).toEqual([["--version"]]);
   expect([...server.wires].every((s) => s.destroyed)).toBe(true);
   expect(vi.getTimerCount()).toBe(0);
@@ -266,7 +270,7 @@ it("retries an expired grab bound on one fresh connection at a time and keeps th
 
 it.each([[[2, 4, 6], 0, 3], [[2], 2700, 1]])("stops retrying an expired grab at the attempt cap or preparation expiry %#", async (drops, before, connections) => {
   const { outcome, live } = await grabRetry(drops, before);
-  expect(outcome).toEqual(new Error("Desktop text preparation failed; no text was sent"));
+  expect(outcome).toEqual(new DesktopTextPreparationError("Desktop text preparation failed; no text was sent"));
   expect(server.connections).toBe(connections);
   expect(live).toEqual(Array(connections).fill(1));
   expect(server.changes).toEqual([]);
@@ -327,4 +331,21 @@ it.each(["core", "modifier"])("plans again under the grab when the %s map change
   expect(server.rows.get(255)).toEqual(kind === "core" ? [0x1234] : undefined);
   anchor.close();
   expect(vi.getTimerCount()).toBe(0);
+});
+
+it("marks every failure before dispatch as a preparation failure, keeping its message", async () => {
+  expect(ExportedPreparationError).toBe(DesktopTextPreparationError);
+  vi.spyOn(target, "validateTypingTarget").mockRejectedValueOnce(new Error("Session not running"));
+  const error = await type().catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(DesktopTextPreparationError);
+  expect((error as Error).message).toBe("Session not running");
+  expect((error as Error).name).toBe("DesktopTextPreparationError");
+  expect(vi.mocked(runCommand)).not.toHaveBeenCalled();
+});
+
+it("rejects an unsupported xdotool version as a preparation failure", async () => {
+  vi.mocked(runCommand).mockResolvedValue({ ...success, stdout: "xdotool version 9" });
+  await expect(type()).rejects.toThrow(/supported xdotool lookup version; no text was sent$/);
+  await expect(type()).rejects.toBeInstanceOf(DesktopTextPreparationError);
+  expect(vi.mocked(runCommand).mock.calls.every(([, args]) => args[0] === "--version")).toBe(true);
 });

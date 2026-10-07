@@ -75,6 +75,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   await server.stop();
   fs.rmSync(root, { recursive: true, force: true });
 });
@@ -416,8 +417,13 @@ it("uses PICKLAB fallback but gives an empty PICKFORGE_HOME precedence", async (
   await type("á");
   expect(delayedText()).toBe("á");
   const connected = server.connections;
-  env = { PICKFORGE_HOME: "", PICKLAB_HOME: home, HOME: root };
+  // An empty PICKFORGE_HOME falls back to os.homedir(), which reads the
+  // process HOME rather than this env object. Point it at the temp root so
+  // the permit never lands in the real ~/.pickforge (#264).
+  vi.stubEnv("HOME", root);
+  env = { PICKFORGE_HOME: "", PICKLAB_HOME: home };
   await expect(type("private")).rejects.toThrow();
+  expect(fs.existsSync(path.join(root, ".pickforge", "lab", "sessions", sessionId, AGENT_PERMITS_DIR))).toBe(true);
   expect(server.connections).toBe(connected);
 });
 

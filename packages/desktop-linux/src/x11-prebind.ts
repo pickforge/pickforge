@@ -3,7 +3,7 @@ import { runCommand, type EnvLike } from "@pickforge/lab-core";
 import { bindingSymbols, keysymToCodepoint, textCodepoints } from "./x11-keysyms.js";
 import { negotiateXkb, readKeyboard, readKeymap, usableCodepoints, type Keyboard, type XdotoolFamily } from "./x11-keymap.js";
 import { validateTypingTarget } from "./x11-target.js";
-import { remaining, request, typingFailure, X11_SETUP_MS, X11Wire } from "./x11-wire.js";
+import { DesktopTextPreparationError, remaining, request, typingFailure, X11_SETUP_MS, X11Wire } from "./x11-wire.js";
 
 const GRAB_ATTEMPTS = 3;
 const GRAB_RETRY_GAP_MS = 100;
@@ -22,7 +22,7 @@ async function clientFamily(deadline: number): Promise<XdotoolFamily> {
   switch (result.stdout.trim()) {
     case "xdotool version 3.20160805.1": return "2016";
     case "xdotool version 4.20260303.1": return "2026";
-    default: throw new Error("Desktop typing requires a supported xdotool lookup version; no text was sent");
+    default: throw new DesktopTextPreparationError("Desktop typing requires a supported xdotool lookup version; no text was sent");
   }
 }
 
@@ -46,7 +46,7 @@ export function planBindings(keyboard: Keyboard, desired: number[][], family: Xd
       empty.push(code);
     }
   }
-  if (missing.length > empty.length) throw new Error("Desktop typing keymap capacity exhausted; no text was sent");
+  if (missing.length > empty.length) throw new DesktopTextPreparationError("Desktop typing keymap capacity exhausted; no text was sent");
   return missing.map((symbols, index) => ({ code: empty[index]!, symbols: [symbols[0]!, symbols[1] ?? symbols[0]!] }));
 }
 
