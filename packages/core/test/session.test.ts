@@ -995,6 +995,8 @@ describe("session registry", () => {
   });
 
   it("stops the browser group before VNC and Xvfb when reaping", async () => {
+    // Covers 10 s readiness plus three sequential 5 s stop budgets, so the
+    // finally cleanup runs before Vitest gives up.
     const orderFile = path.join(home, "stop-order.txt");
     const readyFile = (label: string) => path.join(home, `${label}.ready`);
     // Each fake writes its ready file only after it installs its SIGTERM
@@ -1095,7 +1097,7 @@ describe("session registry", () => {
         }
       }
     }
-  });
+  }, 35_000);
 
   it("leaves helpers and profile intact for an unconfirmed browser group", async () => {
     const browser = spawn(
