@@ -664,6 +664,19 @@ function evacuateOwnChain(
 
 type MemberVerdict = "ours" | "gone" | "foreign" | "unknown";
 
+function classifyCgroupEnvironment(
+  pid: number,
+  token: string,
+  midExec: Set<number>,
+): MemberVerdict {
+  const read = readEnviron(pid);
+  if (read.kind !== "entries") return read.kind === "gone" ? "gone" : "unknown";
+  if (read.entries.includes(`${TOKEN_ENV}=${token}`)) return "ours";
+  if (readMidExecIdentity(pid, read.entries) === undefined) return "foreign";
+  midExec.add(pid);
+  return "unknown";
+}
+
 /**
  * Whether a cgroup member belongs to this scope. It does when it carries the
  * token, or when an ancestor *inside the same cgroup* does: a member that
@@ -680,22 +693,19 @@ function classifyCgroupMember(
   pid: number,
   token: string,
   members: Set<number>,
+  midExec: Set<number>,
 ): MemberVerdict {
   let current: number | undefined = pid;
-  let unreadable = false;
+  let uncertain = false;
   for (let depth = 0; current !== undefined && depth < 64; depth += 1) {
-    const read = readEnviron(current);
-    if (read.kind === "entries") {
-      if (read.entries.includes(`${TOKEN_ENV}=${token}`)) return "ours";
-    } else if (read.kind === "unreadable") {
-      unreadable = true;
-    } else if (current === pid) {
-      return "gone";
-    }
+    const verdict = classifyCgroupEnvironment(current, token, midExec);
+    if (verdict === "ours") return "ours";
+    if (verdict === "unknown") uncertain = true;
+    if (verdict === "gone" && current === pid) return "gone";
     const parent = readParentPid(current);
     current = parent !== undefined && members.has(parent) ? parent : undefined;
   }
-  return unreadable ? "unknown" : "foreign";
+  return uncertain ? "unknown" : "foreign";
 }
 
 /**
@@ -748,9 +758,10 @@ function verifyCgroupMemberIdentity(
   pid: number,
   token: string,
   members: Set<number>,
+  midExec: Set<number>,
 ): Exclude<MemberVerdict, "ours"> | ProcessIdentity {
   const identity = readParentAndStart(pid);
-  const verdict = classifyCgroupMember(pid, token, members);
+  const verdict = classifyCgroupMember(pid, token, members, midExec);
   if (verdict === "foreign" || verdict === "gone") return verdict;
   if (identity === undefined || readProcessStartTicks(pid) !== identity.startTicks) {
     return "unknown";
@@ -764,6 +775,7 @@ function verifyCgroupMemberWithPriorProof(
   token: string,
   members: Set<number>,
   priorProof: Map<number, ProcessIdentity>,
+  midExec: Set<number>,
 ): Exclude<MemberVerdict, "ours"> | ProcessIdentity {
   const prior = priorProof.get(pid);
   if (prior !== undefined) {
@@ -771,27 +783,28 @@ function verifyCgroupMemberWithPriorProof(
     if (lifetime === "gone") return "gone";
     if (lifetime === "match") return prior;
   }
-  return verifyCgroupMemberIdentity(pid, token, members);
+  return verifyCgroupMemberIdentity(pid, token, members, midExec);
 }
 
 function collectCgroupMembership(
   members: number[],
   token: string,
   priorProof: Map<number, ProcessIdentity>,
-): { undecided: number[]; foreign: number[]; proven: ProcessIdentity[] } {
+): { undecided: number[]; foreign: number[]; proven: ProcessIdentity[]; midExec: Set<number> } {
   const chain = selfAndAncestorIdentities();
   const inScope = new Set(members);
   const undecided: number[] = [];
   const foreign: number[] = [];
   const proven: ProcessIdentity[] = [];
+  const midExec = new Set<number>();
   for (const pid of members) {
     if (chain.has(pid)) continue;
-    const verdict = verifyCgroupMemberWithPriorProof(pid, token, inScope, priorProof);
+    const verdict = verifyCgroupMemberWithPriorProof(pid, token, inScope, priorProof, midExec);
     if (verdict === "foreign") foreign.push(pid);
     else if (verdict === "unknown") undecided.push(pid);
     else if (verdict !== "gone") proven.push(verdict);
   }
-  return { undecided, foreign, proven };
+  return { undecided, foreign, proven, midExec };
 }
 
 /**
@@ -809,6 +822,7 @@ async function verifyCgroupMembership(
   token: string,
   priorProof = new Map<number, ProcessIdentity>(),
   timeoutMs = MEMBER_VERIFY_TIMEOUT_MS,
+  retryUnreadable = true,
 ): Promise<KillGuard> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -816,7 +830,7 @@ async function verifyCgroupMembership(
     if (members === undefined) {
       return vacatedOr(cgroupDir, `could not read ${cgroupDir}/cgroup.procs`);
     }
-    const { undecided, foreign, proven } = collectCgroupMembership(members, token, priorProof);
+    const { undecided, foreign, proven, midExec } = collectCgroupMembership(members, token, priorProof);
     if (foreign.length > 0) {
       return {
         refusal:
@@ -825,7 +839,8 @@ async function verifyCgroupMembership(
       };
     }
     if (undecided.length === 0) return { members: proven };
-    if (Date.now() >= deadline) {
+    if (Date.now() >= deadline ||
+      (!retryUnreadable && undecided.some((pid) => !midExec.has(pid)))) {
       return {
         refusal:
           `refusing cgroup cleanup: could not verify that process(es) ` +
@@ -1133,8 +1148,12 @@ async function signalGuardedCgroupMembers(
       return `cgroup ${cgroupDir} still has members after verified signals`;
     }
     // Keep proof for signalled lifetimes whose token-bearing parent has exited.
-    // New members need fresh proof. Refuse unknown joiners without a full wait.
-    guard = await verifyCgroupMembership(cgroupDir, token, priorProof, 0);
+    // New members need fresh proof. Retry mid-exec members within the budget,
+    // but refuse other unknown joiners without a full wait.
+    guard = await verifyCgroupMembership(
+      cgroupDir, token, priorProof,
+      Math.min(MEMBER_VERIFY_TIMEOUT_MS, Math.max(0, deadline - Date.now())), false,
+    );
     await sleep(POLL_INTERVAL_MS);
   }
 }

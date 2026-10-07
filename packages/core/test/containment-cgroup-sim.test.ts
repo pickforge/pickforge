@@ -307,7 +307,77 @@ afterEach(() => {
   strays.clear();
 });
 
+function installMidExecJoiner(freeze: "unsupported" | "pending", withToken: boolean) {
+  const parent = spawnMember(scope());
+  const joiner = spawnMember(withToken ? scope() : undefined);
+  const fake = newFake({
+    members: [parent],
+    freezeSupported: freeze !== "unsupported",
+    freezeEventError: freeze === "pending",
+  });
+  let signaledAtRead: number | undefined;
+  fake.beforeSignal = () => {
+    // The parent leaves before the child can be proved through its ancestry.
+    fake.members = [joiner];
+    fake.beforeSignal = () => { signaledAtRead = fake.procsReads; };
+  };
+  installFakeCgroup(fake);
+  const read = vi.mocked(fs.readFileSync).getMockImplementation() as typeof fs.readFileSync;
+  vi.mocked(fs.readFileSync).mockImplementation(((file, ...args) => {
+    const content = read(file, ...args);
+    if (fake.procsReads >= 6) return content;
+    if (file === `/proc/${joiner}/environ`) return "";
+    if (file === `/proc/${joiner}/stat`) {
+      const stat = String(content);
+      const close = stat.lastIndexOf(")");
+      const fields = stat.slice(close + 1).trim().split(/\s+/);
+      fields[4 - 3] = String(parent);
+      fields[51 - 3] = "0";
+      return `${stat.slice(0, close + 1)} ${fields.join(" ")}`;
+    }
+    return content;
+  }) as typeof fs.readFileSync);
+  return { fake, parent, joiner, signaledAtRead: () => signaledAtRead };
+}
+
 describe("cgroup cleanup guards (simulated cgroup)", () => {
+  it.each(["unsupported", "pending"] as const)(
+    "signals a mid-exec joiner after it settles with the session token (freeze: %s)",
+    async (freeze) => {
+      const { fake, parent, joiner, signaledAtRead } = installMidExecJoiner(freeze, true);
+
+      const result = await destroy();
+
+      expect(result.confirmed).toBe(true);
+      expect(result.reason).toBeUndefined();
+      expect(fake.removed).toBe(true);
+      expect(signaledAtRead()).toBeGreaterThanOrEqual(6);
+      expect(vi.mocked(process.kill).mock.calls).toContainEqual([joiner, "SIGKILL"]);
+      expect(result.signaled).toEqual(expect.arrayContaining([parent, joiner]));
+      expect(isPidAlive(joiner)).toBe(false);
+    },
+    20_000,
+  );
+
+  it.each(["unsupported", "pending"] as const)(
+    "refuses a mid-exec joiner after it settles without the session token (freeze: %s)",
+    async (freeze) => {
+      const { fake, joiner, signaledAtRead } = installMidExecJoiner(freeze, false);
+
+      const result = await destroy();
+
+      expect(result.confirmed).toBe(false);
+      expect(result.reason).toMatch(/do not carry this session's containment token/);
+      expect(fake.procsReads).toBeGreaterThanOrEqual(6);
+      expect(signaledAtRead()).toBeUndefined();
+      expect(result.signaled).not.toContain(joiner);
+      expect(isPidAlive(joiner)).toBe(true);
+      expect(fake.removed).toBe(false);
+      expect(fake.frozen).toBe(false);
+    },
+    20_000,
+  );
+
   it.each([true, false])("kills proven members (freeze supported: %s)", async (freezeSupported) => {
     const member = spawnMember(scope());
     const fake = newFake({ members: [member], freezeSupported });
