@@ -735,7 +735,6 @@ describe("pickforge-lab desktop", () => {
     expect(json.code).toBe(0);
     const report = parseJson(json);
     expect(report.unset).toEqual([
-      "AT_SPI_BUS_ADDRESS",
       "BUN_OPTIONS",
       "DBUS_SESSION_BUS_PID",
       "DBUS_SESSION_BUS_WINDOWID",
@@ -779,6 +778,7 @@ describe("pickforge-lab desktop", () => {
       XDG_SESSION_TYPE: "x11",
     });
     expect(report.homePolicy).toBe("private");
+    expect(report.script).not.toContain("unset 'AT_SPI_BUS_ADDRESS'");
     expect(report.script).not.toContain("do-not-print");
 
     const text = await runCli(

@@ -162,6 +162,9 @@ export function desktopEnvironmentRecipe(
   opts: DesktopEnvironmentOptions = {},
 ): DesktopEnvironmentRecipe {
   const environment = createIsolatedDesktopEnvironment(display, source, opts);
+  const exports = Object.fromEntries(
+    recipeExportNames(opts).map((name) => [name, environment[name] as string]),
+  );
   const unset = [
     ...new Set([
       ...WAYLAND_VARIABLES_TO_UNSET,
@@ -171,10 +174,7 @@ export function desktopEnvironmentRecipe(
         (name) => isWaylandVariable(name) && name !== "WAYLAND_DISPLAY",
       ),
     ]),
-  ].sort();
-  const exports = Object.fromEntries(
-    recipeExportNames(opts).map((name) => [name, environment[name] as string]),
-  );
+  ].filter((name) => !Object.hasOwn(exports, name)).sort();
   return {
     exports,
     unset,

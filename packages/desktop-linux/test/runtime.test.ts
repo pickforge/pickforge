@@ -535,6 +535,8 @@ describe("isolated desktop environment", () => {
     expect(recipe.exports.NO_AT_BRIDGE).toBe("1");
     expect(recipe.exports.PICKFORGE_CONTAINMENT_TOKEN).toBe(scope.token);
     expect(recipe.unset).toContain("DBUS_STARTER_BUS_TYPE");
+    expect(recipe.unset).not.toContain("AT_SPI_BUS_ADDRESS");
+    expect(recipe.unset.filter((name) => Object.hasOwn(recipe.exports, name))).toEqual([]);
     expect(recipe.lines.join("\n")).not.toContain("do-not-print");
   });
 });
