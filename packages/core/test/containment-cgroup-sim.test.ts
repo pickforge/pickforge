@@ -432,19 +432,22 @@ describe("cgroup cleanup guards (simulated cgroup)", () => {
     expect(fake.freezes).toEqual(["1", "0"]);
   }, 20_000);
 
-  it("thaws an unconfirmed freeze request and still runs the marker sweep", async () => {
+  it("signals proven members during a pending freeze and still runs the marker sweep", async () => {
     const member = spawnMember(scope());
+    const escaped = spawnMember(scope());
     const fake = newFake({ members: [member], freezeEventError: true });
     installFakeCgroup(fake);
 
     const result = await destroy();
 
-    expect(result.confirmed).toBe(false);
-    expect(result.reason).toMatch(/could not confirm .* is frozen/);
-    expect(result.signaled).toContain(member);
+    expect(result.confirmed).toBe(true);
+    expect(result.reason).toBeUndefined();
+    expect(result.signaled).toEqual(expect.arrayContaining([member, escaped]));
+    expect(vi.mocked(process.kill).mock.calls).toContainEqual([member, "SIGKILL"]);
     expect(isPidAlive(member)).toBe(false);
+    expect(isPidAlive(escaped)).toBe(false);
     expect(fake.freezes).toEqual(["1", "0"]);
-    expect(fake.removed).toBe(false);
+    expect(fake.removed).toBe(true);
   }, 20_000);
 
   it("always runs the marker sweep after cgroup signals", async () => {

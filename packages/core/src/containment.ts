@@ -871,7 +871,7 @@ async function freezeCgroup(
     if (Date.now() >= deadline) break;
     await sleep(POLL_INTERVAL_MS);
   }
-  // The request may complete later. Refuse signals and undo the request.
+  // The request may complete later. PID guards still apply; always thaw it.
   return "pending";
 }
 
@@ -1136,11 +1136,7 @@ async function destroyCgroupMembers(
     // Evacuate the caller before freezing. Re-prove ownership afterwards.
     const freeze = await freezeCgroup(cgroupDir);
     frozen = freeze !== "unsupported";
-    if (freeze === "pending") {
-      guard = await vacatedOr(cgroupDir, `could not confirm ${cgroupDir} is frozen`);
-    } else {
-      guard = await verifyCgroupMembership(cgroupDir, scope.token);
-    }
+    guard = await verifyCgroupMembership(cgroupDir, scope.token);
     reason = await signalGuardedCgroupMembers(cgroupDir, guard, timeoutMs, signaled);
   } finally {
     if (frozen) reason = unfreezeCgroup(cgroupDir) ?? reason;
