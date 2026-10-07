@@ -7,8 +7,13 @@ const MAX_PACKETS = 4096;
 export const X11_SETUP_MS = 3000;
 export const X11_GRAB_MS = 250;
 
+/** Desktop text preparation failed before any key was sent. */
+export class DesktopTextPreparationError extends Error {
+  override name = "DesktopTextPreparationError";
+}
+
 export function typingFailure(): Error {
-  return new Error("Desktop text preparation failed; no text was sent");
+  return new DesktopTextPreparationError("Desktop text preparation failed; no text was sent");
 }
 
 export function remaining(deadline: number): number {

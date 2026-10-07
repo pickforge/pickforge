@@ -2,7 +2,7 @@ import { runCommand, withAgentPermit, type EnvLike } from "@pickforge/lab-core";
 import { parseDisplayNumber } from "./display.js";
 import { performance } from "node:perf_hooks";
 import { prepareText, typingEnvironment } from "./x11-prebind.js";
-import { remaining } from "./x11-wire.js";
+import { DesktopTextPreparationError, remaining } from "./x11-wire.js";
 import { validateTypingTarget } from "./x11-target.js";
 
 const TYPE_DELAY_MS = 50;
@@ -365,19 +365,32 @@ export async function doubleClick(opts: DoubleClickOptions): Promise<void> {
   );
 }
 
+/** Marks every failure before the xdotool dispatch as a preparation failure: no text was sent. */
+async function beforeDispatch<T>(step: () => Promise<T>): Promise<T> {
+  try {
+    return await step();
+  } catch (error) {
+    if (error instanceof DesktopTextPreparationError) throw error;
+    throw new DesktopTextPreparationError(error instanceof Error ? error.message : "Desktop text preparation failed; no text was sent");
+  }
+}
+
 export async function typeText(opts: TypeTextOptions): Promise<void> {
   const deadline = performance.now() + TYPE_TIMEOUT_MS;
   await withAgentPermit(opts.sessionId, opts.env ?? process.env, async () => {
-    const anchor = await prepareText(opts.sessionId, opts.display, opts.text, opts.env ?? process.env, deadline);
+    const anchor = await beforeDispatch(() => prepareText(opts.sessionId, opts.display, opts.text, opts.env ?? process.env, deadline));
     try {
-      await validateTypingTarget(opts.sessionId, opts.display, opts.env ?? process.env, anchor.preparationDeadline);
-      const args = buildTypeArgs(opts.text);
-      const commandOptions = {
-        cleanEnv: true, env: typingEnvironment(opts.display), signal: anchor.signal,
-        timeoutMs: remaining(deadline), killGraceMs: 0, check: true,
-      };
-      anchor.check();
-      remaining(anchor.preparationDeadline);
+      const { args, commandOptions } = await beforeDispatch(async () => {
+        await validateTypingTarget(opts.sessionId, opts.display, opts.env ?? process.env, anchor.preparationDeadline);
+        const args = buildTypeArgs(opts.text);
+        const commandOptions = {
+          cleanEnv: true, env: typingEnvironment(opts.display), signal: anchor.signal,
+          timeoutMs: remaining(deadline), killGraceMs: 0, check: true,
+        };
+        anchor.check();
+        remaining(anchor.preparationDeadline);
+        return { args, commandOptions };
+      });
       try {
         const result = await runCommand("xdotool", args, commandOptions);
         anchor.check();

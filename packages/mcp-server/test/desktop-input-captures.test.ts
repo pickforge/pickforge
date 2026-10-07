@@ -10,6 +10,7 @@ vi.mock("@pickforge/lab-desktop-linux", async (original) => {
   const input = async (opts: { sessionId: string; env: NodeJS.ProcessEnv }) => withAgentPermit(opts.sessionId, opts.env, async () => {
     state.order.push("input");
     state.inputEffect?.();
+    if (state.fail === "prepare") throw new actual.DesktopTextPreparationError("synthetic typed marker ghp_" + "b".repeat(36));
     if (state.fail === "input") throw new Error("synthetic typed marker ghp_" + "b".repeat(36));
   });
   return { ...actual, click: input, doubleClick: input, drag: input, scroll: input, typeText: input, pressKey: input,
@@ -105,6 +106,24 @@ it.each(["before", "input", "after"])("preserves partial evidence when %s fails 
   expect(JSON.stringify({ result, actions })).not.toContain("synthetic typed marker");
   expect(JSON.stringify({ result, actions })).not.toContain("b".repeat(36));
   for (const file of actions[0]!.artifacts ?? []) expect(fs.existsSync(path.join(dir, file))).toBe(true);
+});
+
+it.each([
+  ["prepare", "not-attempted"], ["input", "attempted"],
+] as const)("desktop_type reports a %s failure as input %s without the typed value", async (fail, inputState) => {
+  state.fail = fail;
+  const captured = await call("desktop_type", { ...cases[4]![1], capture: "both" });
+  expect(captured).toMatchObject({ ok: false, inputState });
+  expect(captured.errors).toEqual([`input failed; input ${inputState}. Input is never retried automatically`]);
+  const uncaptured = await call("desktop_type", cases[4]![1]);
+  expect(uncaptured.ok).toBe(false);
+  expect(state.order).toEqual(["before", "input", "input"]);
+  const { actions } = await evidence();
+  expect(actions.map((action) => [action.status, action.inputState])).toEqual([["error", inputState], ["error", inputState]]);
+  expect(actions[0]!.error).toContain(`input ${inputState}`);
+  // The uncaptured path keeps the redacted error text, as before.
+  expect(JSON.stringify({ captured, action: actions[0] })).not.toContain("synthetic typed marker");
+  expect(JSON.stringify({ captured, uncaptured, actions })).not.toContain("b".repeat(36));
 });
 
 it("links a published PNG even if its subsequent metadata processing fails", async () => {

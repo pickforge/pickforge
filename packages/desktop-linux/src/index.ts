@@ -165,6 +165,7 @@ export {
 } from "./session.js";
 
 export { findOnPath } from "./util.js";
+export { DesktopTextPreparationError } from "./x11-wire.js";
 
 export {
   endHumanTakeover,
