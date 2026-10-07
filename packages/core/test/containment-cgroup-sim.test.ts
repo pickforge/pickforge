@@ -134,6 +134,15 @@ function readFakeProcs(fake: FakeCgroup): string {
   return `${fake.members.join("\n")}\n`;
 }
 
+function writeFakeFreeze(fake: FakeCgroup, data: string): void {
+  if (fake.pruneAt === "cgroup.freeze") prune(fake);
+  const file = path.join(SCOPE_DIR, "cgroup.freeze");
+  if (fake.removed || !fake.freezeSupported) throw pruned(fake, file);
+  if (String(data) === "1") fake.beforeFreeze?.();
+  fake.freezes.push(String(data));
+  fake.frozen = String(data) === "1";
+}
+
 function installFakeCgroup(fake: FakeCgroup): void {
   const realRead = fs.readFileSync;
   const realExists = fs.existsSync;
@@ -198,11 +207,7 @@ function installFakeCgroup(fake: FakeCgroup): void {
       return;
     }
     if (file === path.join(SCOPE_DIR, "cgroup.freeze")) {
-      if (fake.pruneAt === "cgroup.freeze") prune(fake);
-      if (fake.removed || !fake.freezeSupported) throw pruned(fake, String(file));
-      if (String(data) === "1") fake.beforeFreeze?.();
-      fake.freezes.push(String(data));
-      fake.frozen = String(data) === "1";
+      writeFakeFreeze(fake, data as string);
       return;
     }
     if (file === PARENT_PROCS) {

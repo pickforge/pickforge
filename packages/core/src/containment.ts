@@ -743,6 +743,41 @@ async function vacatedOr(
   return "vacated";
 }
 
+/** Pin ownership to the identity read before the token proof. */
+function verifyCgroupMemberIdentity(
+  pid: number,
+  token: string,
+  members: Set<number>,
+): Exclude<MemberVerdict, "ours"> | ProcessIdentity {
+  const identity = readParentAndStart(pid);
+  const verdict = classifyCgroupMember(pid, token, members);
+  if (verdict === "foreign" || verdict === "gone") return verdict;
+  if (identity === undefined || readProcessStartTicks(pid) !== identity.startTicks) {
+    return "unknown";
+  }
+  if (verdict === "unknown") return verdict;
+  return { pid, startTicks: identity.startTicks };
+}
+
+function collectCgroupMembership(
+  members: number[],
+  token: string,
+): { undecided: number[]; foreign: number[]; proven: ProcessIdentity[] } {
+  const chain = selfAndAncestorIdentities();
+  const inScope = new Set(members);
+  const undecided: number[] = [];
+  const foreign: number[] = [];
+  const proven: ProcessIdentity[] = [];
+  for (const pid of members) {
+    if (chain.has(pid)) continue;
+    const verdict = verifyCgroupMemberIdentity(pid, token, inScope);
+    if (verdict === "foreign") foreign.push(pid);
+    else if (verdict === "unknown") undecided.push(pid);
+    else if (verdict !== "gone") proven.push(verdict);
+  }
+  return { undecided, foreign, proven };
+}
+
 /**
  * Prove, immediately before cgroup signals, that every process the signals would
  * reach is this session's own. A directory named `pickforge-<id>` on a cgroup
@@ -763,23 +798,7 @@ async function verifyCgroupMembership(
     if (members === undefined) {
       return vacatedOr(cgroupDir, `could not read ${cgroupDir}/cgroup.procs`);
     }
-    const chain = selfAndAncestorIdentities();
-    const inScope = new Set(members);
-    const undecided: number[] = [];
-    const foreign: number[] = [];
-    const proven: ProcessIdentity[] = [];
-    for (const pid of members) {
-      if (chain.has(pid)) continue;
-      const identity = readParentAndStart(pid);
-      const verdict = classifyCgroupMember(pid, token, inScope);
-      if (verdict === "foreign") foreign.push(pid);
-      else if (verdict !== "gone") {
-        if (identity === undefined || readProcessStartTicks(pid) !== identity.startTicks) {
-          undecided.push(pid);
-        } else if (verdict === "unknown") undecided.push(pid);
-        else proven.push({ pid, startTicks: identity.startTicks });
-      }
-    }
+    const { undecided, foreign, proven } = collectCgroupMembership(members, token);
     if (foreign.length > 0) {
       return {
         refusal:
@@ -1067,6 +1086,22 @@ export interface DestroyContainmentOptions {
   killTimeoutMs?: number;
 }
 
+async function signalGuardedCgroupMembers(
+  cgroupDir: string,
+  guard: KillGuard,
+  timeoutMs: number,
+  signaled: Set<number>,
+): Promise<string | undefined> {
+  if (guard === "vacated") return undefined;
+  if ("refusal" in guard) return guard.refusal;
+  const reason = signalCgroupMembers(guard.members, signaled);
+  if (reason !== undefined) return reason;
+  if (!(await waitForCgroupEmpty(cgroupDir, timeoutMs))) {
+    return `cgroup ${cgroupDir} still has members after verified signals`;
+  }
+  return undefined;
+}
+
 async function destroyCgroupMembers(
   scope: ContainmentScope,
   timeoutMs: number,
@@ -1092,12 +1127,7 @@ async function destroyCgroupMembers(
     } else {
       guard = await verifyCgroupMembership(cgroupDir, scope.token);
     }
-    if (guard !== "vacated") {
-      reason = "refusal" in guard ? guard.refusal : signalCgroupMembers(guard.members, signaled);
-      if (reason === undefined && !(await waitForCgroupEmpty(cgroupDir, timeoutMs))) {
-        reason = `cgroup ${cgroupDir} still has members after verified signals`;
-      }
-    }
+    reason = await signalGuardedCgroupMembers(cgroupDir, guard, timeoutMs, signaled);
   } finally {
     if (frozen) reason = unfreezeCgroup(cgroupDir) ?? reason;
   }
