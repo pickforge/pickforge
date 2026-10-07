@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import {
   CONTAINMENT_TOKEN_ENV,
   buildContainedCommand,
@@ -569,8 +569,30 @@ describe("containment refuses to signal anything it does not own", () => {
   itWithCgroup(
     "refuses cleanup rather than migrating an ancestor whose pid may have been recycled",
     async () => {
-      const scope = createContainmentScope({ id: runScopeId("desk-inside02") });
-      expect(scope.mechanism).toBe("cgroup");
+      // Use a private parent cgroup. The refused cleanup still kills the
+      // victim through the marker sweep, and the worker and its supervisor
+      // then exit, so the scope is empty when it is checked. A
+      // createContainmentScope in another worker or run prunes empty scopes
+      // in the shared delegated cgroup and could remove it first (#279).
+      const parent = fs.mkdtempSync(path.join(delegatedDir as string, "desk-ancestor-"));
+      const id = runScopeId("desk-inside02");
+      const cgroupDir = path.join(parent, `pickforge-${id}`);
+      onTestFinished(() => {
+        for (const dir of [cgroupDir, parent]) {
+          try {
+            fs.rmdirSync(dir);
+          } catch {
+            /* already removed */
+          }
+        }
+      });
+      fs.mkdirSync(cgroupDir);
+      const scope: ContainmentScope = {
+        ...createContainmentScope({ id, useCgroup: false }),
+        mechanism: "cgroup",
+        cgroupDir,
+      };
+      expect(scopeCgroupProblem(cgroupDir, id)).toBeUndefined();
       const victim = spawnInScope(scope, "/bin/sleep", ["300"]);
       expect(await waitFor(() => cgroupMembers(scope).includes(victim))).toBe(true);
 
@@ -602,9 +624,9 @@ describe("containment refuses to signal anything it does not own", () => {
       expect(written.result.signaled).not.toContain(written.pid);
       expect(written.result.signaled).not.toContain(written.ppid);
       // Refused, not written through: the scope cgroup is still there.
-      expect(fs.existsSync(scope.cgroupDir as string)).toBe(true);
+      expect(fs.existsSync(cgroupDir)).toBe(true);
 
-      await destroyContainmentScope(scope);
+      expect((await destroyContainmentScope(scope)).confirmed).toBe(true);
     },
     30_000,
   );
