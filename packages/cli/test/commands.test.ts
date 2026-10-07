@@ -399,10 +399,8 @@ beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-cmd-"));
 });
 
-afterEach(async () => {
-  // Act only on this test's directory and homes. If this hook outlives its
-  // timeout, the next test has already replaced tmpDir.
-  const dir = tmpDir;
+/** Removes this test's homes from cleanupEnvs and closes them to new CLI calls. */
+function claimTestHomes(dir: string): Map<string, Record<string, string>> {
   // makeEnv puts every home under tmpDir, so these homes are this test's.
   const envsByHome = new Map<string, Record<string, string>>();
   for (const [home, env] of cleanupEnvs) {
@@ -411,29 +409,54 @@ afterEach(async () => {
     closedHomes.add(home);
     envsByHome.set(home, env);
   }
+  return envsByHome;
+}
+
+/** Kills processes left in one home and reports leaks. */
+async function sweepHome(home: string, strict: boolean): Promise<string[]> {
+  const failures: string[] = [];
+  const cmdlines = strict ? cmdlinesWithEnv("PICKFORGE_HOME", home) : new Map<number, string>();
+  const { killed, survivors } = await killProcessesWithEnv("PICKFORGE_HOME", home, HOME_SWEEP_MS);
+  if (strict && killed.length > 0) {
+    failures.push(
+      `${home}: processes outlived session destroy: ${describeProcesses(killed, cmdlines)}`,
+    );
+  }
+  if (survivors.length > 0) {
+    failures.push(`${home}: processes survived SIGKILL: ${survivors.join(", ")}`);
+  }
+  return failures;
+}
+
+/** Drains CLI calls, destroys sessions, and sweeps one home. Returns failures. */
+async function cleanupHome(
+  home: string,
+  env: Record<string, string>,
+  deadline: number,
+): Promise<string[]> {
+  const failures: string[] = [];
+  const forced = await stopRunningCli(home, deadline);
+  const destroyed = await destroyAllSessions(env);
+  if (destroyed.code !== 0) {
+    failures.push(`${home}: ${destroyed.stdout}${destroyed.stderr}`.trim());
+  }
+  if (path.isAbsolute(home)) {
+    // After a clean CLI run and destroy, no helper may outlive the session.
+    // A killed CLI or a failed destroy already explains any leftovers.
+    failures.push(...(await sweepHome(home, !forced && destroyed.code === 0)));
+  }
+  return failures;
+}
+
+afterEach(async () => {
+  // Act only on this test's directory and homes. If this hook outlives its
+  // timeout, the next test has already replaced tmpDir.
+  const dir = tmpDir;
+  const envsByHome = claimTestHomes(dir);
   const deadline = Date.now() + CLI_DRAIN_MS;
   const failures: string[] = [];
   for (const [home, env] of envsByHome) {
-    const forced = await stopRunningCli(home, deadline);
-    const destroyed = await destroyAllSessions(env);
-    if (destroyed.code !== 0) {
-      failures.push(`${home}: ${destroyed.stdout}${destroyed.stderr}`.trim());
-    }
-    if (path.isAbsolute(home)) {
-      // After a clean CLI run and destroy, no helper may outlive the session.
-      // A killed CLI or a failed destroy already explains any leftovers.
-      const strict = !forced && destroyed.code === 0;
-      const cmdlines = strict ? cmdlinesWithEnv("PICKFORGE_HOME", home) : new Map<number, string>();
-      const { killed, survivors } = await killProcessesWithEnv("PICKFORGE_HOME", home, HOME_SWEEP_MS);
-      if (strict && killed.length > 0) {
-        failures.push(
-          `${home}: processes outlived session destroy: ${describeProcesses(killed, cmdlines)}`,
-        );
-      }
-      if (survivors.length > 0) {
-        failures.push(`${home}: processes survived SIGKILL: ${survivors.join(", ")}`);
-      }
-    }
+    failures.push(...(await cleanupHome(home, env, deadline)));
   }
   if (failures.length > 0) {
     // Keep the registry so surviving session processes stay findable. VNC
