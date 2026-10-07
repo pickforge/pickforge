@@ -451,6 +451,30 @@ async function trackInput(
   return result;
 }
 
+/**
+ * Uncaptured input with evidence. A failed input still reports the inputState
+ * that trackInput wrote to the evidence record, with the error text unchanged.
+ */
+async function withTrackedInput(
+  ctx: ServerContext,
+  options: McpEvidenceOptions<ToolReport>,
+  input: (evidence: EvidenceOperationContext) => Promise<ToolReport>,
+): Promise<ToolReport> {
+  let record: EvidenceRecordMeta | undefined;
+  try {
+    return await withMcpEvidence(ctx, { ...options, input: true }, (evidence) => {
+      record = evidence.record;
+      return trackInput(evidence.record, () => input(evidence));
+    });
+  } catch (error) {
+    if (record?.inputState === undefined) throw error;
+    return {
+      data: { inputState: record.inputState },
+      errors: [error instanceof Error ? error.message : String(error)],
+    };
+  }
+}
+
 async function withInputCapture(
   ctx: ServerContext,
   options: McpEvidenceOptions<ToolReport>,
@@ -459,7 +483,7 @@ async function withInputCapture(
   input: (evidence: EvidenceOperationContext) => Promise<ToolReport>,
 ): Promise<ToolReport> {
   if (capture === undefined) {
-    return withMcpEvidence(ctx, { ...options, input: true }, (evidence) => trackInput(evidence.record, () => input(evidence)));
+    return withTrackedInput(ctx, options, input);
   }
   const artifacts: string[] = [];
   return withMcpEvidence(ctx, {
@@ -581,21 +605,20 @@ function registerMoveTool(server: McpServer, ctx: ServerContext): void {
     (args) =>
       runTool(async () => {
         const { id, display } = await resolveDesktop(ctx, args.session);
-        return withMcpEvidence(
+        return withTrackedInput(
           ctx,
           {
             sessionId: id,
             tool: "desktop_move",
             target: { x: args.x, y: args.y },
-            input: true,
             ownedDisplay: ownedDisplay(ctx, id, display),
           },
-          ({ record }) => trackInput(record, async () => {
+          async () => {
             await move({ display, sessionId: id, env: ctx.env, x: args.x, y: args.y });
             return {
               data: { sessionId: id, display, x: args.x, y: args.y },
             };
-          }),
+          },
         );
       }),
   );

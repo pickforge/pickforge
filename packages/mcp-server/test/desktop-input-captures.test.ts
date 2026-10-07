@@ -267,6 +267,7 @@ it("desktop_type reports a refused agent permit as input not-attempted without c
   try {
     const result = await call("desktop_type", cases[4]![1]);
     expect(result.ok).toBe(false);
+    expect(result.inputState).toBe("not-attempted");
     expect(result.errors[0]).toContain("human control is active");
     expect(state.order).toEqual([]);
     const { actions } = await evidence();
@@ -274,4 +275,17 @@ it("desktop_type reports a refused agent permit as input not-attempted without c
     expect(JSON.stringify({ result, actions })).not.toContain("synthetic typed marker");
     expect(JSON.stringify({ result, actions })).not.toContain("b".repeat(36));
   } finally { await releaseHumanLease(session, lease.leaseId, env); }
+});
+
+it.each(cases.flatMap(([tool, args]) => [
+  [tool, "prepare", "not-attempted", args], [tool, "input", "attempted", args],
+] as const))("%s reports a %s failure without capture as input %s", async (tool, fail, inputState, args) => {
+  state.fail = fail;
+  const result = await call(tool, args);
+  expect(result).toMatchObject({ ok: false, inputState });
+  expect(result.errors).toHaveLength(1);
+  expect(result.captures).toBeUndefined();
+  expect(state.order).toEqual(["input"]);
+  const { actions } = await evidence();
+  expect(actions.map((action) => [action.tool, action.status, action.inputState])).toEqual([[tool, "error", inputState]]);
 });
