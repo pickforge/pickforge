@@ -251,11 +251,41 @@ it.each(cases)("%s retains takeover refusal even when a before image exists", as
   try {
     const result = await call(tool, { ...args, capture: "both" });
     expect(result.ok).toBe(false);
-    expect(result.inputState).toBe("attempted");
+    expect(result.inputState).toBe("not-attempted");
+    expect(result.errors[0]).toMatch(/^input failed; input not-attempted\. Input is never retried automatically/);
     expect(state.order).toEqual(["before"]);
     const { actions, manifest } = await evidence();
     expect(actions[0]!.status).toBe("error");
+    expect(actions[0]!.inputState).toBe("not-attempted");
     expect(actions[0]!.artifacts).toHaveLength(1);
     await expect(recordEvidenceOutcome(dirs.projectDir, manifest.runId, { scenario: "Refused", status: "pass", inspectedScreenshots: actions[0]!.artifacts! }, env)).rejects.toThrow(/successful interaction/);
   } finally { await releaseHumanLease(session, lease.leaseId, env); }
+});
+
+it("desktop_type reports a refused agent permit as input not-attempted without capture", async () => {
+  const lease = await acquireHumanLease(session, env);
+  try {
+    const result = await call("desktop_type", cases[4]![1]);
+    expect(result.ok).toBe(false);
+    expect(result.inputState).toBe("not-attempted");
+    expect(result.errors[0]).toContain("human control is active");
+    expect(state.order).toEqual([]);
+    const { actions } = await evidence();
+    expect(actions.map((action) => [action.tool, action.status, action.inputState])).toEqual([["desktop_type", "error", "not-attempted"]]);
+    expect(JSON.stringify({ result, actions })).not.toContain("synthetic typed marker");
+    expect(JSON.stringify({ result, actions })).not.toContain("b".repeat(36));
+  } finally { await releaseHumanLease(session, lease.leaseId, env); }
+});
+
+it.each(cases.flatMap(([tool, args]) => [
+  [tool, "prepare", "not-attempted", args], [tool, "input", "attempted", args],
+] as const))("%s reports a %s failure without capture as input %s", async (tool, fail, inputState, args) => {
+  state.fail = fail;
+  const result = await call(tool, args);
+  expect(result).toMatchObject({ ok: false, inputState });
+  expect(result.errors).toHaveLength(1);
+  expect(result.captures).toBeUndefined();
+  expect(state.order).toEqual(["input"]);
+  const { actions } = await evidence();
+  expect(actions.map((action) => [action.tool, action.status, action.inputState])).toEqual([[tool, "error", inputState]]);
 });
