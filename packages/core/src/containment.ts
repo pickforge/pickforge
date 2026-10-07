@@ -902,6 +902,14 @@ function unfreezeCgroup(cgroupDir: string): string | undefined {
   }
 }
 
+function appendThawFailure(
+  reason: string | undefined,
+  thawFailure: string | undefined,
+): string | undefined {
+  if (thawFailure === undefined) return reason;
+  return reason === undefined ? thawFailure : `${reason}; ${thawFailure}`;
+}
+
 /** Recheck the lifetime of an identity whose ownership was already proven. */
 function probeCgroupIdentity(identity: ProcessIdentity): TokenProbe {
   let stat: ReturnType<typeof parseProcStat>;
@@ -1154,7 +1162,7 @@ async function destroyCgroupMembers(
     guard = await verifyCgroupMembership(cgroupDir, scope.token);
     reason = await signalGuardedCgroupMembers(cgroupDir, scope.token, guard, timeoutMs, signaled);
   } finally {
-    if (frozen) reason = unfreezeCgroup(cgroupDir) ?? reason;
+    if (frozen) reason = appendThawFailure(reason, unfreezeCgroup(cgroupDir));
   }
   if (reason !== undefined) return reason;
   if (!(await removeCgroupDir(cgroupDir))) {

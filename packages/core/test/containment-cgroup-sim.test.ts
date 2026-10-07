@@ -41,6 +41,7 @@ interface FakeCgroup {
   freezes: string[];
   thawProcsReads?: number;
   freezeEventError?: boolean;
+  unfreezeError?: boolean;
   beforeFreeze?: () => void;
   beforeSignal?: () => void;
   migrated: number[];
@@ -142,6 +143,9 @@ function writeFakeFreeze(fake: FakeCgroup, data: string): void {
   if (String(data) === "1") fake.beforeFreeze?.();
   fake.freezes.push(String(data));
   if (String(data) === "0") fake.thawProcsReads = fake.procsReads;
+  if (String(data) === "0" && fake.unfreezeError) {
+    throw Object.assign(new Error("EACCES: cannot thaw"), { code: "EACCES" });
+  }
   fake.frozen = String(data) === "1";
 }
 
@@ -480,6 +484,37 @@ describe("cgroup cleanup guards (simulated cgroup)", () => {
     expect(result.signaled).not.toContain(stranger);
     expect(isPidAlive(stranger)).toBe(true);
     expect(fake.freezes).toEqual(["1", "0"]);
+  }, 20_000);
+
+  it("appends a thaw failure to the original foreign-member refusal", async () => {
+    const stranger = spawnMember(undefined);
+    const fake = newFake({ unfreezeError: true });
+    fake.beforeFreeze = () => fake.members.push(stranger);
+    installFakeCgroup(fake);
+
+    const result = await destroy();
+
+    expect(result.confirmed).toBe(false);
+    expect(result.reason).toContain(`containment token: ${stranger}; could not unfreeze ${SCOPE_DIR}`);
+    expect(result.signaled).not.toContain(stranger);
+    expect(isPidAlive(stranger)).toBe(true);
+    expect(fake.freezes).toEqual(["1", "0"]);
+    expect(fake.removed).toBe(false);
+  }, 20_000);
+
+  it("reports a thaw failure after otherwise successful cgroup signals", async () => {
+    const member = spawnMember(scope());
+    const fake = newFake({ members: [member], unfreezeError: true });
+    installFakeCgroup(fake);
+
+    const result = await destroy();
+
+    expect(result.confirmed).toBe(false);
+    expect(result.reason).toBe(`could not unfreeze ${SCOPE_DIR}`);
+    expect(result.signaled).toContain(member);
+    expect(isPidAlive(member)).toBe(false);
+    expect(fake.freezes).toEqual(["1", "0"]);
+    expect(fake.removed).toBe(false);
   }, 20_000);
 
   it("signals proven members during a pending freeze and still runs the marker sweep", async () => {
