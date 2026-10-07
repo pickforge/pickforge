@@ -37,7 +37,8 @@ interface CliResult {
 // afterEach closes the test's state homes to new CLI calls, waits a bounded
 // time for the running ones, kills the survivors, destroys every session
 // within a time limit, and keeps the registry on failure. Calls are keyed by
-// PICKFORGE_HOME, so env copies are covered too. The CLI starts helpers such
+// PICKFORGE_HOME, so env copies are covered too. runCli records the first env
+// of each home, so every test gets this cleanup. The CLI starts helpers such
 // as adb in their own process groups, so killing its group misses them.
 // Helpers inherit the test's unique PICKFORGE_HOME, so a last sweep kills
 // every process that still carries it (#288).
@@ -67,11 +68,17 @@ function runCli(
       new Error(`CLI call after its test finished: ${args.join(" ")}`),
     );
   }
+  if (path.isAbsolute(home) && !cleanupEnvs.has(home)) cleanupEnvs.set(home, env);
   const { child, result } = startCli(args, env, cwd);
   const entry = { home, child, done: result.catch(() => {}) };
   runningCli.add(entry);
   void entry.done.then(() => runningCli.delete(entry));
   return result;
+}
+
+function isInside(child: string, parent: string): boolean {
+  const rel = path.relative(parent, child);
+  return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
 }
 
 function runningFor(home: string): RunningCli[] {
@@ -358,7 +365,8 @@ function writeSyntheticRun(
 }
 
 let tmpDir: string;
-const cleanupEnvs: Array<Record<string, string>> = [];
+/** First env passed to runCli for each PICKFORGE_HOME, until afterEach claims it. */
+const cleanupEnvs = new Map<string, Record<string, string>>();
 
 beforeAll(async () => {
   await ensureCliBuilt();
@@ -372,11 +380,13 @@ afterEach(async () => {
   // Act only on this test's directory and homes. If this hook outlives its
   // timeout, the next test has already replaced tmpDir.
   const dir = tmpDir;
+  // makeEnv puts every home under tmpDir, so these homes are this test's.
   const envsByHome = new Map<string, Record<string, string>>();
-  for (const env of cleanupEnvs.splice(0)) {
-    const home = env.PICKFORGE_HOME ?? "";
+  for (const [home, env] of cleanupEnvs) {
+    if (!isInside(home, dir)) continue;
+    cleanupEnvs.delete(home);
     closedHomes.add(home);
-    if (!envsByHome.has(home)) envsByHome.set(home, env);
+    envsByHome.set(home, env);
   }
   const deadline = Date.now() + CLI_DRAIN_MS;
   const failures: string[] = [];
@@ -417,7 +427,6 @@ describe("pickforge-lab session (desktop)", () => {
     "creates, reports, and destroys a desktop session with inheritHome=%s",
     async (inheritHome) => {
       const env = makeEnv({ realPath: true });
-      cleanupEnvs.push(env);
 
       const created = await runCli(
         ["session", "create", "--type", "desktop", "--json", ...(inheritHome ? ["--inherit-home"] : [])],
@@ -505,7 +514,6 @@ describe("pickforge-lab session (desktop)", () => {
     "lists candidates when the default desktop session is ambiguous",
     async () => {
       const env = makeEnv({ realPath: true });
-      cleanupEnvs.push(env);
       const first = parseJson(
         await runCli(
           ["session", "create", "--type", "desktop", "--json"],
@@ -558,7 +566,6 @@ describe("pickforge-lab session (desktop)", () => {
         bootCompleted: "0",
       });
       const env = makeEnv({ realPath: true, extra: { ANDROID_HOME: sdk } });
-      cleanupEnvs.push(env);
 
       const result = await runCli(
         ["session", "create", "--type", "desktop+android", "--json"],
@@ -590,7 +597,6 @@ describe("pickforge-lab session (desktop)", () => {
         },
         extra: { DISPLAY: ":0" },
       });
-      cleanupEnvs.push(env);
       const created = parseJson(
         await runCli(
           ["session", "create", "--type", "desktop", "--json"],
@@ -668,7 +674,6 @@ describe("pickforge-lab session (desktop)", () => {
         },
         extra: { DISPLAY: ":0" },
       });
-      cleanupEnvs.push(env);
       const projectDir = makeProjectDir();
       const configPath = path.join(projectDir, ".picklab", "config.json");
       fs.mkdirSync(path.dirname(configPath), { recursive: true });
@@ -792,7 +797,6 @@ describe("pickforge-lab session (desktop)", () => {
         },
         extra: { DISPLAY: ":0" },
       });
-      cleanupEnvs.push(env);
       const result = await runCli(
         [
           "session",
@@ -1151,7 +1155,6 @@ describe("pickforge-lab desktop", () => {
         realPath: true,
         bins: { xdotool: "exit 1" },
       });
-      cleanupEnvs.push(env);
       const projectDir = makeProjectDir();
       await runCli(
         ["session", "create", "--type", "desktop", "--json"],
@@ -1207,7 +1210,6 @@ describe("pickforge-lab desktop", () => {
     "launches an app and drives click, type, and key input",
     async () => {
       const env = makeEnv({ realPath: true });
-      cleanupEnvs.push(env);
       await runCli(
         ["session", "create", "--type", "desktop", "--json"],
         env,
@@ -2066,7 +2068,6 @@ describe("pickforge-lab android session lifecycle (fake sdk)", () => {
     async () => {
       const { sdk, emulatorArgsLog } = makeFakeAndroidSdk();
       const env = makeEnv({ extra: { ANDROID_HOME: sdk } });
-      cleanupEnvs.push(env);
       const projectDir = makeProjectDir();
 
       const started = await runCli(
@@ -2143,7 +2144,6 @@ describe("pickforge-lab android session lifecycle (fake sdk)", () => {
     async () => {
       const { sdk } = makeFakeAndroidSdk();
       const env = makeEnv({ extra: { ANDROID_HOME: sdk } });
-      cleanupEnvs.push(env);
       const projectDir = makeProjectDir();
       const configPath = path.join(projectDir, ".picklab", "config.json");
       fs.mkdirSync(path.dirname(configPath), { recursive: true });
