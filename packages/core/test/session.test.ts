@@ -528,17 +528,22 @@ describe("session registry", () => {
   });
 
   it("keeps a live legacy no-identity desktop running without signaling helpers", async () => {
-    const xvfb = spawn(
-      process.execPath,
-      ["-e", "setInterval(() => {}, 1000)"],
-      { stdio: "ignore" },
-    );
-    const vnc = spawn(
-      process.execPath,
-      ["-e", "setInterval(() => {}, 1000)"],
-      { stdio: "ignore" },
-    );
+    // Spawn inside the try, so a failed spawn still lets the finally stop
+    // the fakes that did start.
+    const fakes: ChildProcess[] = [];
     try {
+      const xvfb = spawn(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1000)"],
+        { stdio: "ignore" },
+      );
+      fakes.push(xvfb);
+      const vnc = spawn(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1000)"],
+        { stdio: "ignore" },
+      );
+      fakes.push(vnc);
       if (xvfb.pid === undefined || vnc.pid === undefined) {
         throw new Error("child process did not expose a pid");
       }
@@ -561,7 +566,7 @@ describe("session registry", () => {
       expect(isPidAlive(xvfb.pid)).toBe(true);
       expect(isPidAlive(vnc.pid)).toBe(true);
     } finally {
-      for (const child of [xvfb, vnc]) {
+      for (const child of fakes) {
         if (child.pid !== undefined && isPidAlive(child.pid)) {
           await stopPid(child.pid, { timeoutMs: 1000 });
           await waitForExit(child);
@@ -639,17 +644,22 @@ describe("session registry", () => {
   });
 
   it("default reaper removes a browser session whose display socket is missing", async () => {
-    const browser = spawn(
-      process.execPath,
-      ["-e", "setInterval(() => {}, 1000)"],
-      { detached: true, stdio: "ignore" },
-    );
-    const xvfb = spawn(
-      process.execPath,
-      ["-e", "setInterval(() => {}, 1000)"],
-      { detached: true, stdio: "ignore" },
-    );
+    // Spawn inside the try, so a failed spawn still lets the finally kill
+    // the fakes that did start.
+    const fakes: ChildProcess[] = [];
     try {
+      const browser = spawn(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1000)"],
+        { detached: true, stdio: "ignore" },
+      );
+      fakes.push(browser);
+      const xvfb = spawn(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1000)"],
+        { detached: true, stdio: "ignore" },
+      );
+      fakes.push(xvfb);
       if (browser.pid === undefined || xvfb.pid === undefined) {
         throw new Error("child process did not expose a pid");
       }
@@ -702,7 +712,7 @@ describe("session registry", () => {
       expect(isPidAlive(browser.pid)).toBe(false);
       expect(isPidAlive(xvfb.pid)).toBe(false);
     } finally {
-      for (const child of [browser, xvfb]) {
+      for (const child of fakes) {
         if (child.pid !== undefined) {
           try {
             process.kill(-child.pid, "SIGKILL");
@@ -1102,21 +1112,27 @@ describe("session registry", () => {
   }, 35_000);
 
   it("leaves helpers and profile intact for an unconfirmed browser group", async () => {
-    const browser = spawn(
-      process.execPath,
-      ["-e", "setInterval(() => {}, 1000)"],
-      { stdio: "ignore" },
-    );
-    const vnc = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
-      stdio: "ignore",
-    });
-    const xvfb = spawn(
-      process.execPath,
-      ["-e", "setInterval(() => {}, 1000)"],
-      { stdio: "ignore" },
-    );
     const profileDir = path.join(home, "reused-profile");
+    // Spawn inside the try, so a failed spawn still lets the finally stop
+    // the fakes that did start.
+    const fakes: ChildProcess[] = [];
     try {
+      const browser = spawn(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1000)"],
+        { stdio: "ignore" },
+      );
+      fakes.push(browser);
+      const vnc = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+        stdio: "ignore",
+      });
+      fakes.push(vnc);
+      const xvfb = spawn(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1000)"],
+        { stdio: "ignore" },
+      );
+      fakes.push(xvfb);
       if (
         browser.pid === undefined ||
         vnc.pid === undefined ||
@@ -1163,7 +1179,7 @@ describe("session registry", () => {
       expect(isPidAlive(xvfb.pid)).toBe(true);
       expect(fs.existsSync(path.join(profileDir, "Cookies"))).toBe(true);
     } finally {
-      for (const child of [browser, vnc, xvfb]) {
+      for (const child of fakes) {
         if (child.pid !== undefined && isPidAlive(child.pid)) {
           await stopPid(child.pid, { timeoutMs: 1000 });
           await waitForExit(child);
