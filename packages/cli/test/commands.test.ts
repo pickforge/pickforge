@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
@@ -33,34 +33,60 @@ interface CliResult {
 // A test that exceeds its timeout keeps running after vitest moves on. Its
 // later CLI calls could create a session after afterEach destroyed the
 // sessions and deleted the registry, so that Xvfb outlived the run (#262).
-// afterEach closes the test's session envs to new CLI calls, waits for the
-// running ones, destroys every session, and keeps the registry on failure.
-const closedEnvs = new WeakSet<Record<string, string>>();
-const runningCli = new Set<{ env: Record<string, string>; done: Promise<unknown> }>();
+// afterEach closes the test's state homes to new CLI calls, waits a bounded
+// time for the running ones, kills the survivors, destroys every session,
+// and keeps the registry on failure. Calls are keyed by PICKFORGE_HOME, so
+// env copies are covered too.
+const CLI_DRAIN_MS = 20_000;
+const CLI_KILL_WAIT_MS = 2_000;
+const closedHomes = new Set<string>();
+
+interface RunningCli {
+  home: string;
+  child: ChildProcess;
+  done: Promise<unknown>;
+}
+
+const runningCli = new Set<RunningCli>();
 
 function runCli(
   args: string[],
   env: Record<string, string>,
   cwd?: string,
 ): Promise<CliResult> {
-  if (closedEnvs.has(env)) {
+  const home = env.PICKFORGE_HOME ?? "";
+  if (closedHomes.has(home)) {
     return Promise.reject(
       new Error(`CLI call after its test finished: ${args.join(" ")}`),
     );
   }
-  const result = spawnCli(args, env, cwd);
-  const entry = { env, done: result.catch(() => {}) };
+  const { child, result } = startCli(args, env, cwd);
+  const entry = { home, child, done: result.catch(() => {}) };
   runningCli.add(entry);
   void entry.done.then(() => runningCli.delete(entry));
   return result;
 }
 
-async function waitForRunningCli(env: Record<string, string>): Promise<void> {
-  for (;;) {
-    const running = [...runningCli].filter((entry) => entry.env === env);
-    if (running.length === 0) return;
-    await Promise.all(running.map((entry) => entry.done));
+function runningFor(home: string): RunningCli[] {
+  return [...runningCli].filter((entry) => entry.home === home);
+}
+
+/** Settles when the promise settles or after ms, whichever comes first. */
+async function settleWithin(promise: Promise<unknown>, ms: number): Promise<void> {
+  const timer = new AbortController();
+  await Promise.race([promise, sleep(ms, undefined, { signal: timer.signal }).catch(() => {})]);
+  timer.abort();
+}
+
+/** Waits for the home's CLI calls, then SIGKILLs the process group of each survivor. */
+async function stopRunningCli(home: string, deadline: number): Promise<void> {
+  const running = runningFor(home);
+  await settleWithin(Promise.all(running.map((entry) => entry.done)), deadline - Date.now());
+  const survivors = runningFor(home);
+  for (const { child } of survivors) {
+    if (child.pid !== undefined) stopTestProcessGroup(child.pid, "SIGKILL");
   }
+  await settleWithin(Promise.all(survivors.map((entry) => entry.done)), CLI_KILL_WAIT_MS);
 }
 
 function spawnCli(
@@ -68,12 +94,22 @@ function spawnCli(
   env: Record<string, string>,
   cwd?: string,
 ): Promise<CliResult> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [cliPath, ...args], {
-      cwd,
-      env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+  return startCli(args, env, cwd).result;
+}
+
+function startCli(
+  args: string[],
+  env: Record<string, string>,
+  cwd?: string,
+): { child: ChildProcess; result: Promise<CliResult> } {
+  // Its own process group lets cleanup kill the CLI and its helpers.
+  const child = spawn(process.execPath, [cliPath, ...args], {
+    cwd,
+    env,
+    detached: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const result = new Promise<CliResult>((resolve, reject) => {
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk: Buffer) => {
@@ -85,6 +121,7 @@ function spawnCli(
     child.on("error", reject);
     child.on("close", (code) => resolve({ code, stdout, stderr }));
   });
+  return { child, result };
 }
 
 function parseJson(result: CliResult): Record<string, any> {
@@ -162,9 +199,9 @@ function writeDesktopSessionRecord(
   return id;
 }
 
-function stopTestProcessGroup(pid: number): void {
+function stopTestProcessGroup(pid: number, signal: NodeJS.Signals = "SIGTERM"): void {
   try {
-    process.kill(-pid, "SIGTERM");
+    process.kill(-pid, signal);
   } catch {
     // The test command has already exited.
   }
@@ -310,25 +347,33 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  const envs = cleanupEnvs.splice(0);
-  for (const env of envs) closedEnvs.add(env);
+  // Act only on this test's directory and homes. If this hook outlives its
+  // timeout, the next test has already replaced tmpDir.
+  const dir = tmpDir;
+  const envsByHome = new Map<string, Record<string, string>>();
+  for (const env of cleanupEnvs.splice(0)) {
+    const home = env.PICKFORGE_HOME ?? "";
+    closedHomes.add(home);
+    if (!envsByHome.has(home)) envsByHome.set(home, env);
+  }
+  const deadline = Date.now() + CLI_DRAIN_MS;
   const failures: string[] = [];
-  for (const env of envs) {
-    await waitForRunningCli(env);
+  for (const [home, env] of envsByHome) {
+    await stopRunningCli(home, deadline);
     const destroyed = await spawnCli(["session", "destroy", "--all"], env).catch(
       (error: unknown): CliResult => ({ code: null, stdout: "", stderr: String(error) }),
     );
     if (destroyed.code !== 0) {
-      failures.push(`${env.PICKFORGE_HOME}: ${destroyed.stdout}${destroyed.stderr}`.trim());
+      failures.push(`${home}: ${destroyed.stdout}${destroyed.stderr}`.trim());
     }
   }
   if (failures.length > 0) {
     // Keep the registry so the surviving Xvfb and VNC processes stay findable.
     throw new Error(
-      `Could not destroy test sessions; kept registry at ${tmpDir}:\n${failures.join("\n")}`,
+      `Could not destroy test sessions; kept registry at ${dir}:\n${failures.join("\n")}`,
     );
   }
-  fs.rmSync(tmpDir, { recursive: true, force: true });
+  fs.rmSync(dir, { recursive: true, force: true });
 }, 60_000);
 
 describe("pickforge-lab session (desktop)", () => {
