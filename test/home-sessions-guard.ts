@@ -73,7 +73,9 @@ function unlessMissing<T>(read: () => T): T | undefined {
 }
 
 function entrySignature(full: string, stat: fs.Stats): string | undefined {
-  if (stat.isDirectory()) return "dir";
+  // The inode shows a replaced directory. The times show entries that were
+  // created and removed inside it, even when the final listing is the same.
+  if (stat.isDirectory()) return `dir:${stat.ino}:${stat.mtimeMs}:${stat.ctimeMs}`;
   if (stat.isSymbolicLink()) {
     const target = unlessMissing(() => fs.readlinkSync(full));
     return target === undefined ? undefined : `link:${target}`;

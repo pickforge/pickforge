@@ -142,6 +142,39 @@ describe("startGuard", () => {
     expect(() => teardown()).toThrow(`added ${path.join("desk-keep", "agents", "b.json")}`);
   });
 
+  it("passes when an existing tree is only read", () => {
+    seed();
+    const teardown = start();
+    fs.readdirSync(path.join(dir, "desk-keep", "agents"));
+    fs.readFileSync(path.join(dir, "desk-keep", "agents", "a.json"));
+    expect(teardown()).toBeUndefined();
+    expect(process.exitCode).toBe(savedExitCode);
+  });
+
+  it("fails when a test replaces an existing directory with a new one", () => {
+    seed();
+    const teardown = start();
+    const agents = path.join(dir, "desk-keep", "agents");
+    fs.renameSync(agents, path.join(root, "old-agents"));
+    fs.mkdirSync(agents);
+    fs.renameSync(path.join(root, "old-agents", "a.json"), path.join(agents, "a.json"));
+    // The parent changes too, so the replaced directory follows it in the list.
+    expect(() => teardown()).toThrow(`modified desk-keep, ${path.join("desk-keep", "agents")})`);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("fails when a test creates and removes an entry inside an existing directory", async () => {
+    seed();
+    const agents = path.join(dir, "desk-keep", "agents");
+    const teardown = start();
+    // Wait so the directory time can differ on coarse clocks.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    fs.writeFileSync(path.join(agents, "permit"), "");
+    fs.rmSync(path.join(agents, "permit"));
+    expect(fs.readdirSync(agents)).toEqual(["a.json"]);
+    expect(() => teardown()).toThrow(`modified ${path.join("desk-keep", "agents")}`);
+  });
+
   it("fails when a test removes a nested entry", () => {
     seed();
     const teardown = start();
