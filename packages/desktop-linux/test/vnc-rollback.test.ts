@@ -9,10 +9,10 @@ import {
   type EnvLike,
 } from "@pickforge/lab-core";
 
-// Pids high enough that nothing on the host holds them, so teardown of the
-// fakes resolves as "already dead" rather than touching a real process.
-const XVFB_PID = 4_194_302;
-const VNC_PID = 4_194_303;
+// Pids above the kernel's PID_MAX_LIMIT (4194304), so no process can hold
+// them and teardown of the fakes resolves as "already dead".
+const XVFB_PID = 4_194_313;
+const VNC_PID = 4_194_314;
 
 vi.mock("../src/display.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/display.js")>();

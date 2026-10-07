@@ -1086,9 +1086,9 @@ describe("browser record inspection (no live processes)", () => {
       type: "browser",
       projectDir,
       status: "running",
-      desktop: { display: ":250", xvfbPid: 4_194_300 },
+      desktop: { display: ":250", xvfbPid: 4_194_306 },
       browser: {
-        browserPid: 4_194_301,
+        browserPid: 4_194_307,
         browserStartTimeTicks: 1,
         binaryPath: "/usr/bin/chromium",
         profileMode: "ephemeral",
@@ -1122,7 +1122,7 @@ describe("browser record inspection (no live processes)", () => {
       type: "browser",
       projectDir,
       status: "running",
-      desktop: { display: "not-a-display", xvfbPid: 4_194_301 },
+      desktop: { display: "not-a-display", xvfbPid: 4_194_308 },
     });
     await expect(
       getBrowserSessionStatus(rec.id, registryEnv),
@@ -1139,9 +1139,9 @@ describe("browser record inspection (no live processes)", () => {
       type: "browser",
       projectDir,
       status: "running",
-      desktop: { display: ":251", xvfbPid: 4_194_302 },
+      desktop: { display: ":251", xvfbPid: 4_194_309 },
       browser: {
-        browserPid: 4_194_303,
+        browserPid: 4_194_310,
         browserStartTimeTicks: 1,
         binaryPath: "/usr/bin/chromium",
         profileMode: "ephemeral",
