@@ -242,6 +242,49 @@ function cgroupMembers(scope: ContainmentScope): number[] {
   }
 }
 
+/**
+ * Remove private test cgroups, innermost first. Kill whatever is still inside,
+ * wait for the cgroup to empty, then retry rmdir for a bounded time. A cgroup
+ * that still cannot be removed fails the test instead of leaking silently.
+ */
+async function removePrivateCgroups(dirs: string[]): Promise<void> {
+  const own = ownCgroup === undefined
+    ? undefined
+    : path.resolve(path.join("/sys/fs/cgroup", ownCgroup));
+  const failures: string[] = [];
+  for (const dir of dirs) {
+    if (!fs.existsSync(dir)) continue;
+    if (own !== undefined && (own === dir || own.startsWith(`${dir}/`))) {
+      failures.push(`${dir}: this test process runs inside it`);
+      continue;
+    }
+    try {
+      fs.writeFileSync(path.join(dir, "cgroup.kill"), "1");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        failures.push(`${dir}: cgroup.kill failed: ${(error as Error).message}`);
+      }
+    }
+    let lastError: unknown;
+    const removed = await waitFor(() => {
+      try {
+        fs.rmdirSync(dir);
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+        lastError = error;
+        return false;
+      }
+    }, 10_000);
+    if (!removed) {
+      failures.push(`${dir}: ${(lastError as Error | undefined)?.message ?? "not removed"}`);
+    }
+  }
+  if (failures.length > 0) {
+    throw new Error(`could not remove private test cgroups:\n${failures.join("\n")}`);
+  }
+}
+
 /** Block until a pid is a zombie or gone, without yielding to the event loop. */
 function waitSyncUntilExited(pid: number, realRead: typeof fs.readFileSync): void {
   const deadline = Date.now() + 2_000;
@@ -577,15 +620,9 @@ describe("containment refuses to signal anything it does not own", () => {
       const parent = fs.mkdtempSync(path.join(delegatedDir as string, "desk-ancestor-"));
       const id = runScopeId("desk-inside02");
       const cgroupDir = path.join(parent, `pickforge-${id}`);
-      onTestFinished(() => {
-        for (const dir of [cgroupDir, parent]) {
-          try {
-            fs.rmdirSync(dir);
-          } catch {
-            /* already removed */
-          }
-        }
-      });
+      // A failure midway can leave the victim or the worker in these cgroups,
+      // and afterEach does not wait for its kills, so remove them for sure.
+      onTestFinished(() => removePrivateCgroups([cgroupDir, parent]));
       fs.mkdirSync(cgroupDir);
       const scope: ContainmentScope = {
         ...createContainmentScope({ id, useCgroup: false }),
