@@ -13,7 +13,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { acquireHumanLease, releaseHumanLease, type HumanLease } from "../../src/takeover.js";
+import {
+  acquireHumanLease,
+  releaseHumanLease,
+  StaleHumanLeaseError,
+  type HumanLease,
+} from "../../src/takeover.js";
 
 const home = process.argv[2];
 const sessionId = process.argv[3];
@@ -53,16 +58,19 @@ await waitFor(() => fs.existsSync(path.join(barrier, "go")), "go");
 const claimStart = now();
 let lease: HumanLease | undefined;
 let claimError: string | undefined;
+// The lease file content a StaleHumanLeaseError saw, to diagnose #298.
+let staleRaw: string | undefined;
 try {
   lease = await acquireHumanLease(sessionId, env, { drainTimeoutMs: 2_000 });
 } catch (error) {
   claimError = error instanceof Error ? error.name : String(error);
+  if (error instanceof StaleHumanLeaseError) staleRaw = error.raw;
 }
 const claimEnd = now();
 fs.writeFileSync(path.join(barrier, `attempted-${name}`), "");
 
 if (lease === undefined) {
-  process.stdout.write(`${JSON.stringify({ won: false, error: claimError, claimStart, claimEnd })}\n`);
+  process.stdout.write(`${JSON.stringify({ won: false, error: claimError, staleRaw, claimStart, claimEnd })}\n`);
   process.exit(0);
 }
 try {

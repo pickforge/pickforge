@@ -325,6 +325,7 @@ function run(args: string[]): Promise<ProcResult> {
 interface ClaimOutcome {
   won: boolean;
   error?: string;
+  staleRaw?: string;
   claimStart: number;
   claimEnd: number;
   releaseAt?: number;
@@ -363,7 +364,12 @@ describe("real separate-process concurrency", () => {
       expect(losers).toHaveLength(1);
       const [winner] = winners as [ClaimOutcome];
       const [loser] = losers as [ClaimOutcome];
-      expect(loser.error).toBe("HumanLeaseHeldError");
+      // A StaleHumanLeaseError here may be the partly written lease window
+      // in #298; the raw lease content it saw is in the message.
+      expect(
+        loser.error,
+        `loser error ${loser.error}; stale lease raw: ${JSON.stringify(loser.staleRaw)}`,
+      ).toBe("HumanLeaseHeldError");
       // The claims really contended: the loser's whole attempt fell inside the
       // window in which the winner held the lease.
       expect(winner.releaseAt).toBeDefined();
