@@ -538,10 +538,10 @@ describe("session registry", () => {
       ["-e", "setInterval(() => {}, 1000)"],
       { stdio: "ignore" },
     );
-    if (xvfb.pid === undefined || vnc.pid === undefined) {
-      throw new Error("child process did not expose a pid");
-    }
     try {
+      if (xvfb.pid === undefined || vnc.pid === undefined) {
+        throw new Error("child process did not expose a pid");
+      }
       const legacy = await createSession(
         {
           type: "desktop",
@@ -649,10 +649,10 @@ describe("session registry", () => {
       ["-e", "setInterval(() => {}, 1000)"],
       { detached: true, stdio: "ignore" },
     );
-    if (browser.pid === undefined || xvfb.pid === undefined) {
-      throw new Error("child process did not expose a pid");
-    }
     try {
+      if (browser.pid === undefined || xvfb.pid === undefined) {
+        throw new Error("child process did not expose a pid");
+      }
       const browserIdentity = readProcessIdentity(browser.pid);
       const xvfbIdentity = readProcessIdentity(xvfb.pid);
       if (browserIdentity === undefined || xvfbIdentity === undefined) {
@@ -1004,25 +1004,30 @@ describe("session registry", () => {
     // SIGTERM before the handler exists kills the fake without a record.
     const stopLogger = (label: string) =>
       `const fs=require("node:fs");process.on("SIGTERM",()=>{fs.appendFileSync(${JSON.stringify(orderFile)},${JSON.stringify(`${label}\n`)});process.exit(0)});fs.writeFileSync(${JSON.stringify(readyFile(label))},"");setInterval(()=>{},1000)`;
-    const browser = spawn(process.execPath, ["-e", stopLogger("browser")], {
-      detached: true,
-      stdio: "ignore",
-    });
-    const vnc = spawn(process.execPath, ["-e", stopLogger("vnc")], {
-      stdio: "ignore",
-    });
-    const xvfb = spawn(process.execPath, ["-e", stopLogger("xvfb")], {
-      detached: true,
-      stdio: "ignore",
-    });
-    if (
-      browser.pid === undefined ||
-      vnc.pid === undefined ||
-      xvfb.pid === undefined
-    ) {
-      throw new Error("child process did not expose a pid");
-    }
+    // The browser and Xvfb fakes lead their own process groups, like the
+    // real ones, so cleanup kills those by group.
+    const fakes: Array<{ child: ChildProcess; group: boolean }> = [];
+    const startLogger = (label: string, group: boolean): ChildProcess => {
+      const child = spawn(process.execPath, ["-e", stopLogger(label)], {
+        detached: group,
+        stdio: "ignore",
+      });
+      fakes.push({ child, group });
+      return child;
+    };
     try {
+      // Spawn and check every fake inside the try, so a failed spawn still
+      // lets the finally kill the fakes that did start.
+      const browser = startLogger("browser", true);
+      const vnc = startLogger("vnc", false);
+      const xvfb = startLogger("xvfb", true);
+      if (
+        browser.pid === undefined ||
+        vnc.pid === undefined ||
+        xvfb.pid === undefined
+      ) {
+        throw new Error("child process did not expose a pid");
+      }
       await waitForReadyFiles(
         ["browser", "vnc", "xvfb"].map(readyFile),
         [browser, vnc, xvfb],
@@ -1084,13 +1089,10 @@ describe("session registry", () => {
         "xvfb",
       ]);
     } finally {
-      for (const child of [browser, vnc, xvfb]) {
+      for (const { child, group } of fakes) {
         if (child.pid !== undefined && isPidAlive(child.pid)) {
           try {
-            process.kill(
-              child === browser || child === xvfb ? -child.pid : child.pid,
-              "SIGKILL",
-            );
+            process.kill(group ? -child.pid : child.pid, "SIGKILL");
           } catch {
             // already gone
           }
@@ -1113,17 +1115,17 @@ describe("session registry", () => {
       ["-e", "setInterval(() => {}, 1000)"],
       { stdio: "ignore" },
     );
-    if (
-      browser.pid === undefined ||
-      vnc.pid === undefined ||
-      xvfb.pid === undefined
-    ) {
-      throw new Error("child process did not expose a pid");
-    }
     const profileDir = path.join(home, "reused-profile");
-    await fs.promises.mkdir(profileDir, { recursive: true });
-    await fs.promises.writeFile(path.join(profileDir, "Cookies"), "secret");
     try {
+      if (
+        browser.pid === undefined ||
+        vnc.pid === undefined ||
+        xvfb.pid === undefined
+      ) {
+        throw new Error("child process did not expose a pid");
+      }
+      await fs.promises.mkdir(profileDir, { recursive: true });
+      await fs.promises.writeFile(path.join(profileDir, "Cookies"), "secret");
       const identity = readProcessIdentity(browser.pid);
       if (identity === undefined) {
         throw new Error("could not read browser identity");
