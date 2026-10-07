@@ -30,7 +30,40 @@ interface CliResult {
   stderr: string;
 }
 
+// A test that exceeds its timeout keeps running after vitest moves on. Its
+// later CLI calls could create a session after afterEach destroyed the
+// sessions and deleted the registry, so that Xvfb outlived the run (#262).
+// afterEach closes the test's session envs to new CLI calls, waits for the
+// running ones, destroys every session, and keeps the registry on failure.
+const closedEnvs = new WeakSet<Record<string, string>>();
+const runningCli = new Set<{ env: Record<string, string>; done: Promise<unknown> }>();
+
 function runCli(
+  args: string[],
+  env: Record<string, string>,
+  cwd?: string,
+): Promise<CliResult> {
+  if (closedEnvs.has(env)) {
+    return Promise.reject(
+      new Error(`CLI call after its test finished: ${args.join(" ")}`),
+    );
+  }
+  const result = spawnCli(args, env, cwd);
+  const entry = { env, done: result.catch(() => {}) };
+  runningCli.add(entry);
+  void entry.done.then(() => runningCli.delete(entry));
+  return result;
+}
+
+async function waitForRunningCli(env: Record<string, string>): Promise<void> {
+  for (;;) {
+    const running = [...runningCli].filter((entry) => entry.env === env);
+    if (running.length === 0) return;
+    await Promise.all(running.map((entry) => entry.done));
+  }
+}
+
+function spawnCli(
   args: string[],
   env: Record<string, string>,
   cwd?: string,
@@ -277,9 +310,23 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  while (cleanupEnvs.length > 0) {
-    const env = cleanupEnvs.pop() as Record<string, string>;
-    await runCli(["session", "destroy", "--all"], env).catch(() => {});
+  const envs = cleanupEnvs.splice(0);
+  for (const env of envs) closedEnvs.add(env);
+  const failures: string[] = [];
+  for (const env of envs) {
+    await waitForRunningCli(env);
+    const destroyed = await spawnCli(["session", "destroy", "--all"], env).catch(
+      (error: unknown): CliResult => ({ code: null, stdout: "", stderr: String(error) }),
+    );
+    if (destroyed.code !== 0) {
+      failures.push(`${env.PICKFORGE_HOME}: ${destroyed.stdout}${destroyed.stderr}`.trim());
+    }
+  }
+  if (failures.length > 0) {
+    // Keep the registry so the surviving Xvfb and VNC processes stay findable.
+    throw new Error(
+      `Could not destroy test sessions; kept registry at ${tmpDir}:\n${failures.join("\n")}`,
+    );
   }
   fs.rmSync(tmpDir, { recursive: true, force: true });
 }, 60_000);
