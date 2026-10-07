@@ -31,7 +31,7 @@ export default defineConfig({
   },
   test: {
     pool: exitLoggingForksPool,
-    globalSetup: ["./test/host-display-guard.ts"],
+    globalSetup: ["./test/host-display-guard.ts", "./test/home-sessions-guard.ts"],
     include: ["packages/*/test/**/*.test.ts", "test/**/*.test.ts"],
     exclude: runLiveAndroid ? [] : ["packages/android/test/integration.test.ts"],
     coverage: {
