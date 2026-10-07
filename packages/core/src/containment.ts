@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { readPickforgeEnv } from "./env-compat.js";
-import { isPidAlive, parseProcStat, readProcessStartTicks, type ProcessIdentity } from "./proc.js";
+import { parseProcStat, readProcessStartTicks, type ProcessIdentity } from "./proc.js";
 
 /**
  * Containment for apps launched into a lab session.
@@ -884,6 +884,20 @@ function unfreezeCgroup(cgroupDir: string): string | undefined {
   }
 }
 
+/** Recheck the lifetime of an identity whose ownership was already proven. */
+function probeCgroupIdentity(identity: ProcessIdentity): TokenProbe {
+  let stat: ReturnType<typeof parseProcStat>;
+  try {
+    stat = parseProcStat(fs.readFileSync(`/proc/${identity.pid}/stat`, "utf8"));
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ESRCH" ? "gone" : "unverified";
+  }
+  if (stat === undefined) return "unverified";
+  if (stat.state === "Z") return "gone";
+  return stat.startTicks === identity.startTicks ? "match" : "mismatch";
+}
+
 function signalCgroupMembers(
   members: ProcessIdentity[],
   signaled: Set<number>,
@@ -894,12 +908,12 @@ function signalCgroupMembers(
     // Ownership proved for this identity remains valid if its token-bearing
     // parent was already killed. Only that same identity may be signalled.
     if (selfAndAncestorIdentities().has(identity.pid)) continue;
-    const current = readParentAndStart(identity.pid);
-    if (current === undefined) {
-      if (!isPidAlive(identity.pid)) continue;
+    const current = probeCgroupIdentity(identity);
+    if (current === "gone") continue;
+    if (current === "unverified") {
       return `could not re-read cgroup member identity for pid ${identity.pid}`;
     }
-    if (current.startTicks !== identity.startTicks) {
+    if (current === "mismatch") {
       return `refusing to signal recycled cgroup member pid ${identity.pid}`;
     }
     try {

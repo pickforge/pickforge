@@ -317,6 +317,40 @@ describe("cgroup cleanup guards (simulated cgroup)", () => {
     expect(isPidAlive(member)).toBe(false);
   }, 20_000);
 
+  it("skips a proven zombie and signals the remaining cgroup members", async () => {
+    const zombie = spawnMember(scope());
+    const remaining = spawnMember(scope());
+    const fake = newFake({ members: [zombie, remaining] });
+    installFakeCgroup(fake);
+    const read = vi.mocked(fs.readFileSync).getMockImplementation() as typeof fs.readFileSync;
+    let proofRead = false;
+    let exited = false;
+    vi.mocked(fs.readFileSync).mockImplementation(((file, ...args) => {
+      const content = read(file, ...args);
+      if (file === `/proc/${zombie}/stat` && exited) {
+        return String(content).replace(/\) \S+ /, ") Z ");
+      }
+      if (file === `/proc/${zombie}/environ` && fake.procsReads === 3) proofRead = true;
+      if (file === `/proc/${zombie}/stat` && proofRead) {
+        // Return the final live proof, then retain only its zombie in /proc.
+        exited = true;
+        fake.members = fake.members.filter((pid) => pid !== zombie);
+      }
+      return content;
+    }) as typeof fs.readFileSync);
+
+    const result = await destroy();
+
+    expect(exited).toBe(true);
+    expect(result.confirmed).toBe(true);
+    expect(result.reason).toBeUndefined();
+    expect(fake.removed).toBe(true);
+    expect(result.signaled).not.toContain(zombie);
+    expect(vi.mocked(process.kill).mock.calls).toContainEqual([remaining, "SIGKILL"]);
+    expect(isPidAlive(zombie)).toBe(true);
+    expect(isPidAlive(remaining)).toBe(false);
+  }, 20_000);
+
   it.each([true, false])(
     "does not kill a foreign member joining after proof (freeze supported: %s)",
     async (freezeSupported) => {
