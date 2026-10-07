@@ -720,6 +720,9 @@ describe("pickforge-lab desktop", () => {
         ELECTRON_OZONE_PLATFORM_HINT: "wayland",
         GLFW_PLATFORM: "wayland",
         SECRET_TOKEN: "do-not-print",
+        AT_SPI_BUS_ADDRESS: "unix:path=/run/user/1000/at-spi/bus_0",
+        GTK_A11Y: "atspi",
+        NO_AT_BRIDGE: "0",
       },
     });
     const id = writeDesktopSessionRecord(env, projectDir, ":98");
@@ -732,6 +735,7 @@ describe("pickforge-lab desktop", () => {
     expect(json.code).toBe(0);
     const report = parseJson(json);
     expect(report.unset).toEqual([
+      "AT_SPI_BUS_ADDRESS",
       "BUN_OPTIONS",
       "DBUS_SESSION_BUS_PID",
       "DBUS_SESSION_BUS_WINDOWID",
@@ -757,6 +761,9 @@ describe("pickforge-lab desktop", () => {
       XDG_CACHE_HOME: path.join(runtimeDir, "home", "cache"),
       XDG_STATE_HOME: path.join(runtimeDir, "home", "state"),
       XDG_RUNTIME_DIR: runtimeDir,
+      AT_SPI_BUS_ADDRESS: `unix:path=${path.join(runtimeDir, "at-spi-bus")}`,
+      GTK_A11Y: "none",
+      NO_AT_BRIDGE: "1",
       DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(runtimeDir, "bus")}`,
       DBUS_SYSTEM_BUS_ADDRESS: `unix:path=${path.join(
         runtimeDir,

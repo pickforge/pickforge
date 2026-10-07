@@ -52,6 +52,9 @@ const env: EnvLike = {
   XDG_CACHE_HOME: path.join(hostHome, "cache"),
   XDG_STATE_HOME: path.join(hostHome, "state"),
   XDG_RUNTIME_DIR: hostRuntime,
+  AT_SPI_BUS_ADDRESS: "unix:path=/run/user/1000/at-spi/bus_0",
+  GTK_A11Y: "atspi",
+  NO_AT_BRIDGE: "0",
   PICKFORGE_HOME: path.join(tmpRoot, "state"),
 };
 
@@ -134,7 +137,7 @@ describeWithXvfb("desktop session runtime isolation", () => {
     const dump = path.join(tmpRoot, "app-env.txt");
     const command = writeExecutable(
       "dump-env.sh",
-      `for name in HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS DBUS_SYSTEM_BUS_ADDRESS DISPLAY WAYLAND_DISPLAY PICKFORGE_CONTAINMENT_TOKEN; do printf '%s=' "$name"; printenv "$name"; done > "${dump}.part" && mv "${dump}.part" "${dump}"\nexec /bin/sleep 300`,
+      `for name in HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME XDG_RUNTIME_DIR AT_SPI_BUS_ADDRESS GTK_A11Y NO_AT_BRIDGE DBUS_SESSION_BUS_ADDRESS DBUS_SYSTEM_BUS_ADDRESS DISPLAY WAYLAND_DISPLAY PICKFORGE_CONTAINMENT_TOKEN; do printf '%s=' "$name"; printenv "$name"; done > "${dump}.part" && mv "${dump}.part" "${dump}"\nexec /bin/sleep 300`,
     );
 
     const isolation = await ensureDesktopSessionIsolation(handle.id, env);
@@ -165,6 +168,9 @@ describeWithXvfb("desktop session runtime isolation", () => {
     }
     expect(appEnv.get("WAYLAND_DISPLAY")).toBe("pickforge-no-wayland");
     expect(appEnv.get("XDG_RUNTIME_DIR")).toBe(handle.runtimeDir);
+    expect(appEnv.get("AT_SPI_BUS_ADDRESS")).toBe(`unix:path=${path.join(handle.runtimeDir, "at-spi-bus")}`);
+    expect(appEnv.get("GTK_A11Y")).toBe("none");
+    expect(appEnv.get("NO_AT_BRIDGE")).toBe("1");
     expect(appEnv.get("DBUS_SESSION_BUS_ADDRESS")).toBe(
       `unix:path=${path.join(handle.runtimeDir, "bus")}`,
     );

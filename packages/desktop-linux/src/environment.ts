@@ -19,6 +19,10 @@ const X11_BACKEND_HINTS = {
   SDL_VIDEODRIVER: "x11",
   WINIT_UNIX_BACKEND: "x11",
   XDG_SESSION_TYPE: "x11",
+  // AT-SPI can bypass the session bus through an env address or X11 property.
+  // Disable toolkit discovery even when no managed runtime was supplied.
+  NO_AT_BRIDGE: "1",
+  GTK_A11Y: "none",
 } as const;
 
 /**
@@ -29,6 +33,7 @@ const X11_BACKEND_HINTS = {
  * autolaunch fallbacks.
  */
 const DBUS_VARIABLES_TO_UNSET = [
+  "AT_SPI_BUS_ADDRESS",
   "DBUS_SESSION_BUS_PID",
   "DBUS_SESSION_BUS_WINDOWID",
   "DBUS_STARTER_ADDRESS",
@@ -72,6 +77,7 @@ function runtimeIsolationEntries(
     XDG_RUNTIME_DIR: runtime.runtimeDir,
     DBUS_SESSION_BUS_ADDRESS: `unix:path=${runtime.dbusSessionPath}`,
     DBUS_SYSTEM_BUS_ADDRESS: `unix:path=${runtime.dbusSystemPath}`,
+    AT_SPI_BUS_ADDRESS: `unix:path=${path.join(runtime.runtimeDir, "at-spi-bus")}`,
   };
 }
 
