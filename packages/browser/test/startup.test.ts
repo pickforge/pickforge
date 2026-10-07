@@ -9,7 +9,7 @@ import {
   type EnvLike,
 } from "@pickforge/lab-core";
 
-const PARTIAL_PID = 4_194_302;
+const PARTIAL_PID = 4_194_312;
 
 vi.mock("@pickforge/lab-desktop-linux", async (importOriginal) => {
   const actual =

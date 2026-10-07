@@ -10,7 +10,7 @@ import {
   type EnvLike,
 } from "@pickforge/lab-core";
 
-const PARTIAL_PID = 4_194_301;
+const PARTIAL_PID = 4_194_311;
 
 vi.mock("../src/display.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/display.js")>();
