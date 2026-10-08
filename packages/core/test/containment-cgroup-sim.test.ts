@@ -429,45 +429,156 @@ describe("cgroup cleanup guards (simulated cgroup)", () => {
     20_000,
   );
 
-  it.each([
-    { statState: "missing", environError: "ENOENT" },
-    { statState: "zombie", environError: "ESRCH" },
-  ])("skips a member gone during the exec-completion reread (stat: $statState)", async ({ statState, environError }) => {
-    const member = spawnMember(scope());
+  it.each(["ENOENT", "ESRCH"])(
+    "skips a departed member with a non-empty foreign environment and stat %s",
+    async (statError) => {
+      const member = spawnMember(undefined);
+      const fake = newFake({ members: [member] });
+      installFakeCgroup(fake);
+      const read = vi.mocked(fs.readFileSync).getMockImplementation() as typeof fs.readFileSync;
+      let readEnvironment = false;
+      vi.mocked(fs.readFileSync).mockImplementation(((file, ...args) => {
+        if (file === `/proc/${member}/environ`) {
+          readEnvironment = true;
+          return "PATH=/usr/bin\0";
+        }
+        if (file === `/proc/${member}/stat` && readEnvironment) {
+          fake.members = [];
+          throw Object.assign(new Error(statError), { code: statError });
+        }
+        return read(file, ...args);
+      }) as typeof fs.readFileSync);
+
+      const result = await destroy();
+
+      expect(readEnvironment).toBe(true);
+      expect(result.confirmed, result.reason).toBe(true);
+      expect(result.reason).toBeUndefined();
+      expect(result.signaled).toEqual([]);
+      expect(fake.removed).toBe(true);
+    },
+    20_000,
+  );
+
+  it("confirms a zombie's cgroup membership before a later stat reports it reaped", async () => {
+    const member = spawnMember(undefined);
     const stat = fs.readFileSync(`/proc/${member}/stat`, "utf8");
-    const kill = process.kill;
     const fake = newFake({ members: [member] });
     installFakeCgroup(fake);
     const read = vi.mocked(fs.readFileSync).getMockImplementation() as typeof fs.readFileSync;
-    let environReads = 0;
+    let readEnvironment = false;
+    let sawZombie = false;
+    let reaped = false;
+    let checkedMembership = false;
     vi.mocked(fs.readFileSync).mockImplementation(((file, ...args) => {
       if (file === `/proc/${member}/environ`) {
-        environReads += 1;
-        if (environReads === 1) {
-          kill(member, "SIGKILL");
-          return "";
-        }
-        fake.members = [];
-        throw Object.assign(new Error(environError), { code: environError });
+        readEnvironment = true;
+        return "";
       }
-      if (file === `/proc/${member}/stat` && environReads > 0) {
-        if (statState === "missing" || environReads > 1) {
-          throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      if (file === path.join(SCOPE_DIR, "cgroup.procs") && sawZombie && !reaped) {
+        checkedMembership = true;
+      }
+      if (file === `/proc/${member}/stat` && readEnvironment) {
+        if (!sawZombie) {
+          sawZombie = true;
+          return stat.replace(/\) \S+ /, ") Z ");
         }
-        return stat.replace(/\) \S+ /, ") Z ");
+        reaped = true;
+        fake.members = [];
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
       }
       return read(file, ...args);
     }) as typeof fs.readFileSync);
 
     const result = await destroy();
 
-    expect(environReads).toBeGreaterThanOrEqual(2);
+    expect(sawZombie).toBe(true);
+    expect(reaped).toBe(true);
+    expect(checkedMembership).toBe(true);
     expect(result.confirmed, result.reason).toBe(true);
     expect(result.signaled).toEqual([]);
-    expect(vi.mocked(process.kill).mock.calls.some(([pid, signal]) => pid === member && signal !== 0)).toBe(false);
-    expect(isPidAlive(member)).toBe(false);
     expect(fake.removed).toBe(true);
   }, 20_000);
+
+  it.each([
+    { statState: "Z", environError: null },
+    { statState: "ENOENT", environError: null },
+    { statState: "ESRCH", environError: null },
+    { statState: "EACCES", environError: null },
+    { statState: "Z", environError: "ESRCH" },
+  ])(
+    "refuses a still-listed member before freezing (stat: $statState, environ error: $environError)",
+    async ({ statState, environError }) => {
+      const member = spawnMember(undefined);
+      const stat = fs.readFileSync(`/proc/${member}/stat`, "utf8");
+      const fake = newFake({ members: [member] });
+      installFakeCgroup(fake);
+      const read = vi.mocked(fs.readFileSync).getMockImplementation() as typeof fs.readFileSync;
+      vi.mocked(fs.readFileSync).mockImplementation(((file, ...args) => {
+        if (file === `/proc/${member}/environ`) {
+          if (environError !== null) {
+            throw Object.assign(new Error(environError), { code: environError });
+          }
+          return "";
+        }
+        if (file === `/proc/${member}/stat`) {
+          if (statState === "Z") return stat.replace(/\) \S+ /, ") Z ");
+          throw Object.assign(new Error(statState), { code: statState });
+        }
+        return read(file, ...args);
+      }) as typeof fs.readFileSync);
+
+      const result = await destroy();
+
+      expect(result.confirmed).toBe(false);
+      expect(result.reason).toMatch(/could not verify/);
+      expect(result.signaled).toEqual([]);
+      expect(vi.mocked(process.kill).mock.calls.some(([pid, signal]) => pid === member && signal !== 0)).toBe(false);
+      expect(isPidAlive(member)).toBe(true);
+      expect(fake.members).toContain(member);
+      expect(fake.procsReads).toBeGreaterThan(3);
+      expect(fake.freezes).toEqual([]);
+      expect(fake.removed).toBe(false);
+    },
+    20_000,
+  );
+
+  it.each([0, 1, 2])(
+    "skips a zombie with an empty environment after %s environment reads",
+    async (zombieAfterReads) => {
+      const member = spawnMember(undefined);
+      const stat = fs.readFileSync(`/proc/${member}/stat`, "utf8");
+      const fake = newFake({ members: [member] });
+      installFakeCgroup(fake);
+      const read = vi.mocked(fs.readFileSync).getMockImplementation() as typeof fs.readFileSync;
+      let environReads = 0;
+      let sawZombie = false;
+      vi.mocked(fs.readFileSync).mockImplementation(((file, ...args) => {
+        if (file === `/proc/${member}/environ`) {
+          environReads += 1;
+          return "";
+        }
+        if (file === `/proc/${member}/stat`) {
+          if (environReads < zombieAfterReads) return stat;
+          sawZombie = true;
+          // Zombies no longer appear in the kernel's cgroup.procs list.
+          fake.members = [];
+          return stat.replace(/\) \S+ /, ") Z ");
+        }
+        return read(file, ...args);
+      }) as typeof fs.readFileSync);
+
+      const result = await destroy();
+
+      expect(sawZombie).toBe(true);
+      expect(environReads).toBeGreaterThanOrEqual(zombieAfterReads);
+      expect(result.confirmed, result.reason).toBe(true);
+      expect(result.signaled).toEqual([]);
+      expect(vi.mocked(process.kill).mock.calls.some(([pid, signal]) => pid === member && signal !== 0)).toBe(false);
+      expect(fake.removed).toBe(true);
+    },
+    20_000,
+  );
 
   it.each([
     { secondRead: "unreadable", membershipRead: 2 },
