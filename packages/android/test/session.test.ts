@@ -19,6 +19,7 @@ import {
   getAndroidSessionStatus,
   startEmulator,
 } from "../src/index.js";
+import { holdTestPortLock } from "./port-lock.js";
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-android-sess-"));
 const home = path.join(tmpRoot, "home");
@@ -39,6 +40,9 @@ const toolEnv: EnvLike = { PATH: "", ANDROID_AVD_HOME: avdHome };
  * uses. Every explicit port below is derived from this base.
  */
 const BASE = 5640;
+
+// The window is host-global; see port-lock.ts (#293).
+holdTestPortLock("session");
 
 afterAll(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
