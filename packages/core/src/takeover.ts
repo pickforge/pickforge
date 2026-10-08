@@ -447,8 +447,8 @@ async function createExclusiveHumanLeaseFile(
   now: Date,
 ): Promise<void> {
   const tmp = `.human-lease-${crypto.randomUUID()}`;
+  await dir.writeFileAtomic(tmp, `${JSON.stringify(lease)}\n`);
   try {
-    await dir.writeFileAtomic(tmp, `${JSON.stringify(lease)}\n`);
     await dir.linkChild(tmp, HUMAN_LEASE_FILE);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;

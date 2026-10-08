@@ -102,6 +102,17 @@ describe("acquireHumanLease", () => {
     expect(fs.readdirSync(path.join(env.PICKFORGE_HOME as string, "sessions", "desk-cleanup"))).toEqual(["permits"]);
   });
 
+  it("propagates staging EEXIST unchanged instead of reporting lease contention", async () => {
+    const failure = Object.assign(new Error("staging file already exists"), { code: "EEXIST" });
+    const write = DirHandle.prototype.writeFileAtomic;
+    vi.spyOn(DirHandle.prototype, "writeFileAtomic").mockImplementation(async function(this: DirHandle, name, content) {
+      if (name.startsWith(".human-lease-")) throw failure;
+      return write.call(this, name, content);
+    });
+    await expect(acquireHumanLease("desk-staging", env)).rejects.toBe(failure);
+    expect(await readHumanLease("desk-staging", env)).toBeUndefined();
+  });
+
   it("returns the published lease even when staging cleanup fails", async () => {
     const unlink = DirHandle.prototype.unlinkChild;
     vi.spyOn(DirHandle.prototype, "unlinkChild").mockImplementation(async function(this: DirHandle, name) {
