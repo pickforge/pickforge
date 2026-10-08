@@ -312,9 +312,11 @@ function spawnMember(target: ContainmentScope | undefined): number {
 }
 
 function destroy(): ReturnType<typeof destroyContainmentScope> {
+  // Each phase needs two full /proc scans even after cgroup signals. Use the
+  // product's default budgets so a loaded host can complete those scans.
   return destroyContainmentScope(scope(), {
-    termTimeoutMs: 500,
-    killTimeoutMs: 500,
+    termTimeoutMs: 3_000,
+    killTimeoutMs: 2_000,
   });
 }
 
@@ -468,7 +470,7 @@ describe("cgroup cleanup guards (simulated cgroup)", () => {
 
       const result = await destroy();
 
-      expect(result.confirmed).toBe(true);
+      expect(result.confirmed, result.reason).toBe(true);
       expect(result.reason).toBeUndefined();
       expect(fake.removed).toBe(true);
       expect(signaledAtRead()).toBeGreaterThanOrEqual(6);
