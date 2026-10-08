@@ -133,10 +133,13 @@ function statusRuntime(ctx: ServerContext): LocalSessionStatusRuntime {
   };
 }
 
-function destroyRuntime(ctx: ServerContext): LocalSessionDestroyRuntime {
+function destroyRuntime(
+  ctx: ServerContext,
+  signal: AbortSignal,
+): LocalSessionDestroyRuntime {
   return {
-    desktop: { destroy: (id) => destroyDesktopSession(id, ctx.env) },
-    browser: { destroy: (id) => destroyBrowserSession(id, ctx.env) },
+    desktop: { destroy: (id) => destroyDesktopSession(id, ctx.env, { signal }) },
+    browser: { destroy: (id) => destroyBrowserSession(id, ctx.env, { signal }) },
     android: {
       destroy: (id) => destroyAndroidSession(id, ctx.env, { env: ctx.env }),
     },
@@ -349,12 +352,12 @@ function registerSessionDestroyTool(
         all: z.boolean().optional().describe("Destroy all sessions"),
       },
     },
-    (args) =>
+    (args, extra) =>
       runTool(async () => {
         const records = await resolveDestroyTargets(ctx, args);
         const { destroyed, errors } = await destroyLocalSessions(
           records,
-          destroyRuntime(ctx),
+          destroyRuntime(ctx, extra.mcpReq.signal),
           {
             aroundDestroy: (record, destroy) =>
               withMcpEvidence(

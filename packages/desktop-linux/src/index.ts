@@ -162,6 +162,7 @@ export {
   type DesktopSessionStatus,
   type EnsureSessionVncOptions,
   type EnsuredSessionVnc,
+  type SessionVncLockOptions,
   type StartSessionVncOptions,
 } from "./session.js";
 
