@@ -3,7 +3,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { runCommand, type EnvLike } from "@pickforge/lab-core";
 import {
   AVD_SHARING_POLICY,
@@ -18,45 +18,15 @@ import {
   waitForBoot,
   type EmulatorHandle,
 } from "../src/index.js";
+import { holdTestPortLock } from "./port-lock.js";
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-android-emu-"));
 
-// The console ports below are fixed and host-global. The reservation registry
-// lives in this run's own temp home, so it cannot see another run, and its TCP
-// probe briefly binds every port it checks. Two concurrent runs of this file
-// therefore take each other's ports (#280). One abstract Unix socket, shared by
-// every process on the host, makes a second run wait until the first is done.
-// The kernel frees it when its owner exits, so a crashed run leaves nothing.
-const PORT_LOCK = "\0pickforge-test-android-emulator-ports";
-const PORT_LOCK_WAIT_MS = 120_000;
-let portLock: net.Server | undefined;
+// The console ports below are fixed and host-global; see port-lock.ts (#280).
+holdTestPortLock("emulator");
 
-function tryLockPorts(): Promise<net.Server | undefined> {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer((socket) => socket.destroy());
-    server.once("error", (error: NodeJS.ErrnoException) => {
-      // Only a held lock means "wait"; any other failure is a real error.
-      if (error.code === "EADDRINUSE") resolve(undefined);
-      else reject(new Error(`cannot take the emulator test port lock: ${error.code ?? error.message}`));
-    });
-    server.listen({ path: PORT_LOCK }, () => resolve(server));
-  });
-}
-
-beforeAll(async () => {
-  const deadline = Date.now() + PORT_LOCK_WAIT_MS;
-  while ((portLock = await tryLockPorts()) === undefined) {
-    if (Date.now() > deadline) {
-      throw new Error("another run held the emulator test ports for too long");
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-}, PORT_LOCK_WAIT_MS + 5_000);
-
-afterAll(async () => {
+afterAll(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
-  const lock = portLock;
-  if (lock !== undefined) await new Promise((resolve) => lock.close(resolve));
 });
 
 function writeExecutable(filePath: string, content: string): void {
