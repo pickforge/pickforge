@@ -322,21 +322,59 @@ function run(args: string[]): Promise<ProcResult> {
   });
 }
 
+interface ClaimOutcome {
+  won: boolean;
+  error?: string;
+  staleRaw?: string;
+  claimStart: number;
+  claimEnd: number;
+  releaseAt?: number;
+}
+
+async function waitForFiles(dir: string, names: string[], timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!names.every((name) => fs.existsSync(path.join(dir, name)))) {
+    if (Date.now() > deadline) throw new Error(`workers never became ready: ${names.join(", ")}`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 describe("real separate-process concurrency", () => {
   it(
     "two concurrent claims yield exactly one winner",
     async () => {
+      // Both workers start claiming only after both are ready, and the winner
+      // holds the lease until both have attempted, so spawn skew cannot turn
+      // the race into two sequential claims (#278).
       const home = path.join(tmpRoot, "race-home");
-      const results = await Promise.all([
-        run([acquireWorker, home, "desk-race", "150"]),
-        run([acquireWorker, home, "desk-race", "150"]),
-      ]);
-      const outcomes = results.map((r) => JSON.parse(r.stdout.trim()) as { won: boolean });
+      const barrier = path.join(tmpRoot, "race-barrier");
+      fs.mkdirSync(barrier);
+      const names = ["a", "b"];
+      const running = names.map((name) =>
+        run([acquireWorker, home, "desk-race", barrier, name, String(names.length)]),
+      );
+      await waitForFiles(barrier, names.map((name) => `ready-${name}`), 8_000);
+      fs.writeFileSync(path.join(barrier, "go"), "");
+      const results = await Promise.all(running);
+      expect(results.map((r) => r.code)).toEqual([0, 0]);
+      const outcomes = results.map((r) => JSON.parse(r.stdout.trim()) as ClaimOutcome);
       const winners = outcomes.filter((o) => o.won === true);
       const losers = outcomes.filter((o) => o.won === false);
       expect(winners).toHaveLength(1);
       expect(losers).toHaveLength(1);
+      const [winner] = winners as [ClaimOutcome];
+      const [loser] = losers as [ClaimOutcome];
+      // A StaleHumanLeaseError here may be the partly written lease window
+      // in #298; the raw lease content it saw is in the message.
+      expect(
+        loser.error,
+        `loser error ${loser.error}; stale lease raw: ${JSON.stringify(loser.staleRaw)}`,
+      ).toBe("HumanLeaseHeldError");
+      // The claims really contended: the loser's whole attempt fell inside the
+      // window in which the winner held the lease.
+      expect(winner.releaseAt).toBeDefined();
+      expect(loser.claimEnd).toBeLessThanOrEqual(winner.releaseAt as number);
     },
-    10_000,
+    20_000,
   );
 });

@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import {
   CONTAINMENT_TOKEN_ENV,
   buildContainedCommand,
@@ -239,6 +239,59 @@ function cgroupMembers(scope: ContainmentScope): number[] {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw error;
+  }
+}
+
+/**
+ * Remove private test cgroups, innermost first. Kill whatever is still inside,
+ * wait for the cgroup to empty, then retry rmdir for a bounded time. A cgroup
+ * that still cannot be removed fails the test instead of leaking silently.
+ */
+function killCgroup(dir: string): string | undefined {
+  try {
+    fs.writeFileSync(path.join(dir, "cgroup.kill"), "1");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      return `${dir}: cgroup.kill failed: ${(error as Error).message}`;
+    }
+  }
+  return undefined;
+}
+
+async function rmdirWithRetry(dir: string): Promise<string | undefined> {
+  let lastError: unknown;
+  const removed = await waitFor(() => {
+    try {
+      fs.rmdirSync(dir);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+      lastError = error;
+      return false;
+    }
+  }, 10_000);
+  if (removed) return undefined;
+  return `${dir}: ${(lastError as Error | undefined)?.message ?? "not removed"}`;
+}
+
+async function removePrivateCgroups(dirs: string[]): Promise<void> {
+  const own = ownCgroup === undefined
+    ? undefined
+    : path.resolve(path.join("/sys/fs/cgroup", ownCgroup));
+  const failures: string[] = [];
+  for (const dir of dirs) {
+    if (!fs.existsSync(dir)) continue;
+    if (own !== undefined && (own === dir || own.startsWith(`${dir}/`))) {
+      failures.push(`${dir}: this test process runs inside it`);
+      continue;
+    }
+    const killFailure = killCgroup(dir);
+    if (killFailure !== undefined) failures.push(killFailure);
+    const rmdirFailure = await rmdirWithRetry(dir);
+    if (rmdirFailure !== undefined) failures.push(rmdirFailure);
+  }
+  if (failures.length > 0) {
+    throw new Error(`could not remove private test cgroups:\n${failures.join("\n")}`);
   }
 }
 
@@ -569,8 +622,25 @@ describe("containment refuses to signal anything it does not own", () => {
   itWithCgroup(
     "refuses cleanup rather than migrating an ancestor whose pid may have been recycled",
     async () => {
-      const scope = createContainmentScope({ id: runScopeId("desk-inside02") });
-      expect(scope.mechanism).toBe("cgroup");
+      // Use a private parent cgroup. The refused cleanup still kills the
+      // victim through the marker sweep, and the worker and its supervisor
+      // then exit, so the scope is empty when it is checked. A
+      // createContainmentScope in another worker or run prunes empty scopes
+      // in the shared delegated cgroup and could remove it first (#279).
+      const parent = fs.mkdtempSync(path.join(delegatedDir as string, "desk-ancestor-"));
+      const id = runScopeId("desk-inside02");
+      const cgroupDir = path.join(parent, `pickforge-${id}`);
+      // A failure midway can leave the victim or the worker in these cgroups,
+      // and afterEach does not wait for its kills, so remove them for sure.
+      // Two directories may each retry rmdir for 10 s, beyond the default hook timeout.
+      onTestFinished(() => removePrivateCgroups([cgroupDir, parent]), 25_000);
+      fs.mkdirSync(cgroupDir);
+      const scope: ContainmentScope = {
+        ...createContainmentScope({ id, useCgroup: false }),
+        mechanism: "cgroup",
+        cgroupDir,
+      };
+      expect(scopeCgroupProblem(cgroupDir, id)).toBeUndefined();
       const victim = spawnInScope(scope, "/bin/sleep", ["300"]);
       expect(await waitFor(() => cgroupMembers(scope).includes(victim))).toBe(true);
 
@@ -602,9 +672,9 @@ describe("containment refuses to signal anything it does not own", () => {
       expect(written.result.signaled).not.toContain(written.pid);
       expect(written.result.signaled).not.toContain(written.ppid);
       // Refused, not written through: the scope cgroup is still there.
-      expect(fs.existsSync(scope.cgroupDir as string)).toBe(true);
+      expect(fs.existsSync(cgroupDir)).toBe(true);
 
-      await destroyContainmentScope(scope);
+      expect((await destroyContainmentScope(scope)).confirmed).toBe(true);
     },
     30_000,
   );
