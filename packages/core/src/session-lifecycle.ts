@@ -384,10 +384,11 @@ export async function reapDeadRunningSessions(
 ): Promise<SessionRecord[]> {
   const reaped: SessionRecord[] = [];
   for (const record of await listSessions(env)) {
-    const retryPending = await isSessionInputClosed(record.id, env) || (
-      record.status === "error" &&
-      record.meta?.[REAPER_CLEANUP_PENDING_META_KEY] === true
-    );
+    // An interrupted teardown leaves the marker on a running or starting
+    // record. A completed rollback is an error record kept for inspection.
+    const retryPending = record.status === "error"
+      ? record.meta?.[REAPER_CLEANUP_PENDING_META_KEY] === true
+      : await isSessionInputClosed(record.id, env);
     if (record.status !== "running" && !retryPending) continue;
     if (!canTeardownLocalSession(record, runtime)) continue;
     if (!retryPending && (await isAlive(record))) continue;

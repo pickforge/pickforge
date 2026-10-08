@@ -32,6 +32,7 @@ import {
   isSessionProcessAlive,
   listSessions,
   sessionDataDir,
+  sessionInputClosedName,
   updateSession,
   type SessionLivenessCheck,
 } from "../src/session.js";
@@ -1357,4 +1358,13 @@ it("preserves late startup ownership across closure and stops its real Xvfb", as
     scan.mockRestore();
     if (isPidAlive(xvfb.pid)) await stopPid(xvfb.pid);
   }
+});
+
+it("keeps a completed rollback's error record for inspection", async () => {
+  const record = await createSession({ type: "desktop", projectDir: "/proj", status: "starting" }, env);
+  const failed = await updateSession(record.id, { status: "error", meta: { startFailure: "x11vnc missing" } }, env);
+  // Rollback closed input and finished cleanup, so no retry flag remains.
+  fs.writeFileSync(path.join(path.dirname(sessionDataDir(record.id, env)), sessionInputClosedName(record.id)), "");
+  expect(await reapDeadRunningSessions(env)).toEqual([]);
+  expect(await getSession(record.id, env)).toEqual(failed);
 });

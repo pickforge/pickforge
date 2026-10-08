@@ -142,12 +142,12 @@ it("browser destroy forwards its full budget and cancellation, preserving resour
   await core.releaseAgentPermit(permit);
 });
 
-it.each(["running", "error"] as const)("clean browser destroy retains logs without a failure object, status=%s", async (status) => {
+it.each(["running", "error"] as const)("browser destroy records a failure only for an error record, status=%s", async (status) => {
   const record = await running();
   if (status === "error") await core.updateSession(record.id, { status, meta: { reaperCleanupPending: true } }, env);
   await core.updateSession(record.id, { browser: { ...record.browser!, profileDir: path.join(core.sessionDataDir(record.id, env), "profile") } }, env);
   await destroyBrowserSession(record.id, env);
-  expect(JSON.parse(fs.readFileSync(path.join(core.sessionDataDir(record.id, env), "stopped.json"), "utf8"))).toEqual({
-    id: record.id, stoppedAt: expect.any(String),
-  });
+  const marker = JSON.parse(fs.readFileSync(path.join(core.sessionDataDir(record.id, env), "stopped.json"), "utf8"));
+  if (status === "running") expect(marker).toEqual({ id: record.id, stoppedAt: expect.any(String) });
+  else expect(marker.failure).toMatchObject({ id: record.id, status: "error" });
 });

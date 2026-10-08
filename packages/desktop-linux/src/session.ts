@@ -1107,7 +1107,7 @@ export async function teardownDesktopSession(
         );
       }
       try {
-        await retainSessionLogs({ ...record, status: "stopped" }, registryEnv);
+        await retainSessionLogs(record, registryEnv);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         throw new Error(`Failed to retain logs of session ${record.id}: ${message}`, { cause: error });
