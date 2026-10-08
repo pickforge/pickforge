@@ -59,6 +59,14 @@ afterEach(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
+function hasMissingPid(...pids: (number | undefined)[]): boolean {
+  return pids.includes(undefined);
+}
+
+function isPositivePid(pid: number | undefined): pid is number {
+  return pid !== undefined && pid > 0;
+}
+
 function reapBrowserSessions() {
   return reapDeadRunningSessions(registryEnv, {
     browser: {
@@ -890,9 +898,7 @@ describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
     let childPid: number | undefined;
     let xvfbPid: number | undefined;
     while (
-      (leaderPid === undefined ||
-        childPid === undefined ||
-        xvfbPid === undefined) &&
+      hasMissingPid(leaderPid, childPid, xvfbPid) &&
       Date.now() < handoffDeadline
     ) {
       const current = await getSession(id, registryEnv);
@@ -902,21 +908,14 @@ describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
         leaderPid === undefined
           ? undefined
           : listProcessGroupMembers(leaderPid).find((pid) => pid !== leaderPid);
-      if (
-        leaderPid === undefined ||
-        childPid === undefined ||
-        xvfbPid === undefined
-      ) {
+      if (hasMissingPid(leaderPid, childPid, xvfbPid)) {
         await scheduler.yield();
       }
     }
     if (
-      leaderPid === undefined ||
-      leaderPid <= 0 ||
-      childPid === undefined ||
-      childPid <= 0 ||
-      xvfbPid === undefined ||
-      xvfbPid <= 0
+      !isPositivePid(leaderPid) ||
+      !isPositivePid(childPid) ||
+      !isPositivePid(xvfbPid)
     ) {
       throw new Error(
         "Browser ownership handoff did not persist a real leader and child PID",
