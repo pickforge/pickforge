@@ -25,6 +25,7 @@ import {
   type ConnectedLab,
   type LabDirs,
 } from "../../packages/mcp-server/test/helpers.js";
+import { holdTestPortLock } from "../../packages/android/test/port-lock.js";
 import {
   listPackageSourceFiles,
   packagesDir,
@@ -100,6 +101,10 @@ describe("static: mcp-server source", () => {
 });
 
 describe("behavioral: MCP server with poisoned PATH", () => {
+  // session_create type android probes from the 5556 floor, like the CLI
+  // lifecycle tests, so share their host-wide lock (#306).
+  holdTestPortLock("auto-floor");
+
   let dirs: LabDirs;
   let lab: ConnectedLab;
   let sudoRecord: string;

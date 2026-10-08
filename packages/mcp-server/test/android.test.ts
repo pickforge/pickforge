@@ -24,6 +24,7 @@ import {
   type ConnectedLab,
   type LabDirs,
 } from "./helpers.js";
+import { holdTestPortLock } from "../../android/test/port-lock.js";
 
 let dirs: LabDirs;
 let lab: ConnectedLab;
@@ -455,6 +456,10 @@ describe("android tools (fake adb)", () => {
 });
 
 describe("android_start (fake sdk)", () => {
+  // android_start without a port probes from the 5556 floor, like the CLI
+  // lifecycle tests, so share their host-wide lock (#308).
+  holdTestPortLock("auto-floor");
+
   it("starts and destroys an emulator session", async () => {
     const startDirs = makeLabDirs();
     const { sdk, pidFile, avdHome } = makeFakeAndroidSdk(startDirs.root);

@@ -620,33 +620,38 @@ describe("pickforge-lab session (desktop)", () => {
     60_000,
   );
 
-  it(
-    "cleans up the desktop leg when the android leg of desktop+android fails",
-    async () => {
-      const { sdk } = makeFakeAndroidSdk({
-        emulatorExits: true,
-        bootCompleted: "0",
-      });
-      const env = makeEnv({ realPath: true, extra: { ANDROID_HOME: sdk } });
+  describe("desktop+android with a fake sdk", () => {
+    // The android leg probes from the 5556 floor like `android start`.
+    holdTestPortLock("auto-floor");
 
-      const result = await runCli(
-        ["session", "create", "--type", "desktop+android", "--json"],
-        env,
-        tmpDir,
-      );
-      expect(result.code).toBe(1);
-      const report = parseJson(result);
-      expect(report.ok).toBe(false);
-      expect(report.errors.length).toBeGreaterThan(0);
+    it(
+      "cleans up the desktop leg when the android leg of desktop+android fails",
+      async () => {
+        const { sdk } = makeFakeAndroidSdk({
+          emulatorExits: true,
+          bootCompleted: "0",
+        });
+        const env = makeEnv({ realPath: true, extra: { ANDROID_HOME: sdk } });
 
-      const status = parseJson(await runCli(["session", "status", "--json"], env));
-      const desktops = status.sessions.filter(
-        (entry: any) => entry.type === "desktop",
-      );
-      expect(desktops).toEqual([]);
-    },
-    60_000,
-  );
+        const result = await runCli(
+          ["session", "create", "--type", "desktop+android", "--json"],
+          env,
+          tmpDir,
+        );
+        expect(result.code).toBe(1);
+        const report = parseJson(result);
+        expect(report.ok).toBe(false);
+        expect(report.errors.length).toBeGreaterThan(0);
+
+        const status = parseJson(await runCli(["session", "status", "--json"], env));
+        const desktops = status.sessions.filter(
+          (entry: any) => entry.type === "desktop",
+        );
+        expect(desktops).toEqual([]);
+      },
+      60_000,
+    );
+  });
   it(
     "watches in a browser viewer and leaves VNC alive after the browser exits",
     async () => {
