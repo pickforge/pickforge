@@ -725,10 +725,19 @@ describe("pickforge-lab session (desktop)", () => {
     "applies auto/manual viewer mode with one-shot overrides",
     async () => {
       const opens = path.join(tmpDir, "viewer-opens");
+      // The fake browser stays open until the test releases it, and records
+      // when it exits. The 30 s bound only ends it if the CLI waits for it.
+      const release = path.join(tmpDir, "viewer-release");
+      const exited = path.join(tmpDir, "viewer-exited");
       const env = makeEnv({
         realPath: true,
         bins: {
-          chromium: `printf '%s\\n' "$1" >> "${opens}"; sleep 10`,
+          chromium: [
+            `printf '%s\\n' "$1" >> "${opens}"`,
+            "i=0",
+            `while [ ! -e "${release}" ] && [ "$i" -lt 600 ]; do sleep 0.05; i=$((i+1)); done`,
+            `printf '%s\\n' "$1" >> "${exited}"`,
+          ].join("\n"),
         },
         extra: { DISPLAY: ":0" },
       });
@@ -737,7 +746,6 @@ describe("pickforge-lab session (desktop)", () => {
       fs.mkdirSync(path.dirname(configPath), { recursive: true });
       fs.writeFileSync(configPath, JSON.stringify({ viewer: { mode: "auto" } }));
 
-      const automaticStartedAt = Date.now();
       const automatic = parseJson(
         await runCli(
           ["session", "create", "--type", "desktop", "--json"],
@@ -746,10 +754,12 @@ describe("pickforge-lab session (desktop)", () => {
         ),
       );
       expect(automatic.viewer.opened).toBe(true);
-      // Returned without waiting for the 10 s browser.
-      expect(Date.now() - automaticStartedAt).toBeLessThan(8_000);
+      // The CLI returned while the browser was still open.
+      expect(fs.existsSync(exited)).toBe(false);
       await waitFor(() => fs.existsSync(opens));
       expect(fs.readFileSync(opens, "utf8").trim().split("\n")).toHaveLength(1);
+      fs.writeFileSync(release, "");
+      await waitFor(() => fs.existsSync(exited), 20_000);
 
       const disabled = parseJson(
         await runCli(
