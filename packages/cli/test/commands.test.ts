@@ -44,8 +44,13 @@ interface CliResult {
 // every process that still carries it (#288).
 const CLI_DRAIN_MS = 20_000;
 const CLI_KILL_WAIT_MS = 2_000;
-// Above the 5 s `adb emu kill` plus the 30 s exit grace of an Android destroy.
-const CLI_DESTROY_MS = 45_000;
+// Sessions are destroyed one after another. Each Xvfb or VNC group can wait
+// 5 s after TERM and 1 s after KILL, the containment scope 3 s and 2 s, and
+// each viewer process 1 s and 1 s. The processes in these tests exit on TERM,
+// so destroys finish in a few seconds. The fake adb stops the fake emulator at
+// once, so an Android destroy never waits its 30 s exit grace here. A destroy
+// that needs it fails cleanup.
+const CLI_DESTROY_MS = 20_000;
 const HOME_SWEEP_MS = 2_000;
 const closedHomes = new Set<string>();
 
@@ -350,7 +355,8 @@ function makeFakeAndroidSdk(
       'case "$*" in',
       `  *getprop*) echo ${opts.bootCompleted ?? "1"} ;;`,
       '  devices) printf "List of devices attached\\n" ;;',
-      `  *"emu kill"*) [ -f "${pidFile}" ] && kill "$(cat "${pidFile}")" 2>/dev/null ;;`,
+      // Shell builtins only: PATH may hold just the fake bin directory.
+      `  *"emu kill"*) [ -f "${pidFile}" ] && read -r pid < "${pidFile}" && kill "$pid" 2>/dev/null ;;`,
       "esac",
       "exit 0",
     ].join("\n"),
@@ -466,7 +472,7 @@ afterEach(async () => {
     );
   }
   fs.rmSync(dir, { recursive: true, force: true });
-}, 90_000);
+}, 60_000);
 
 describe("pickforge-lab session (desktop)", () => {
   it("describes immutable inherited-home consent without disabling takeover", async () => {
@@ -722,10 +728,19 @@ describe("pickforge-lab session (desktop)", () => {
     "applies auto/manual viewer mode with one-shot overrides",
     async () => {
       const opens = path.join(tmpDir, "viewer-opens");
+      // The fake browser stays open until the test releases it, and records
+      // when it exits. The 30 s bound only ends it if the CLI waits for it.
+      const release = path.join(tmpDir, "viewer-release");
+      const exited = path.join(tmpDir, "viewer-exited");
       const env = makeEnv({
         realPath: true,
         bins: {
-          chromium: `printf '%s\\n' "$1" >> "${opens}"; sleep 10`,
+          chromium: [
+            `printf '%s\\n' "$1" >> "${opens}"`,
+            "i=0",
+            `while [ ! -e "${release}" ] && [ "$i" -lt 600 ]; do sleep 0.05; i=$((i+1)); done`,
+            `printf '%s\\n' "$1" >> "${exited}"`,
+          ].join("\n"),
         },
         extra: { DISPLAY: ":0" },
       });
@@ -734,7 +749,6 @@ describe("pickforge-lab session (desktop)", () => {
       fs.mkdirSync(path.dirname(configPath), { recursive: true });
       fs.writeFileSync(configPath, JSON.stringify({ viewer: { mode: "auto" } }));
 
-      const automaticStartedAt = Date.now();
       const automatic = parseJson(
         await runCli(
           ["session", "create", "--type", "desktop", "--json"],
@@ -743,10 +757,12 @@ describe("pickforge-lab session (desktop)", () => {
         ),
       );
       expect(automatic.viewer.opened).toBe(true);
-      // Returned without waiting for the 10 s browser.
-      expect(Date.now() - automaticStartedAt).toBeLessThan(8_000);
+      // The CLI returned while the browser was still open.
+      expect(fs.existsSync(exited)).toBe(false);
       await waitFor(() => fs.existsSync(opens));
       expect(fs.readFileSync(opens, "utf8").trim().split("\n")).toHaveLength(1);
+      fs.writeFileSync(release, "");
+      await waitFor(() => fs.existsSync(exited), 20_000);
 
       const disabled = parseJson(
         await runCli(
