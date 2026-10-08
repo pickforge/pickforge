@@ -44,9 +44,12 @@ interface CliResult {
 // every process that still carries it (#288).
 const CLI_DRAIN_MS = 20_000;
 const CLI_KILL_WAIT_MS = 2_000;
-// A desktop destroy waits up to 3 s for TERM and 2 s for KILL per process
-// group. The fake adb stops the fake emulator at once, so an Android destroy
-// never waits its 30 s exit grace here. A destroy that needs it fails cleanup.
+// Sessions are destroyed one after another. Each Xvfb or VNC group can wait
+// 5 s after TERM and 1 s after KILL, the containment scope 3 s and 2 s, and
+// each viewer process 1 s and 1 s. The processes in these tests exit on TERM,
+// so destroys finish in a few seconds. The fake adb stops the fake emulator at
+// once, so an Android destroy never waits its 30 s exit grace here. A destroy
+// that needs it fails cleanup.
 const CLI_DESTROY_MS = 20_000;
 const HOME_SWEEP_MS = 2_000;
 const closedHomes = new Set<string>();
