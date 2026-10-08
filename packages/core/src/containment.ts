@@ -671,7 +671,10 @@ function classifyCgroupEntries(
   midExec: Set<number>,
 ): MemberVerdict {
   if (entries.includes(`${TOKEN_ENV}=${token}`)) return "ours";
-  if (readMidExecIdentity(pid, entries) === undefined) return "foreign";
+  if (readMidExecIdentity(pid, entries) === undefined) {
+    // Check after each environ and mid-exec read before declaring it foreign.
+    return readProcStatFields(pid)?.[0] === "Z" ? "gone" : "foreign";
+  }
   midExec.add(pid);
   return "unknown";
 }

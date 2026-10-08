@@ -461,13 +461,50 @@ describe("cgroup cleanup guards (simulated cgroup)", () => {
 
     const result = await destroy();
 
-    expect(environReads).toBeGreaterThanOrEqual(2);
+    expect(environReads).toBeGreaterThanOrEqual(statState === "zombie" ? 1 : 2);
     expect(result.confirmed, result.reason).toBe(true);
     expect(result.signaled).toEqual([]);
     expect(vi.mocked(process.kill).mock.calls.some(([pid, signal]) => pid === member && signal !== 0)).toBe(false);
     expect(isPidAlive(member)).toBe(false);
     expect(fake.removed).toBe(true);
   }, 20_000);
+
+  it.each([0, 1, 2])(
+    "skips a zombie with an empty environment after %s environment reads",
+    async (zombieAfterReads) => {
+      const member = spawnMember(undefined);
+      const stat = fs.readFileSync(`/proc/${member}/stat`, "utf8");
+      const fake = newFake({ members: [member] });
+      installFakeCgroup(fake);
+      const read = vi.mocked(fs.readFileSync).getMockImplementation() as typeof fs.readFileSync;
+      let environReads = 0;
+      let sawZombie = false;
+      vi.mocked(fs.readFileSync).mockImplementation(((file, ...args) => {
+        if (file === `/proc/${member}/environ`) {
+          environReads += 1;
+          return "";
+        }
+        if (file === `/proc/${member}/stat`) {
+          if (environReads < zombieAfterReads) return stat;
+          sawZombie = true;
+          // Zombies no longer appear in the kernel's cgroup.procs list.
+          fake.members = [];
+          return stat.replace(/\) \S+ /, ") Z ");
+        }
+        return read(file, ...args);
+      }) as typeof fs.readFileSync);
+
+      const result = await destroy();
+
+      expect(sawZombie).toBe(true);
+      expect(environReads).toBeGreaterThanOrEqual(zombieAfterReads);
+      expect(result.confirmed, result.reason).toBe(true);
+      expect(result.signaled).toEqual([]);
+      expect(vi.mocked(process.kill).mock.calls.some(([pid, signal]) => pid === member && signal !== 0)).toBe(false);
+      expect(fake.removed).toBe(true);
+    },
+    20_000,
+  );
 
   it.each([
     { secondRead: "unreadable", membershipRead: 2 },
