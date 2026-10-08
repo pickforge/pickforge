@@ -246,12 +246,40 @@ function scope(): ContainmentScope {
   };
 }
 
+const SPAWN_PATH = "/usr/bin:/bin";
+// Captured before a test replaces it with the simulated cgroup.
+const realReadFileSync = fs.readFileSync;
+
+/**
+ * Block until `pid` runs its new image with the environment spawn gave it.
+ * spawn can return while execve is still in progress, and until the kernel
+ * sets env_end, `/proc/<pid>/environ` reads as empty. On a loaded host that
+ * window can reach destroy's first membership proof. Cleanup then retries the
+ * member, which shifts the proc reads these tests count on, or refuses it
+ * (#292). The tests here start from members that have finished exec.
+ */
+function waitForExec(pid: number): void {
+  const deadline = Date.now() + 10_000;
+  const cell = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    let environ = "";
+    try {
+      environ = realReadFileSync.call(fs, `/proc/${pid}/environ`, "latin1") as string;
+    } catch {
+      // Not readable yet; keep waiting until the deadline.
+    }
+    if (environ.split("\0").includes(`PATH=${SPAWN_PATH}`)) return;
+    if (Date.now() >= deadline) throw new Error(`pid ${pid} did not finish exec in time`);
+    Atomics.wait(cell, 0, 0, 5);
+  }
+}
+
 /** A real token carrier that forks a child of its own. */
 function spawnShellWithChild(): number {
   // `; true` keeps the shell from exec'ing the sleep in place, so
   // there really are two processes.
   const child = spawn("/bin/sh", ["-c", "/bin/sleep 300; true"], {
-    env: { PATH: "/usr/bin:/bin", ...containmentEnv(scope()) },
+    env: { PATH: SPAWN_PATH, ...containmentEnv(scope()) },
     detached: true,
     stdio: "ignore",
   });
@@ -259,6 +287,7 @@ function spawnShellWithChild(): number {
   const pid = child.pid;
   if (pid === undefined) throw new Error("spawn produced no pid");
   strays.add(pid);
+  waitForExec(pid);
   return pid;
 }
 
@@ -267,8 +296,8 @@ function spawnMember(target: ContainmentScope | undefined): number {
   const child = spawn("/bin/sleep", ["300"], {
     env:
       target === undefined
-        ? { PATH: "/usr/bin:/bin" }
-        : { PATH: "/usr/bin:/bin", ...containmentEnv(target) },
+        ? { PATH: SPAWN_PATH }
+        : { PATH: SPAWN_PATH, ...containmentEnv(target) },
     detached: true,
     stdio: "ignore",
   });
@@ -276,6 +305,7 @@ function spawnMember(target: ContainmentScope | undefined): number {
   const pid = child.pid;
   if (pid === undefined) throw new Error("spawn produced no pid");
   strays.add(pid);
+  waitForExec(pid);
   return pid;
 }
 
