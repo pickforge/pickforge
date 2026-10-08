@@ -257,6 +257,10 @@ const realReadFileSync = fs.readFileSync;
  * window can reach destroy's first membership proof. Cleanup then retries the
  * member, which shifts the proc reads these tests count on, or refuses it
  * (#292). The tests here start from members that have finished exec.
+ * This deliberately excludes one real product transition. If exec finishes
+ * between the environ read and the stat read, the product classifies an
+ * owned member as foreign and refuses it. Issue #299 tracks that defect and
+ * its regression test.
  */
 function waitForExec(pid: number): void {
   const deadline = Date.now() + 10_000;

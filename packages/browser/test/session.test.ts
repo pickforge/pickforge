@@ -886,7 +886,9 @@ describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
       projectDir,
       registryEnv,
       env: spawnEnvFor("stubborn-stall"),
-      cdpTimeoutMs: 5000,
+      // The test ends startup itself by killing the leader. A short CDP
+      // timeout could fire first on a starved host and kill the group.
+      cdpTimeoutMs: TEST_TIMEOUT_MS,
     });
 
     const recordFile = await recordReady;
