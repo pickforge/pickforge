@@ -32,6 +32,7 @@ import {
   stopOwnedSessionVnc,
   stopSessionViewer,
   withSessionVncLock,
+  type SessionVncLockOptions,
   type XvfbHandle,
   type XvfbPartialStart,
 } from "@pickforge/lab-desktop-linux";
@@ -756,6 +757,7 @@ export async function teardownBrowserSession(
   id: string,
   registryEnv: EnvLike,
   finalize: LocalSessionTeardownFinalizer,
+  options: SessionVncLockOptions = {},
 ): Promise<void> {
   const initial = await getSession(id, registryEnv);
   if (initial === undefined) {
@@ -844,14 +846,18 @@ export async function teardownBrowserSession(
       throw new Error(`Failed to retain logs of session ${record.id}: ${message}`, { cause: error });
     }
     await finalize();
-  });
+  }, options);
 }
 
 export async function destroyBrowserSession(
   id: string,
   registryEnv: EnvLike = process.env,
+  options: SessionVncLockOptions = {},
 ): Promise<void> {
-  await teardownBrowserSession(id, registryEnv, () =>
-    destroySessionRecord(id, registryEnv),
+  await teardownBrowserSession(
+    id,
+    registryEnv,
+    () => destroySessionRecord(id, registryEnv),
+    options,
   );
 }

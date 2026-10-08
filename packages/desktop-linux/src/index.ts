@@ -151,6 +151,7 @@ export {
   ensureDesktopSessionIsolation,
   ensureSessionVnc,
   getDesktopSessionStatus,
+  SESSION_VNC_LOCK_TIMEOUT_MS,
   startSessionVnc,
   stopOwnedSessionVnc,
   teardownDesktopSession,
@@ -161,6 +162,7 @@ export {
   type DesktopSessionStatus,
   type EnsureSessionVncOptions,
   type EnsuredSessionVnc,
+  type SessionVncLockOptions,
   type StartSessionVncOptions,
 } from "./session.js";
 

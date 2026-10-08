@@ -387,6 +387,7 @@ describe("bridge supervision", () => {
 
 async function daemonEntry(
   kind: "ready" | "hang" | "exit" | "unauthorized" | "stall" = "ready",
+  readyDelayMs = 0,
 ): Promise<string> {
   const entry = path.join(testRoot, "daemon.cjs");
   const viewer = desktop.sessionViewerDir(sessionId, registryEnv);
@@ -411,7 +412,7 @@ if (${JSON.stringify(kind)} !== 'hang') {
     response.end();
   });
   process.on('SIGUSR1', () => server.close());
-  server.listen(0, '127.0.0.1', () => {
+  setTimeout(() => server.listen(0, '127.0.0.1', () => {
   const stat = fileSystem.readFileSync('/proc/' + process.pid + '/stat', 'utf8');
   const fields = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\\s+/);
   const startTicks = Number(fields[19]);
@@ -422,7 +423,7 @@ if (${JSON.stringify(kind)} !== 'hang') {
     port: server.address().port,
   }), { mode: 0o600 });
   fileSystem.renameSync(temporaryPath, viewerDirectory + '/bridge.json');
-  });
+  }), ${readyDelayMs});
 }
 setInterval(() => {}, 1000);
 `,
@@ -692,6 +693,33 @@ describe("detached bridge daemon", () => {
     ).rejects.toThrow();
     await expect(fs.lstat(path.join(testRoot, "foreign"))).rejects.toThrow();
   });
+  it("keeps another lock caller waiting through a slow but permitted startup", async () => {
+    await updateSession(
+      sessionId,
+      { desktop: { display: ":991" } },
+      registryEnv,
+    );
+    // The bridge reports ready after the old 10 s lock wait (#301).
+    const startup = ensureViewerBridge(sessionId, {
+      registryEnv,
+      _cliEntry: await daemonEntry("ready", 11_000),
+      _readyMs: 15_000,
+    });
+    const lockPath = path.join(
+      testRoot,
+      "sessions",
+      `${sessionId}.ensure-vnc.lock`,
+    );
+    await vi.waitFor(() => fs.access(lockPath), { timeout: 5_000 });
+    const waitStartedAt = Date.now();
+    const seen = await desktop.withSessionVncLock(sessionId, registryEnv, () =>
+      getSession(sessionId, registryEnv),
+    );
+    const bridge = await startup;
+    owned.push(readProcessIdentity(bridge.pid)!);
+    expect(Date.now() - waitStartedAt).toBeGreaterThan(10_000);
+    expect(seen?.desktop?.viewerBridgePid).toBe(bridge.pid);
+  }, 40_000);
   it.each(["hang", "exit"] as const)(
     "cleans failed %s startups without recording a ready bridge",
     async (kind) => {
@@ -700,13 +728,20 @@ describe("detached bridge daemon", () => {
         { desktop: { display: ":991" } },
         registryEnv,
       );
-      await expect(
-        ensureViewerBridge(sessionId, {
-          registryEnv: registryEnv,
-          _cliEntry: await daemonEntry(kind),
-          _readyMs: 100,
-        }),
-      ).rejects.toThrow();
+      const failure = ensureViewerBridge(sessionId, {
+        registryEnv: registryEnv,
+        _cliEntry: await daemonEntry(kind),
+        _readyMs: 100,
+      });
+      if (kind === "hang") {
+        // The error says what timed out, how much was CPU wait, and where
+        // the bridge log is (#301).
+        await expect(failure).rejects.toThrow(
+          /^Viewer bridge did not report readiness after \d+\.\d s, \d+\.\d s of it waiting for a CPU\. If the host is busy, retry when the load drops\. Otherwise see .*viewer-bridge\.log\.$/,
+        );
+      } else {
+        await expect(failure).rejects.toThrow();
+      }
       expect(
         (await getSession(sessionId, registryEnv))?.desktop?.viewerBridgePid,
       ).toBeUndefined();

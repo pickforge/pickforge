@@ -149,6 +149,11 @@ export interface DestroyLocalSessionsOptions {
     record: SessionRecord,
     destroy: () => Promise<void>,
   ) => Promise<void>;
+  /**
+   * Stops new teardowns once aborted. A teardown that already started runs
+   * to completion; each later session is reported as cancelled.
+   */
+  signal?: AbortSignal;
 }
 
 function assertRecipe(recipe: LocalSessionRecipe): void {
@@ -418,6 +423,10 @@ export async function destroyLocalSessions(
   const destroyed: string[] = [];
   const errors: string[] = [];
   for (const record of records) {
+    if (options.signal?.aborted === true) {
+      errors.push(`${record.id}: cancelled before teardown started`);
+      continue;
+    }
     try {
       const destroy = () => destroyLocalSession(record, runtime);
       if (options.aroundDestroy === undefined) {

@@ -613,6 +613,88 @@ describe("read-only VNC connection", () => {
 // it out under concurrent suites (#263).
 const TEARDOWN_TIMEOUT_MS = 20_000;
 
+describe("session VNC lock cancellation", () => {
+  function holdLock(): { held: Promise<void>; release: () => void } {
+    let release: (() => void) | undefined;
+    const held = withSessionVncLock(
+      sessionId,
+      registryEnv,
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    return { held, release: () => release?.() };
+  }
+
+  it("rejects an aborted wait promptly and leaves the session intact", async () => {
+    const holder = holdLock();
+    await vi.waitFor(async () =>
+      expect(
+        await fs.readdir(path.join(testRoot, "sessions")),
+      ).toContain(`${sessionId}.ensure-vnc.lock`),
+    );
+    const controller = new AbortController();
+    const finalize = vi.fn(async () => {});
+    const started = Date.now();
+    const teardown = teardownDesktopSession(sessionId, registryEnv, finalize, {
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 50);
+    await expect(teardown).rejects.toThrow(
+      `Cancelled while waiting for the VNC lock of session ${sessionId}`,
+    );
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(finalize).not.toHaveBeenCalled();
+    holder.release();
+    await holder.held;
+    expect(await getSession(sessionId, registryEnv)).toMatchObject({
+      status: "running",
+    });
+    expect(
+      await withSessionVncLock(sessionId, registryEnv, async () => "free"),
+    ).toBe("free");
+  });
+
+  it("still runs a waiting operation with a live signal once the holder releases", async () => {
+    const holder = holdLock();
+    await vi.waitFor(async () =>
+      expect(
+        await fs.readdir(path.join(testRoot, "sessions")),
+      ).toContain(`${sessionId}.ensure-vnc.lock`),
+    );
+    const controller = new AbortController();
+    let ran = false;
+    const waiting = withSessionVncLock(
+      sessionId,
+      registryEnv,
+      async () => {
+        ran = true;
+        return "ran";
+      },
+      { signal: controller.signal },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(ran).toBe(false);
+    holder.release();
+    await holder.held;
+    expect(await waiting).toBe("ran");
+  });
+
+  it("skips the locked operation when the signal is already aborted", async () => {
+    const operation = vi.fn(async () => {});
+    await expect(
+      withSessionVncLock(sessionId, registryEnv, operation, {
+        signal: AbortSignal.abort(),
+      }),
+    ).rejects.toThrow(/Cancelled while waiting for the VNC lock/);
+    expect(operation).not.toHaveBeenCalled();
+    expect(
+      await withSessionVncLock(sessionId, registryEnv, async () => "free"),
+    ).toBe("free");
+  });
+});
+
 describe("viewer teardown", { timeout: TEARDOWN_TIMEOUT_MS }, () => {
   it.each(["term", "kill"] as const)(
     "stops surviving browser children with %s after their group leader exits",
