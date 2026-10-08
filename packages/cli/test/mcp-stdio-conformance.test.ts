@@ -15,11 +15,19 @@ import {
 } from "@modelcontextprotocol/server";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ensureCliBuilt } from "./build-once.js";
-import { cliSpawnTimeout } from "./spawn-timeout.js";
+import { CLI_SPAWN_BUDGET_MS } from "./spawn-timeout.js";
 
 const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const entry = path.join(repoRoot, "packages", "cli", "dist", "pickforge-mcp.js");
 const TIMEOUT_MS = 5_000;
+// The first wait after a spawn also covers the server's startup. That took
+// up to 9 s on a loaded host, so a hung server still fails within 30 s. Later
+// waits keep TIMEOUT_MS.
+const STARTUP_TIMEOUT_MS = 30_000;
+// Covers one startup plus the later frame waits of each server process.
+function wireTestTimeout(spawns = 1): number {
+  return spawns * (STARTUP_TIMEOUT_MS + CLI_SPAWN_BUDGET_MS);
+}
 const MODERN_PROTOCOL_REVISION = "2026-07-28";
 const PLANTED_TOKEN = `ghp_${"a".repeat(36)}`;
 const LEGACY_PROTOCOL_REVISIONS = [
@@ -79,11 +87,15 @@ interface ExitStatus {
   signal: NodeJS.Signals | null;
 }
 
-function withTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+function withTimeout<T>(
+  promise: Promise<T>,
+  label: string,
+  timeoutMs = TIMEOUT_MS,
+): Promise<T> {
   return Promise.race([
     promise,
-    sleep(TIMEOUT_MS).then(() => {
-      throw new Error(`${label} timed out after ${TIMEOUT_MS}ms`);
+    sleep(timeoutMs).then(() => {
+      throw new Error(`${label} timed out after ${timeoutMs}ms`);
     }),
   ]);
 }
@@ -144,6 +156,7 @@ class WireProcess {
   private readonly lines: readline.Interface;
   private readonly iterator: AsyncIterator<string>;
   private disposed = false;
+  private started = false;
 
   constructor(readonly root = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-mcp-wire-"))) {
     const env = makeIsolatedEnvironment(root);
@@ -174,8 +187,15 @@ class WireProcess {
     this.send({ jsonrpc: "2.0", method, params });
   }
 
+  /** Bounds a wait on the server. The first one after spawn also covers startup. */
+  wait<T>(promise: Promise<T>, label: string): Promise<T> {
+    const timeoutMs = this.started ? TIMEOUT_MS : STARTUP_TIMEOUT_MS;
+    this.started = true;
+    return withTimeout(promise, label, timeoutMs);
+  }
+
   async readFrame(): Promise<RpcFrame> {
-    const next = await withTimeout(this.iterator.next(), "MCP stdout frame");
+    const next = await this.wait(this.iterator.next(), "MCP stdout frame");
     if (next.done === true) throw new Error("MCP stdout closed before a response");
     return parseFrame(next.value);
   }
@@ -203,7 +223,7 @@ class WireProcess {
   }
 
   async waitUntilReady(): Promise<void> {
-    await withTimeout(
+    await this.wait(
       (async () => {
         while (!this.stderr.includes("listening on stdio")) await sleep(10);
       })(),
@@ -213,7 +233,7 @@ class WireProcess {
 
   async finishInput(): Promise<ExitStatus> {
     if (!this.child.stdin.destroyed) this.child.stdin.end();
-    return withTimeout(waitForExit(this.child), "MCP exit after EOF");
+    return this.wait(waitForExit(this.child), "MCP exit after EOF");
   }
 
   async dispose(): Promise<void> {
@@ -299,6 +319,7 @@ describe("raw MCP stdio wire", () => {
       expect(await wire.finishInput()).toEqual({ code: 0, signal: null });
       expect(wire.stderr).toContain("listening on stdio");
     },
+    wireTestTimeout(),
   );
 
   it("preserves legacy push elicitation through the v2 compatibility shim", async () => {
@@ -324,7 +345,7 @@ describe("raw MCP stdio wire", () => {
 
     expect(toolReport(result).value).toBe("Pixel 9");
     expect(await wire.finishInput()).toEqual({ code: 0, signal: null });
-  });
+  }, wireTestTimeout());
 
   it("serves the explicitly opted-in 2026-07-28 era", async () => {
     const wire = new WireProcess();
@@ -376,7 +397,7 @@ describe("raw MCP stdio wire", () => {
     expect(toolReport(answered).value).toBe("Pixel 9");
     expect(tasks.error?.code).toBe(-32601);
     expect(await wire.finishInput()).toEqual({ code: 0, signal: null });
-  });
+  }, wireTestTimeout());
 
   it("counter-offers legacy and rejects unsupported modern revisions", async () => {
     const legacy = new WireProcess();
@@ -398,7 +419,7 @@ describe("raw MCP stdio wire", () => {
       data: { requested: "2026-08-01", supported: [MODERN_PROTOCOL_REVISION] },
     });
     expect(await modern.finishInput()).toEqual({ code: 0, signal: null });
-  }, cliSpawnTimeout(2));
+  }, wireTestTimeout(2));
 
   it("drops malformed input while keeping stderr bounded and redacted", async () => {
     const wire = new WireProcess();
@@ -423,19 +444,19 @@ describe("raw MCP stdio wire", () => {
     expect(wire.stderr).toContain("Invalid input");
     expect(wire.stderr).toContain("further errors suppressed");
     expect(Buffer.byteLength(wire.stderr)).toBeLessThan(18_000);
-  });
+  }, wireTestTimeout());
 });
 
 describe("MCP process lifecycle", () => {
   it("exits cleanly on EOF before negotiation", async () => {
     const wire = new WireProcess();
     expect(await wire.finishInput()).toEqual({ code: 0, signal: null });
-  });
+  }, wireTestTimeout());
 
   it("exits after a transport buffer error closes the connection", async () => {
     const wire = new WireProcess();
     wire.sendRaw(Buffer.alloc(11 * 1024 * 1024, "x"));
-    const status = await withTimeout(
+    const status = await wire.wait(
       waitForExit(wire.child),
       "MCP exit after transport close",
     );
@@ -443,7 +464,7 @@ describe("MCP process lifecycle", () => {
     expect(status).toEqual({ code: 0, signal: null });
     expect(wire.stderr).toMatch(/buffer|max/i);
     expect(Buffer.byteLength(wire.stderr)).toBeLessThan(4_096);
-  });
+  }, wireTestTimeout());
 
   it.each(["SIGINT", "SIGTERM", "SIGHUP"] as const)(
     "closes cleanly on %s with stdin open",
@@ -453,9 +474,10 @@ describe("MCP process lifecycle", () => {
       wire.child.kill(signal);
 
       expect(
-        await withTimeout(waitForExit(wire.child), `MCP exit after ${signal}`),
+        await wire.wait(waitForExit(wire.child), `MCP exit after ${signal}`),
       ).toEqual({ code: 0, signal: null });
     },
+    wireTestTimeout(),
   );
 });
 
@@ -478,5 +500,5 @@ describe("isolated-home real CLI contract", () => {
     expect(wire.projectDir).toBe(path.join(wire.root, "project"));
     expect(await wire.finishInput()).toEqual({ code: 0, signal: null });
     expect(fs.existsSync(path.join(wire.root, "home"))).toBe(true);
-  });
+  }, wireTestTimeout());
 });
