@@ -7,7 +7,7 @@ import { appendAction, beginEvidenceRun } from "./evidence.js";
 import { ensureDir, type EnvLike } from "./paths.js";
 import { DirHandle, withDirHandle } from "./dir-handle.js";
 import { identityIsAlive, readProcessStartTicks } from "./proc.js";
-import { getSession, sessionDataDir, takeoverIdentityName } from "./session.js";
+import { getSession, REAPER_CLEANUP_PENDING_META_KEY, sessionDataDir, takeoverIdentityName, updateSession } from "./session.js";
 
 /**
  * Supervised pause / human takeover (pickforge/pickforge#21).
@@ -184,7 +184,7 @@ export class AgentPermitUnavailableError extends Error {
 
 async function assertRunningSession(sessionId: string, env: EnvLike): Promise<void> {
   if ((await getSession(sessionId, env))?.status !== "running") {
-    throw new Error(`Session ${sessionId} is not running; agent input is unavailable`);
+    throw new Error(`Session ${sessionId} is not running; takeover coordination is unavailable`);
   }
 }
 
@@ -257,6 +257,15 @@ export class HumanLeaseDrainTimeoutError extends Error {
     );
     this.name = "HumanLeaseDrainTimeoutError";
     this.pendingPermitIds = pendingPermitIds;
+  }
+}
+
+/** Teardown cannot release the display while a live agent permit remains. */
+export class AgentPermitDrainTimeoutError extends Error {
+  readonly code = "agent_permit_drain_timeout";
+  constructor(readonly pendingPermitIds: string[]) {
+    super(`Timed out waiting for ${pendingPermitIds.length} agent action(s) before stopping the session`);
+    this.name = "AgentPermitDrainTimeoutError";
   }
 }
 
@@ -474,7 +483,8 @@ async function createExclusiveHumanLeaseFile(
     }
     throw new StaleHumanLeaseError(raw, existing);
   } finally {
-    await dir.unlinkChild(tmp);
+    // A staging cleanup failure must not lose ownership of a published lease.
+    await dir.unlinkChild(tmp).catch(() => {});
   }
 }
 
@@ -497,6 +507,7 @@ export async function acquireHumanLease(
   opts: AcquireHumanLeaseOptions = {},
 ): Promise<HumanLease> {
   assertSafeSessionId(sessionId);
+  await assertRunningSession(sessionId, env);
   return withSessionDirectory(sessionId, env, true, async (dir, permits, verify) => {
     const leasePath = dir.resolve(HUMAN_LEASE_FILE);
     const now = opts.now ?? new Date();
@@ -504,6 +515,7 @@ export async function acquireHumanLease(
     await createExclusiveHumanLeaseFile(dir, lease, sessionId, now);
     try {
       if (opts._afterCreate !== undefined) await opts._afterCreate();
+      await assertRunningSession(sessionId, env);
       if (permits === undefined) throw new Error("Takeover permit directory is missing");
       await drainAgentPermits(permits, opts.drainTimeoutMs ?? HUMAN_LEASE_DRAIN_TIMEOUT_MS);
       await verify();
@@ -729,6 +741,7 @@ export async function releaseAgentPermit(permit: AgentPermit): Promise<void> {
 async function drainAgentPermits(
   dir: DirHandle,
   timeoutMs: number,
+  timeoutError = (ids: string[]): Error => new HumanLeaseDrainTimeoutError(ids),
 ): Promise<void> {
   const entries = (await dir.readEntryNames()).filter((name) => name.endsWith(".json"));
   const pending = new Set(entries);
@@ -751,7 +764,7 @@ async function drainAgentPermits(
     }
     if (pending.size === 0) return;
     if (Date.now() >= deadline) {
-      throw new HumanLeaseDrainTimeoutError(
+      throw timeoutError(
         [...pending].map((name) => name.replace(/\.json$/, "")),
       );
     }
@@ -759,12 +772,61 @@ async function drainAgentPermits(
   }
 }
 
+async function alreadyRetainedSessionLogs(sessionId: string, env: EnvLike): Promise<boolean> {
+  const target = sessionDataDir(sessionId, env);
+  if (!fs.existsSync(target)) return false;
+  return withDirHandle(DirHandle.open(path.dirname(target)), (root) =>
+    withDirHandle(root.openChild(sessionId), async (dir) => {
+      if (await dir.lstatChild(AGENT_PERMITS_DIR) !== undefined) return false;
+      const raw = await readTextIfPresent(dir.resolve("stopped.json"));
+      if (raw === undefined) return false;
+      try {
+        const identityRaw = await readTextIfPresent(root.resolve(takeoverIdentityName(sessionId)));
+        if (identityRaw !== undefined) {
+          const identity = JSON.parse(identityRaw);
+          if (!Array.isArray(identity) || identity.length !== 3 || identity[0] !== dir.stat.dev || identity[1] !== dir.stat.ino) return false;
+        }
+        const marker = JSON.parse(raw);
+        return marker.id === sessionId && typeof marker.stoppedAt === "string" && Number.isFinite(Date.parse(marker.stoppedAt));
+      } catch { return false; }
+    }),
+  );
+}
+
+/** Block new input, then drain existing permits before releasing any display. */
+export async function stopSessionAgentInput(
+  sessionId: string,
+  env: EnvLike,
+  timeoutMs = HUMAN_LEASE_DRAIN_TIMEOUT_MS,
+): Promise<void> {
+  assertSafeSessionId(sessionId);
+  const record = await getSession(sessionId, env);
+  // A missing record already blocks new input, but old permits must still drain.
+  // Retention follows a successful drain and process cleanup. A failed finalizer
+  // can retry even though retention has removed the bound permits directory.
+  if ((record === undefined || record.status === "error" && record.meta?.[REAPER_CLEANUP_PENDING_META_KEY] === true) &&
+      await alreadyRetainedSessionLogs(sessionId, env)) return;
+  // Keep failed or interrupted teardown eligible for a reaper retry.
+  if (record !== undefined) {
+    await updateSession(sessionId, {
+      status: "error",
+      meta: { ...record.meta, [REAPER_CLEANUP_PENDING_META_KEY]: true },
+    }, env);
+  }
+  await withSessionDirectory(sessionId, env, false, async (_dir, permits, verify) => {
+    if (permits !== undefined) {
+      await drainAgentPermits(permits, timeoutMs, (ids) => new AgentPermitDrainTimeoutError(ids));
+    }
+    await verify();
+  });
+}
+
 /**
  * Run `action` while holding a fail-closed agent permit: acquire the permit,
- * recheck for a live human lease, execute only if none is found, then
- * release the permit in `finally`. Throws `HumanControlActiveError` (never
- * runs `action`) when human control is active — "no permit fitness ⇒ no
- * input delivery."
+ * recheck the running record and human lease, then execute and release.
+ * Before execution, human control throws `HumanControlActiveError`; other
+ * gate failures throw `AgentPermitUnavailableError`. Neither runs `action`.
+ * Action and subsequent release errors propagate without either wrapper.
  */
 export async function withAgentPermit<T>(
   sessionId: string,

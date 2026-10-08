@@ -237,6 +237,10 @@ describe("createTakeoverBusyIntercept", () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-takeover-intercept-"));
     temporaryDirectories.push(tmp);
     const env = { PICKFORGE_HOME: path.join(tmp, "home") };
+    fs.mkdirSync(path.join(env.PICKFORGE_HOME, "sessions"), { recursive: true });
+    fs.writeFileSync(path.join(env.PICKFORGE_HOME, "sessions", "brow-aaaaaa11.json"), JSON.stringify({
+      id: "brow-aaaaaa11", type: "browser", status: "running", createdAt: new Date().toISOString(), projectDir: tmp,
+    }));
     const intercept = createTakeoverBusyIntercept("brow-aaaaaa11", env);
 
     // No lease yet: everything passes through.

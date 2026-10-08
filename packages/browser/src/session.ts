@@ -5,6 +5,7 @@ import {
   createSession,
   destroySessionRecord,
   retainSessionLogs,
+  stopSessionAgentInput,
   getSession,
   isPidAlive,
   isProfileConfined,
@@ -536,6 +537,7 @@ async function failBrowserCreation(
   state: BrowserCreationState,
   error: unknown,
 ): Promise<never> {
+  await stopSessionAgentInput(ctx.record.id, ctx.registryEnv);
   const browserGone = await stopFailedBrowser(state);
   state.browserDaemon?.release();
   const xvfbGone = await stopFailedXvfb(state, browserGone);
@@ -774,6 +776,7 @@ export async function teardownBrowserSession(
       throw new Error(`Session ${id} is not a browser session`);
     }
 
+    await stopSessionAgentInput(id, registryEnv);
     const failures: Error[] = [];
     const browser = record.browser;
     const { gone, error: groupError } = await stopBrowserGroup(

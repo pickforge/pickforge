@@ -175,6 +175,48 @@ export async function createAndroidSession(
   }
 }
 
+async function stopRecordedEmulator(
+  record: SessionRecord,
+  registryEnv: EnvLike,
+  opts: AndroidSessionOpOptions,
+): Promise<void> {
+  const android = record.android;
+  if (android?.emulatorPid === undefined && android?.serial === undefined) return;
+  let stopped: boolean;
+  let failure: Error | undefined;
+  try {
+    stopped = await stopEmulator({
+      serial: android.serial,
+      pid: android.emulatorPid,
+      sdk: opts.sdk,
+      env: opts.env,
+      registryEnv,
+      timeoutMs: opts.timeoutMs,
+    });
+  } catch (error) {
+    stopped = false;
+    failure = error instanceof Error ? error : new Error(String(error));
+  }
+  if (!stopped) {
+    await updateSession(
+      record.id,
+      {
+        status: "error",
+        meta: {
+          ...record.meta,
+          [REAPER_CLEANUP_PENDING_META_KEY]: true,
+        },
+      },
+      registryEnv,
+    ).catch(() => {});
+    throw new Error(
+      `Failed to stop emulator of android session ${record.id} ` +
+        `(serial ${android.serial ?? "unknown"}, pid ${android.emulatorPid ?? "unknown"})` +
+        (failure !== undefined ? `: ${failure.message}` : ""),
+    );
+  }
+}
+
 export async function teardownAndroidSession(
   id: string,
   registryEnv: EnvLike,
@@ -185,42 +227,9 @@ export async function teardownAndroidSession(
   if (record === undefined) {
     throw new Error(`Android session not found: ${id}`);
   }
-  const android = record.android;
-  if (android?.emulatorPid !== undefined || android?.serial !== undefined) {
-    let stopped: boolean;
-    let failure: Error | undefined;
-    try {
-      stopped = await stopEmulator({
-        serial: android.serial,
-        pid: android.emulatorPid,
-        sdk: opts.sdk,
-        env: opts.env,
-        registryEnv,
-        timeoutMs: opts.timeoutMs,
-      });
-    } catch (error) {
-      stopped = false;
-      failure = error instanceof Error ? error : new Error(String(error));
-    }
-    if (!stopped) {
-      await updateSession(
-        id,
-        {
-          status: "error",
-          meta: {
-            ...record.meta,
-            [REAPER_CLEANUP_PENDING_META_KEY]: true,
-          },
-        },
-        registryEnv,
-      ).catch(() => {});
-      throw new Error(
-        `Failed to stop emulator of android session ${id} ` +
-          `(serial ${android.serial ?? "unknown"}, pid ${android.emulatorPid ?? "unknown"})` +
-          (failure !== undefined ? `: ${failure.message}` : ""),
-      );
-    }
-  }
+  await stopRecordedEmulator(record, registryEnv, opts);
+  // The desktop leg still owns its display and in-flight permits.
+  if (record.type === "desktop+android") return finalize();
   try {
     await retainSessionLogs(record, registryEnv);
   } catch (error) {

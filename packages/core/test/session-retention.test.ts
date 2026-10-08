@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -157,6 +159,7 @@ describe("explicit session log pruning", () => {
     resume();
     await expect(delayed).rejects.toThrow(AgentPermitUnavailableError);
     expect(action).not.toHaveBeenCalled();
+    await expect(acquireHumanLease(a.id, env)).rejects.toThrow("not running");
     expect(fs.existsSync(path.join(sessionsDir(env), takeoverIdentityName(a.id)))).toBe(false);
     expect(fs.existsSync(path.join(dir, "permits"))).toBe(false);
     expect(fs.existsSync(dir)).toBe(!prune);
@@ -193,4 +196,61 @@ describe("explicit session log pruning", () => {
   it.each(["1s", "2m", "3h", "4d", "5w"])("accepts duration %s", (value) => {
     expect(parseSessionRetentionDuration(value)).toBeGreaterThan(0);
   });
+});
+
+describe("orphaned human lease staging", () => {
+  const uuid = "12345678-abcd-4321-abcd-123456789abc";
+  const stages = [`.human-lease-${uuid}`, `..human-lease-${uuid}.tmp-123-1`, ".human.lease.json.tmp-123-2"];
+
+  it("cleans exact staging files and links without following targets", async () => {
+    const record = await createSession({ type: "desktop", projectDir: home, status: "running" }, env);
+    const dir = sessionDataDir(record.id, env);
+    fs.mkdirSync(dir);
+    const outside = path.join(home, "outside");
+    fs.writeFileSync(outside, "keep");
+    for (const name of stages) fs.writeFileSync(path.join(dir, name), "orphan");
+    fs.unlinkSync(path.join(dir, stages[1]!));
+    fs.symlinkSync(outside, path.join(dir, stages[1]!));
+    fs.mkdirSync(path.join(dir, ".human.lease.json.tmp-123-3"));
+    fs.writeFileSync(path.join(dir, ".human-lease-not-a-uuid"), "keep");
+    await retainSessionLogs(record, env);
+    for (const name of stages) expect(fs.existsSync(path.join(dir, name))).toBe(false);
+    expect(fs.readFileSync(outside, "utf8")).toBe("keep");
+    expect(fs.statSync(path.join(dir, ".human.lease.json.tmp-123-3")).isDirectory()).toBe(true);
+    expect(fs.readFileSync(path.join(dir, ".human-lease-not-a-uuid"), "utf8")).toBe("keep");
+  });
+
+  it("recovers renewal stages left after retention before explicit pruning", async () => {
+    const { record, dir } = await stopped();
+    for (const name of stages) fs.writeFileSync(path.join(dir, name), "orphan");
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+    expect(fs.existsSync(dir)).toBe(false);
+  });
+
+  it("retains logs and prunes after killing a claimant before lease linking", async () => {
+    const record = await createSession({ type: "desktop", projectDir: home, status: "running" }, env);
+    const ready = path.join(home, "ready");
+    const worker = fileURLToPath(new URL("./workers/takeover-crash-worker.ts", import.meta.url));
+    const child = spawn("bun", [worker, home, record.id, ready], { stdio: ["ignore", "pipe", "pipe"] });
+    const exited = new Promise<void>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", () => resolve());
+    });
+    try {
+      await vi.waitFor(() => expect(fs.existsSync(ready)).toBe(true), { timeout: 5_000 });
+      const dir = sessionDataDir(record.id, env);
+      expect(fs.readdirSync(dir).some((name) => name.startsWith(".human-lease-"))).toBe(true);
+      expect(await readHumanLease(record.id, env)).toBeUndefined();
+      child.kill("SIGKILL");
+      await exited;
+      fs.writeFileSync(path.join(dir, "xvfb.log"), "diagnostics");
+      await retainSessionLogs(record, env);
+      expect(fs.readdirSync(dir).sort()).toEqual(["stopped.json", "xvfb.log"]);
+      await destroySessionRecord(record.id, env);
+      expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+    } finally {
+      child.kill("SIGKILL");
+      await exited;
+    }
+  }, 10_000);
 });

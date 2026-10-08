@@ -7,6 +7,17 @@ import { sessionDataDir, type SessionRecord } from "./session.js";
 const MARKER = "stopped.json";
 const SESSION_ID = /^(desk|andr|duo|brow)-[0-9a-f]{6,}$/;
 const LOG_FILE = /^[^.].*\.log$/;
+const LEASE_UUID = "[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}";
+const LEASE_STAGE = new RegExp(`^(?:\\.human-lease-${LEASE_UUID}|\\.\\.human-lease-${LEASE_UUID}\\.tmp-[0-9]+-[0-9]+|\\.human\\.lease\\.json\\.tmp-[0-9]+-[0-9]+)$`);
+
+async function removeLeaseStages(dir: DirHandle): Promise<void> {
+  for (const name of await dir.readEntryNames()) {
+    if (!LEASE_STAGE.test(name)) continue;
+    const stat = await dir.lstatChild(name);
+    // Unlink through the pinned directory; never follow links or remove directories.
+    if (stat?.isFile() === true || stat?.isSymbolicLink() === true) await dir.unlinkChild(name);
+  }
+}
 
 /** Called only after typed teardown has confirmed its processes are gone. */
 export async function retainSessionLogs(
@@ -16,14 +27,17 @@ export async function retainSessionLogs(
   const dir = sessionDataDir(record.id, env);
   await withDirHandle(DirHandle.open(path.dirname(dir)), async (root) => {
     await withDirHandle(root.ensureChildDir(record.id, 0o700), async (handle) => {
-      for (const name of ["permits", "human.lease.json"]) {
-        await fs.promises.rm(handle.resolve(name), { recursive: true, force: true });
-      }
+      await removeLeaseStages(handle);
       await handle.writeFileAtomic(MARKER, JSON.stringify({
         id: record.id,
         stoppedAt: new Date().toISOString(),
         ...(record.status === "error" ? { failure: record } : {}),
       }) + "\n");
+      // Publish confirmed process cleanup before removing coordination. A failed
+      // retention or registry finalizer can then retry without rebuilding it.
+      for (const name of ["permits", "human.lease.json"]) {
+        await fs.promises.rm(handle.resolve(name), { recursive: true, force: true });
+      }
     });
   });
 }
@@ -70,6 +84,7 @@ async function pruneDirectory(root: DirHandle, id: string, roots: string[], age:
   return withDirHandle(root.openChild(id), async (dir) => {
     const elapsed = await retainedAge(dir, id);
     if (elapsed === undefined || elapsed < age) return false;
+    await removeLeaseStages(dir);
     const names = await dir.readEntryNames();
     // Unknown data is not ours to delete. Never traverse a child directory or link.
     for (const name of names) {

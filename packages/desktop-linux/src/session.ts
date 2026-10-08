@@ -14,6 +14,7 @@ import {
   ensureContainmentScope,
   destroySessionRecord,
   retainSessionLogs,
+  stopSessionAgentInput,
   getSession,
   isHumanLeaseStale,
   isPidAlive,
@@ -344,6 +345,7 @@ async function rollbackFailedCreate(
   state: DesktopStartupState,
   registryEnv: EnvLike,
 ): Promise<void> {
+  await stopSessionAgentInput(record.id, registryEnv);
   const vncGone = await stopStartupVnc(record.id, state);
   const xvfbGone = await stopStartupXvfb(state);
   const contained = await destroyContainmentScope(state.containment);
@@ -974,6 +976,7 @@ export async function teardownDesktopSession(
     if (record === undefined) {
       throw new Error(`Desktop session not found: ${id}`);
     }
+    await stopSessionAgentInput(id, registryEnv);
     const desktop = record.desktop;
     const failures: Error[] = [];
     // Apps first: they are clients of the display, and killing the display out

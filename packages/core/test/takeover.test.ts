@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AgentPermitUnavailableError,
+  AgentPermitDrainTimeoutError,
+  stopSessionAgentInput,
   HumanControlActiveError,
   HumanLeaseDrainTimeoutError,
   HumanLeaseHeldError,
@@ -41,7 +43,7 @@ beforeEach(() => {
   env = { ...process.env, PICKFORGE_HOME: path.join(tmpRoot, "home") };
   const sessions = path.join(env.PICKFORGE_HOME!, "sessions");
   fs.mkdirSync(sessions, { recursive: true });
-  for (const id of ["desk-0000a5", "desk-0000a6", "desk-0000b1", "desk-0000b2", "desk-0000b3", "desk-0000b4"]) {
+  for (const id of ["desk-0000a5", "desk-0000a6", "desk-0000b1", "desk-0000b2", "desk-0000b3", "desk-0000b4", "desk-0000a1", "desk-0000a2", "desk-0000a3", "desk-0000a4", "desk-0000a7", "desk-0000c1", "desk-000c1b", "desk-0000c2", "desk-0000d1", "desk-a70a1c", "desk-c1ea00"]) {
     fs.writeFileSync(path.join(sessions, `${id}.json`), JSON.stringify({
       id, type: "desktop", status: "running", createdAt: new Date().toISOString(), projectDir: tmpRoot,
     }));
@@ -63,12 +65,12 @@ async function writeRawLease(sessionId: string, lease: HumanLease): Promise<stri
 
 describe("acquireHumanLease", () => {
   it("acquires a fresh lease and persists it atomically", async () => {
-    const lease = await acquireHumanLease("desk-a1", env);
-    expect(lease.sessionId).toBe("desk-a1");
+    const lease = await acquireHumanLease("desk-0000a1", env);
+    expect(lease.sessionId).toBe("desk-0000a1");
     expect(lease.ownerPid).toBe(process.pid);
     expect(lease.ttlMs).toBe(30_000);
     expect(lease.heartbeatMs).toBe(5_000);
-    const onDisk = await readHumanLease("desk-a1", env);
+    const onDisk = await readHumanLease("desk-0000a1", env);
     expect(onDisk).toEqual(lease);
   });
 
@@ -92,15 +94,15 @@ describe("acquireHumanLease", () => {
       }
       return file;
     });
-    const first = acquireHumanLease("desk-atomic", env).catch((error: unknown) => error);
+    const first = acquireHumanLease("desk-a70a1c", env).catch((error: unknown) => error);
     try {
       await paused;
-      expect(await readHumanLease("desk-atomic", env)).toBeUndefined();
-      const winner = await acquireHumanLease("desk-atomic", env);
+      expect(await readHumanLease("desk-a70a1c", env)).toBeUndefined();
+      const winner = await acquireHumanLease("desk-a70a1c", env);
       resume();
       expect(await first).toBeInstanceOf(HumanLeaseHeldError);
-      expect(await readHumanLease("desk-atomic", env)).toEqual(winner);
-      expect(fs.readdirSync(sessionDataDir("desk-atomic", env)).sort()).toEqual(["human.lease.json", "permits"]);
+      expect(await readHumanLease("desk-a70a1c", env)).toEqual(winner);
+      expect(fs.readdirSync(sessionDataDir("desk-a70a1c", env)).sort()).toEqual(["human.lease.json", "permits"]);
     } finally { resume(); await first; }
   });
 
@@ -120,56 +122,82 @@ describe("acquireHumanLease", () => {
         return link.call(this, from, to);
       });
     }
-    await expect(acquireHumanLease("desk-cleanup", env)).rejects.toThrow(`lease ${stage} failed`);
-    expect(fs.readdirSync(sessionDataDir("desk-cleanup", env))).toEqual(["permits"]);
+    await expect(acquireHumanLease("desk-c1ea00", env)).rejects.toThrow(`lease ${stage} failed`);
+    expect(fs.readdirSync(sessionDataDir("desk-c1ea00", env))).toEqual(["permits"]);
+  });
+
+  it("returns the published lease even when staging cleanup fails", async () => {
+    const unlink = DirHandle.prototype.unlinkChild;
+    vi.spyOn(DirHandle.prototype, "unlinkChild").mockImplementation(async function(this: DirHandle, name) {
+      if (name.startsWith(".human-lease-")) throw new Error("staging unlink failed");
+      return unlink.call(this, name);
+    });
+    const lease = await acquireHumanLease("desk-c1ea00", env);
+    expect(await readHumanLease(lease.sessionId, env)).toEqual(lease);
+    await expect(acquireHumanLease(lease.sessionId, env)).rejects.toThrow(HumanLeaseHeldError);
+    expect(await releaseHumanLease(lease.sessionId, lease.leaseId, env)).toBe(true);
+    expect(await readHumanLease(lease.sessionId, env)).toBeUndefined();
+  });
+
+  it.each(["starting", "error", "stopped"] as const)("does not create coordination for a %s session", async (status) => {
+    const record = await createSession({ type: "desktop", projectDir: tmpRoot, status }, env);
+    await expect(acquireHumanLease(record.id, env)).rejects.toThrow("not running");
+    expect(fs.existsSync(sessionDataDir(record.id, env))).toBe(false);
+  });
+
+  it("rolls back a lease published across the teardown status change", async () => {
+    await expect(acquireHumanLease("desk-0000a1", env, {
+      _afterCreate: async () => { await stopSessionAgentInput("desk-0000a1", env); },
+    })).rejects.toThrow("not running");
+    expect(await readHumanLease("desk-0000a1", env)).toBeUndefined();
   });
 
   it("refuses a second acquisition while the lease is live", async () => {
-    const first = await acquireHumanLease("desk-a2", env);
-    await expect(acquireHumanLease("desk-a2", env)).rejects.toThrow(HumanLeaseHeldError);
+    const first = await acquireHumanLease("desk-0000a2", env);
+    await expect(acquireHumanLease("desk-0000a2", env)).rejects.toThrow(HumanLeaseHeldError);
     // The live lease is untouched by the failed attempt.
-    expect((await readHumanLease("desk-a2", env))?.leaseId).toBe(first.leaseId);
+    expect((await readHumanLease("desk-0000a2", env))?.leaseId).toBe(first.leaseId);
   });
 
   it("reports a dead-owner lease as stale and recoverable", async () => {
     const stale: HumanLease = {
       leaseId: "dead-lease",
-      sessionId: "desk-a3",
+      sessionId: "desk-0000a3",
       ownerPid: DEAD_PID,
       createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
       ttlMs: 30_000,
       heartbeatMs: 5_000,
     };
-    const raw = await writeRawLease("desk-a3", stale);
+    const raw = await writeRawLease("desk-0000a3", stale);
     expect(isHumanLeaseStale(stale)).toBe(true);
 
     let caught: StaleHumanLeaseError | undefined;
     try {
-      await acquireHumanLease("desk-a3", env);
+      await acquireHumanLease("desk-0000a3", env);
     } catch (error) {
       caught = error as StaleHumanLeaseError;
     }
     expect(caught).toBeInstanceOf(StaleHumanLeaseError);
     expect(caught?.lease?.leaseId).toBe("dead-lease");
 
-    expect(await clearStaleHumanLease("desk-a3", raw, env)).toBe(true);
-    const fresh = await acquireHumanLease("desk-a3", env);
+    expect(await clearStaleHumanLease("desk-0000a3", raw, env)).toBe(true);
+    const fresh = await acquireHumanLease("desk-0000a3", env);
     expect(fresh.leaseId).not.toBe("dead-lease");
   });
 
   it("reports a TTL-expired lease as stale even with a live owner", async () => {
     const expired: HumanLease = {
       leaseId: "expired-lease",
-      sessionId: "desk-a4",
+      sessionId: "desk-0000a4",
       ownerPid: process.pid,
       createdAt: new Date(Date.now() - 120_000).toISOString(),
       expiresAt: new Date(Date.now() - 60_000).toISOString(),
       ttlMs: 30_000,
       heartbeatMs: 5_000,
     };
-    await writeRawLease("desk-a4", expired);
-    await expect(acquireHumanLease("desk-a4", env)).rejects.toThrow(StaleHumanLeaseError);
+    await writeRawLease("desk-0000a4", expired);
+    await expect(acquireHumanLease("desk-0000a4", env)).rejects.toThrow(StaleHumanLeaseError);
   });
 
   it("drains pre-existing agent permits before returning", async () => {
@@ -218,19 +246,19 @@ describe("acquireHumanLease", () => {
   });
 
   it("sweeps a permit owned by a dead process instead of blocking the drain", async () => {
-    const dir = path.join(env.PICKFORGE_HOME as string, "sessions", "desk-a7", "permits");
+    const dir = path.join(env.PICKFORGE_HOME as string, "sessions", "desk-0000a7", "permits");
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
       path.join(dir, "dead-permit.json"),
       JSON.stringify({
         permitId: "dead-permit",
-        sessionId: "desk-a7",
+        sessionId: "desk-0000a7",
         ownerPid: DEAD_PID,
         createdAt: new Date().toISOString(),
       }),
     );
-    const lease = await acquireHumanLease("desk-a7", env, { drainTimeoutMs: 500 });
-    expect(lease.sessionId).toBe("desk-a7");
+    const lease = await acquireHumanLease("desk-0000a7", env, { drainTimeoutMs: 500 });
+    expect(lease.sessionId).toBe("desk-0000a7");
     expect(fs.existsSync(path.join(dir, "dead-permit.json"))).toBe(false);
   });
 });
@@ -368,8 +396,8 @@ describe("withAgentPermit", () => {
 
 describe("renewHumanLease / releaseHumanLease", () => {
   it("extends expiresAt only for the owning leaseId", async () => {
-    const lease = await acquireHumanLease("desk-c1", env);
-    const renewed = await renewHumanLease("desk-c1", lease.leaseId, env, {
+    const lease = await acquireHumanLease("desk-0000c1", env);
+    const renewed = await renewHumanLease("desk-0000c1", lease.leaseId, env, {
       vncPid: 12345,
       vncPort: 5901,
     });
@@ -380,11 +408,11 @@ describe("renewHumanLease / releaseHumanLease", () => {
     expect(renewed?.vncPid).toBe(12345);
     expect(renewed?.vncPort).toBe(5901);
 
-    expect(await renewHumanLease("desk-c1", "not-the-owner", env)).toBeUndefined();
+    expect(await renewHumanLease("desk-0000c1", "not-the-owner", env)).toBeUndefined();
   });
 
   it("refuses to resurrect a lease that has already gone stale by TTL, even for its own owner (P0-B)", async () => {
-    const lease = await acquireHumanLease("desk-c1b", env);
+    const lease = await acquireHumanLease("desk-000c1b", env);
     // The owner is this very process (alive), but the TTL has elapsed
     // without a timely renewal — the agent must be able to observe the
     // lease as free the instant that happens, so a straggling renewal must
@@ -393,45 +421,45 @@ describe("renewHumanLease / releaseHumanLease", () => {
     expect(isHumanLeaseStale(lease, now)).toBe(true);
 
     expect(
-      await renewHumanLease("desk-c1b", lease.leaseId, env, {}, now),
+      await renewHumanLease("desk-000c1b", lease.leaseId, env, {}, now),
     ).toBeUndefined();
     // Untouched: no expiresAt extension, no partial write.
-    expect(await readHumanLease("desk-c1b", env)).toEqual(lease);
+    expect(await readHumanLease("desk-000c1b", env)).toEqual(lease);
   });
 
   it("only releases the lease it owns", async () => {
-    const lease = await acquireHumanLease("desk-c2", env);
-    expect(await releaseHumanLease("desk-c2", "not-the-owner", env)).toBe(false);
-    expect(await readHumanLease("desk-c2", env)).toBeDefined();
-    expect(await releaseHumanLease("desk-c2", lease.leaseId, env)).toBe(true);
-    expect(await readHumanLease("desk-c2", env)).toBeUndefined();
+    const lease = await acquireHumanLease("desk-0000c2", env);
+    expect(await releaseHumanLease("desk-0000c2", "not-the-owner", env)).toBe(false);
+    expect(await readHumanLease("desk-0000c2", env)).toBeDefined();
+    expect(await releaseHumanLease("desk-0000c2", lease.leaseId, env)).toBe(true);
+    expect(await readHumanLease("desk-0000c2", env)).toBeUndefined();
   });
 });
 
 describe("getTakeoverStatus", () => {
   it("reports agent-active, human-active, and stale", async () => {
-    expect(await getTakeoverStatus("desk-d1", env)).toEqual({
-      sessionId: "desk-d1",
+    expect(await getTakeoverStatus("desk-0000d1", env)).toEqual({
+      sessionId: "desk-0000d1",
       active: false,
     });
 
-    const lease = await acquireHumanLease("desk-d1", env);
-    const active = await getTakeoverStatus("desk-d1", env);
+    const lease = await acquireHumanLease("desk-0000d1", env);
+    const active = await getTakeoverStatus("desk-0000d1", env);
     expect(active.active).toBe(true);
     expect(active.lease?.leaseId).toBe(lease.leaseId);
 
-    await releaseHumanLease("desk-d1", lease.leaseId, env);
+    await releaseHumanLease("desk-0000d1", lease.leaseId, env);
     const stale: HumanLease = {
       leaseId: "dead-lease-d1",
-      sessionId: "desk-d1",
+      sessionId: "desk-0000d1",
       ownerPid: DEAD_PID,
       createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
       ttlMs: 30_000,
       heartbeatMs: 5_000,
     };
-    await writeRawLease("desk-d1", stale);
-    const staleStatus = await getTakeoverStatus("desk-d1", env);
+    await writeRawLease("desk-0000d1", stale);
+    const staleStatus = await getTakeoverStatus("desk-0000d1", env);
     expect(staleStatus).toMatchObject({ active: false, stale: true });
   });
 });
@@ -486,9 +514,13 @@ describe("real separate-process concurrency", () => {
       const home = path.join(tmpRoot, "race-home");
       const barrier = path.join(tmpRoot, "race-barrier");
       fs.mkdirSync(barrier);
+      fs.mkdirSync(path.join(home, "sessions"), { recursive: true });
+      fs.writeFileSync(path.join(home, "sessions", "desk-aceace.json"), JSON.stringify({
+        id: "desk-aceace", type: "desktop", status: "running", createdAt: new Date().toISOString(), projectDir: tmpRoot,
+      }));
       const names = ["a", "b"];
       const running = names.map((name) =>
-        run([acquireWorker, home, "desk-race", barrier, name, String(names.length)]),
+        run([acquireWorker, home, "desk-aceace", barrier, name, String(names.length)]),
       );
       await waitForFiles(barrier, names.map((name) => `ready-${name}`), 8_000);
       fs.writeFileSync(path.join(barrier, "go"), "");
@@ -514,4 +546,33 @@ describe("real separate-process concurrency", () => {
     },
     20_000,
   );
+});
+
+describe("teardown permit draining", () => {
+  it("leaves live permits and a retry record on timeout, then drains on retry", async () => {
+    const permit = await acquireAgentPermit("desk-0000b1", env);
+    const failure = await stopSessionAgentInput(permit.sessionId, env, 0).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(AgentPermitDrainTimeoutError);
+    expect((failure as AgentPermitDrainTimeoutError).pendingPermitIds).toEqual([permit.permitId]);
+    expect(fs.existsSync(permit.path)).toBe(true);
+    await expect(acquireAgentPermit(permit.sessionId, env)).rejects.toThrow(AgentPermitUnavailableError);
+    await releaseAgentPermit(permit);
+    await expect(stopSessionAgentInput(permit.sessionId, env, 0)).resolves.toBeUndefined();
+  });
+
+  it("drains old permits even when a concurrent destroy removed the registry record", async () => {
+    const permit = await acquireAgentPermit("desk-0000b1", env);
+    await destroySessionRecord(permit.sessionId, env);
+    await expect(stopSessionAgentInput(permit.sessionId, env, 0)).rejects.toThrow(AgentPermitDrainTimeoutError);
+    await releaseAgentPermit(permit);
+    await expect(stopSessionAgentInput(permit.sessionId, env, 0)).resolves.toBeUndefined();
+  });
+
+  it("sweeps permits whose owner died before stopping", async () => {
+    const permit = await acquireAgentPermit("desk-0000b1", env);
+    fs.writeFileSync(permit.path, JSON.stringify({ ...permit, ownerPid: DEAD_PID }));
+    await expect(stopSessionAgentInput(permit.sessionId, env, 0)).resolves.toBeUndefined();
+    expect(fs.existsSync(permit.path)).toBe(false);
+    await releaseAgentPermit(permit);
+  });
 });

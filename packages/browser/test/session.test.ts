@@ -6,6 +6,8 @@ import path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  acquireAgentPermit,
+  releaseAgentPermit,
   createSession,
   getSession,
   isPidAlive,
@@ -14,6 +16,7 @@ import {
   readProcessIdentity,
   stopPid,
   updateSession,
+  type AgentPermit,
   type CreateSessionInput,
   type EnvLike,
 } from "@pickforge/lab-core";
@@ -733,6 +736,7 @@ describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
     const controller = new AbortController();
     const realRename = fs.promises.rename.bind(fs.promises);
     let aborted = false;
+    let permit: AgentPermit | undefined;
     const rename = vi
       .spyOn(fs.promises, "rename")
       .mockImplementation(async (source, target) => {
@@ -744,21 +748,29 @@ describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
             content.includes('"browser"')
           ) {
             aborted = true;
+            permit = await acquireAgentPermit(JSON.parse(content).id, registryEnv);
             controller.abort();
           }
         }
       });
+    const creating = createBrowserSession({
+      projectDir, registryEnv, env: spawnEnvFor("ready"),
+      cdpTimeoutMs: 5000, signal: controller.signal,
+    }).catch((error: unknown) => error);
     try {
-      await expect(
-        createBrowserSession({
-          projectDir,
-          registryEnv,
-          env: spawnEnvFor("ready"),
-          cdpTimeoutMs: 5000,
-          signal: controller.signal,
-        }),
-      ).rejects.toThrow(/aborted/);
+      await vi.waitFor(async () => {
+        expect(permit).toBeDefined();
+        expect((await getSession(permit!.sessionId, registryEnv))?.status).toBe("error");
+      }, { timeout: 5_000 });
+      const stopping = await getSession(permit!.sessionId, registryEnv);
+      expect(isPidAlive(stopping!.desktop!.xvfbPid!)).toBe(true);
+      expect(isPidAlive(stopping!.browser!.browserPid)).toBe(true);
+      expect(fs.existsSync(stopping!.browser!.profileDir)).toBe(true);
+      await releaseAgentPermit(permit!);
+      expect(await creating).toMatchObject({ message: expect.stringMatching(/aborted/) });
     } finally {
+      if (permit !== undefined) await releaseAgentPermit(permit);
+      await creating;
       rename.mockRestore();
     }
 
