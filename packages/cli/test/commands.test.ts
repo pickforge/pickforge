@@ -44,8 +44,10 @@ interface CliResult {
 // every process that still carries it (#288).
 const CLI_DRAIN_MS = 20_000;
 const CLI_KILL_WAIT_MS = 2_000;
-// Above the 5 s `adb emu kill` plus the 30 s exit grace of an Android destroy.
-const CLI_DESTROY_MS = 45_000;
+// A desktop destroy waits up to 3 s for TERM and 2 s for KILL per process
+// group. The fake adb stops the fake emulator at once, so an Android destroy
+// never waits its 30 s exit grace here. A destroy that needs it fails cleanup.
+const CLI_DESTROY_MS = 20_000;
 const HOME_SWEEP_MS = 2_000;
 const closedHomes = new Set<string>();
 
@@ -350,7 +352,8 @@ function makeFakeAndroidSdk(
       'case "$*" in',
       `  *getprop*) echo ${opts.bootCompleted ?? "1"} ;;`,
       '  devices) printf "List of devices attached\\n" ;;',
-      `  *"emu kill"*) [ -f "${pidFile}" ] && kill "$(cat "${pidFile}")" 2>/dev/null ;;`,
+      // Shell builtins only: PATH may hold just the fake bin directory.
+      `  *"emu kill"*) [ -f "${pidFile}" ] && read -r pid < "${pidFile}" && kill "$pid" 2>/dev/null ;;`,
       "esac",
       "exit 0",
     ].join("\n"),
@@ -466,7 +469,7 @@ afterEach(async () => {
     );
   }
   fs.rmSync(dir, { recursive: true, force: true });
-}, 90_000);
+}, 60_000);
 
 describe("pickforge-lab session (desktop)", () => {
   it("describes immutable inherited-home consent without disabling takeover", async () => {
