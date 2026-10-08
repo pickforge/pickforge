@@ -312,12 +312,9 @@ function spawnMember(target: ContainmentScope | undefined): number {
 }
 
 function destroy(): ReturnType<typeof destroyContainmentScope> {
-  // Each phase needs two full /proc scans even after cgroup signals. Use the
+  // Cleanup still needs two empty /proc scans after cgroup signals. Keep the
   // product's default budgets so a loaded host can complete those scans.
-  return destroyContainmentScope(scope(), {
-    termTimeoutMs: 3_000,
-    killTimeoutMs: 2_000,
-  });
+  return destroyContainmentScope(scope());
 }
 
 async function waitFor(predicate: () => boolean): Promise<boolean> {
@@ -663,7 +660,7 @@ describe("cgroup cleanup guards (simulated cgroup)", () => {
       expect(result.signaled).not.toContain(stranger);
       expect(fake.frozen).toBe(false);
       expect(fake.removed).toBe(false);
-      // Refuse on the next proof rather than polling for the full 500 ms.
+      // Refuse on the next proof rather than polling for the full timeout.
       if (freezeSupported) expect(fake.thawProcsReads).toBeLessThan(8);
     },
     20_000,
