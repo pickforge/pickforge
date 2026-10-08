@@ -1,3 +1,4 @@
+import type { ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -50,15 +51,50 @@ vi.mock("@pickforge/lab-desktop-linux", async (importOriginal) => {
   };
 });
 
+// Generous: a full parallel `bun run test` run can starve these spawned
+// processes of CPU for several seconds before they get scheduled at all.
+const MARKER_WAIT_MS = vi.hoisted(() => 20_000);
+
 // Simulate the "pathological /proc identity-read failure" the issue
 // describes: the owned Chrome supervisor is alive, but its own identity can
 // never be captured.
+//
+// The product gives up on the identity after a fixed 1 s window that starts
+// when `startDaemon` returns, then kills the group. On a starved host that
+// window can close before the supervisor has spawned fake Chrome at all, and
+// the test would never see a live leftover (#260). So the Chrome daemon
+// handle is handed back only once `chrome.pid` exists, which the fake (or the
+// crashing stand-in supervisor) writes after Chrome is running. The identity
+// window then always opens with a live Chrome to leave behind.
 vi.mock("@pickforge/lab-core", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("@pickforge/lab-core")>();
+  const { existsSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const startDaemon = async (
+    ...args: Parameters<typeof actual.startDaemon>
+  ): Promise<Awaited<ReturnType<typeof actual.startDaemon>>> => {
+    const handle = await actual.startDaemon(...args);
+    const [, , opts] = args;
+    if (opts.name !== "chrome") return handle;
+    const marker = join(opts.logDir, "chrome.pid");
+    // Chrome is always started as an owned daemon, whose handle has `child`.
+    const { child } = handle as { child?: ChildProcess };
+    const exited = (): boolean =>
+      child !== undefined &&
+      (child.exitCode !== null || child.signalCode !== null);
+    const deadline = Date.now() + MARKER_WAIT_MS;
+    // A supervisor that exits without the marker falls through, and the
+    // test's own marker assertion reports it.
+    while (!existsSync(marker) && !exited() && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return handle;
+  };
   return {
     ...actual,
     readProcessIdentity: vi.fn(() => undefined),
+    startDaemon: vi.fn(startDaemon),
   };
 });
 
@@ -78,10 +114,7 @@ import { createBrowserSession, browserSessionLogDir } from "../src/session.js";
 import { buildSupervisedBrowserCommand } from "../src/supervisor.js";
 import { writeFakeChrome } from "./fakes.js";
 
-// Generous: a full parallel `bun run test` run can starve these spawned
-// processes of CPU for several seconds before they get scheduled at all.
 const TEST_TIMEOUT_MS = 30_000;
-const MARKER_WAIT_MS = 20_000;
 const mockedBuildSupervisedBrowserCommand = vi.mocked(
   buildSupervisedBrowserCommand,
 );
