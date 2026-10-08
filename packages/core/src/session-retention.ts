@@ -7,8 +7,12 @@ import { sessionDataDir, type SessionRecord } from "./session.js";
 const MARKER = "stopped.json";
 const SESSION_ID = /^(desk|andr|duo|brow)-[0-9a-f]{6,}$/;
 const LOG_FILE = /^[^.].*\.log$/;
-// Lease staging names from takeover.ts, including writeFileAtomic's own temp.
-const LEASE_STAGING = /^\.\.?human-lease-[0-9a-f-]{36}(\.tmp-\d+-\d+)?$/;
+// Lease staging names: the takeover.ts staging file, writeFileAtomic's temp
+// for it, and the temp a lease renewal leaves.
+const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+const LEASE_STAGING = new RegExp(
+  `^(\\.human-lease-${UUID}|\\.\\.human-lease-${UUID}\\.tmp-\\d+-\\d+|\\.human\\.lease\\.json\\.tmp-\\d+-\\d+)$`,
+);
 
 /** Called only after typed teardown has confirmed its processes are gone. */
 export async function retainSessionLogs(
