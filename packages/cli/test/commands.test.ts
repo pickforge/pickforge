@@ -8,6 +8,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createRun, recordEvidenceOutcome, writeEvidenceReport, isProcessGroupAlive, readActions, listRuns } from "@pickforge/lab-core";
 import { ensureCliBuilt } from "./build-once.js";
+import { findProcessesWithEnv, killProcessesWithEnv } from "./env-process-sweep.js";
 import { cliSpawnTimeout } from "./spawn-timeout.js";
 import { encodePng } from "../../desktop-linux/test/png-fixture.js";
 
@@ -34,11 +35,18 @@ interface CliResult {
 // later CLI calls could create a session after afterEach destroyed the
 // sessions and deleted the registry, so that Xvfb outlived the run (#262).
 // afterEach closes the test's state homes to new CLI calls, waits a bounded
-// time for the running ones, kills the survivors, destroys every session,
-// and keeps the registry on failure. Calls are keyed by PICKFORGE_HOME, so
-// env copies are covered too.
+// time for the running ones, kills the survivors, destroys every session
+// within a time limit, and keeps the registry on failure. Calls are keyed by
+// PICKFORGE_HOME, so env copies are covered too. runCli records the first env
+// of each home, so every test gets this cleanup. The CLI starts helpers such
+// as adb in their own process groups, so killing its group misses them.
+// Helpers inherit the test's unique PICKFORGE_HOME, so a last sweep kills
+// every process that still carries it (#288).
 const CLI_DRAIN_MS = 20_000;
 const CLI_KILL_WAIT_MS = 2_000;
+// Above the 5 s `adb emu kill` plus the 30 s exit grace of an Android destroy.
+const CLI_DESTROY_MS = 45_000;
+const HOME_SWEEP_MS = 2_000;
 const closedHomes = new Set<string>();
 
 interface RunningCli {
@@ -60,11 +68,17 @@ function runCli(
       new Error(`CLI call after its test finished: ${args.join(" ")}`),
     );
   }
+  if (path.isAbsolute(home) && !cleanupEnvs.has(home)) cleanupEnvs.set(home, env);
   const { child, result } = startCli(args, env, cwd);
   const entry = { home, child, done: result.catch(() => {}) };
   runningCli.add(entry);
   void entry.done.then(() => runningCli.delete(entry));
   return result;
+}
+
+function isInside(child: string, parent: string): boolean {
+  const rel = path.relative(parent, child);
+  return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
 }
 
 function runningFor(home: string): RunningCli[] {
@@ -78,8 +92,11 @@ async function settleWithin(promise: Promise<unknown>, ms: number): Promise<void
   timer.abort();
 }
 
-/** Waits for the home's CLI calls, then SIGKILLs the process group of each survivor. */
-async function stopRunningCli(home: string, deadline: number): Promise<void> {
+/**
+ * Waits for the home's CLI calls, then SIGKILLs the process group of each
+ * survivor. Returns true when it had to kill a CLI call.
+ */
+async function stopRunningCli(home: string, deadline: number): Promise<boolean> {
   const running = runningFor(home);
   await settleWithin(Promise.all(running.map((entry) => entry.done)), deadline - Date.now());
   const survivors = runningFor(home);
@@ -87,14 +104,49 @@ async function stopRunningCli(home: string, deadline: number): Promise<void> {
     if (child.pid !== undefined) stopTestProcessGroup(child.pid, "SIGKILL");
   }
   await settleWithin(Promise.all(survivors.map((entry) => entry.done)), CLI_KILL_WAIT_MS);
+  return survivors.length > 0;
 }
 
-function spawnCli(
-  args: string[],
-  env: Record<string, string>,
-  cwd?: string,
-): Promise<CliResult> {
-  return startCli(args, env, cwd).result;
+/** Returns "pid cmdline" for each process, with the cmdline cut to 80 characters. */
+function describeProcesses(pids: number[], cmdlines: Map<number, string>): string {
+  return pids.map((pid) => `${pid} ${(cmdlines.get(pid) ?? "?").slice(0, 80)}`).join(", ");
+}
+
+/** Reads the cmdline of each process that carries `name=value`, before a sweep kills it. */
+function cmdlinesWithEnv(name: string, value: string): Map<number, string> {
+  const cmdlines = new Map<number, string>();
+  for (const { pid } of findProcessesWithEnv(name, value)) {
+    try {
+      const raw = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
+      cmdlines.set(pid, raw.split("\0").filter(Boolean).join(" "));
+    } catch {
+      // It exited after the scan.
+    }
+  }
+  return cmdlines;
+}
+
+/** Runs `session destroy --all`, and kills it if it overruns CLI_DESTROY_MS. */
+async function destroyAllSessions(env: Record<string, string>): Promise<CliResult> {
+  const { child, result } = startCli(["session", "destroy", "--all"], env);
+  let destroyed: CliResult | undefined;
+  const done = result.then(
+    (value) => {
+      destroyed = value;
+    },
+    (error: unknown) => {
+      destroyed = { code: null, stdout: "", stderr: String(error) };
+    },
+  );
+  await settleWithin(done, CLI_DESTROY_MS);
+  if (destroyed !== undefined) return destroyed;
+  if (child.pid !== undefined) stopTestProcessGroup(child.pid, "SIGKILL");
+  await settleWithin(done, CLI_KILL_WAIT_MS);
+  return {
+    code: null,
+    stdout: "",
+    stderr: `session destroy --all did not finish within ${CLI_DESTROY_MS} ms and was killed`,
+  };
 }
 
 function startCli(
@@ -336,7 +388,8 @@ function writeSyntheticRun(
 }
 
 let tmpDir: string;
-const cleanupEnvs: Array<Record<string, string>> = [];
+/** First env passed to runCli for each PICKFORGE_HOME, until afterEach claims it. */
+const cleanupEnvs = new Map<string, Record<string, string>>();
 
 beforeAll(async () => {
   await ensureCliBuilt();
@@ -346,35 +399,74 @@ beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-cmd-"));
 });
 
+/** Removes this test's homes from cleanupEnvs and closes them to new CLI calls. */
+function claimTestHomes(dir: string): Map<string, Record<string, string>> {
+  // makeEnv puts every home under tmpDir, so these homes are this test's.
+  const envsByHome = new Map<string, Record<string, string>>();
+  for (const [home, env] of cleanupEnvs) {
+    if (!isInside(home, dir)) continue;
+    cleanupEnvs.delete(home);
+    closedHomes.add(home);
+    envsByHome.set(home, env);
+  }
+  return envsByHome;
+}
+
+/** Kills processes left in one home and reports leaks. */
+async function sweepHome(home: string, strict: boolean): Promise<string[]> {
+  const failures: string[] = [];
+  const cmdlines = strict ? cmdlinesWithEnv("PICKFORGE_HOME", home) : new Map<number, string>();
+  const { killed, survivors } = await killProcessesWithEnv("PICKFORGE_HOME", home, HOME_SWEEP_MS);
+  if (strict && killed.length > 0) {
+    failures.push(
+      `${home}: processes outlived session destroy: ${describeProcesses(killed, cmdlines)}`,
+    );
+  }
+  if (survivors.length > 0) {
+    failures.push(`${home}: processes survived SIGKILL: ${survivors.join(", ")}`);
+  }
+  return failures;
+}
+
+/** Drains CLI calls, destroys sessions, and sweeps one home. Returns failures. */
+async function cleanupHome(
+  home: string,
+  env: Record<string, string>,
+  deadline: number,
+): Promise<string[]> {
+  const failures: string[] = [];
+  const forced = await stopRunningCli(home, deadline);
+  const destroyed = await destroyAllSessions(env);
+  if (destroyed.code !== 0) {
+    failures.push(`${home}: ${destroyed.stdout}${destroyed.stderr}`.trim());
+  }
+  if (path.isAbsolute(home)) {
+    // After a clean CLI run and destroy, no helper may outlive the session.
+    // A killed CLI or a failed destroy already explains any leftovers.
+    failures.push(...(await sweepHome(home, !forced && destroyed.code === 0)));
+  }
+  return failures;
+}
+
 afterEach(async () => {
   // Act only on this test's directory and homes. If this hook outlives its
   // timeout, the next test has already replaced tmpDir.
   const dir = tmpDir;
-  const envsByHome = new Map<string, Record<string, string>>();
-  for (const env of cleanupEnvs.splice(0)) {
-    const home = env.PICKFORGE_HOME ?? "";
-    closedHomes.add(home);
-    if (!envsByHome.has(home)) envsByHome.set(home, env);
-  }
+  const envsByHome = claimTestHomes(dir);
   const deadline = Date.now() + CLI_DRAIN_MS;
   const failures: string[] = [];
   for (const [home, env] of envsByHome) {
-    await stopRunningCli(home, deadline);
-    const destroyed = await spawnCli(["session", "destroy", "--all"], env).catch(
-      (error: unknown): CliResult => ({ code: null, stdout: "", stderr: String(error) }),
-    );
-    if (destroyed.code !== 0) {
-      failures.push(`${home}: ${destroyed.stdout}${destroyed.stderr}`.trim());
-    }
+    failures.push(...(await cleanupHome(home, env, deadline)));
   }
   if (failures.length > 0) {
-    // Keep the registry so the surviving Xvfb and VNC processes stay findable.
+    // Keep the registry so surviving session processes stay findable. VNC
+    // and the browser get a clean environment, so the sweep misses them.
     throw new Error(
       `Could not destroy test sessions; kept registry at ${dir}:\n${failures.join("\n")}`,
     );
   }
   fs.rmSync(dir, { recursive: true, force: true });
-}, 60_000);
+}, 90_000);
 
 describe("pickforge-lab session (desktop)", () => {
   it("describes immutable inherited-home consent without disabling takeover", async () => {
@@ -390,7 +482,6 @@ describe("pickforge-lab session (desktop)", () => {
     "creates, reports, and destroys a desktop session with inheritHome=%s",
     async (inheritHome) => {
       const env = makeEnv({ realPath: true });
-      cleanupEnvs.push(env);
 
       const created = await runCli(
         ["session", "create", "--type", "desktop", "--json", ...(inheritHome ? ["--inherit-home"] : [])],
@@ -478,7 +569,6 @@ describe("pickforge-lab session (desktop)", () => {
     "lists candidates when the default desktop session is ambiguous",
     async () => {
       const env = makeEnv({ realPath: true });
-      cleanupEnvs.push(env);
       const first = parseJson(
         await runCli(
           ["session", "create", "--type", "desktop", "--json"],
@@ -531,7 +621,6 @@ describe("pickforge-lab session (desktop)", () => {
         bootCompleted: "0",
       });
       const env = makeEnv({ realPath: true, extra: { ANDROID_HOME: sdk } });
-      cleanupEnvs.push(env);
 
       const result = await runCli(
         ["session", "create", "--type", "desktop+android", "--json"],
@@ -563,7 +652,6 @@ describe("pickforge-lab session (desktop)", () => {
         },
         extra: { DISPLAY: ":0" },
       });
-      cleanupEnvs.push(env);
       const created = parseJson(
         await runCli(
           ["session", "create", "--type", "desktop", "--json"],
@@ -641,7 +729,6 @@ describe("pickforge-lab session (desktop)", () => {
         },
         extra: { DISPLAY: ":0" },
       });
-      cleanupEnvs.push(env);
       const projectDir = makeProjectDir();
       const configPath = path.join(projectDir, ".picklab", "config.json");
       fs.mkdirSync(path.dirname(configPath), { recursive: true });
@@ -765,7 +852,6 @@ describe("pickforge-lab session (desktop)", () => {
         },
         extra: { DISPLAY: ":0" },
       });
-      cleanupEnvs.push(env);
       const result = await runCli(
         [
           "session",
@@ -1124,7 +1210,6 @@ describe("pickforge-lab desktop", () => {
         realPath: true,
         bins: { xdotool: "exit 1" },
       });
-      cleanupEnvs.push(env);
       const projectDir = makeProjectDir();
       await runCli(
         ["session", "create", "--type", "desktop", "--json"],
@@ -1180,7 +1265,6 @@ describe("pickforge-lab desktop", () => {
     "launches an app and drives click, type, and key input",
     async () => {
       const env = makeEnv({ realPath: true });
-      cleanupEnvs.push(env);
       await runCli(
         ["session", "create", "--type", "desktop", "--json"],
         env,
@@ -2039,7 +2123,6 @@ describe("pickforge-lab android session lifecycle (fake sdk)", () => {
     async () => {
       const { sdk, emulatorArgsLog } = makeFakeAndroidSdk();
       const env = makeEnv({ extra: { ANDROID_HOME: sdk } });
-      cleanupEnvs.push(env);
       const projectDir = makeProjectDir();
 
       const started = await runCli(
@@ -2116,7 +2199,6 @@ describe("pickforge-lab android session lifecycle (fake sdk)", () => {
     async () => {
       const { sdk } = makeFakeAndroidSdk();
       const env = makeEnv({ extra: { ANDROID_HOME: sdk } });
-      cleanupEnvs.push(env);
       const projectDir = makeProjectDir();
       const configPath = path.join(projectDir, ".picklab", "config.json");
       fs.mkdirSync(path.dirname(configPath), { recursive: true });

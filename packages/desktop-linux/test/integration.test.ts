@@ -247,8 +247,6 @@ function writeFakeXvfb(binDir: string): void {
       "const createdSocketDir = !fs.existsSync(socketDir);",
       "fs.mkdirSync(socketDir, { recursive: true });",
       'fs.writeFileSync(lock, `${process.pid}\\n`);',
-      "const server = net.createServer(() => {});",
-      "server.listen(socket);",
       "const cleanup = () => {",
       "  fs.rmSync(lock, { force: true });",
       "  fs.rmSync(socket, { force: true });",
@@ -259,6 +257,10 @@ function writeFakeXvfb(binDir: string): void {
       'process.on("SIGTERM", () => { cleanup(); process.exit(0); });',
       'process.on("SIGINT", () => { cleanup(); process.exit(0); });',
       'process.on("exit", cleanup);',
+      // Readiness needs the socket, so create it only after the handlers
+      // exist. A stop signal then always removes the lock and socket.
+      "const server = net.createServer(() => {});",
+      "server.listen(socket);",
       "setInterval(() => {}, 1000);",
     ].join("\n"),
   );
