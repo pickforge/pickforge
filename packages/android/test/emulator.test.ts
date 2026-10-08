@@ -3,7 +3,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runCommand, type EnvLike } from "@pickforge/lab-core";
 import {
   AVD_SHARING_POLICY,
@@ -21,8 +21,42 @@ import {
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-android-emu-"));
 
-afterAll(() => {
+// The console ports below are fixed and host-global. The reservation registry
+// lives in this run's own temp home, so it cannot see another run, and its TCP
+// probe briefly binds every port it checks. Two concurrent runs of this file
+// therefore take each other's ports (#280). One abstract Unix socket, shared by
+// every process on the host, makes a second run wait until the first is done.
+// The kernel frees it when its owner exits, so a crashed run leaves nothing.
+const PORT_LOCK = "\0pickforge-test-android-emulator-ports";
+const PORT_LOCK_WAIT_MS = 120_000;
+let portLock: net.Server | undefined;
+
+function tryLockPorts(): Promise<net.Server | undefined> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer((socket) => socket.destroy());
+    server.once("error", (error: NodeJS.ErrnoException) => {
+      // Only a held lock means "wait"; any other failure is a real error.
+      if (error.code === "EADDRINUSE") resolve(undefined);
+      else reject(new Error(`cannot take the emulator test port lock: ${error.code ?? error.message}`));
+    });
+    server.listen({ path: PORT_LOCK }, () => resolve(server));
+  });
+}
+
+beforeAll(async () => {
+  const deadline = Date.now() + PORT_LOCK_WAIT_MS;
+  while ((portLock = await tryLockPorts()) === undefined) {
+    if (Date.now() > deadline) {
+      throw new Error("another run held the emulator test ports for too long");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}, PORT_LOCK_WAIT_MS + 5_000);
+
+afterAll(async () => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
+  const lock = portLock;
+  if (lock !== undefined) await new Promise((resolve) => lock.close(resolve));
 });
 
 function writeExecutable(filePath: string, content: string): void {
@@ -128,6 +162,43 @@ async function startFailure(
     return error as EmulatorStartError;
   }
   throw new Error("expected startEmulator to reject");
+}
+
+/** Like startFailure, but stops the emulator if the start wrongly succeeds. */
+async function startFailureStopping(
+  promise: Promise<EmulatorHandle>,
+  sdk: string,
+  registryEnv: EnvLike,
+): Promise<EmulatorStartError> {
+  return startFailure(
+    promise.then(async (handle) => {
+      await stop(handle, sdk, registryEnv);
+      return handle;
+    }),
+  );
+}
+
+/**
+ * Wait until /proc shows the child's new command line. The spawn event can
+ * fire while exec is still setting up the new image, and until then the
+ * kernel reports an empty cmdline (#294). A lock that names such a pid would
+ * read as stale.
+ */
+async function waitForCmdline(pid: number, pattern: RegExp, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let cmdline = "";
+    try {
+      cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, "latin1");
+    } catch {
+      // the process is not visible yet or has gone; keep polling until the deadline
+    }
+    if (pattern.test(cmdline)) return;
+    if (Date.now() > deadline) {
+      throw new Error(`pid ${pid} never showed ${pattern} in /proc cmdline (last: ${JSON.stringify(cmdline)})`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 /**
@@ -454,9 +525,10 @@ describe("AVD pre-flight checks", () => {
     });
     await new Promise((resolve) => holder.once("spawn", resolve));
     const lockPath = avdLockPath("pickforge-avd", toolEnv);
-    fs.writeFileSync(lockPath, `${holder.pid}\0`);
     try {
-      const error = await startFailure(
+      await waitForCmdline(holder.pid as number, /emulator/);
+      fs.writeFileSync(lockPath, `${holder.pid}\0`);
+      const error = await startFailureStopping(
         startEmulator({
           avdName: "pickforge-avd",
           sdk,
@@ -464,6 +536,8 @@ describe("AVD pre-flight checks", () => {
           env: toolEnv,
           registryEnv,
         }),
+        sdk,
+        registryEnv,
       );
       expect(error.kind).toBe("avd-in-use");
       expect(error.message).toContain(`writable emulator pid ${holder.pid}`);
@@ -474,7 +548,7 @@ describe("AVD pre-flight checks", () => {
       expect(fs.existsSync(marker)).toBe(false);
 
       // Pickforge refuses a read-only instance next to a writable one too.
-      const readOnlyError = await startFailure(
+      const readOnlyError = await startFailureStopping(
         startEmulator({
           avdName: "pickforge-avd",
           sdk,
@@ -483,6 +557,8 @@ describe("AVD pre-flight checks", () => {
           env: toolEnv,
           registryEnv,
         }),
+        sdk,
+        registryEnv,
       );
       expect(readOnlyError.kind).toBe("avd-in-use");
       expect(readOnlyError.message).toContain(AVD_SHARING_POLICY);
