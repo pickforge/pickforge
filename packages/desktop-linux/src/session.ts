@@ -468,8 +468,8 @@ export async function createDesktopSession(
   if (wantsVnc) requireVncBinary(opts);
   await reapDeadRunningSessions(registryEnv, {
     desktop: {
-      teardown: (id, finalize) =>
-        teardownDesktopSession(id, registryEnv, finalize),
+      teardown: (id, finalize, options) =>
+        teardownDesktopSession(id, registryEnv, finalize, options),
     },
   });
   const record = await createSession(
@@ -1065,57 +1065,59 @@ export async function teardownDesktopSession(
     throw new Error(`Desktop session not found: ${id}`);
   }
   await withSessionVncLock(id, registryEnv, async () => {
-    await stopSessionAgentInput(id, registryEnv, options.inputDrainTimeoutMs, options.signal);
-    const record = await getSession(id, registryEnv);
-    if (record === undefined) {
-      throw new Error(`Desktop session not found: ${id}`);
-    }
-    options.signal?.throwIfAborted();
-    const desktop = record.desktop;
-    const failures: Error[] = [];
-    // Apps first: they are clients of the display, and killing the display out
-    // from under them would leave the escape this cleanup exists to catch.
-    const containedGone = await stopSessionContainment(desktop, failures);
-    failures.push(...await stopSessionViewer(id, desktop, registryEnv));
-    const vncGone = await stopSessionVnc(id, desktop, failures);
-    const xvfbGone = await stopSessionXvfb(desktop, failures);
-    await removeSessionRuntime(
-      id,
-      registryEnv,
-      desktop,
-      containedGone && vncGone && xvfbGone,
-      failures,
-    );
-
-    if (failures.length > 0) {
-      await updateSession(
-        id,
-        {
-          status: "error",
-          meta: {
-            ...record.meta,
-            [REAPER_CLEANUP_PENDING_META_KEY]: true,
-          },
-        },
-        registryEnv,
-      ).catch(() => {});
-      throw new AggregateError(
-        failures,
-        `Failed to stop ${failures.length} process(es) of desktop session ${id}: ` +
-          failures.map((failure) => failure.message).join("; "),
-      );
-    }
     try {
-      await retainSessionLogs(record, registryEnv);
+      await stopSessionAgentInput(id, registryEnv, options.inputDrainTimeoutMs, options.signal);
+      const record = await getSession(id, registryEnv);
+      if (record === undefined) {
+        throw new Error(`Desktop session not found: ${id}`);
+      }
+      options.signal?.throwIfAborted();
+      const desktop = record.desktop;
+      const failures: Error[] = [];
+      // Apps first: they are clients of the display, and killing the display out
+      // from under them would leave the escape this cleanup exists to catch.
+      const containedGone = await stopSessionContainment(desktop, failures);
+      failures.push(...await stopSessionViewer(id, desktop, registryEnv));
+      const vncGone = await stopSessionVnc(id, desktop, failures);
+      const xvfbGone = await stopSessionXvfb(desktop, failures);
+      await removeSessionRuntime(
+        id,
+        registryEnv,
+        desktop,
+        containedGone && vncGone && xvfbGone,
+        failures,
+      );
+
+      if (failures.length > 0) {
+        await updateSession(
+          id,
+          {
+            status: "error",
+            meta: {
+              ...record.meta,
+              [REAPER_CLEANUP_PENDING_META_KEY]: true,
+            },
+          },
+          registryEnv,
+        ).catch(() => {});
+        throw new AggregateError(
+          failures,
+          `Failed to stop ${failures.length} process(es) of desktop session ${id}: ` +
+            failures.map((failure) => failure.message).join("; "),
+        );
+      }
+      try {
+        await retainSessionLogs({ ...record, status: "stopped" }, registryEnv);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`Failed to retain logs of session ${record.id}: ${message}`, { cause: error });
+      }
+      await finalize();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`Failed to retain logs of session ${record.id}: ${message}`, { cause: error });
+      await markSessionCleanupPendingIfInputClosed(id, registryEnv).catch(() => {});
+      throw error;
     }
-    await finalize();
-  }, options).catch(async (error: unknown) => {
-    await markSessionCleanupPendingIfInputClosed(id, registryEnv).catch(() => {});
-    throw error;
-  });
+  }, options);
 }
 
 export async function destroyDesktopSession(

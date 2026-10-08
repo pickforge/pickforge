@@ -678,8 +678,8 @@ export async function createBrowserSession(
 
   await reapDeadRunningSessions(registryEnv, {
     browser: {
-      teardown: (id, finalize) =>
-        teardownBrowserSession(id, registryEnv, finalize),
+      teardown: (id, finalize, options) =>
+        teardownBrowserSession(id, registryEnv, finalize, options),
     },
   });
   assertNotAborted(opts.signal);
@@ -828,84 +828,86 @@ export async function teardownBrowserSession(
   await requireBrowserSession(id, registryEnv);
 
   await withSessionVncLock(id, registryEnv, async () => {
-    await stopSessionAgentInput(id, registryEnv, options.inputDrainTimeoutMs, options.signal);
-    const record = await requireBrowserSession(id, registryEnv);
-
-    options.signal?.throwIfAborted();
-    const failures: Error[] = [];
-    const browser = record.browser;
-    const { gone, error: groupError } = await stopBrowserGroup(
-      browser === undefined
-        ? undefined
-        : {
-            pid: browser.browserPid,
-            startTicks: browser.browserStartTimeTicks,
-          },
-    );
-    if (groupError !== undefined) {
-      failures.push(groupError);
-    } else if (!gone) {
-      failures.push(
-        new Error(
-          `Chrome process group (pid ${browser?.browserPid ?? "unknown"}) could not be verified as gone`,
-        ),
-      );
-    }
-
-    failures.push(...await stopSessionViewer(id, record.desktop, registryEnv));
-    await stopBrowserVnc(record, gone, failures);
-    await stopBrowserDisplay(record, gone, failures);
-
-    const sessionDir = browserSessionLogDir(id, registryEnv);
-    const layout = browserRuntimeLayout(sessionDir);
-    const profileDir = browser?.profileDir ?? layout.profileDir;
-    // Confinement guard: never delete a profile path a tampered record points
-    // outside the session directory.
-    const confined = await isProfileConfined(sessionDir, profileDir);
-    if (!confined) {
-      failures.push(
-        new Error(
-          `Refusing to delete profile outside the session directory: ${profileDir}`,
-        ),
-      );
-    } else if (gone) {
-      failures.push(...(await removeRuntimeData(layout, profileDir)));
-    } else {
-      failures.push(
-        new Error(
-          `Refusing to delete profile for ${id}: Chrome process group is still alive`,
-        ),
-      );
-    }
-
-    if (failures.length > 0) {
-      await updateSession(
-        id,
-        {
-          status: "error",
-          meta: {
-            ...record.meta,
-            [REAPER_CLEANUP_PENDING_META_KEY]: true,
-          },
-        },
-        registryEnv,
-      ).catch(() => {});
-      throw new AggregateError(
-        failures,
-        `Failed to fully destroy browser session ${id}`,
-      );
-    }
     try {
-      await retainSessionLogs(record, registryEnv);
+      await stopSessionAgentInput(id, registryEnv, options.inputDrainTimeoutMs, options.signal);
+      const record = await requireBrowserSession(id, registryEnv);
+
+      options.signal?.throwIfAborted();
+      const failures: Error[] = [];
+      const browser = record.browser;
+      const { gone, error: groupError } = await stopBrowserGroup(
+        browser === undefined
+          ? undefined
+          : {
+              pid: browser.browserPid,
+              startTicks: browser.browserStartTimeTicks,
+            },
+      );
+      if (groupError !== undefined) {
+        failures.push(groupError);
+      } else if (!gone) {
+        failures.push(
+          new Error(
+            `Chrome process group (pid ${browser?.browserPid ?? "unknown"}) could not be verified as gone`,
+          ),
+        );
+      }
+
+      failures.push(...await stopSessionViewer(id, record.desktop, registryEnv));
+      await stopBrowserVnc(record, gone, failures);
+      await stopBrowserDisplay(record, gone, failures);
+
+      const sessionDir = browserSessionLogDir(id, registryEnv);
+      const layout = browserRuntimeLayout(sessionDir);
+      const profileDir = browser?.profileDir ?? layout.profileDir;
+      // Confinement guard: never delete a profile path a tampered record points
+      // outside the session directory.
+      const confined = await isProfileConfined(sessionDir, profileDir);
+      if (!confined) {
+        failures.push(
+          new Error(
+            `Refusing to delete profile outside the session directory: ${profileDir}`,
+          ),
+        );
+      } else if (gone) {
+        failures.push(...(await removeRuntimeData(layout, profileDir)));
+      } else {
+        failures.push(
+          new Error(
+            `Refusing to delete profile for ${id}: Chrome process group is still alive`,
+          ),
+        );
+      }
+
+      if (failures.length > 0) {
+        await updateSession(
+          id,
+          {
+            status: "error",
+            meta: {
+              ...record.meta,
+              [REAPER_CLEANUP_PENDING_META_KEY]: true,
+            },
+          },
+          registryEnv,
+        ).catch(() => {});
+        throw new AggregateError(
+          failures,
+          `Failed to fully destroy browser session ${id}`,
+        );
+      }
+      try {
+        await retainSessionLogs({ ...record, status: "stopped" }, registryEnv);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`Failed to retain logs of session ${record.id}: ${message}`, { cause: error });
+      }
+      await finalize();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`Failed to retain logs of session ${record.id}: ${message}`, { cause: error });
+      await markSessionCleanupPendingIfInputClosed(id, registryEnv).catch(() => {});
+      throw error;
     }
-    await finalize();
-  }, options).catch(async (error: unknown) => {
-    await markSessionCleanupPendingIfInputClosed(id, registryEnv).catch(() => {});
-    throw error;
-  });
+  }, options);
 }
 
 export async function destroyBrowserSession(

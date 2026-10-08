@@ -70,8 +70,8 @@ function isPositivePid(pid: number | undefined): pid is number {
 function reapBrowserSessions() {
   return reapDeadRunningSessions(registryEnv, {
     browser: {
-      teardown: (id, finalize) =>
-        teardownBrowserSession(id, registryEnv, finalize),
+      teardown: (id, finalize, options) =>
+        teardownBrowserSession(id, registryEnv, finalize, options),
     },
   });
 }

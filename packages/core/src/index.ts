@@ -275,6 +275,7 @@ export {
   type LocalSessionStatusRuntime,
   type LocalSessionSummary,
   type LocalSessionTeardownFinalizer,
+  type LocalSessionTeardownOptions,
   type LocalSessionTeardownRuntime,
 } from "./session-lifecycle.js";
 
@@ -305,6 +306,7 @@ export {
   withSessionStartupPermit,
   stopSessionAgentInput,
   markSessionCleanupPendingIfInputClosed,
+  isSessionInputClosed,
   SESSION_DESTROY_DRAIN_TIMEOUT_MS,
   SessionInputDrainTimeoutError,
   type AcquireHumanLeaseOptions,

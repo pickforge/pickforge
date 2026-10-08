@@ -149,12 +149,12 @@ function destroyRuntime(
 function reaperRuntime(ctx: ServerContext): LocalSessionTeardownRuntime {
   return {
     desktop: {
-      teardown: (id, finalize) =>
-        teardownDesktopSession(id, ctx.env, finalize),
+      teardown: (id, finalize, options) =>
+        teardownDesktopSession(id, ctx.env, finalize, options),
     },
     browser: {
-      teardown: (id, finalize) =>
-        teardownBrowserSession(id, ctx.env, finalize),
+      teardown: (id, finalize, options) =>
+        teardownBrowserSession(id, ctx.env, finalize, options),
     },
     android: {
       teardown: (id, finalize) =>

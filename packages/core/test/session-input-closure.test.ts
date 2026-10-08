@@ -7,7 +7,7 @@ import {
   acquireAgentPermit, acquireHumanLease, createSession, destroySessionRecord,
   getSession, getTakeoverStatus, pruneSessionLogs, readHumanLease,
   releaseAgentPermit, releaseHumanLease, retainSessionLogs, sessionDataDir, sessionInputClosedName,
-  stopSessionAgentInput, updateSession, withAgentPermit,
+  stopSessionAgentInput, updateSession, withAgentPermit, reapDeadRunningSessions,
 } from "../src/index.js";
 import { DirHandle } from "../src/dir-handle.js";
 
@@ -211,7 +211,8 @@ it("refuses teardown if the permits directory is replaced while draining", async
   await releaseAgentPermit(permit);
   await refused;
   expect(fs.readFileSync(path.join(permits, "replacement.json"), "utf8")).toBe("replacement");
-  expect(await getSession(record.id, env)).toMatchObject({ status: "error", meta: { reaperCleanupPending: true } });
+  expect(await getSession(record.id, env)).toEqual(record);
+  expect(fs.existsSync(marker(record.id))).toBe(true);
 });
 
 it("keeps cleanup pending on drain timeout and permits a retry", async () => {
@@ -221,7 +222,7 @@ it("keeps cleanup pending on drain timeout and permits a retry", async () => {
     name: "SessionInputDrainTimeoutError", pendingPermitIds: [permit.permitId],
     message: expect.stringContaining(permit.permitId),
   });
-  expect(await getSession(record.id, env)).toMatchObject({ status: "error", desktop: record.desktop, meta: { reaperCleanupPending: true } });
+  expect(await getSession(record.id, env)).toMatchObject({ status: "running", desktop: record.desktop });
   expect(fs.existsSync(marker(record.id))).toBe(true);
   await expect(acquireAgentPermit(record.id, env)).rejects.toThrow(AgentPermitUnavailableError);
   await expect(acquireHumanLease(record.id, env)).rejects.toThrow("input is closed");
@@ -342,7 +343,7 @@ it("refuses a staged permit when teardown closes input before linking", async ()
   expect(fs.readdirSync(path.join(sessionDataDir(record.id, env), "permits"))).toEqual([]);
 });
 
-it("persists cleanup pending before a held drain can be interrupted", async () => {
+it("keeps interrupted cleanup eligible through closure without rewriting ownership", async () => {
   const record = await running();
   const permit = await acquireAgentPermit(record.id, env);
   const reached = barrier();
@@ -358,9 +359,23 @@ it("persists cleanup pending before a held drain can be interrupted", async () =
   const stopping = stopSessionAgentInput(record.id, env);
   await reached.promise;
   expect(fs.existsSync(marker(record.id))).toBe(true);
-  expect(await getSession(record.id, env)).toMatchObject({ status: "error", meta: { reaperCleanupPending: true } });
+  expect(await getSession(record.id, env)).toEqual(record);
   expect(fs.existsSync(permit.path)).toBe(true);
   await releaseAgentPermit(permit);
   resume.resolve();
   await stopping;
+});
+
+// A killed destroy leaves only this marker: no catch-path record write runs.
+it.each(["starting", "running"] as const)("reaps an interrupted %s session from its closure marker", async (status) => {
+  const record = await createSession({ type: "desktop", status, projectDir: home }, env);
+  fs.writeFileSync(marker(record.id), "");
+  const teardown = vi.fn(async (_id, finalize) => {
+    expect(await getSession(record.id, env)).toEqual(record);
+    await finalize();
+  });
+  const alive = vi.fn(() => true);
+  expect((await reapDeadRunningSessions(env, { desktop: { teardown } }, alive)).map(({ id }) => id)).toEqual([record.id]);
+  expect(alive).not.toHaveBeenCalled();
+  expect(await getSession(record.id, env)).toBeUndefined();
 });

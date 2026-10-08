@@ -1,4 +1,4 @@
-import { markSessionCleanupPendingIfInputClosed } from "./takeover.js";
+import { isSessionInputClosed, markSessionCleanupPendingIfInputClosed } from "./takeover.js";
 import type { EnvLike } from "./paths.js";
 import {
   REAPER_CLEANUP_PENDING_META_KEY,
@@ -6,11 +6,12 @@ import {
   desktopHomePolicy,
   isSessionProcessAlive,
   listSessions,
-  updateSession,
   type SessionLivenessCheck,
   type SessionRecord,
   type SessionType,
 } from "./session.js";
+
+const REAPER_TEARDOWN_TIMEOUT_MS = 5_000;
 
 export type LocalSessionRecipe = SessionType;
 
@@ -111,23 +112,30 @@ export interface LocalSessionDestroyRuntime {
 
 export type LocalSessionTeardownFinalizer = () => Promise<void>;
 
+export interface LocalSessionTeardownOptions extends LocalSessionDestroyOptions {
+  inputDrainTimeoutMs?: number;
+}
+
 export interface LocalSessionTeardownRuntime {
   desktop?: {
     teardown: (
       id: string,
       finalize: LocalSessionTeardownFinalizer,
+      options?: LocalSessionTeardownOptions,
     ) => Promise<void>;
   };
   android?: {
     teardown: (
       id: string,
       finalize: LocalSessionTeardownFinalizer,
+      options?: LocalSessionTeardownOptions,
     ) => Promise<void>;
   };
   browser?: {
     teardown: (
       id: string,
       finalize: LocalSessionTeardownFinalizer,
+      options?: LocalSessionTeardownOptions,
     ) => Promise<void>;
   };
 }
@@ -340,17 +348,18 @@ export async function teardownLocalSession(
   record: SessionRecord,
   runtime: LocalSessionTeardownRuntime,
   finalize: LocalSessionTeardownFinalizer,
+  options?: LocalSessionTeardownOptions,
 ): Promise<void> {
   if (record.type === "desktop" && runtime.desktop !== undefined) {
-    await runtime.desktop.teardown(record.id, finalize);
+    await runtime.desktop.teardown(record.id, finalize, options);
     return;
   }
   if (record.type === "android" && runtime.android !== undefined) {
-    await runtime.android.teardown(record.id, finalize);
+    await runtime.android.teardown(record.id, finalize, options);
     return;
   }
   if (record.type === "browser" && runtime.browser !== undefined) {
-    await runtime.browser.teardown(record.id, finalize);
+    await runtime.browser.teardown(record.id, finalize, options);
     return;
   }
   if (
@@ -360,7 +369,7 @@ export async function teardownLocalSession(
   ) {
     // The desktop drain must precede either leg's shared-directory retention.
     const android = runtime.android;
-    await runtime.desktop.teardown(record.id, () => android.teardown(record.id, finalize));
+    await runtime.desktop.teardown(record.id, () => android.teardown(record.id, finalize, options), options);
     return;
   }
   throw new Error(
@@ -375,29 +384,26 @@ export async function reapDeadRunningSessions(
 ): Promise<SessionRecord[]> {
   const reaped: SessionRecord[] = [];
   for (const record of await listSessions(env)) {
-    const retryPending =
+    const retryPending = await isSessionInputClosed(record.id, env) || (
       record.status === "error" &&
-      record.meta?.[REAPER_CLEANUP_PENDING_META_KEY] === true;
+      record.meta?.[REAPER_CLEANUP_PENDING_META_KEY] === true
+    );
     if (record.status !== "running" && !retryPending) continue;
     if (!canTeardownLocalSession(record, runtime)) continue;
     if (!retryPending && (await isAlive(record))) continue;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REAPER_TEARDOWN_TIMEOUT_MS);
     try {
       await teardownLocalSession(record, runtime, () =>
         destroySessionRecord(record.id, env, "failed"),
+        { signal: controller.signal, inputDrainTimeoutMs: REAPER_TEARDOWN_TIMEOUT_MS },
       );
     } catch {
-      await updateSession(
-        record.id,
-        {
-          status: "error",
-          meta: {
-            ...record.meta,
-            [REAPER_CLEANUP_PENDING_META_KEY]: true,
-          },
-        },
-        env,
-      ).catch(() => {});
+      // Typed teardown owns failure records. Closure keeps interrupted work
+      // retryable; a cancelled lock wait must not rewrite its live holder.
       continue;
+    } finally {
+      clearTimeout(timer);
     }
     reaped.push(record);
   }

@@ -72,11 +72,11 @@ it("a drain timeout preserves Chrome and the display for a reaper retry", async 
   const shortDrain = vi.spyOn(core, "stopSessionAgentInput").mockImplementation((id, registry) => stop(id, registry, 0));
   await expect(destroyBrowserSession(record.id, env)).rejects.toThrow(core.SessionInputDrainTimeoutError);
   expect(core.stopProcessGroupVerified).not.toHaveBeenCalled();
-  expect(await core.getSession(record.id, env)).toMatchObject({ status: "error", meta: { reaperCleanupPending: true }, desktop: record.desktop });
+  expect(await core.getSession(record.id, env)).toMatchObject({ status: "running", desktop: record.desktop });
   await core.releaseAgentPermit(permit);
   shortDrain.mockRestore();
   const reaped = await core.reapDeadRunningSessions(env, { browser: {
-    teardown: (id, finalize) => teardownBrowserSession(id, env, finalize),
+    teardown: (id, finalize, options) => teardownBrowserSession(id, env, finalize, options),
   } }, () => true);
   expect(reaped.map(({ id }) => id)).toEqual([record.id]);
 });
@@ -138,6 +138,16 @@ it("browser destroy forwards its full budget and cancellation, preserving resour
   await cancelled;
   expect(drain).toHaveBeenCalledWith(record.id, env, core.SESSION_DESTROY_DRAIN_TIMEOUT_MS, controller.signal);
   expect(core.stopProcessGroupVerified).not.toHaveBeenCalled();
-  expect(await core.getSession(record.id, env)).toMatchObject({ status: "error", meta: { reaperCleanupPending: true }, desktop: record.desktop, browser: record.browser });
+  expect(await core.getSession(record.id, env)).toMatchObject({ status: "running", desktop: record.desktop, browser: record.browser });
   await core.releaseAgentPermit(permit);
+});
+
+it.each(["running", "error"] as const)("clean browser destroy retains logs without a failure object, status=%s", async (status) => {
+  const record = await running();
+  if (status === "error") await core.updateSession(record.id, { status, meta: { reaperCleanupPending: true } }, env);
+  await core.updateSession(record.id, { browser: { ...record.browser!, profileDir: path.join(core.sessionDataDir(record.id, env), "profile") } }, env);
+  await destroyBrowserSession(record.id, env);
+  expect(JSON.parse(fs.readFileSync(path.join(core.sessionDataDir(record.id, env), "stopped.json"), "utf8"))).toEqual({
+    id: record.id, stoppedAt: expect.any(String),
+  });
 });

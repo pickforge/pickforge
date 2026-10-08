@@ -62,11 +62,11 @@ it("a timeout keeps the display and lets the reaper retry", async () => {
   const shortDrain = vi.spyOn(core, "stopSessionAgentInput").mockImplementation((id, registry) => stop(id, registry, 0));
   await expect(destroyDesktopSession(record.id, env)).rejects.toThrow(core.SessionInputDrainTimeoutError);
   expect(core.stopProcessGroupVerified).not.toHaveBeenCalled();
-  expect(await core.getSession(record.id, env)).toMatchObject({ status: "error", desktop: record.desktop, meta: { reaperCleanupPending: true } });
+  expect(await core.getSession(record.id, env)).toMatchObject({ status: "running", desktop: record.desktop });
   await core.releaseAgentPermit(permit);
   shortDrain.mockRestore();
   const reaped = await core.reapDeadRunningSessions(env, { desktop: {
-    teardown: (id, finalize) => teardownDesktopSession(id, env, finalize),
+    teardown: (id, finalize, options) => teardownDesktopSession(id, env, finalize, options),
   } }, () => true);
   expect(reaped.map(({ id }) => id)).toEqual([record.id]);
   expect(await core.getSession(record.id, env)).toBeUndefined();
@@ -183,10 +183,11 @@ it("bulk cancellation after closure preserves the display and marks a reaper ret
   expect(drain).toHaveBeenCalledTimes(1);
   expect(core.stopProcessGroupVerified).not.toHaveBeenCalled();
   expect(fs.existsSync(permit.path)).toBe(true);
-  expect(await core.getSession(record.id, env)).toMatchObject({ status: "error", meta: { reaperCleanupPending: true } });
+  expect(await core.getSession(record.id, env)).toMatchObject({ status: "running" });
+  expect(await core.isSessionInputClosed(record.id, env)).toBe(true);
   await core.releaseAgentPermit(permit);
   expect((await core.reapDeadRunningSessions(env, { desktop: {
-    teardown: (id, finalize) => teardownDesktopSession(id, env, finalize),
+    teardown: (id, finalize, options) => teardownDesktopSession(id, env, finalize, options),
   } }, () => true)).map(({ id }) => id)).toEqual([record.id]);
 });
 
@@ -250,4 +251,50 @@ it("re-reads Xvfb ownership published while an inherited startup permit drains",
   await destroying;
   expect(core.stopProcessGroupVerified).toHaveBeenCalledWith({ pid: xvfb.pid, startTicks: xvfb.startTimeTicks });
   expect(await core.getSession(record!.id, env)).toBeUndefined();
+});
+
+it.each(["running", "error"] as const)("clean destroy retains logs without a failure object, status=%s", async (status) => {
+  const record = await running();
+  if (status === "error") await core.updateSession(record.id, { status, meta: { reaperCleanupPending: true } }, env);
+  await destroyDesktopSession(record.id, env);
+  expect(JSON.parse(fs.readFileSync(path.join(core.sessionDataDir(record.id, env), "stopped.json"), "utf8"))).toEqual({
+    id: record.id, stoppedAt: expect.any(String),
+  });
+});
+
+it("a reaper bounds its lock wait during live explicit destroy without rewriting the record", async () => {
+  const record = await running();
+  const permit = await core.acquireAgentPermit(record.id, env);
+  const listed = barrier();
+  const read = DirHandle.prototype.readEntryNames;
+  vi.spyOn(DirHandle.prototype, "readEntryNames").mockImplementation(async function (this: DirHandle) {
+    const names = await read.call(this);
+    if (this.realDir.endsWith("/permits")) listed.resolve();
+    return names;
+  });
+  const destroying = destroyDesktopSession(record.id, env);
+  await listed.promise;
+  const waiting = barrier();
+  const readOwner = fs.promises.readFile;
+  vi.spyOn(fs.promises, "readFile").mockImplementation(async (...args) => {
+    const raw = await readOwner(...args);
+    if (String(args[0]).endsWith(".ensure-vnc.lock")) waiting.resolve();
+    return raw;
+  });
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    const reaping = core.reapDeadRunningSessions(env, { desktop: {
+      teardown: (id, finalize, options) => teardownDesktopSession(id, env, finalize, options),
+    } }, () => true);
+    await waiting.promise;
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(await reaping).toEqual([]);
+    expect(await core.getSession(record.id, env)).toEqual(record);
+    expect(await core.isSessionInputClosed(record.id, env)).toBe(true);
+    expect(core.stopProcessGroupVerified).not.toHaveBeenCalled();
+  } finally {
+    vi.useRealTimers();
+    await core.releaseAgentPermit(permit);
+    await destroying;
+  }
 });

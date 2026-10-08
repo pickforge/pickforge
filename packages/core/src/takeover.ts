@@ -721,6 +721,12 @@ async function inputIsClosed(id: string, root: string): Promise<boolean> {
   }
 }
 
+/** Closure also makes an interrupted teardown eligible for a reaper retry. */
+export async function isSessionInputClosed(id: string, env: EnvLike): Promise<boolean> {
+  assertSafeSessionId(id);
+  return inputIsClosed(id, path.dirname(sessionDataDir(id, env)));
+}
+
 async function assertInputNotClosed(id: string, root: string): Promise<void> {
   if (await inputIsClosed(id, root)) throw new Error(`Session input is closed for ${id}`);
 }
@@ -732,6 +738,16 @@ async function assertInputOpen(id: string, env: EnvLike, root: string, status: "
 }
 
 async function markSessionCleanupPending(id: string, env: EnvLike): Promise<void> {
+  // Startup can still publish ownership while its permit is held. In that
+  // case closure alone records retry eligibility; never overwrite its record.
+  try {
+    await withSessionDirectory(id, env, false, async (_dir, permits, verify) => {
+      if (permits !== undefined) await drainAgentPermits(permits, 0);
+      await verify();
+    });
+  } catch {
+    return;
+  }
   const record = await getSession(id, env).catch(() => undefined);
   if (record === undefined) return;
   await updateSession(id, {
@@ -884,8 +900,6 @@ export async function stopSessionAgentInput(
     // Closure precedes the listing. Only permits published before closure can
     // pass their re-check, and identity verification pins the same directory.
     await closeSessionInput(id, env);
-    // Persist retry eligibility before a process can exit during the drain.
-    await markSessionCleanupPending(id, env);
     await withSessionDirectory(id, env, false, async (_dir, permits, verify) => {
       if (permits !== undefined) await drainAgentPermits(permits, timeoutMs, signal);
       signal?.throwIfAborted();
