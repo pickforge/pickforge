@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { isEvidenceTruncated, withAgentPermit } from "@pickforge/lab-core";
+import { HumanControlActiveError, isEvidenceTruncated, withAgentPermit } from "@pickforge/lab-core";
 import type { EvidenceInputState, RunHandle, SessionType } from "@pickforge/lab-core";
 import { setRunCaptureGeometry } from "@pickforge/lab-core";
 import {
@@ -426,6 +426,15 @@ async function focusEvidence(display: string, ctx: ServerContext): Promise<Evide
   }
 }
 
+/**
+ * True when the input failed before anything was sent: a text preparation
+ * failure, or an agent permit refused because human control is active.
+ * withAgentPermit throws HumanControlActiveError before it runs the input.
+ */
+function noInputSent(error: unknown): boolean {
+  return error instanceof DesktopTextPreparationError || error instanceof HumanControlActiveError;
+}
+
 async function trackInput(
   record: EvidenceRecordMeta,
   input: () => Promise<ToolReport>,
@@ -435,11 +444,35 @@ async function trackInput(
   try {
     result = await input();
   } catch (error) {
-    if (error instanceof DesktopTextPreparationError) record.inputState = "not-attempted";
+    if (noInputSent(error)) record.inputState = "not-attempted";
     throw error;
   }
   if ((result.errors?.length ?? 0) === 0) record.inputState = "completed";
   return result;
+}
+
+/**
+ * Uncaptured input with evidence. A failed input still reports the inputState
+ * that trackInput wrote to the evidence record, with the error text unchanged.
+ */
+async function withTrackedInput(
+  ctx: ServerContext,
+  options: McpEvidenceOptions<ToolReport>,
+  input: (evidence: EvidenceOperationContext) => Promise<ToolReport>,
+): Promise<ToolReport> {
+  let record: EvidenceRecordMeta | undefined;
+  try {
+    return await withMcpEvidence(ctx, { ...options, input: true }, (evidence) => {
+      record = evidence.record;
+      return trackInput(evidence.record, () => input(evidence));
+    });
+  } catch (error) {
+    if (record?.inputState === undefined) throw error;
+    return {
+      data: { inputState: record.inputState },
+      errors: [error instanceof Error ? error.message : String(error)],
+    };
+  }
 }
 
 async function withInputCapture(
@@ -450,7 +483,7 @@ async function withInputCapture(
   input: (evidence: EvidenceOperationContext) => Promise<ToolReport>,
 ): Promise<ToolReport> {
   if (capture === undefined) {
-    return withMcpEvidence(ctx, { ...options, input: true }, (evidence) => trackInput(evidence.record, () => input(evidence)));
+    return withTrackedInput(ctx, options, input);
   }
   const artifacts: string[] = [];
   return withMcpEvidence(ctx, {
@@ -490,8 +523,8 @@ async function withInputCapture(
       await take("after");
       return { ...result, data: { ...result.data, capture, captures, inputState, artifacts } };
     } catch (error) {
-      // Preparation failed before any key was sent.
-      if (error instanceof DesktopTextPreparationError) inputState = record.inputState = "not-attempted";
+      // Preparation failed or the permit was refused before any input was sent.
+      if (noInputSent(error)) inputState = record.inputState = "not-attempted";
       // Typed values must not reappear through subprocess diagnostics. Keep the
       // existing length/type target, and report only the failed stage here.
       const detail = options.typedValue === undefined
@@ -572,21 +605,20 @@ function registerMoveTool(server: McpServer, ctx: ServerContext): void {
     (args) =>
       runTool(async () => {
         const { id, display } = await resolveDesktop(ctx, args.session);
-        return withMcpEvidence(
+        return withTrackedInput(
           ctx,
           {
             sessionId: id,
             tool: "desktop_move",
             target: { x: args.x, y: args.y },
-            input: true,
             ownedDisplay: ownedDisplay(ctx, id, display),
           },
-          ({ record }) => trackInput(record, async () => {
+          async () => {
             await move({ display, sessionId: id, env: ctx.env, x: args.x, y: args.y });
             return {
               data: { sessionId: id, display, x: args.x, y: args.y },
             };
-          }),
+          },
         );
       }),
   );
