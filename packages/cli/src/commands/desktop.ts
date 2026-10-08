@@ -1,6 +1,6 @@
 import path from "node:path";
 import {
-  appendAction, beginEvidenceRun, isEvidenceEnabled, loadConfig, ObservationTimeoutError,
+  AgentPermitUnavailableError, HumanControlActiveError, appendAction, beginEvidenceRun, isEvidenceEnabled, loadConfig, ObservationTimeoutError,
   sanitizeActionTarget, sanitizeErrorText, setRunCaptureGeometry, withAgentPermit,
   type EvidenceAction, type RunHandle, type SessionType,
 } from "@pickforge/lab-core";
@@ -167,6 +167,9 @@ async function pointerWithEvidence(
     await input();
     action.inputState = "completed";
   } catch (error) {
+    if (error instanceof HumanControlActiveError || error instanceof AgentPermitUnavailableError) {
+      action.inputState = "not-attempted";
+    }
     action.error = sanitizeErrorText(error instanceof Error ? error.message : String(error));
     action.status = /timed out/i.test(action.error) ? "timeout" : "error";
     throw error;

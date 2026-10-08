@@ -17,7 +17,7 @@ import { sessionDataDir, takeoverIdentityName } from "./session.js";
  *
  * - `agent-active`: no `human.lease.json` in the session directory. Agent
  *   permits (short-lived files under `permits/`) are always granted.
- * - `pause-requested`: `acquireHumanLease` atomically (`wx`) creates the
+ * - `pause-requested`: `acquireHumanLease` atomically links the
  *   lease file — the instant it exists, every agent permit recheck starts
  *   failing closed — then waits for permits that predate the lease to drain.
  * - `human-active`: the lease is held; the caller (desktop-linux) switches
@@ -186,6 +186,19 @@ export class HumanControlActiveError extends Error {
     this.name = "HumanControlActiveError";
     this.lease = lease;
   }
+}
+
+/** A permit acquisition or recheck failed before the agent action started. */
+export class AgentPermitUnavailableError extends Error {
+  readonly code = "agent_permit_unavailable";
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : "Agent permit is unavailable", { cause });
+    this.name = "AgentPermitUnavailableError";
+  }
+}
+
+function agentPermitError(error: unknown): Error {
+  return error instanceof HumanControlActiveError ? error : new AgentPermitUnavailableError(error);
 }
 
 /** Thrown when acquiring a human lease finds another *live* owner. */
@@ -428,19 +441,18 @@ function buildHumanLease(
 }
 
 async function createExclusiveHumanLeaseFile(
-  leasePath: string,
+  dir: DirHandle,
   lease: HumanLease,
   sessionId: string,
   now: Date,
 ): Promise<void> {
+  const tmp = `.human-lease-${crypto.randomUUID()}`;
+  await dir.writeFileAtomic(tmp, `${JSON.stringify(lease)}\n`);
   try {
-    await fs.promises.writeFile(leasePath, `${JSON.stringify(lease)}\n`, {
-      encoding: "utf8",
-      flag: "wx",
-    });
+    await dir.linkChild(tmp, HUMAN_LEASE_FILE);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    const raw = await readTextIfPresent(leasePath);
+    const raw = await readTextIfPresent(dir.resolve(HUMAN_LEASE_FILE));
     if (raw === undefined) {
       // Vanished between our failed create and this read (a peer released
       // it). Safe to retry from the caller's side; report as contention
@@ -454,11 +466,14 @@ async function createExclusiveHumanLeaseFile(
       throw new HumanLeaseHeldError(existing);
     }
     throw new StaleHumanLeaseError(raw, existing);
+  } finally {
+    // Cleanup must not turn a published lease into a failed acquisition.
+    await dir.unlinkChild(tmp).catch(() => {});
   }
 }
 
 /**
- * Acquire exclusive human control of a session: atomically (`wx`) create the
+ * Acquire exclusive human control of a session: atomically link the
  * lease file, then wait for every agent permit that existed at that instant
  * to drain (finish, or be recognized as owned by a dead process and swept).
  *
@@ -480,7 +495,7 @@ export async function acquireHumanLease(
     const leasePath = dir.resolve(HUMAN_LEASE_FILE);
     const now = opts.now ?? new Date();
     const lease = buildHumanLease(sessionId, now, opts);
-    await createExclusiveHumanLeaseFile(leasePath, lease, sessionId, now);
+    await createExclusiveHumanLeaseFile(dir, lease, sessionId, now);
     try {
       if (opts._afterCreate !== undefined) await opts._afterCreate();
       if (permits === undefined) throw new Error("Takeover permit directory is missing");
@@ -645,39 +660,43 @@ export async function acquireAgentPermit(
   sessionId: string,
   env: EnvLike = process.env,
 ): Promise<AgentPermit> {
-  assertSafeSessionId(sessionId);
-  return withSessionDirectory(sessionId, env, true, async (session, permits, verify) => {
-    if (permits === undefined) throw new Error("Takeover permit directory is missing");
-    const dir = await DirHandle.open(permits.resolve(), { followFinal: true });
-    try {
-      const ownerPid = process.pid;
-      const ownerStartTicks = readProcessStartTicks(ownerPid);
-      const permitId = crypto.randomUUID();
-      const record: Omit<AgentPermit, "path"> = {
-        permitId,
-        sessionId,
-        ownerPid,
-        createdAt: new Date().toISOString(),
-      };
-      if (ownerStartTicks !== undefined) record.ownerStartTicks = ownerStartTicks;
-      const name = `${permitId}.json`;
-      const raw = `${JSON.stringify(record)}\n`;
-      await fs.promises.writeFile(dir.resolve(name), raw, {
-        encoding: "utf8",
-        flag: "wx",
-      });
-      await verify().catch(async (error: unknown) => {
-        await unlinkIfMatches(dir.resolve(name), raw).catch(() => {});
+  try {
+    assertSafeSessionId(sessionId);
+    return await withSessionDirectory(sessionId, env, true, async (session, permits, verify) => {
+      if (permits === undefined) throw new Error("Takeover permit directory is missing");
+      const dir = await DirHandle.open(permits.resolve(), { followFinal: true });
+      try {
+        const ownerPid = process.pid;
+        const ownerStartTicks = readProcessStartTicks(ownerPid);
+        const permitId = crypto.randomUUID();
+        const record: Omit<AgentPermit, "path"> = {
+          permitId,
+          sessionId,
+          ownerPid,
+          createdAt: new Date().toISOString(),
+        };
+        if (ownerStartTicks !== undefined) record.ownerStartTicks = ownerStartTicks;
+        const name = `${permitId}.json`;
+        const raw = `${JSON.stringify(record)}\n`;
+        await fs.promises.writeFile(dir.resolve(name), raw, {
+          encoding: "utf8",
+          flag: "wx",
+        });
+        await verify().catch(async (error: unknown) => {
+          await unlinkIfMatches(dir.resolve(name), raw).catch(() => {});
+          throw error;
+        });
+        const permit = { ...record, path: path.join(session.dir, AGENT_PERMITS_DIR, name) };
+        permitDirectories.set(permit, { dir, name, raw });
+        return permit;
+      } catch (error) {
+        await dir.close();
         throw error;
-      });
-      const permit = { ...record, path: path.join(session.dir, AGENT_PERMITS_DIR, name) };
-      permitDirectories.set(permit, { dir, name, raw });
-      return permit;
-    } catch (error) {
-      await dir.close();
-      throw error;
-    }
-  });
+      }
+    });
+  } catch (error) {
+    throw agentPermitError(error);
+  }
 }
 
 /** Release a previously-acquired agent permit. Best-effort/idempotent. */
@@ -728,9 +747,9 @@ async function drainAgentPermits(
 /**
  * Run `action` while holding a fail-closed agent permit: acquire the permit,
  * recheck for a live human lease, execute only if none is found, then
- * release the permit in `finally`. Throws `HumanControlActiveError` (never
- * runs `action`) when human control is active — "no permit fitness ⇒ no
- * input delivery."
+ * release the permit in `finally`. Human control throws `HumanControlActiveError`.
+ * Other acquisition or recheck failures throw `AgentPermitUnavailableError`.
+ * These failures never run `action`. Action and release errors propagate unchanged.
  */
 export async function withAgentPermit<T>(
   sessionId: string,
@@ -743,6 +762,11 @@ export async function withAgentPermit<T>(
     if (lease !== undefined) {
       throw new HumanControlActiveError(lease);
     }
+  } catch (error) {
+    await releaseAgentPermit(permit).catch(() => {});
+    throw agentPermitError(error);
+  }
+  try {
     return await action();
   } finally {
     await releaseAgentPermit(permit);

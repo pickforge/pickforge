@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { createSession, listRuns, readActions, saveProjectConfig, type EnvLike, type EvidenceAction } from "@pickforge/lab-core";
+import { acquireHumanLease, withAgentPermit, createSession, listRuns, readActions, saveProjectConfig, type EnvLike, type EvidenceAction } from "@pickforge/lab-core";
 import { runDesktopClick, runDesktopDrag } from "../src/commands/desktop.js";
 
 type Identity = { display: string; pid: number; startTicks: number } | undefined | "reject";
@@ -28,11 +28,11 @@ vi.mock("@pickforge/lab-core", async (original) => {
 });
 vi.mock("@pickforge/lab-desktop-linux", async (original) => {
   const actual = await original<typeof import("@pickforge/lab-desktop-linux")>();
-  const input = async (opts: { display: string }) => {
+  const input = async (opts: { sessionId: string; display: string }) => withAgentPermit(opts.sessionId, process.env, async () => {
     state.order.push("input");
     state.inputDisplays.push(opts.display);
     if (state.fail) throw new Error("synthetic input failure");
-  };
+  });
   return { ...actual, click: input, drag: input,
     verifyOwnedDisplayTarget: vi.fn(async (...args: unknown[]) => {
       state.order.push("verify");
@@ -204,4 +204,30 @@ it.each([["click", click], ["drag", drag]] as const)("verifies the session displ
     expect(display).toBe(":42");
     expect(verifyEnv).toBe(process.env);
   }
+});
+
+it.each([["click", click], ["drag", drag]] as const)("records %s as not-attempted when human control refuses input", async (_name, run) => {
+  await acquireHumanLease(session, env);
+  expect(await run()).toBe(1);
+  expect(state.order).not.toContain("input");
+  expect(await actions()).toMatchObject([{ status: "error", inputState: "not-attempted", error: expect.stringContaining("human control is active") }]);
+});
+
+it.each([["click", click], ["drag", drag]] as const)("records %s as not-attempted when permit storage fails", async (_name, run) => {
+  fs.mkdirSync(path.join(env.PICKFORGE_HOME!, "sessions", session));
+  fs.writeFileSync(path.join(env.PICKFORGE_HOME!, "sessions", session, "permits"), "blocked");
+  expect(await run()).toBe(1);
+  expect(state.order).not.toContain("input");
+  expect(await actions()).toMatchObject([{ status: "error", inputState: "not-attempted" }]);
+});
+
+it("records input as attempted when permit release fails after input", async () => {
+  const unlink = fs.promises.unlink;
+  vi.spyOn(fs.promises, "unlink").mockImplementation(async (file) => {
+    if (String(file).startsWith("/proc/self/fd/") && String(file).endsWith(".json")) throw new Error("permit release failed");
+    return unlink(file);
+  });
+  expect(await click()).toBe(1);
+  expect(state.order).toContain("input");
+  expect(await actions()).toMatchObject([{ status: "error", inputState: "attempted", error: "permit release failed" }]);
 });
