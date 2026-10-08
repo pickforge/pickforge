@@ -359,6 +359,7 @@ function registerSessionDestroyTool(
           records,
           destroyRuntime(ctx, extra.mcpReq.signal),
           {
+            signal: extra.mcpReq.signal,
             aroundDestroy: (record, destroy) =>
               withMcpEvidence(
                 ctx,
