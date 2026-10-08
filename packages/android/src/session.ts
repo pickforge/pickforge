@@ -2,6 +2,7 @@ import {
   createSession,
   destroySessionRecord,
   retainSessionLogs,
+  stopSessionAgentInput,
   getSession,
   isPidAlive,
   reapDeadRunningSessions,
@@ -227,6 +228,7 @@ export async function teardownAndroidSession(
   if (record === undefined) {
     throw new Error(`Android session not found: ${id}`);
   }
+  await stopSessionAgentInput(id, registryEnv);
   await stopRecordedEmulator(record, registryEnv, opts);
   // The desktop leg still owns its display and in-flight permits.
   if (record.type === "desktop+android") return finalize();

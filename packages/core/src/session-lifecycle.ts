@@ -1,3 +1,4 @@
+import { sessionInputIsClosed } from "./session-gate.js";
 import type { EnvLike } from "./paths.js";
 import {
   REAPER_CLEANUP_PENDING_META_KEY,
@@ -357,6 +358,12 @@ export async function teardownLocalSession(
   );
 }
 
+async function needsTeardownRetry(record: SessionRecord, env: EnvLike): Promise<boolean> {
+  if (record.status === "error") return record.meta?.[REAPER_CLEANUP_PENDING_META_KEY] === true;
+  if (record.status !== "running" && record.status !== "starting") return false;
+  return sessionInputIsClosed(record.id, env);
+}
+
 export async function reapDeadRunningSessions(
   env: EnvLike,
   runtime: LocalSessionTeardownRuntime,
@@ -364,9 +371,7 @@ export async function reapDeadRunningSessions(
 ): Promise<SessionRecord[]> {
   const reaped: SessionRecord[] = [];
   for (const record of await listSessions(env)) {
-    const retryPending =
-      record.status === "error" &&
-      record.meta?.[REAPER_CLEANUP_PENDING_META_KEY] === true;
+    const retryPending = await needsTeardownRetry(record, env);
     if (record.status !== "running" && !retryPending) continue;
     if (!canTeardownLocalSession(record, runtime)) continue;
     if (!retryPending && (await isAlive(record))) continue;

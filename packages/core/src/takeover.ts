@@ -6,6 +6,7 @@ import { isEvidenceEnabled, loadConfig } from "./config.js";
 import { appendAction, beginEvidenceRun } from "./evidence.js";
 import { ensureDir, type EnvLike } from "./paths.js";
 import { DirHandle, withDirHandle } from "./dir-handle.js";
+import { checkSessionInputOpen, closeSessionInput, withSessionGate } from "./session-gate.js";
 import { identityIsAlive, readProcessStartTicks } from "./proc.js";
 import { getSession, REAPER_CLEANUP_PENDING_META_KEY, sessionDataDir, takeoverIdentityName, updateSession } from "./session.js";
 
@@ -75,17 +76,42 @@ async function withSessionDirectory<T>(
   const parentPath = path.dirname(sessionPath);
   if (create) await ensureDir(parentPath);
   else if (!fs.existsSync(parentPath)) return undefined;
-  return withDirHandle(DirHandle.open(parentPath), async (parent) => {
-    // Outside the replaceable session tree, shared by every process. Never
-    // refresh this binding to a new inode or silently recreate bound storage.
-    const marker = takeoverIdentityName(sessionId);
-    const raw = await readTextIfPresent(parent.resolve(marker));
-    if (!create && raw === undefined && await parent.lstatChild(sessionId) === undefined) return undefined;
-    return withDirHandle(
-      create && raw === undefined ? parent.ensureChildDir(sessionId, 0o700) : parent.openChild(sessionId),
-      (session) => withCoordinationIdentity(parent, session, marker, raw, create, action),
-    );
-  });
+  const prepare = async () => {
+    const parent = await DirHandle.open(parentPath);
+    try {
+      // This sibling binding survives retained directory pruning.
+      const marker = takeoverIdentityName(sessionId);
+      const raw = await readTextIfPresent(parent.resolve(marker));
+      if (!create && raw === undefined && await parent.lstatChild(sessionId) === undefined) {
+        await parent.close();
+        return undefined;
+      }
+      const session = await (create && raw === undefined
+        ? parent.ensureChildDir(sessionId, 0o700) : parent.openChild(sessionId));
+      try {
+        const bound = await bindCoordinationIdentity(parent, session, marker, raw, create);
+        // Keep the verifier's descriptors until the action ends, outside the gate lock.
+        return { parent, session, ...bound };
+      } catch (error) {
+        await session.close();
+        throw error;
+      }
+    } catch (error) {
+      await parent.close();
+      throw error;
+    }
+  };
+  const bound = create ? await withSessionGate(sessionId, parentPath, async () => {
+    await checkSessionInputOpen(sessionId, env);
+    return prepare();
+  }) : await prepare();
+  if (bound === undefined) return undefined;
+  try { return await action(bound.session, bound.permits, bound.verify); }
+  finally {
+    await bound.permits?.close();
+    await bound.session.close();
+    await bound.parent.close();
+  }
 }
 
 async function publishCoordinationIdentity(parent: DirHandle, marker: string, raw: string): Promise<void> {
@@ -108,10 +134,10 @@ async function assertDirectoryIdentity(parent: DirHandle, name: string, dir: Dir
   }
 }
 
-async function withCoordinationIdentity<T>(
+async function bindCoordinationIdentity(
   parent: DirHandle, session: DirHandle, marker: string, raw: string | undefined,
-  create: boolean, action: SessionDirectoryAction<T>,
-): Promise<T> {
+  create: boolean,
+) {
   const permits = create && raw === undefined
     ? await session.ensureChildDir(AGENT_PERMITS_DIR, 0o700)
     : await session.lstatChild(AGENT_PERMITS_DIR) === undefined
@@ -130,9 +156,10 @@ async function withCoordinationIdentity<T>(
       }
     };
     await verify();
-    return await action(session, permits, verify);
-  } finally {
+    return { permits, verify };
+  } catch (error) {
     await permits?.close();
+    throw error;
   }
 }
 
@@ -183,7 +210,9 @@ export class AgentPermitUnavailableError extends Error {
 }
 
 async function assertRunningSession(sessionId: string, env: EnvLike): Promise<void> {
-  if ((await getSession(sessionId, env))?.status !== "running") {
+  const record = await getSession(sessionId, env);
+  await checkSessionInputOpen(sessionId, env);
+  if (record?.status !== "running") {
     throw new Error(`Session ${sessionId} is not running; takeover coordination is unavailable`);
   }
 }
@@ -461,11 +490,15 @@ async function createExclusiveHumanLeaseFile(
   lease: HumanLease,
   sessionId: string,
   now: Date,
+  env: EnvLike,
 ): Promise<void> {
   const tmp = `.human-lease-${crypto.randomUUID()}`;
   try {
     await dir.writeFileAtomic(tmp, `${JSON.stringify(lease)}\n`);
-    await dir.linkChild(tmp, HUMAN_LEASE_FILE);
+    await withSessionGate(sessionId, path.dirname(dir.dir), async () => {
+      await checkSessionInputOpen(sessionId, env);
+      await dir.linkChild(tmp, HUMAN_LEASE_FILE);
+    });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     const raw = await readTextIfPresent(dir.resolve(HUMAN_LEASE_FILE));
@@ -512,13 +545,14 @@ export async function acquireHumanLease(
     const leasePath = dir.resolve(HUMAN_LEASE_FILE);
     const now = opts.now ?? new Date();
     const lease = buildHumanLease(sessionId, now, opts);
-    await createExclusiveHumanLeaseFile(dir, lease, sessionId, now);
+    await createExclusiveHumanLeaseFile(dir, lease, sessionId, now, env);
     try {
       if (opts._afterCreate !== undefined) await opts._afterCreate();
       await assertRunningSession(sessionId, env);
       if (permits === undefined) throw new Error("Takeover permit directory is missing");
       await drainAgentPermits(permits, opts.drainTimeoutMs ?? HUMAN_LEASE_DRAIN_TIMEOUT_MS);
       await verify();
+      await checkSessionInputOpen(sessionId, env);
     } catch (error) {
       await unlinkIfMatches(leasePath, `${JSON.stringify(lease)}\n`).catch(() => {});
       throw error;
@@ -558,6 +592,7 @@ export async function renewHumanLease(
   now: Date = new Date(),
 ): Promise<HumanLease | undefined> {
   assertSafeSessionId(sessionId);
+  await checkSessionInputOpen(sessionId, env);
   return withSessionDirectory(sessionId, env, false, async (dir, _permits, verify) => {
     const leasePath = dir.resolve(HUMAN_LEASE_FILE);
     const raw = await readTextIfPresent(leasePath);
@@ -573,7 +608,10 @@ export async function renewHumanLease(
     if (patch.vncPid !== undefined) updated.vncPid = patch.vncPid;
     if (patch.vncStartTimeTicks !== undefined) updated.vncStartTimeTicks = patch.vncStartTimeTicks;
     if (patch.vncPort !== undefined) updated.vncPort = patch.vncPort;
-    await dir.writeFileAtomic(HUMAN_LEASE_FILE, `${JSON.stringify(updated)}\n`);
+    await withSessionGate(sessionId, path.dirname(dir.dir), async () => {
+      await checkSessionInputOpen(sessionId, env);
+      await dir.writeFileAtomic(HUMAN_LEASE_FILE, `${JSON.stringify(updated)}\n`);
+    });
     const confirmedRaw = await readVerifiedLease(dir, verify);
     const confirmed = confirmedRaw === undefined ? undefined : parseHumanLease(confirmedRaw);
     return confirmed?.leaseId === leaseId ? confirmed : undefined;
@@ -669,6 +707,7 @@ export async function checkHumanLeaseBusy(
   sessionId: string,
   env: EnvLike = process.env,
 ): Promise<HumanLease | undefined> {
+  await checkSessionInputOpen(sessionId, env);
   const lease = await readHumanLease(sessionId, env);
   return lease !== undefined && !isHumanLeaseStale(lease) ? lease : undefined;
 }
@@ -800,6 +839,7 @@ export async function stopSessionAgentInput(
   timeoutMs = HUMAN_LEASE_DRAIN_TIMEOUT_MS,
 ): Promise<void> {
   assertSafeSessionId(sessionId);
+  await closeSessionInput(sessionId, path.dirname(sessionDataDir(sessionId, env)));
   const record = await getSession(sessionId, env);
   // A missing record already blocks new input, but old permits must still drain.
   // Retention follows a successful drain and process cleanup. A failed finalizer

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSession, destroySessionRecord, sessionDataDir, takeoverIdentityName, updateSession } from "../src/session.js";
+import { sessionInputClosedName } from "../src/session-gate.js";
 import { sessionsDir } from "../src/paths.js";
 import { parseSessionRetentionDuration, pruneSessionLogs, retainSessionLogs } from "../src/session-retention.js";
 import { AgentPermitUnavailableError, acquireAgentPermit, acquireHumanLease, readHumanLease, getTakeoverStatus, withAgentPermit } from "../src/takeover.js";
@@ -186,6 +187,13 @@ describe("explicit session log pruning", () => {
   it("does not allocate an id whose takeover identity is still reserved", async () => {
     fs.mkdirSync(sessionsDir(env), { recursive: true });
     fs.writeFileSync(path.join(sessionsDir(env), takeoverIdentityName("desk-0badc0de")), "[0,0,null]");
+    forcedIds.push("0badc0de", "0badf00d");
+    expect((await createSession({ type: "desktop", projectDir: home }, env)).id).toBe("desk-0badf00d");
+  });
+
+  it("does not allocate an id whose closed gate survives pruning", async () => {
+    fs.mkdirSync(sessionsDir(env), { recursive: true });
+    fs.writeFileSync(path.join(sessionsDir(env), sessionInputClosedName("desk-0badc0de")), "");
     forcedIds.push("0badc0de", "0badf00d");
     expect((await createSession({ type: "desktop", projectDir: home }, env)).id).toBe("desk-0badf00d");
   });

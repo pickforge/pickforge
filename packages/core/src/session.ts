@@ -12,6 +12,7 @@ import {
   type EnvLike,
 } from "./paths.js";
 import { isPidAlive, processIdentityMatches } from "./proc.js";
+import { checkSessionInputOpen, closeSessionInput, sessionInputClosedName, withSessionGate } from "./session-gate.js";
 import type { ContainmentScope } from "./containment.js";
 
 export type SessionType = "desktop" | "android" | "desktop+android" | "browser";
@@ -154,6 +155,13 @@ function serialize(record: SessionRecord): string {
   return `${JSON.stringify(record, null, 2)}\n`;
 }
 
+function isReservedSessionId(id: string, env: EnvLike): boolean {
+  const primary = sessionsDir(env);
+  return fs.existsSync(path.join(primary, id)) ||
+    fs.existsSync(path.join(primary, takeoverIdentityName(id))) ||
+    [primary, ...legacySessionsDirs(env)].some((root) => fs.existsSync(path.join(root, sessionInputClosedName(id))));
+}
+
 export async function createSession(
   input: CreateSessionInput,
   env: EnvLike = process.env,
@@ -168,8 +176,7 @@ export async function createSession(
       projectDir: input.projectDir,
     };
     // Retained directories and unretired takeover bindings reserve IDs.
-    if (fs.existsSync(path.join(sessionsDir(env), record.id))) continue;
-    if (fs.existsSync(path.join(sessionsDir(env), takeoverIdentityName(record.id)))) continue;
+    if (isReservedSessionId(record.id, env)) continue;
     if (input.desktop !== undefined) record.desktop = input.desktop;
     if (input.android !== undefined) record.android = input.android;
     if (input.browser !== undefined) record.browser = input.browser;
@@ -319,19 +326,22 @@ export async function updateSession(
   if (!isValidSessionId(id)) {
     throw invalidSessionIdError(id);
   }
-  const existing = await getSession(id, env);
-  if (existing === undefined) {
-    throw new Error(`Session not found: ${id}`);
-  }
-  const updated: SessionRecord = {
-    ...existing,
-    ...patch,
-    id: existing.id,
-    type: existing.type,
-    createdAt: existing.createdAt,
-  };
-  await writeFileAtomic(sessionPathForRead(id, env), serialize(updated));
-  return updated;
+  return withSessionGate(id, path.dirname(sessionPathForRead(id, env)), async () => {
+    const existing = await getSession(id, env);
+    if (existing === undefined) {
+      throw new Error(`Session not found: ${id}`);
+    }
+    const updated: SessionRecord = {
+      ...existing,
+      ...patch,
+      id: existing.id,
+      type: existing.type,
+      createdAt: existing.createdAt,
+    };
+    if (updated.status === "running") await checkSessionInputOpen(id, env);
+    await writeFileAtomic(sessionPathForRead(id, env), serialize(updated));
+    return updated;
+  });
 }
 
 export async function destroySessionRecord(
@@ -342,6 +352,7 @@ export async function destroySessionRecord(
   if (!isValidSessionId(id)) {
     throw invalidSessionIdError(id);
   }
+  await closeSessionInput(id, path.dirname(sessionPathForRead(id, env)));
   const record = await getSession(id, env);
   if (record !== undefined) {
     const finalized = await finalizeActiveEvidenceRunHandle(
@@ -360,8 +371,10 @@ export async function destroySessionRecord(
   const legacyPaths = legacySessionsDirs(env).map((dir) =>
     path.join(dir, `${id}.json`),
   );
-  await fs.promises.rm(sessionPath(id, env), { force: true });
-  for (const legacyPath of legacyPaths) {
-    await fs.promises.rm(legacyPath, { force: true });
-  }
+  await withSessionGate(id, path.dirname(sessionPathForRead(id, env)), async () => {
+    await fs.promises.rm(sessionPath(id, env), { force: true });
+    for (const legacyPath of legacyPaths) {
+      await fs.promises.rm(legacyPath, { force: true });
+    }
+  });
 }

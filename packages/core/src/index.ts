@@ -353,3 +353,5 @@ export {
   renderRustEvidenceReport,
   type RustEvidenceRun,
 } from "./rust-evidence.js";
+
+export { SessionInputClosedError } from "./session-gate.js";

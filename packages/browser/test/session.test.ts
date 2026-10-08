@@ -1,3 +1,4 @@
+import * as core from "@pickforge/lab-core";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
@@ -761,25 +762,18 @@ describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
 
   it("cleans up when cancellation occurs during the running-record commit", async () => {
     const controller = new AbortController();
-    const realRename = fs.promises.rename.bind(fs.promises);
+    const realUpdate = core.updateSession;
     let aborted = false;
     let permit: AgentPermit | undefined;
-    const rename = vi
-      .spyOn(fs.promises, "rename")
-      .mockImplementation(async (source, target) => {
-        await realRename(source, target);
-        if (!aborted && String(target).endsWith(".json")) {
-          const content = fs.readFileSync(target, "utf8");
-          if (
-            content.includes('"status": "running"') &&
-            content.includes('"browser"')
-          ) {
-            aborted = true;
-            permit = await acquireAgentPermit(JSON.parse(content).id, registryEnv);
-            controller.abort();
-          }
-        }
-      });
+    const update = vi.spyOn(core, "updateSession").mockImplementation(async (id, patch, env) => {
+      const record = await realUpdate(id, patch, env);
+      if (!aborted && patch.status === "running" && patch.browser !== undefined) {
+        aborted = true;
+        permit = await acquireAgentPermit(id, registryEnv);
+        controller.abort();
+      }
+      return record;
+    });
     const creating = createBrowserSession({
       projectDir, registryEnv, env: spawnEnvFor("ready"),
       cdpTimeoutMs: 5000, signal: controller.signal,
@@ -798,7 +792,7 @@ describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
     } finally {
       if (permit !== undefined) await releaseAgentPermit(permit);
       await creating;
-      rename.mockRestore();
+      update.mockRestore();
     }
 
     expect(aborted).toBe(true);

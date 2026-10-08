@@ -80,18 +80,11 @@ describe("display teardown permit races", () => {
     ["desktop", false], ["desktop", true],
     ["desktop+android", false], ["desktop+android", true],
     ["browser", false], ["browser", true],
-  ] as const)("drains an action past its final gate before releasing %s (prune=%s)", async (type, prune) => {
+  ] as const)("refuses an action paused at the last registry read across %s teardown (prune=%s)", async (type, prune) => {
     const record = await makeRecord(type);
     const gate = pauseFinalRegistryRead(record.id);
-    const actionEntered = barrier();
-    const actionFinish = barrier();
-    const action = vi.fn(async () => {
-      expect(stopProcessGroupVerified).not.toHaveBeenCalled();
-      actionEntered.resume();
-      await actionFinish.wait;
-      expect(stopProcessGroupVerified).not.toHaveBeenCalled();
-    });
-    const input = withAgentPermit(record.id, env, action);
+    const action = vi.fn(async () => {});
+    const input = withAgentPermit(record.id, env, action).catch((error: unknown) => error);
     await gate.reached;
     const destroy = teardownLocalSession(record, teardownRuntime(), () => destroySessionRecord(record.id, env));
     try {
@@ -100,23 +93,40 @@ describe("display teardown permit races", () => {
       await expect(withAgentPermit(record.id, env, async () => { throw new Error("must not run"); }))
         .rejects.toThrow(AgentPermitUnavailableError);
       gate.resume();
-      await actionEntered.wait;
-      expect(fs.readdirSync(path.join(sessionDataDir(record.id, env), "permits"))).toHaveLength(1);
-      actionFinish.resume();
-      await input;
+      expect(await input).toBeInstanceOf(AgentPermitUnavailableError);
+      expect(action).not.toHaveBeenCalled();
       await destroy;
       expect(stopProcessGroupVerified).toHaveBeenCalled();
       if (prune) expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
       const replacement = await makeRecord();
       const lease = await acquireHumanLease(replacement.id, env);
       expect(lease.sessionId).toBe(replacement.id);
-      expect(action).toHaveBeenCalledTimes(1);
+      expect(action).not.toHaveBeenCalled();
       await expect(withAgentPermit(record.id, env, action)).rejects.toThrow(AgentPermitUnavailableError);
-      expect(action).toHaveBeenCalledTimes(1);
+      expect(action).not.toHaveBeenCalled();
     } finally {
-      gate.resume(); actionFinish.resume();
+      gate.resume();
       await Promise.allSettled([input, destroy]);
     }
+  });
+
+  it.each(["desktop", "browser", "desktop+android"] as const)("waits for an action already running before closing %s", async (type) => {
+    const record = await makeRecord(type);
+    const entered = barrier();
+    const finish = barrier();
+    const input = withAgentPermit(record.id, env, async () => {
+      entered.resume(); await finish.wait;
+      expect(stopProcessGroupVerified).not.toHaveBeenCalled();
+    });
+    await entered.wait;
+    const destroy = teardownLocalSession(record, teardownRuntime(), () => destroySessionRecord(record.id, env));
+    try {
+      await vi.waitFor(async () => expect((await getSession(record.id, env))?.status).toBe("error"));
+      expect(stopProcessGroupVerified).not.toHaveBeenCalled();
+      await expect(updateSession(record.id, { status: "running" }, env)).rejects.toThrow("permanently closed");
+      finish.resume(); await input; await destroy;
+      expect(stopProcessGroupVerified).toHaveBeenCalled();
+    } finally { finish.resume(); await Promise.allSettled([input, destroy]); }
   });
 
   it("refuses a permit published after teardown blocked new input", async () => {
