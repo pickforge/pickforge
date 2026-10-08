@@ -432,6 +432,97 @@ describe("cgroup cleanup guards (simulated cgroup)", () => {
     20_000,
   );
 
+  it.each([
+    { statState: "missing", environError: "ENOENT" },
+    { statState: "zombie", environError: "ESRCH" },
+  ])("skips a member gone during the exec-completion reread (stat: $statState)", async ({ statState, environError }) => {
+    const member = spawnMember(scope());
+    const stat = fs.readFileSync(`/proc/${member}/stat`, "utf8");
+    const kill = process.kill;
+    const fake = newFake({ members: [member] });
+    installFakeCgroup(fake);
+    const read = vi.mocked(fs.readFileSync).getMockImplementation() as typeof fs.readFileSync;
+    let environReads = 0;
+    vi.mocked(fs.readFileSync).mockImplementation(((file, ...args) => {
+      if (file === `/proc/${member}/environ`) {
+        environReads += 1;
+        if (environReads === 1) {
+          kill(member, "SIGKILL");
+          return "";
+        }
+        fake.members = [];
+        throw Object.assign(new Error(environError), { code: environError });
+      }
+      if (file === `/proc/${member}/stat` && environReads > 0) {
+        if (statState === "missing" || environReads > 1) {
+          throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        }
+        return stat.replace(/\) \S+ /, ") Z ");
+      }
+      return read(file, ...args);
+    }) as typeof fs.readFileSync);
+
+    const result = await destroy();
+
+    expect(environReads).toBeGreaterThanOrEqual(2);
+    expect(result.confirmed, result.reason).toBe(true);
+    expect(result.signaled).toEqual([]);
+    expect(vi.mocked(process.kill).mock.calls.some(([pid, signal]) => pid === member && signal !== 0)).toBe(false);
+    expect(isPidAlive(member)).toBe(false);
+    expect(fake.removed).toBe(true);
+  }, 20_000);
+
+  it.each([
+    { secondRead: "unreadable", membershipRead: 2 },
+    { secondRead: "unreadable", membershipRead: 3 },
+    { secondRead: "mid-exec again", membershipRead: 2 },
+    { secondRead: "mid-exec again", membershipRead: 3 },
+    { secondRead: "mid-exec again", membershipRead: 4 },
+  ])("retries $secondRead on exec's second environment read (membership: $membershipRead)", async ({ secondRead, membershipRead }) => {
+    const member = spawnMember(scope());
+    const parent = membershipRead === 4 ? spawnMember(scope()) : undefined;
+    const fake = newFake({ members: [parent ?? member] });
+    let signaledAtRead: number | undefined;
+    fake.beforeSignal = () => {
+      if (parent !== undefined && fake.members.includes(parent)) {
+        fake.members = [member];
+        return;
+      }
+      signaledAtRead = fake.procsReads;
+    };
+    installFakeCgroup(fake);
+    const read = vi.mocked(fs.readFileSync).getMockImplementation() as typeof fs.readFileSync;
+    let environReads = 0;
+    vi.mocked(fs.readFileSync).mockImplementation(((file, ...args) => {
+      const unsettled = fake.procsReads >= membershipRead && fake.procsReads < membershipRead + 2;
+      if (file === `/proc/${member}/environ` && unsettled) {
+        environReads += 1;
+        if (environReads === 1 || secondRead === "mid-exec again") return "";
+        throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+      }
+      const content = read(file, ...args);
+      if (file !== `/proc/${member}/stat`) return content;
+      if (!unsettled || environReads < 2 || secondRead !== "mid-exec again") return content;
+      // The first stat sees a completed wrapper. The second environ and stat
+      // see the app's exec, with no environment address range yet.
+      const stat = String(content);
+      const close = stat.lastIndexOf(")");
+      const fields = stat.slice(close + 1).trim().split(/\s+/);
+      fields[51 - 3] = "0";
+      return `${stat.slice(0, close + 1)} ${fields.join(" ")}`;
+    }) as typeof fs.readFileSync);
+
+    const result = await destroy();
+
+    expect(environReads).toBeGreaterThanOrEqual(2);
+    expect(result.confirmed, result.reason).toBe(true);
+    expect(signaledAtRead).toBeGreaterThanOrEqual(membershipRead + 2);
+    expect(result.signaled).toContain(member);
+    expect(vi.mocked(process.kill).mock.calls).toContainEqual([member, "SIGKILL"]);
+    expect(isPidAlive(member)).toBe(false);
+    expect(fake.removed).toBe(true);
+  }, 20_000);
+
   it("refuses a member recycled during the second exec-completion environment read", async () => {
     const member = spawnMember(scope());
     const fake = newFake({ members: [member] });

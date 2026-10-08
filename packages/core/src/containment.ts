@@ -664,6 +664,18 @@ function evacuateOwnChain(
 
 type MemberVerdict = "ours" | "gone" | "foreign" | "unknown";
 
+function classifyCgroupEntries(
+  pid: number,
+  token: string,
+  entries: string[],
+  midExec: Set<number>,
+): MemberVerdict {
+  if (entries.includes(`${TOKEN_ENV}=${token}`)) return "ours";
+  if (readMidExecIdentity(pid, entries) === undefined) return "foreign";
+  midExec.add(pid);
+  return "unknown";
+}
+
 function classifyCgroupEnvironment(
   pid: number,
   token: string,
@@ -671,16 +683,15 @@ function classifyCgroupEnvironment(
 ): MemberVerdict {
   const read = readEnviron(pid);
   if (read.kind !== "entries") return read.kind === "gone" ? "gone" : "unknown";
-  if (read.entries.includes(`${TOKEN_ENV}=${token}`)) return "ours";
-  if (readMidExecIdentity(pid, read.entries) === undefined) {
-    // Exec may finish after the empty environ read but before the stat read.
-    // Re-read before refusing; the surrounding start-time checks still pin
-    // ownership across both environment reads.
-    const empty = read.entries.length === 1 && read.entries[0] === "";
-    return empty && processCarriesToken(pid, token) ? "ours" : "foreign";
-  }
-  midExec.add(pid);
-  return "unknown";
+  const verdict = classifyCgroupEntries(pid, token, read.entries, midExec);
+  const empty = read.entries.length === 1 && read.entries[0] === "";
+  if (verdict !== "foreign" || !empty) return verdict;
+  // Exec may finish after the empty environ read but before the stat read.
+  // Classify the reread the same way, including another exec or unreadability.
+  // The surrounding start-time checks still pin both environment reads.
+  const again = readEnviron(pid);
+  if (again.kind !== "entries") return again.kind === "gone" ? "gone" : "unknown";
+  return classifyCgroupEntries(pid, token, again.entries, midExec);
 }
 
 /**
