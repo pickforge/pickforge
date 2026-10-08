@@ -126,6 +126,25 @@ async function waitForEntry(
   }
 }
 
+/**
+ * Wait until fake Chrome `pid` has written `chrome.pid`. The fake writes it
+ * only after it installs any signal handlers its mode needs.
+ */
+async function waitForChromePidMarker(
+  sessionDir: string,
+  pid: number,
+  deadline: number,
+): Promise<void> {
+  const marker = path.join(sessionDir, "chrome.pid");
+  const written = (): boolean =>
+    fs.existsSync(marker) && fs.readFileSync(marker, "utf8").trim() === String(pid);
+  while (!written()) {
+    if (!isPidAlive(pid)) throw new Error(`Fake Chrome ${pid} exited before it was ready`);
+    if (Date.now() >= deadline) throw new Error(`Fake Chrome ${pid} was not ready in time`);
+    await scheduler.wait(10);
+  }
+}
+
 async function waitForXvfbStarted(
   dir: string,
   startedFile: string,
@@ -903,10 +922,11 @@ describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
         "Browser ownership handoff did not persist a real leader and child PID",
       );
     }
-    // The durable record identifies the stable supervisor. Let its freshly
-    // spawned child finish installing the fake Chrome signal handlers before
-    // killing the supervisor, then prove the same child still owns the group.
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The durable record identifies the stable supervisor. Wait until its
+    // freshly spawned child has installed the fake Chrome signal handlers
+    // before killing the supervisor, then prove the same child still owns the
+    // group. A fixed delay let a loaded host signal the fake first (#297).
+    await waitForChromePidMarker(sessionDir, childPid, handoffDeadline);
     expect(listProcessGroupMembers(leaderPid)).toContain(childPid);
 
     process.kill(leaderPid, "SIGKILL");
