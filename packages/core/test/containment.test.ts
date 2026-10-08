@@ -632,7 +632,8 @@ describe("containment refuses to signal anything it does not own", () => {
       const cgroupDir = path.join(parent, `pickforge-${id}`);
       // A failure midway can leave the victim or the worker in these cgroups,
       // and afterEach does not wait for its kills, so remove them for sure.
-      onTestFinished(() => removePrivateCgroups([cgroupDir, parent]));
+      // Two directories may each retry rmdir for 10 s, beyond the default hook timeout.
+      onTestFinished(() => removePrivateCgroups([cgroupDir, parent]), 25_000);
       fs.mkdirSync(cgroupDir);
       const scope: ContainmentScope = {
         ...createContainmentScope({ id, useCgroup: false }),
