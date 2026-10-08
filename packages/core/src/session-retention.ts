@@ -7,6 +7,8 @@ import { sessionDataDir, type SessionRecord } from "./session.js";
 const MARKER = "stopped.json";
 const SESSION_ID = /^(desk|andr|duo|brow)-[0-9a-f]{6,}$/;
 const LOG_FILE = /^[^.].*\.log$/;
+// Lease staging names from takeover.ts, including writeFileAtomic's own temp.
+const LEASE_STAGING = /^\.\.?human-lease-[0-9a-f-]{36}(\.tmp-\d+-\d+)?$/;
 
 /** Called only after typed teardown has confirmed its processes are gone. */
 export async function retainSessionLogs(
@@ -18,6 +20,11 @@ export async function retainSessionLogs(
     await withDirHandle(root.ensureChildDir(record.id, 0o700), async (handle) => {
       for (const name of ["permits", "human.lease.json"]) {
         await fs.promises.rm(handle.resolve(name), { recursive: true, force: true });
+      }
+      // A lease publisher killed before its cleanup leaves staging files behind.
+      for (const name of await handle.readEntryNames()) {
+        if (!LEASE_STAGING.test(name)) continue;
+        if ((await handle.lstatChild(name))?.isDirectory() === false) await handle.unlinkChild(name);
       }
       await handle.writeFileAtomic(MARKER, JSON.stringify({
         id: record.id,
