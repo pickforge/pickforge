@@ -87,6 +87,35 @@ describe("explicit session log pruning", () => {
     expect(fs.readFileSync(path.join(unknown.dir, "notes.txt"), "utf8")).toBe("mine");
   });
 
+  it("removes orphan lease staging files so the session can be pruned", async () => {
+    const record = await createSession({ type: "desktop", projectDir: home }, env);
+    const dir = sessionDataDir(record.id, env);
+    fs.mkdirSync(dir);
+    const uuid = "0f8e2b1c-3d4a-4b5c-8d6e-7f8091a2b3c4";
+    fs.writeFileSync(path.join(dir, `.human-lease-${uuid}`), "{}\n");
+    fs.writeFileSync(path.join(dir, `..human-lease-${uuid}.tmp-123-4`), "{");
+    fs.writeFileSync(path.join(dir, ".human.lease.json.tmp-123-5"), "{");
+    const outside = path.join(home, "outside");
+    fs.writeFileSync(outside, "unrelated");
+    fs.symlinkSync(outside, path.join(dir, `.human-lease-${uuid.replace("0f", "2f")}`));
+    // Names no code produces are not staging files.
+    fs.writeFileSync(path.join(dir, `..human-lease-${uuid}`), "x");
+    fs.mkdirSync(path.join(dir, `.human-lease-${uuid.replace("0f", "1f")}`));
+    fs.writeFileSync(path.join(dir, ".human-lease-notes"), "mine");
+    await retainSessionLogs(record, env);
+    await destroySessionRecord(record.id, env);
+    expect(fs.readdirSync(dir).sort()).toEqual([
+      `..human-lease-${uuid}`, ".human-lease-1f8e2b1c-3d4a-4b5c-8d6e-7f8091a2b3c4", ".human-lease-notes", "stopped.json",
+    ]);
+    expect(fs.readFileSync(outside, "utf8")).toBe("unrelated");
+    // Unknown entries still block pruning.
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    fs.rmdirSync(path.join(dir, ".human-lease-1f8e2b1c-3d4a-4b5c-8d6e-7f8091a2b3c4"));
+    fs.unlinkSync(path.join(dir, ".human-lease-notes"));
+    fs.unlinkSync(path.join(dir, `..human-lease-${uuid}`));
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+  });
+
   it.each(["xvfb.log", "stopped.json"])("never follows a %s symlink", async (name) => {
     const { dir } = await stopped();
     const outside = path.join(home, "outside");
