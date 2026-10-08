@@ -4,6 +4,7 @@ import {
   REAPER_CLEANUP_PENDING_META_KEY,
   createSession,
   destroySessionRecord,
+  stopSessionAgentInput,
   retainSessionLogs,
   getSession,
   isPidAlive,
@@ -417,7 +418,6 @@ async function finishBrowserStartup(
   state.browserDaemon = browserDaemon;
   const browserIdentity = await waitForOwnedIdentity(browserDaemon);
   if (browserIdentity === undefined) {
-    await stopOwnedBrowserDaemon(browserDaemon);
     throw new Error(
       `Chrome process ${browserDaemon.pid} could not be identified during startup; ` +
         `check the log at ${browserDaemon.logPath}`,
@@ -537,6 +537,18 @@ async function failBrowserCreation(
   state: BrowserCreationState,
   error: unknown,
 ): Promise<never> {
+  try {
+    await stopSessionAgentInput(ctx.record.id, ctx.registryEnv);
+  } catch (cleanup) {
+    state.browserDaemon?.release();
+    await updateSession(ctx.record.id, {
+      status: "error",
+      desktop: failedDesktopInfo(state),
+      browser: failedBrowserInfo(ctx, state),
+      meta: { ...ctx.record.meta, [REAPER_CLEANUP_PENDING_META_KEY]: true },
+    }, ctx.registryEnv).catch(() => {});
+    throw new AggregateError([error, cleanup], `${asError(error).message}; ${asError(cleanup).message}`, { cause: error });
+  }
   const browserGone = await stopFailedBrowser(state);
   state.browserDaemon?.release();
   const xvfbGone = await stopFailedXvfb(state, browserGone);
@@ -776,6 +788,7 @@ export async function teardownBrowserSession(
       throw new Error(`Session ${id} is not a browser session`);
     }
 
+    await stopSessionAgentInput(id, registryEnv);
     const failures: Error[] = [];
     const browser = record.browser;
     const { gone, error: groupError } = await stopBrowserGroup(

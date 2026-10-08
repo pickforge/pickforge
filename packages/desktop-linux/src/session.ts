@@ -27,6 +27,8 @@ import {
   stopProcessGroupVerified,
   updateSession,
   withAgentPermit,
+  withSessionStartupPermit,
+  stopSessionAgentInput,
   type ContainmentScope,
   type DesktopSessionInfo,
   type DesktopHomePolicy,
@@ -122,6 +124,8 @@ interface DesktopStartupState {
 export interface StartSessionVncOptions {
   /** Internal takeover authority for private control infrastructure only. */
   humanLeaseId?: string;
+  /** Internal creation authority. Ordinary callers require a running record. */
+  starting?: boolean;
   display: string;
   port?: number;
   env?: EnvLike;
@@ -172,7 +176,10 @@ export async function startSessionVnc(
     }
     return start();
   }
-  return policy === "inherit" ? withAgentPermit(id, registryEnv, start) : start();
+  if (policy !== "inherit") return start();
+  return opts.starting === true
+    ? withSessionStartupPermit(id, registryEnv, start)
+    : withAgentPermit(id, registryEnv, start);
 }
 
 function requireVncBinary(opts: CreateDesktopSessionOptions): void {
@@ -343,6 +350,16 @@ async function rollbackFailedCreate(
   state: DesktopStartupState,
   registryEnv: EnvLike,
 ): Promise<void> {
+  try {
+    await stopSessionAgentInput(record.id, registryEnv);
+  } catch (error) {
+    await updateSession(record.id, {
+      status: "error",
+      desktop: pendingDesktopInfo(state),
+      meta: { ...record.meta, [REAPER_CLEANUP_PENDING_META_KEY]: true },
+    }, registryEnv).catch(() => {});
+    throw error;
+  }
   const vncGone = await stopStartupVnc(record.id, state);
   const xvfbGone = await stopStartupXvfb(state);
   const contained = await destroyContainmentScope(state.containment);
@@ -406,7 +423,7 @@ export async function createDesktopSession(
       return startSessionXvfb(record.id, opts, state, registryEnv);
     };
     const xvfb = state.homePolicy === "inherit"
-      ? await withAgentPermit(record.id, registryEnv, start)
+      ? await withSessionStartupPermit(record.id, registryEnv, start)
       : await start();
     state.xvfb = xvfb;
     const viewOnly = opts.vncControl !== true;
@@ -415,6 +432,7 @@ export async function createDesktopSession(
         display: xvfb.display,
         env: opts.env,
         viewOnly,
+        starting: true,
       }).catch((error: unknown) => {
         // A failed startup still owns whatever it spawned: keep the partial so
         // rollback can decide about the runtime dir and the retry record.
@@ -443,7 +461,11 @@ export async function createDesktopSession(
     }
     return handle;
   } catch (error) {
-    await rollbackFailedCreate(record, state, registryEnv);
+    try {
+      await rollbackFailedCreate(record, state, registryEnv);
+    } catch (cleanup) {
+      throw new AggregateError([error, cleanup], `${asError(error).message}; ${asError(cleanup).message}`, { cause: error });
+    }
     throw error;
   }
 }
@@ -1005,6 +1027,7 @@ export async function teardownDesktopSession(
     if (record === undefined) {
       throw new Error(`Desktop session not found: ${id}`);
     }
+    await stopSessionAgentInput(id, registryEnv);
     const desktop = record.desktop;
     const failures: Error[] = [];
     // Apps first: they are clients of the display, and killing the display out

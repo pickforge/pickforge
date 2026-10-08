@@ -423,7 +423,7 @@ it("uses PICKLAB fallback but gives an empty PICKFORGE_HOME precedence", async (
   vi.stubEnv("HOME", root);
   env = { PICKFORGE_HOME: "", PICKLAB_HOME: home };
   await expect(type("private")).rejects.toThrow();
-  expect(fs.existsSync(path.join(root, ".pickforge", "lab", "sessions", sessionId, AGENT_PERMITS_DIR))).toBe(true);
+  expect(fs.existsSync(path.join(root, ".pickforge", "lab", "sessions", sessionId, AGENT_PERMITS_DIR))).toBe(false);
   expect(server.connections).toBe(connected);
 });
 

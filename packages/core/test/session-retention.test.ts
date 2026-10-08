@@ -29,7 +29,7 @@ afterEach(() => {
 });
 
 async function stopped(type: "desktop" | "browser" | "android" = "desktop", takeover = false) {
-  const record = await createSession({ type, projectDir: home }, env);
+  const record = await createSession({ type, status: "running", projectDir: home }, env);
   const dir = sessionDataDir(record.id, env);
   if (takeover) await withAgentPermit(record.id, env, async () => {});
   else fs.mkdirSync(dir);
@@ -154,6 +154,13 @@ describe("explicit session log pruning", () => {
   it("does not allocate an id whose takeover identity is still reserved", async () => {
     fs.mkdirSync(sessionsDir(env), { recursive: true });
     fs.writeFileSync(path.join(sessionsDir(env), takeoverIdentityName("desk-0badc0de")), "[0,0,null]");
+    forcedIds.push("0badc0de", "0badf00d");
+    expect((await createSession({ type: "desktop", projectDir: home }, env)).id).toBe("desk-0badf00d");
+  });
+
+  it("does not allocate an id whose input closure survives pruning", async () => {
+    fs.mkdirSync(sessionsDir(env), { recursive: true });
+    fs.writeFileSync(path.join(sessionsDir(env), ".desk-0badc0de.input-closed"), "");
     forcedIds.push("0badc0de", "0badf00d");
     expect((await createSession({ type: "desktop", projectDir: home }, env)).id).toBe("desk-0badf00d");
   });

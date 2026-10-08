@@ -1,3 +1,4 @@
+import { stopSessionAgentInput } from "./takeover.js";
 import type { EnvLike } from "./paths.js";
 import {
   REAPER_CLEANUP_PENDING_META_KEY,
@@ -145,6 +146,7 @@ export interface DestroyLocalSessionsResult {
 }
 
 export interface DestroyLocalSessionsOptions {
+  env?: EnvLike;
   aroundDestroy?: (
     record: SessionRecord,
     destroy: () => Promise<void>,
@@ -428,7 +430,12 @@ export async function destroyLocalSessions(
       continue;
     }
     try {
-      const destroy = () => destroyLocalSession(record, runtime);
+      const destroy = async () => {
+        if (record.desktop !== undefined || record.type === "browser" || record.type === "desktop") {
+          await stopSessionAgentInput(record.id, options.env ?? process.env);
+        }
+        await destroyLocalSession(record, runtime);
+      };
       if (options.aroundDestroy === undefined) {
         await destroy();
       } else {
