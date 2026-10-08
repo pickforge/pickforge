@@ -280,7 +280,7 @@ describe("local session lifecycle", () => {
       },
     );
 
-    expect(calls).toEqual(["android", "desktop", "finalize"]);
+    expect(calls).toEqual(["desktop", "android", "finalize"]);
   });
 
   it("dispatches typed destroy and continues after individual failures", async () => {

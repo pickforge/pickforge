@@ -1,4 +1,4 @@
-import { stopSessionAgentInput } from "./takeover.js";
+import { markSessionCleanupPendingIfInputClosed } from "./takeover.js";
 import type { EnvLike } from "./paths.js";
 import {
   REAPER_CLEANUP_PENDING_META_KEY,
@@ -93,15 +93,19 @@ export interface LocalSessionStatusRuntime {
   };
 }
 
+export interface LocalSessionDestroyOptions {
+  signal?: AbortSignal;
+}
+
 export interface LocalSessionDestroyRuntime {
   desktop: {
-    destroy: (id: string) => Promise<void>;
+    destroy: (id: string, options?: LocalSessionDestroyOptions) => Promise<void>;
   };
   android: {
-    destroy: (id: string) => Promise<void>;
+    destroy: (id: string, options?: LocalSessionDestroyOptions) => Promise<void>;
   };
   browser: {
-    destroy: (id: string) => Promise<void>;
+    destroy: (id: string, options?: LocalSessionDestroyOptions) => Promise<void>;
   };
 }
 
@@ -152,8 +156,8 @@ export interface DestroyLocalSessionsOptions {
     destroy: () => Promise<void>,
   ) => Promise<void>;
   /**
-   * Stops new teardowns once aborted. A teardown that already started runs
-   * to completion; each later session is reported as cancelled.
+   * Cancels lock and permit waits. Once process cleanup starts, it finishes.
+   * Later sessions are reported as cancelled.
    */
   signal?: AbortSignal;
 }
@@ -354,9 +358,9 @@ export async function teardownLocalSession(
     runtime.desktop !== undefined &&
     runtime.android !== undefined
   ) {
-    await runtime.android.teardown(record.id, async () => {});
-    await runtime.desktop.teardown(record.id, async () => {});
-    await finalize();
+    // The desktop drain must precede either leg's shared-directory retention.
+    const android = runtime.android;
+    await runtime.desktop.teardown(record.id, () => android.teardown(record.id, finalize));
     return;
   }
   throw new Error(
@@ -400,16 +404,25 @@ export async function reapDeadRunningSessions(
   return reaped;
 }
 
+function invokeDestroy(
+  destroy: LocalSessionDestroyRuntime["desktop"]["destroy"],
+  id: string,
+  options: LocalSessionDestroyOptions,
+): Promise<void> {
+  return options.signal === undefined ? destroy(id) : destroy(id, options);
+}
+
 export async function destroyLocalSession(
   record: SessionRecord,
   runtime: LocalSessionDestroyRuntime,
+  options: LocalSessionDestroyOptions = {},
 ): Promise<void> {
   if (record.type === "desktop") {
-    await runtime.desktop.destroy(record.id);
+    await invokeDestroy(runtime.desktop.destroy, record.id, options);
   } else if (record.type === "browser") {
-    await runtime.browser.destroy(record.id);
+    await invokeDestroy(runtime.browser.destroy, record.id, options);
   } else if (record.type === "android") {
-    await runtime.android.destroy(record.id);
+    await invokeDestroy(runtime.android.destroy, record.id, options);
   } else {
     throw new Error(
       `Cannot destroy session ${record.id} of type "${record.type}"`,
@@ -430,12 +443,7 @@ export async function destroyLocalSessions(
       continue;
     }
     try {
-      const destroy = async () => {
-        if (record.desktop !== undefined || record.type === "browser" || record.type === "desktop") {
-          await stopSessionAgentInput(record.id, options.env ?? process.env);
-        }
-        await destroyLocalSession(record, runtime);
-      };
+      const destroy = () => destroyLocalSession(record, runtime, { signal: options.signal });
       if (options.aroundDestroy === undefined) {
         await destroy();
       } else {
@@ -443,6 +451,7 @@ export async function destroyLocalSessions(
       }
       destroyed.push(record.id);
     } catch (error) {
+      await markSessionCleanupPendingIfInputClosed(record.id, options.env ?? process.env).catch(() => {});
       errors.push(
         `${record.id}: ${error instanceof Error ? error.message : String(error)}`,
       );

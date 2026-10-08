@@ -3,6 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
+  acquireAgentPermit,
+  releaseAgentPermit,
+  sessionDataDir,
   createSession,
   getSession,
   isPidAlive,
@@ -18,6 +21,7 @@ import {
   destroyAndroidSession,
   getAndroidSessionStatus,
   startEmulator,
+  teardownAndroidSession,
 } from "../src/index.js";
 import { holdTestPortLock } from "./port-lock.js";
 
@@ -279,4 +283,18 @@ describe("getAndroidSessionStatus", () => {
       getAndroidSessionStatus("andr-ffffffff", registryEnv),
     ).rejects.toThrow(/not found/);
   });
+});
+
+it("the Android leg preserves held desktop permits and shared retention", async () => {
+  const record = await createSession({ type: "desktop+android", projectDir, status: "running",
+    desktop: { display: ":2994" }, android: { avdName: "fake" },
+  }, registryEnv);
+  const permit = await acquireAgentPermit(record.id, registryEnv);
+  try {
+    await teardownAndroidSession(record.id, registryEnv, {}, async () => {});
+    expect(fs.existsSync(permit.path)).toBe(true);
+    expect(fs.existsSync(path.join(sessionDataDir(record.id, registryEnv), "stopped.json"))).toBe(false);
+  } finally {
+    await releaseAgentPermit(permit);
+  }
 });

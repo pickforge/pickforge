@@ -65,7 +65,7 @@ describe("desktop partial startup ownership", () => {
     const dir = sessionDataDir(records[0]!.id, env);
     expect(fs.readFileSync(path.join(dir, "xvfb.log"), "utf8")).toBe("Xvfb failed to start");
     expect(fs.existsSync(path.join(dir, "runtime"))).toBe(false);
-    expect(fs.existsSync(path.join(dir, "permits"))).toBe(false);
+    expect(fs.readdirSync(path.join(dir, "permits"))).toEqual([]);
   });
 
   it("persists a retryable error record when Xvfb cleanup is unconfirmed", async () => {

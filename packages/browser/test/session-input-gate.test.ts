@@ -109,3 +109,35 @@ it.each([false, true])("startup rollback preserves resources until input drains,
     expect(vi.mocked(core.stopProcessGroupVerified).mock.calls.map(([identity]) => identity.pid)).toEqual([CHROME_PID, XVFB_PID]);
   }
 });
+
+it("browser rollback releases its own startup permit before draining", async () => {
+  vi.mocked(waitForDevToolsPort).mockImplementationOnce(async () => {
+    const [record] = await core.listSessions(env);
+    expect(fs.readdirSync(path.join(core.sessionDataDir(record!.id, env), "permits"))).toHaveLength(1);
+    throw new Error("own startup failed");
+  });
+  const stop = core.stopSessionAgentInput;
+  vi.spyOn(core, "stopSessionAgentInput").mockImplementation((id, registry) => stop(id, registry, 0));
+  await expect(createBrowserSession({ projectDir: home, registryEnv: env })).rejects.toThrow("own startup failed");
+  const [record] = await core.listSessions(env);
+  expect(record?.meta?.reaperCleanupPending).toBeUndefined();
+  expect(fs.readdirSync(path.join(core.sessionDataDir(record!.id, env), "permits"))).toEqual([]);
+  expect(core.stopProcessGroupVerified).toHaveBeenCalled();
+});
+
+it("browser destroy forwards its full budget and cancellation, preserving resources", async () => {
+  const record = await running();
+  const permit = await core.acquireAgentPermit(record.id, env);
+  const controller = new AbortController();
+  const drain = vi.spyOn(core, "stopSessionAgentInput");
+  const closed = watchClosure();
+  const destroying = destroyBrowserSession(record.id, env, { signal: controller.signal });
+  const cancelled = expect(destroying).rejects.toThrow();
+  await closed;
+  controller.abort();
+  await cancelled;
+  expect(drain).toHaveBeenCalledWith(record.id, env, core.SESSION_DESTROY_DRAIN_TIMEOUT_MS, controller.signal);
+  expect(core.stopProcessGroupVerified).not.toHaveBeenCalled();
+  expect(await core.getSession(record.id, env)).toMatchObject({ status: "error", meta: { reaperCleanupPending: true }, desktop: record.desktop, browser: record.browser });
+  await core.releaseAgentPermit(permit);
+});

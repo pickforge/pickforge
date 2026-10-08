@@ -433,7 +433,7 @@ describe.skipIf(!hasXvfb)("destroyBrowserSession (fake binaries)", () => {
       cdpTimeoutMs: 5000,
     });
     const { browserPid, xvfbPid, profileDir, logDir } = session;
-    fs.mkdirSync(path.join(logDir, "permits"));
+    fs.mkdirSync(path.join(logDir, "permits"), { recursive: true });
     fs.writeFileSync(path.join(logDir, "permits", "old.json"), "{}");
     const layout = browserRuntimeLayout(logDir);
     const vnc = spawn(
@@ -700,7 +700,7 @@ describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
     const failedDir = browserSessionLogDir(id, registryEnv);
     expect(fs.readFileSync(path.join(failedDir, "chrome.log"), "utf8")).toContain("fake Chrome crashed");
     expect(fs.existsSync(path.join(failedDir, "xvfb.log"))).toBe(true);
-    expect(fs.existsSync(path.join(failedDir, "permits"))).toBe(false);
+    expect(fs.readdirSync(path.join(failedDir, "permits"))).toEqual([]);
     const xvfbPid = record?.desktop?.xvfbPid;
     if (xvfbPid !== undefined) {
       expect(isPidAlive(xvfbPid)).toBe(false);
