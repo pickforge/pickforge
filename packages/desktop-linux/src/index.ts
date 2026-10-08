@@ -151,6 +151,7 @@ export {
   ensureDesktopSessionIsolation,
   ensureSessionVnc,
   getDesktopSessionStatus,
+  SESSION_VNC_LOCK_TIMEOUT_MS,
   startSessionVnc,
   stopOwnedSessionVnc,
   teardownDesktopSession,

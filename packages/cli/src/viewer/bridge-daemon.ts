@@ -16,6 +16,7 @@ import {
   type ProcessIdentity,
 } from "@pickforge/lab-core";
 import {
+  SESSION_VNC_LOCK_TIMEOUT_MS,
   withSessionVncLock,
   withViewerDir,
   readViewerPrivateFile,
@@ -48,6 +49,11 @@ export interface EnsureViewerBridgeOptions {
 // gets a CPU. A bridge that exits fails at once.
 const READY_BUDGET_MS = 8_000;
 const READY_WALL_CAP_FACTOR = 8;
+// Startup holds the session VNC lock. The wall cap leaves room for the
+// probe, the old bridge stop and the cleanup, so other callers of the lock
+// do not time out while a startup is still allowed to run.
+const READY_LOCK_MARGIN_MS = 20_000;
+const READY_WALL_CAP_MAX_MS = SESSION_VNC_LOCK_TIMEOUT_MS - READY_LOCK_MARGIN_MS;
 
 /** Time the process's main thread spent runnable but waiting for a CPU. */
 function cpuWaitMs(pid: number): number {
@@ -243,7 +249,10 @@ async function startBridge(
   );
   const startedAt = Date.now();
   const budgetMs = options._readyMs ?? READY_BUDGET_MS;
-  const wallCapMs = budgetMs * READY_WALL_CAP_FACTOR;
+  const wallCapMs = Math.min(
+    budgetMs * READY_WALL_CAP_FACTOR,
+    READY_WALL_CAP_MAX_MS,
+  );
   let elapsedMs = 0;
   let waitMs = 0;
   try {

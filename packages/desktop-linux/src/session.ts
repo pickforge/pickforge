@@ -448,7 +448,13 @@ export async function createDesktopSession(
   }
 }
 
-const VNC_LOCK_TIMEOUT_MS = 10_000;
+/**
+ * How long a caller waits for a live holder of the session VNC lock. A holder
+ * that dies is detected and replaced at once, whatever this bound. Viewer
+ * bridge startup holds the lock until the bridge reports ready, which can
+ * take over a minute on a busy host (#301), so this bound covers it.
+ */
+export const SESSION_VNC_LOCK_TIMEOUT_MS = 90_000;
 const VNC_LOCK_POLL_MS = 25;
 
 interface VncLockOwner {
@@ -543,7 +549,7 @@ async function acquireSessionVncLock(
   await fs.promises.writeFile(sentinelPath, JSON.stringify(owner), {
     flag: "wx",
   });
-  const deadline = Date.now() + VNC_LOCK_TIMEOUT_MS;
+  const deadline = Date.now() + SESSION_VNC_LOCK_TIMEOUT_MS;
   let acquired = false;
 
   try {
