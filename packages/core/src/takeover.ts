@@ -773,10 +773,13 @@ async function acquirePermit(sessionId: string, env: EnvLike, status: "running" 
         if (ownerStartTicks !== undefined) record.ownerStartTicks = ownerStartTicks;
         const name = `${permitId}.json`;
         const raw = `${JSON.stringify(record)}\n`;
-        await fs.promises.writeFile(dir.resolve(name), raw, {
-          encoding: "utf8",
-          flag: "wx",
-        });
+        const tmp = `.agent-permit-${crypto.randomUUID()}`;
+        await dir.writeFileAtomic(tmp, raw);
+        try {
+          await dir.linkChild(tmp, name);
+        } finally {
+          await dir.unlinkChild(tmp).catch(() => {});
+        }
         // A successful re-check means this file predates closure. Teardown
         // lists this bound directory and waits; otherwise no action can run.
         await (async () => {
@@ -817,6 +820,7 @@ async function drainAgentPermits(
   signal?: AbortSignal,
 ): Promise<void> {
   signal?.throwIfAborted();
+  // Staging names have no .json suffix. Only complete, linked files are permits.
   const entries = (await dir.readEntryNames()).filter((name) => name.endsWith(".json"));
   const pending = new Set(entries);
   const deadline = Date.now() + timeoutMs;
@@ -880,6 +884,8 @@ export async function stopSessionAgentInput(
     // Closure precedes the listing. Only permits published before closure can
     // pass their re-check, and identity verification pins the same directory.
     await closeSessionInput(id, env);
+    // Persist retry eligibility before a process can exit during the drain.
+    await markSessionCleanupPending(id, env);
     await withSessionDirectory(id, env, false, async (_dir, permits, verify) => {
       if (permits !== undefined) await drainAgentPermits(permits, timeoutMs, signal);
       signal?.throwIfAborted();

@@ -6,7 +6,7 @@ import {
   AgentPermitUnavailableError,
   acquireAgentPermit, acquireHumanLease, createSession, destroySessionRecord,
   getSession, getTakeoverStatus, pruneSessionLogs, readHumanLease,
-  releaseAgentPermit, retainSessionLogs, sessionDataDir, sessionInputClosedName,
+  releaseAgentPermit, releaseHumanLease, retainSessionLogs, sessionDataDir, sessionInputClosedName,
   stopSessionAgentInput, updateSession, withAgentPermit,
 } from "../src/index.js";
 import { DirHandle } from "../src/dir-handle.js";
@@ -100,10 +100,10 @@ it.each(["closure", "status"])("rolls back a published permit when %s wins its r
   const record = await running();
   const published = barrier();
   const resume = barrier();
-  const write = fs.promises.writeFile;
-  vi.spyOn(fs.promises, "writeFile").mockImplementation(async (...args) => {
-    await write(...args);
-    if (String(args[1]).includes('"permitId"')) {
+  const link = DirHandle.prototype.linkChild;
+  vi.spyOn(DirHandle.prototype, "linkChild").mockImplementation(async function (this: DirHandle, from, to) {
+    await link.call(this, from, to);
+    if (from.startsWith(".agent-permit-")) {
       published.resolve();
       await resume.promise;
     }
@@ -169,13 +169,13 @@ it("never writes a delayed permit into a pruned and recreated directory", async 
   await releaseAgentPermit(await acquireAgentPermit(record.id, env));
   const reached = barrier();
   const resume = barrier();
-  const write = fs.promises.writeFile;
-  vi.spyOn(fs.promises, "writeFile").mockImplementation(async (...args) => {
-    if (String(args[1]).includes('"permitId"')) {
+  const write = DirHandle.prototype.writeFileAtomic;
+  vi.spyOn(DirHandle.prototype, "writeFileAtomic").mockImplementation(async function (this: DirHandle, name, content) {
+    if (name.startsWith(".agent-permit-")) {
       reached.resolve();
       await resume.promise;
     }
-    return write(...args);
+    return write.call(this, name, content);
   });
   const action = vi.fn(async () => {});
   const input = withAgentPermit(record.id, env, action);
@@ -268,4 +268,99 @@ it.each([false, true])("cancellation marks cleanup pending only after input clos
     expect(await getSession(record.id, env)).toMatchObject({ status: "running" });
     expect(fs.existsSync(marker(record.id))).toBe(false);
   }
+});
+
+it("ignores staged permits during a human drain and tracks the action after linking", async () => {
+  const record = await running();
+  const staged = barrier();
+  const publish = barrier();
+  const entered = barrier();
+  const finish = barrier();
+  const link = DirHandle.prototype.linkChild;
+  vi.spyOn(DirHandle.prototype, "linkChild").mockImplementation(async function (this: DirHandle, from, to) {
+    if (from.startsWith(".agent-permit-")) {
+      staged.resolve();
+      await publish.promise;
+    }
+    await link.call(this, from, to);
+  });
+  const permits = path.join(sessionDataDir(record.id, env), "permits");
+  const input = withAgentPermit(record.id, env, async () => {
+    const names = fs.readdirSync(permits);
+    expect(names).toEqual([`${contents.permitId}.json`]);
+    expect(JSON.parse(fs.readFileSync(path.join(permits, names[0]!), "utf8"))).toEqual(contents);
+    entered.resolve();
+    await finish.promise;
+  });
+  await staged.promise;
+  const [name] = fs.readdirSync(permits);
+  expect(name).toMatch(/^\.agent-permit-/);
+  const raw = fs.readFileSync(path.join(permits, name!), "utf8");
+  const contents = JSON.parse(raw) as { permitId: string; sessionId: string; ownerPid: number };
+  expect(contents).toMatchObject({ sessionId: record.id, ownerPid: process.pid });
+  const lease = await acquireHumanLease(record.id, env, { drainTimeoutMs: 0 });
+  expect(fs.readFileSync(path.join(permits, name!), "utf8")).toBe(raw);
+  expect(fs.readdirSync(permits)).toEqual([name]);
+  await releaseHumanLease(record.id, lease.leaseId, env);
+  publish.resolve();
+  await entered.promise;
+  const listed = watchPermitListing();
+  const stopping = stopSessionAgentInput(record.id, env);
+  let stopped = false;
+  void stopping.then(() => { stopped = true; });
+  await listed;
+  expect(stopped).toBe(false);
+  expect(fs.readdirSync(permits)).toEqual([`${contents.permitId}.json`]);
+  finish.resolve();
+  await input;
+  await stopping;
+  expect(stopped).toBe(true);
+  expect(fs.readdirSync(permits)).toEqual([]);
+});
+
+it("refuses a staged permit when teardown closes input before linking", async () => {
+  const record = await running();
+  const staged = barrier();
+  const publish = barrier();
+  const link = DirHandle.prototype.linkChild;
+  vi.spyOn(DirHandle.prototype, "linkChild").mockImplementation(async function (this: DirHandle, from, to) {
+    if (from.startsWith(".agent-permit-")) {
+      staged.resolve();
+      await publish.promise;
+    }
+    await link.call(this, from, to);
+  });
+  const action = vi.fn(async () => {});
+  const input = withAgentPermit(record.id, env, action);
+  const refused = expect(input).rejects.toThrow(AgentPermitUnavailableError);
+  await staged.promise;
+  await stopSessionAgentInput(record.id, env, 0);
+  expect(fs.readdirSync(path.join(sessionDataDir(record.id, env), "permits"))).toHaveLength(1);
+  publish.resolve();
+  await refused;
+  expect(action).not.toHaveBeenCalled();
+  expect(fs.readdirSync(path.join(sessionDataDir(record.id, env), "permits"))).toEqual([]);
+});
+
+it("persists cleanup pending before a held drain can be interrupted", async () => {
+  const record = await running();
+  const permit = await acquireAgentPermit(record.id, env);
+  const reached = barrier();
+  const resume = barrier();
+  const read = DirHandle.prototype.readEntryNames;
+  vi.spyOn(DirHandle.prototype, "readEntryNames").mockImplementation(async function (this: DirHandle) {
+    if (this.realDir.endsWith("/permits")) {
+      reached.resolve();
+      await resume.promise;
+    }
+    return read.call(this);
+  });
+  const stopping = stopSessionAgentInput(record.id, env);
+  await reached.promise;
+  expect(fs.existsSync(marker(record.id))).toBe(true);
+  expect(await getSession(record.id, env)).toMatchObject({ status: "error", meta: { reaperCleanupPending: true } });
+  expect(fs.existsSync(permit.path)).toBe(true);
+  await releaseAgentPermit(permit);
+  resume.resolve();
+  await stopping;
 });

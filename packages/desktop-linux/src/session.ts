@@ -179,7 +179,13 @@ export async function startSessionVnc(
     return start();
   }
   // Creation holds its startup permit through VNC ownership publication.
-  if (opts.starting === true || policy !== "inherit") return start();
+  if (opts.starting === true) {
+    if (record?.status !== "starting") {
+      throw new Error(`Session ${id} is not starting; startup VNC authority is unavailable`);
+    }
+    return start();
+  }
+  if (policy !== "inherit") return start();
   return withAgentPermit(id, registryEnv, start);
 }
 

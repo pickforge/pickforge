@@ -13,7 +13,7 @@ vi.mock("../src/display.js", async (original) => {
   return { ...actual, startXvfb: vi.fn() };
 });
 import { startXvfb, XvfbStartError } from "../src/display.js";
-import { DirHandle } from "../../core/src/dir-handle.js";
+import { DirHandle } from "@pickforge/lab-core";
 import { createDesktopSession, destroyDesktopSession, teardownDesktopSession } from "../src/session.js";
 
 let home: string;

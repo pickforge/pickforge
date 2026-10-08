@@ -251,7 +251,11 @@ describe("withAgentPermit", () => {
 
   it("types storage failures during acquisition without running the action", async () => {
     const failure = new Error("permit storage failed");
-    vi.spyOn(fs.promises, "writeFile").mockRejectedValue(failure);
+    const write = DirHandle.prototype.writeFileAtomic;
+    vi.spyOn(DirHandle.prototype, "writeFileAtomic").mockImplementation(async function (this: DirHandle, name, content) {
+      if (name.startsWith(".agent-permit-")) throw failure;
+      return write.call(this, name, content);
+    });
     const action = vi.fn(async () => "sent");
     const error = await withAgentPermit("desk-0ef40916", env, action).catch((error: unknown) => error);
     expect(error).toBeInstanceOf(AgentPermitUnavailableError);

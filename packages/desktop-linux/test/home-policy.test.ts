@@ -8,6 +8,7 @@ import {
   getSession,
   releaseHumanLease,
   sessionDataDir,
+  updateSession,
   type DesktopSessionInfo,
   type EnvLike,
 } from "@pickforge/lab-core";
@@ -117,4 +118,13 @@ it("resolves the session registry and runtime under the env HOME when PICKFORGE_
   expect(isolation.runtime.runtimeDir).toBe(path.join(sessionDir, "runtime"));
   expect(fs.statSync(isolation.runtime.runtimeDir).isDirectory()).toBe(true);
   expect(await getSession(record.id, env)).toBeUndefined();
+});
+
+it.each(["running", "error", "stopped"] as const)("refuses startup VNC authority for a %s inherited session", async (status) => {
+  const record = await session("inherit");
+  await updateSession(record.id, { status }, env);
+  await expect(startSessionVnc(record.id, env, {
+    display: ":987", viewOnly: true, starting: true,
+  })).rejects.toThrow("is not starting");
+  expect(fs.existsSync(sessionDataDir(record.id, env))).toBe(false);
 });
