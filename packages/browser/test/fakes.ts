@@ -26,8 +26,9 @@ export type FakeChromeMode =
  *   - crash: exits non-zero immediately
  *   - crash-after-port: publishes a port, closes it, then exits non-zero
  *   - stall: stays alive but never publishes a port
- *   - stubborn-stall: publishes a readiness marker, ignores graceful signals,
- *     and never publishes a port (for deterministic failed-cleanup tests)
+ *   - stubborn-stall: ignores graceful signals and never publishes a port
+ *     (for deterministic failed-cleanup tests). Its `chrome.pid` is written
+ *     only after those handlers are installed, so it is the readiness marker.
  */
 export function writeFakeChrome(binDir: string, mode: FakeChromeMode): void {
   const server = path.join(binDir, "fake-chrome.cjs");
@@ -47,13 +48,15 @@ export function writeFakeChrome(binDir: string, mode: FakeChromeMode): void {
       "function safeWrite(p, data) {",
       "  try { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, data); } catch {}",
       "}",
+      // Handlers first: chrome.pid is the readiness marker, so a test that waits
+      // for it never signals a fake whose handlers are not installed yet.
+      'if (MODE === "stubborn-stall") {',
+      '  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, () => {});',
+      "}",
       'if (sessionDir) safeWrite(path.join(sessionDir, "chrome.pid"), String(process.pid));',
       "if (profile) {",
       '  safeWrite(path.join(profile, "fake-chrome-env.json"), JSON.stringify(process.env));',
       '  safeWrite(path.join(profile, "fake-chrome-argv.json"), JSON.stringify(process.argv.slice(2)));',
-      "}",
-      'if (MODE === "stubborn-stall") {',
-      '  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, () => {});',
       "}",
       'if (MODE === "crash") { console.error("fake Chrome crashed before publishing a port"); process.exit(1); }',
       'if (MODE === "ready" || MODE === "crash-after-port") {',
