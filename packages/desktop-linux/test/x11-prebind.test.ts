@@ -10,7 +10,7 @@ vi.mock("@pickforge/lab-core", async (original) => {
   const actual = await original<typeof import("@pickforge/lab-core")>();
   return { ...actual, runCommand: vi.fn(), processIdentityMatches: vi.fn(() => true) };
 });
-import { AGENT_PERMITS_DIR, acquireHumanLease, createSession, sessionDataDir, updateSession, runCommand, processIdentityMatches, type EnvLike } from "@pickforge/lab-core";
+import { AGENT_PERMITS_DIR, AgentPermitUnavailableError, acquireHumanLease, createSession, sessionDataDir, updateSession, runCommand, processIdentityMatches, type EnvLike } from "@pickforge/lab-core";
 import { typeText } from "../src/input.js";
 import { validateTypingTarget } from "../src/x11-target.js";
 import { X11Wire } from "../src/x11-wire.js";
@@ -422,8 +422,8 @@ it("uses PICKLAB fallback but gives an empty PICKFORGE_HOME precedence", async (
   // the permit never lands in the real ~/.pickforge (#264).
   vi.stubEnv("HOME", root);
   env = { PICKFORGE_HOME: "", PICKLAB_HOME: home };
-  await expect(type("private")).rejects.toThrow();
-  expect(fs.existsSync(path.join(root, ".pickforge", "lab", "sessions", sessionId, AGENT_PERMITS_DIR))).toBe(true);
+  await expect(type("private")).rejects.toThrow(AgentPermitUnavailableError);
+  expect(fs.existsSync(path.join(root, ".pickforge", "lab", "sessions", sessionId, AGENT_PERMITS_DIR))).toBe(false);
   expect(server.connections).toBe(connected);
 });
 

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSession, destroySessionRecord, sessionDataDir, takeoverIdentityName, updateSession } from "../src/session.js";
 import { sessionsDir } from "../src/paths.js";
 import { parseSessionRetentionDuration, pruneSessionLogs, retainSessionLogs } from "../src/session-retention.js";
-import { acquireAgentPermit, readHumanLease, withAgentPermit } from "../src/takeover.js";
+import { AgentPermitUnavailableError, acquireAgentPermit, acquireHumanLease, readHumanLease, getTakeoverStatus, withAgentPermit } from "../src/takeover.js";
 
 const forcedIds = vi.hoisted(() => [] as string[]);
 vi.mock("node:crypto", async (importOriginal) => {
@@ -29,7 +29,7 @@ afterEach(() => {
 });
 
 async function stopped(type: "desktop" | "browser" | "android" = "desktop", takeover = false) {
-  const record = await createSession({ type, projectDir: home }, env);
+  const record = await createSession({ type, projectDir: home, status: "running" }, env);
   const dir = sessionDataDir(record.id, env);
   if (takeover) await withAgentPermit(record.id, env, async () => {});
   else fs.mkdirSync(dir);
@@ -134,6 +134,35 @@ describe("explicit session log pruning", () => {
     await retainSessionLogs(record, env);
     expect(fs.existsSync(path.join(dir, "permits"))).toBe(false);
     expect(fs.readFileSync(path.join(outside, "mine"), "utf8")).toBe("keep");
+  });
+
+  it.each([false, true])("refuses delayed first input after teardown (prune=%s)", async (prune) => {
+    const a = await createSession({ type: "desktop", projectDir: home, status: "running", desktop: { display: ":987" } }, env);
+    const dir = sessionDataDir(a.id, env);
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, "xvfb.log"), "diagnostics");
+    let resume!: () => void;
+    const gate = new Promise<void>((resolve) => { resume = resolve; });
+    const action = vi.fn(async () => {});
+    // The caller resolved A's display, then stalled before entering the gate.
+    const delayed = (async () => {
+      await gate;
+      return withAgentPermit(a.id, env, action);
+    })();
+    await retainSessionLogs(a, env);
+    await destroySessionRecord(a.id, env);
+    if (prune) expect(await pruneSessionLogs(0, env)).toEqual([a.id]);
+    const b = await createSession({ type: "desktop", projectDir: home, status: "running", desktop: { display: a.desktop!.display } }, env);
+    const lease = await acquireHumanLease(b.id, env);
+    resume();
+    await expect(delayed).rejects.toThrow(AgentPermitUnavailableError);
+    expect(action).not.toHaveBeenCalled();
+    expect(fs.existsSync(path.join(sessionsDir(env), takeoverIdentityName(a.id)))).toBe(false);
+    expect(fs.existsSync(path.join(dir, "permits"))).toBe(false);
+    expect(fs.existsSync(dir)).toBe(!prune);
+    expect(await getTakeoverStatus(a.id, env)).toEqual({ sessionId: a.id, active: false });
+    expect(await readHumanLease(b.id, env)).toEqual(lease);
+    if (!prune) expect(fs.readFileSync(path.join(dir, "xvfb.log"), "utf8")).toBe("diagnostics");
   });
 
   it("keeps the takeover identity so late callers for a pruned id still fail closed", async () => {

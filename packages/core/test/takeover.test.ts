@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  AgentPermitUnavailableError,
   HumanControlActiveError,
   HumanLeaseDrainTimeoutError,
   HumanLeaseHeldError,
@@ -20,9 +21,15 @@ import {
   releaseHumanLease,
   renewHumanLease,
   withAgentPermit,
+  createSession,
+  destroySessionRecord,
+  updateSession,
+  sessionDataDir,
   type EnvLike,
   type HumanLease,
 } from "../src/index.js";
+
+import { DirHandle } from "../src/dir-handle.js";
 
 const DEAD_PID = 999_999;
 
@@ -32,9 +39,17 @@ let env: EnvLike;
 beforeEach(() => {
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-takeover-test-"));
   env = { ...process.env, PICKFORGE_HOME: path.join(tmpRoot, "home") };
+  const sessions = path.join(env.PICKFORGE_HOME!, "sessions");
+  fs.mkdirSync(sessions, { recursive: true });
+  for (const id of ["desk-0000a5", "desk-0000a6", "desk-0000b1", "desk-0000b2", "desk-0000b3", "desk-0000b4"]) {
+    fs.writeFileSync(path.join(sessions, `${id}.json`), JSON.stringify({
+      id, type: "desktop", status: "running", createdAt: new Date().toISOString(), projectDir: tmpRoot,
+    }));
+  }
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
@@ -55,6 +70,58 @@ describe("acquireHumanLease", () => {
     expect(lease.heartbeatMs).toBe(5_000);
     const onDisk = await readHumanLease("desk-a1", env);
     expect(onDisk).toEqual(lease);
+  });
+
+  it("never exposes a lease while its temporary file is still empty", async () => {
+    let ready!: () => void;
+    let resume!: () => void;
+    const paused = new Promise<void>((resolve) => { ready = resolve; });
+    const gate = new Promise<void>((resolve) => { resume = resolve; });
+    const openFile = DirHandle.prototype.openFile;
+    let intercepted = false;
+    vi.spyOn(DirHandle.prototype, "openFile").mockImplementation(async function(this: DirHandle, name, flags, mode) {
+      const file = await openFile.call(this, name, flags, mode);
+      if (!intercepted && name.startsWith("..human-lease-")) {
+        intercepted = true;
+        const write = file.writeFile.bind(file);
+        vi.spyOn(file, "writeFile").mockImplementation(async (...args) => {
+          ready();
+          await gate;
+          return write(...args);
+        });
+      }
+      return file;
+    });
+    const first = acquireHumanLease("desk-atomic", env).catch((error: unknown) => error);
+    try {
+      await paused;
+      expect(await readHumanLease("desk-atomic", env)).toBeUndefined();
+      const winner = await acquireHumanLease("desk-atomic", env);
+      resume();
+      expect(await first).toBeInstanceOf(HumanLeaseHeldError);
+      expect(await readHumanLease("desk-atomic", env)).toEqual(winner);
+      expect(fs.readdirSync(sessionDataDir("desk-atomic", env)).sort()).toEqual(["human.lease.json", "permits"]);
+    } finally { resume(); await first; }
+  });
+
+  it.each(["write", "link"])("cleans up lease staging files after a %s failure", async (stage) => {
+    if (stage === "write") {
+      // FileHandle writes are used by atomic publication.
+      const openFile = DirHandle.prototype.openFile;
+      vi.spyOn(DirHandle.prototype, "openFile").mockImplementation(async function(this: DirHandle, name, flags, mode) {
+        const file = await openFile.call(this, name, flags, mode);
+        if (name.startsWith("..human-lease-")) vi.spyOn(file, "writeFile").mockRejectedValue(new Error("lease write failed"));
+        return file;
+      });
+    } else {
+      const link = DirHandle.prototype.linkChild;
+      vi.spyOn(DirHandle.prototype, "linkChild").mockImplementation(async function(this: DirHandle, from, to) {
+        if (to === "human.lease.json") throw new Error("lease link failed");
+        return link.call(this, from, to);
+      });
+    }
+    await expect(acquireHumanLease("desk-cleanup", env)).rejects.toThrow(`lease ${stage} failed`);
+    expect(fs.readdirSync(sessionDataDir("desk-cleanup", env))).toEqual(["permits"]);
   });
 
   it("refuses a second acquisition while the lease is live", async () => {
@@ -106,22 +173,22 @@ describe("acquireHumanLease", () => {
   });
 
   it("drains pre-existing agent permits before returning", async () => {
-    const permit = await acquireAgentPermit("desk-a5", env);
-    const acquiring = acquireHumanLease("desk-a5", env, { drainTimeoutMs: 2_000 });
+    const permit = await acquireAgentPermit("desk-0000a5", env);
+    const acquiring = acquireHumanLease("desk-0000a5", env, { drainTimeoutMs: 2_000 });
     // Give the drain loop a moment to observe the permit as pending, then
     // release it — acquisition must complete once it drains.
     await new Promise((resolve) => setTimeout(resolve, 60));
     await releaseAgentPermit(permit);
-    await expect(acquiring).resolves.toMatchObject({ sessionId: "desk-a5" });
+    await expect(acquiring).resolves.toMatchObject({ sessionId: "desk-0000a5" });
   });
 
   it("times out and releases its own lease when permits do not drain", async () => {
-    const permit = await acquireAgentPermit("desk-a6", env);
+    const permit = await acquireAgentPermit("desk-0000a6", env);
     await expect(
-      acquireHumanLease("desk-a6", env, { drainTimeoutMs: 80 }),
+      acquireHumanLease("desk-0000a6", env, { drainTimeoutMs: 80 }),
     ).rejects.toThrow(HumanLeaseDrainTimeoutError);
     // The lease created for the failed attempt must not linger.
-    expect(await readHumanLease("desk-a6", env)).toBeUndefined();
+    expect(await readHumanLease("desk-0000a6", env)).toBeUndefined();
     await releaseAgentPermit(permit);
   });
 
@@ -131,7 +198,9 @@ describe("acquireHumanLease", () => {
     const id = "desk-a1b2c3";
     const legacySessions = path.join(fakeHome, ".picklab", "sessions");
     fs.mkdirSync(legacySessions, { recursive: true });
-    fs.writeFileSync(path.join(legacySessions, `${id}.json`), "{}\n");
+    fs.writeFileSync(path.join(legacySessions, `${id}.json`), JSON.stringify({
+      id, type: "desktop", status: "running", createdAt: new Date().toISOString(), projectDir: tmpRoot,
+    }));
 
     const lease = await acquireHumanLease(id, {});
     const permit = await acquireAgentPermit(id, {});
@@ -168,22 +237,90 @@ describe("acquireHumanLease", () => {
 
 describe("withAgentPermit", () => {
   it("runs the action and cleans up its permit when no lease is held", async () => {
-    const result = await withAgentPermit("desk-b1", env, async () => "ran");
+    const result = await withAgentPermit("desk-0000b1", env, async () => "ran");
     expect(result).toBe("ran");
-    const permitsDir = path.join(env.PICKFORGE_HOME as string, "sessions", "desk-b1", "permits");
+    const permitsDir = path.join(env.PICKFORGE_HOME as string, "sessions", "desk-0000b1", "permits");
     expect(fs.existsSync(permitsDir) ? fs.readdirSync(permitsDir) : []).toEqual([]);
   });
 
+  it.each(["starting", "stopped", "error"] as const)("refuses a %s session without creating coordination", async (status) => {
+    const session = await createSession({ type: "desktop", projectDir: tmpRoot, status }, env);
+    const action = vi.fn();
+    await expect(withAgentPermit(session.id, env, action)).rejects.toThrow(AgentPermitUnavailableError);
+    expect(action).not.toHaveBeenCalled();
+    expect(fs.existsSync(sessionDataDir(session.id, env))).toBe(false);
+  });
+
+  it("refuses a missing registry record without creating storage", async () => {
+    const isolated = { PICKFORGE_HOME: path.join(tmpRoot, "missing-home") };
+    await expect(acquireAgentPermit("desk-abcdef", isolated)).rejects.toThrow(AgentPermitUnavailableError);
+    expect(fs.existsSync(isolated.PICKFORGE_HOME)).toBe(false);
+  });
+
+  it("refuses input if teardown occurs during permit publication", async () => {
+    const session = await createSession({ type: "desktop", projectDir: tmpRoot, status: "running" }, env);
+    const write = fs.promises.writeFile;
+    vi.spyOn(fs.promises, "writeFile").mockImplementation(async (...args) => {
+      await write(...args);
+      if (String(args[0]).startsWith("/proc/self/fd/") && String(args[0]).endsWith(".json")) {
+        await destroySessionRecord(session.id, env);
+      }
+    });
+    const action = vi.fn();
+    await expect(withAgentPermit(session.id, env, action)).rejects.toThrow(AgentPermitUnavailableError);
+    expect(action).not.toHaveBeenCalled();
+    expect(fs.readdirSync(path.join(sessionDataDir(session.id, env), "permits"))).toEqual([]);
+  });
+
+  it("types a failed lease recheck as unavailable and releases its permit", async () => {
+    const open = fs.promises.open;
+    vi.spyOn(fs.promises, "open").mockImplementation(async (...args) => {
+      if (String(args[0]).endsWith("human.lease.json")) throw new Error("lease read failed");
+      return open(...args);
+    });
+    const action = vi.fn();
+    await expect(withAgentPermit("desk-0000b1", env, action)).rejects.toThrow(AgentPermitUnavailableError);
+    expect(action).not.toHaveBeenCalled();
+    expect(fs.readdirSync(path.join(sessionDataDir("desk-0000b1", env), "permits"))).toEqual([]);
+  });
+
+  it("rechecks the registry immediately before the action", async () => {
+    const session = await createSession({ type: "desktop", projectDir: tmpRoot, status: "running" }, env);
+    const open = fs.promises.open;
+    vi.spyOn(fs.promises, "open").mockImplementation(async (...args) => {
+      if (String(args[0]).endsWith("human.lease.json")) await updateSession(session.id, { status: "stopped" }, env);
+      return open(...args);
+    });
+    const action = vi.fn();
+    await expect(withAgentPermit(session.id, env, action)).rejects.toThrow(AgentPermitUnavailableError);
+    expect(action).not.toHaveBeenCalled();
+  });
+
+  it("does not type action or release failures as permit refusals", async () => {
+    const failure = new Error("action failed");
+    await expect(withAgentPermit("desk-0000b1", env, async () => { throw failure; })).rejects.toBe(failure);
+    const unlink = fs.promises.unlink;
+    vi.spyOn(fs.promises, "unlink").mockImplementation(async (file) => {
+      if (String(file).endsWith(".json")) throw new Error("permit release failed");
+      return unlink(file);
+    });
+    const action = vi.fn(async () => "sent");
+    const error = await withAgentPermit("desk-0000b1", env, action).catch((error: unknown) => error);
+    expect(action).toHaveBeenCalledOnce();
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(AgentPermitUnavailableError);
+  });
+
   it("fails closed and never runs the action while human control is active", async () => {
-    await acquireHumanLease("desk-b2", env);
+    await acquireHumanLease("desk-0000b2", env);
     let ran = false;
     await expect(
-      withAgentPermit("desk-b2", env, async () => {
+      withAgentPermit("desk-0000b2", env, async () => {
         ran = true;
       }),
     ).rejects.toThrow(HumanControlActiveError);
     expect(ran).toBe(false);
-    const permitsDir = path.join(env.PICKFORGE_HOME as string, "sessions", "desk-b2", "permits");
+    const permitsDir = path.join(env.PICKFORGE_HOME as string, "sessions", "desk-0000b2", "permits");
     expect(fs.existsSync(permitsDir) ? fs.readdirSync(permitsDir) : []).toEqual([]);
   });
 
@@ -195,19 +332,19 @@ describe("withAgentPermit", () => {
     // `acquireHumanLease`, whose drain would otherwise wait on this same
     // permit — the recheck ordering being asserted here is independent of
     // that drain mechanics.
-    const permit = await acquireAgentPermit("desk-b3", env);
-    expect(await checkHumanLeaseBusy("desk-b3", env)).toBeUndefined();
+    const permit = await acquireAgentPermit("desk-0000b3", env);
+    expect(await checkHumanLeaseBusy("desk-0000b3", env)).toBeUndefined();
     const lease: HumanLease = {
       leaseId: "concurrent-lease",
-      sessionId: "desk-b3",
+      sessionId: "desk-0000b3",
       ownerPid: process.pid,
       createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 30_000).toISOString(),
       ttlMs: 30_000,
       heartbeatMs: 5_000,
     };
-    await writeRawLease("desk-b3", lease);
-    expect(await checkHumanLeaseBusy("desk-b3", env)).toMatchObject({
+    await writeRawLease("desk-0000b3", lease);
+    expect(await checkHumanLeaseBusy("desk-0000b3", env)).toMatchObject({
       leaseId: "concurrent-lease",
     });
     await releaseAgentPermit(permit);
@@ -216,15 +353,15 @@ describe("withAgentPermit", () => {
   it("does not fail closed against a stale lease", async () => {
     const stale: HumanLease = {
       leaseId: "dead-lease-b4",
-      sessionId: "desk-b4",
+      sessionId: "desk-0000b4",
       ownerPid: DEAD_PID,
       createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
       ttlMs: 30_000,
       heartbeatMs: 5_000,
     };
-    await writeRawLease("desk-b4", stale);
-    const result = await withAgentPermit("desk-b4", env, async () => "ran");
+    await writeRawLease("desk-0000b4", stale);
+    const result = await withAgentPermit("desk-0000b4", env, async () => "ran");
     expect(result).toBe("ran");
   });
 });
@@ -300,7 +437,7 @@ describe("getTakeoverStatus", () => {
 });
 
 // Real separate-process race: spawns two genuine OS processes (via `bun`, the
-// repo's test runtime) so the `wx` claim protocol is proven under real
+// repo's test runtime) so the link claim protocol is proven under real
 // concurrency, not just in-process Promise.all with a single shared PID.
 const BUN = /[\\/]bun$/.test(process.execPath) ? process.execPath : "bun";
 const acquireWorker = fileURLToPath(

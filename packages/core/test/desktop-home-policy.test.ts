@@ -19,9 +19,12 @@ afterEach(() => {
 describe("takeover storage ownership", () => {
   function fixture() {
     const env = { PICKFORGE_HOME: path.join(root, "registry") };
-    const session = sessionDataDir("synthetic", env);
+    const session = sessionDataDir("desk-abcdef", env);
     const outside = path.join(root, "outside");
     fs.mkdirSync(session, { recursive: true });
+    fs.writeFileSync(`${session}.json`, JSON.stringify({
+      id: "desk-abcdef", type: "desktop", status: "running", createdAt: new Date().toISOString(), projectDir: root,
+    }));
     fs.mkdirSync(outside);
     return { env, session, outside };
   }
@@ -31,14 +34,14 @@ describe("takeover storage ownership", () => {
     const target = kind === "session" ? session : path.join(session, "permits");
     if (kind === "session") fs.renameSync(session, `${session}-original`);
     fs.symlinkSync(outside, target);
-    await expect(acquireAgentPermit("synthetic", env)).rejects.toThrow(/symlink/);
-    await expect(acquireHumanLease("synthetic", env)).rejects.toThrow(/symlink/);
+    await expect(acquireAgentPermit("desk-abcdef", env)).rejects.toThrow(/symlink/);
+    await expect(acquireHumanLease("desk-abcdef", env)).rejects.toThrow(/symlink/);
     expect(fs.readdirSync(outside)).toEqual([]);
   });
 
   it.each(["session", "permits"])("releases the original permit after a %s path swap", async (kind) => {
     const { env, session, outside } = fixture();
-    const permit = await acquireAgentPermit("synthetic", env);
+    const permit = await acquireAgentPermit("desk-abcdef", env);
     const target = kind === "session" ? session : path.join(session, "permits");
     fs.renameSync(target, `${target}-original`);
     const outsidePermits = kind === "session" ? path.join(outside, "permits") : outside;
@@ -63,16 +66,16 @@ describe("takeover storage ownership", () => {
       }
       return original.call(this, name, mode);
     });
-    await expect(acquireAgentPermit("synthetic", env)).rejects.toThrow(/replaced/);
+    await expect(acquireAgentPermit("desk-abcdef", env)).rejects.toThrow(/replaced/);
     expect(fs.readdirSync(outside)).toEqual([]);
     expect(fs.readdirSync(path.join(`${session}-original`, "permits"))).toEqual([]);
   });
 
   it("drains the pinned permits and rolls back the pinned lease after a session swap", async () => {
     const { env, session, outside } = fixture();
-    const permit = await acquireAgentPermit("synthetic", env);
+    const permit = await acquireAgentPermit("desk-abcdef", env);
     try {
-      await expect(acquireHumanLease("synthetic", env, {
+      await expect(acquireHumanLease("desk-abcdef", env, {
         drainTimeoutMs: 0,
         _afterCreate() {
           fs.renameSync(session, `${session}-original`);
@@ -86,18 +89,18 @@ describe("takeover storage ownership", () => {
 
   it.each(["session", "permits"])("shares the %s identity with separate-process lease and permit users", async (kind) => {
     const { env, session } = fixture();
-    const permit = await acquireAgentPermit("synthetic", env);
+    const permit = await acquireAgentPermit("desk-abcdef", env);
     const target = kind === "session" ? session : path.join(session, "permits");
     fs.renameSync(target, `${target}-original`);
     fs.mkdirSync(target, { mode: 0o700 });
     try {
-      await expect(checkHumanLeaseBusy("synthetic", env)).rejects.toThrow(/identity changed/);
+      await expect(checkHumanLeaseBusy("desk-abcdef", env)).rejects.toThrow(/identity changed/);
       const modulePath = fileURLToPath(new URL("../src/takeover.ts", import.meta.url));
       const child = spawnSync("bun", ["-e", `
         import { acquireHumanLease, acquireAgentPermit, checkHumanLeaseBusy } from ${JSON.stringify(modulePath)};
         const outcomes = [];
         for (const operation of [acquireHumanLease, acquireAgentPermit, checkHumanLeaseBusy]) {
-          try { await operation("synthetic"); outcomes.push("unexpected success"); }
+          try { await operation("desk-abcdef"); outcomes.push("unexpected success"); }
           catch (error) { outcomes.push(error.message); }
         }
         console.log(JSON.stringify(outcomes));
@@ -111,10 +114,10 @@ describe("takeover storage ownership", () => {
 
   it("drains the held permit directory even if its name is replaced after lease publication", async () => {
     const { env, session } = fixture();
-    const permit = await acquireAgentPermit("synthetic", env);
+    const permit = await acquireAgentPermit("desk-abcdef", env);
     const permits = path.join(session, "permits");
     try {
-      const acquiring = acquireHumanLease("synthetic", env, {
+      const acquiring = acquireHumanLease("desk-abcdef", env, {
         drainTimeoutMs: 0,
         _afterCreate() {
           fs.renameSync(permits, `${permits}-original`);
@@ -128,31 +131,31 @@ describe("takeover storage ownership", () => {
       expect(fs.readdirSync(permits)).toEqual([]);
     } finally { await releaseAgentPermit(permit); }
     expect(fs.readdirSync(`${permits}-original`)).toEqual([]);
-    await expect(acquireHumanLease("synthetic", env)).rejects.toThrow(/identity changed/);
+    await expect(acquireHumanLease("desk-abcdef", env)).rejects.toThrow(/identity changed/);
   });
 
   it.each(["session", "permits"])("does not recreate a missing bound %s directory", async (kind) => {
     const { env, session } = fixture();
-    const permit = await acquireAgentPermit("synthetic", env);
+    const permit = await acquireAgentPermit("desk-abcdef", env);
     const target = kind === "session" ? session : path.join(session, "permits");
     fs.renameSync(target, `${target}-original`);
     try {
-      await expect(acquireHumanLease("synthetic", env)).rejects.toThrow();
-      await expect(checkHumanLeaseBusy("synthetic", env)).rejects.toThrow();
+      await expect(acquireHumanLease("desk-abcdef", env)).rejects.toThrow();
+      await expect(checkHumanLeaseBusy("desk-abcdef", env)).rejects.toThrow();
       expect(fs.existsSync(target)).toBe(false);
     } finally { await releaseAgentPermit(permit); }
   });
 
   it("refuses lease reads, renewal and release through a swapped session", async () => {
     const { env, session, outside } = fixture();
-    const lease = await acquireHumanLease("synthetic", env);
+    const lease = await acquireHumanLease("desk-abcdef", env);
     const raw = fs.readFileSync(path.join(session, "human.lease.json"), "utf8");
     fs.writeFileSync(path.join(outside, "human.lease.json"), raw);
     fs.renameSync(session, `${session}-original`);
     fs.symlinkSync(outside, session);
-    await expect(readHumanLease("synthetic", env)).rejects.toThrow(/symlink/);
-    await expect(renewHumanLease("synthetic", lease.leaseId, env)).rejects.toThrow(/symlink/);
-    await expect(releaseHumanLease("synthetic", lease.leaseId, env)).rejects.toThrow(/symlink/);
+    await expect(readHumanLease("desk-abcdef", env)).rejects.toThrow(/symlink/);
+    await expect(renewHumanLease("desk-abcdef", lease.leaseId, env)).rejects.toThrow(/symlink/);
+    await expect(releaseHumanLease("desk-abcdef", lease.leaseId, env)).rejects.toThrow(/symlink/);
     expect(fs.readFileSync(path.join(outside, "human.lease.json"), "utf8")).toBe(raw);
   });
 });

@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { HumanControlActiveError, isEvidenceTruncated, withAgentPermit } from "@pickforge/lab-core";
+import { AgentPermitUnavailableError, HumanControlActiveError, isEvidenceTruncated, withAgentPermit } from "@pickforge/lab-core";
 import type { EvidenceInputState, RunHandle, SessionType } from "@pickforge/lab-core";
 import { setRunCaptureGeometry } from "@pickforge/lab-core";
 import {
@@ -428,11 +428,11 @@ async function focusEvidence(display: string, ctx: ServerContext): Promise<Evide
 
 /**
  * True when the input failed before anything was sent: a text preparation
- * failure, or an agent permit refused because human control is active.
- * withAgentPermit throws HumanControlActiveError before it runs the input.
+ * failure, or a permit gate failure before the action starts.
  */
 function noInputSent(error: unknown): boolean {
-  return error instanceof DesktopTextPreparationError || error instanceof HumanControlActiveError;
+  return error instanceof DesktopTextPreparationError || error instanceof HumanControlActiveError ||
+    error instanceof AgentPermitUnavailableError;
 }
 
 async function trackInput(

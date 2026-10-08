@@ -7,7 +7,7 @@ import { appendAction, beginEvidenceRun } from "./evidence.js";
 import { ensureDir, type EnvLike } from "./paths.js";
 import { DirHandle, withDirHandle } from "./dir-handle.js";
 import { identityIsAlive, readProcessStartTicks } from "./proc.js";
-import { sessionDataDir, takeoverIdentityName } from "./session.js";
+import { getSession, sessionDataDir, takeoverIdentityName } from "./session.js";
 
 /**
  * Supervised pause / human takeover (pickforge/pickforge#21).
@@ -16,8 +16,8 @@ import { sessionDataDir, takeoverIdentityName } from "./session.js";
  * deadline) -> returning -> agent-active`.
  *
  * - `agent-active`: no `human.lease.json` in the session directory. Agent
- *   permits (short-lived files under `permits/`) are always granted.
- * - `pause-requested`: `acquireHumanLease` atomically (`wx`) creates the
+ *   permits (short-lived files under `permits/`) require a running session.
+ * - `pause-requested`: `acquireHumanLease` atomically (link) creates the
  *   lease file — the instant it exists, every agent permit recheck starts
  *   failing closed — then waits for permits that predate the lease to drain.
  * - `human-active`: the lease is held; the caller (desktop-linux) switches
@@ -171,6 +171,26 @@ export interface AgentPermit {
   ownerStartTicks?: number;
   createdAt: string;
   path: string;
+}
+
+/** A permit gate failed before the agent action started. */
+export class AgentPermitUnavailableError extends Error {
+  readonly code = "agent_permit_unavailable";
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : "Agent permit is unavailable", { cause });
+    this.name = "AgentPermitUnavailableError";
+  }
+}
+
+async function assertRunningSession(sessionId: string, env: EnvLike): Promise<void> {
+  if ((await getSession(sessionId, env))?.status !== "running") {
+    throw new Error(`Session ${sessionId} is not running; agent input is unavailable`);
+  }
+}
+
+function permitGateError(error: unknown): Error {
+  return error instanceof HumanControlActiveError || error instanceof AgentPermitUnavailableError
+    ? error : new AgentPermitUnavailableError(error);
 }
 
 /** Thrown when an agent action is refused because human control is active. */
@@ -428,19 +448,18 @@ function buildHumanLease(
 }
 
 async function createExclusiveHumanLeaseFile(
-  leasePath: string,
+  dir: DirHandle,
   lease: HumanLease,
   sessionId: string,
   now: Date,
 ): Promise<void> {
+  const tmp = `.human-lease-${crypto.randomUUID()}`;
   try {
-    await fs.promises.writeFile(leasePath, `${JSON.stringify(lease)}\n`, {
-      encoding: "utf8",
-      flag: "wx",
-    });
+    await dir.writeFileAtomic(tmp, `${JSON.stringify(lease)}\n`);
+    await dir.linkChild(tmp, HUMAN_LEASE_FILE);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    const raw = await readTextIfPresent(leasePath);
+    const raw = await readTextIfPresent(dir.resolve(HUMAN_LEASE_FILE));
     if (raw === undefined) {
       // Vanished between our failed create and this read (a peer released
       // it). Safe to retry from the caller's side; report as contention
@@ -454,11 +473,13 @@ async function createExclusiveHumanLeaseFile(
       throw new HumanLeaseHeldError(existing);
     }
     throw new StaleHumanLeaseError(raw, existing);
+  } finally {
+    await dir.unlinkChild(tmp);
   }
 }
 
 /**
- * Acquire exclusive human control of a session: atomically (`wx`) create the
+ * Acquire exclusive human control of a session: atomically (link) create the
  * lease file, then wait for every agent permit that existed at that instant
  * to drain (finish, or be recognized as owned by a dead process and swept).
  *
@@ -480,7 +501,7 @@ export async function acquireHumanLease(
     const leasePath = dir.resolve(HUMAN_LEASE_FILE);
     const now = opts.now ?? new Date();
     const lease = buildHumanLease(sessionId, now, opts);
-    await createExclusiveHumanLeaseFile(leasePath, lease, sessionId, now);
+    await createExclusiveHumanLeaseFile(dir, lease, sessionId, now);
     try {
       if (opts._afterCreate !== undefined) await opts._afterCreate();
       if (permits === undefined) throw new Error("Takeover permit directory is missing");
@@ -645,7 +666,17 @@ export async function acquireAgentPermit(
   sessionId: string,
   env: EnvLike = process.env,
 ): Promise<AgentPermit> {
+  try {
+    return await createAgentPermit(sessionId, env);
+  } catch (error) {
+    throw permitGateError(error);
+  }
+}
+
+async function createAgentPermit(sessionId: string, env: EnvLike): Promise<AgentPermit> {
   assertSafeSessionId(sessionId);
+  // Check before any creation, including when no coordination identity exists.
+  await assertRunningSession(sessionId, env);
   return withSessionDirectory(sessionId, env, true, async (session, permits, verify) => {
     if (permits === undefined) throw new Error("Takeover permit directory is missing");
     const dir = await DirHandle.open(permits.resolve(), { followFinal: true });
@@ -666,10 +697,13 @@ export async function acquireAgentPermit(
         encoding: "utf8",
         flag: "wx",
       });
-      await verify().catch(async (error: unknown) => {
+      try {
+        await verify();
+        await assertRunningSession(sessionId, env);
+      } catch (error) {
         await unlinkIfMatches(dir.resolve(name), raw).catch(() => {});
         throw error;
-      });
+      }
       const permit = { ...record, path: path.join(session.dir, AGENT_PERMITS_DIR, name) };
       permitDirectories.set(permit, { dir, name, raw });
       return permit;
@@ -740,9 +774,14 @@ export async function withAgentPermit<T>(
   const permit = await acquireAgentPermit(sessionId, env);
   try {
     const lease = await checkHumanLeaseBusy(sessionId, env);
-    if (lease !== undefined) {
-      throw new HumanControlActiveError(lease);
-    }
+    if (lease !== undefined) throw new HumanControlActiveError(lease);
+    await assertRunningSession(sessionId, env);
+  } catch (error) {
+    // A cleanup failure must not hide the fact that no action started.
+    await releaseAgentPermit(permit).catch(() => {});
+    throw permitGateError(error);
+  }
+  try {
     return await action();
   } finally {
     await releaseAgentPermit(permit);

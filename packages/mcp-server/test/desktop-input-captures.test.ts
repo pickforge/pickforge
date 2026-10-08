@@ -46,7 +46,7 @@ beforeEach(async () => {
   state.order = []; state.fail = ""; state.publishedFailure = false;
   state.captureBytes = 0; state.inputEffect = undefined;
 });
-afterEach(async () => { await lab.close(); removeLabDirs(dirs); });
+afterEach(async () => { vi.restoreAllMocks(); await lab.close(); removeLabDirs(dirs); });
 async function call(tool: string, args: Record<string, unknown>) {
   return parseToolJson(await lab.client.callTool({ name: tool, arguments: { session, ...args } }));
 }
@@ -288,4 +288,37 @@ it.each(cases.flatMap(([tool, args]) => [
   expect(state.order).toEqual(["input"]);
   const { actions } = await evidence();
   expect(actions.map((action) => [action.tool, action.status, action.inputState])).toEqual([[tool, "error", inputState]]);
+});
+
+it.each(cases)("%s reports a storage refusal as not-attempted in results and evidence", async (tool, args) => {
+  const dir = path.join(dirs.home, "sessions", session);
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir, "permits"), "blocked");
+  for (const capture of [undefined, "after", "both"]) {
+    state.order = [];
+    const result = await call(tool, { ...args, capture });
+    expect(result.ok).toBe(false);
+    expect(result.inputState).toBe("not-attempted");
+    expect(state.order).toEqual(capture === "both" ? ["before"] : []);
+    const { actions } = await evidence();
+    expect(actions.at(-1)).toMatchObject({ tool, status: "error", inputState: "not-attempted" });
+    expect(JSON.stringify({ result, actions })).not.toContain(cases[4]![1].text);
+  }
+});
+
+it.each([undefined, "after", "both"])("keeps release failures attempted with capture=%s and omits the typed value", async (capture) => {
+  const unlink = fs.promises.unlink;
+  vi.spyOn(fs.promises, "unlink").mockImplementation(async (file) => {
+    if (String(file).startsWith("/proc/self/fd/") && String(file).endsWith(".json")) {
+      throw new Error("permit release failed");
+    }
+    return unlink(file);
+  });
+  const result = await call("desktop_type", { ...cases[4]![1], capture });
+  expect(result.ok).toBe(false);
+  expect(result.inputState).toBe("attempted");
+  expect(state.order.filter((entry) => entry === "input")).toHaveLength(1);
+  const { actions } = await evidence();
+  expect(actions.at(-1)).toMatchObject({ status: "error", inputState: "attempted" });
+  expect(JSON.stringify({ result, actions })).not.toContain(cases[4]![1].text);
 });

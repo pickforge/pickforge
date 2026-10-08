@@ -172,7 +172,8 @@ export async function startSessionVnc(
     }
     return start();
   }
-  return policy === "inherit" ? withAgentPermit(id, registryEnv, start) : start();
+  return policy === "inherit" && record?.status !== "starting"
+    ? withAgentPermit(id, registryEnv, start) : start();
 }
 
 function requireVncBinary(opts: CreateDesktopSessionOptions): void {
@@ -405,9 +406,8 @@ export async function createDesktopSession(
       await createDesktopRuntimeDir(state.runtime);
       return startSessionXvfb(record.id, opts, state, registryEnv);
     };
-    const xvfb = state.homePolicy === "inherit"
-      ? await withAgentPermit(record.id, registryEnv, start)
-      : await start();
+    // This new session has no display yet. Input permits require a running session.
+    const xvfb = await start();
     state.xvfb = xvfb;
     const viewOnly = opts.vncControl !== true;
     if (wantsVnc) {
