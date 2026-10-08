@@ -11,6 +11,8 @@ import { ensureCliBuilt } from "./build-once.js";
 import { findProcessesWithEnv, killProcessesWithEnv } from "./env-process-sweep.js";
 import { cliSpawnTimeout } from "./spawn-timeout.js";
 import { encodePng } from "../../desktop-linux/test/png-fixture.js";
+import { holdTestPortLock } from "../../android/test/port-lock.js";
+import { AUTO_MIN_CONSOLE_PORT, isConsolePortPairFree } from "@pickforge/lab-android";
 
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json") as { version: string };
@@ -22,7 +24,6 @@ const MINI_PNG = Buffer.from(
   "base64",
 );
 const FAKE_SERIAL = "emulator-5554";
-const AUTO_ALLOCATED_SERIAL = "emulator-5556";
 const PLANTED_TOKEN = `ghp_${"a".repeat(36)}`;
 
 interface CliResult {
@@ -2084,13 +2085,26 @@ describe("pickforge-lab android (fake adb)", () => {
   });
 });
 
+/** The serial automatic allocation should pick: the first free pair from the floor. */
+async function expectedAutoSerial(): Promise<string> {
+  let port = AUTO_MIN_CONSOLE_PORT;
+  // A real emulator on this host can hold the floor; the allocator skips it.
+  while (!(await isConsolePortPairFree(port))) port += 2;
+  return `emulator-${port}`;
+}
+
 describe("pickforge-lab android session lifecycle (fake sdk)", () => {
+  // `android start` without --port probes from the 5556 floor. Another run of
+  // this file probes the same ports, so hold a host-wide lock (#306).
+  holdTestPortLock("auto-floor");
+
   it(
     "starts an emulator session, resolves it implicitly, and destroys it",
     async () => {
       const { sdk, adbLog, pidFile } = makeFakeAndroidSdk();
       const env = makeEnv({ extra: { ANDROID_HOME: sdk } });
       const projectDir = makeProjectDir();
+      const autoSerial = await expectedAutoSerial();
 
       const started = await runCli(
         ["android", "start", "--json", "--project-dir", projectDir],
@@ -2103,7 +2117,7 @@ describe("pickforge-lab android session lifecycle (fake sdk)", () => {
       expect(session.id).toMatch(/^andr-[0-9a-f]+$/);
       expect(session.type).toBe("android");
       expect(session.avdName).toBe("pickforge-avd");
-      expect(session.serial).toBe(AUTO_ALLOCATED_SERIAL);
+      expect(session.serial).toBe(autoSerial);
 
       const tap = await runCli(
         ["android", "tap", "10", "20", "--json", "--project-dir", projectDir],
@@ -2112,14 +2126,14 @@ describe("pickforge-lab android session lifecycle (fake sdk)", () => {
       expect(tap.code).toBe(0);
       expect(parseJson(tap).sessionId).toBe(session.id);
       expect(adbLogLines(adbLog)).toContain(
-        `-s ${AUTO_ALLOCATED_SERIAL} shell input tap 10 20`,
+        `-s ${autoSerial} shell input tap 10 20`,
       );
 
       const status = parseJson(
         await runCli(["session", "status", session.id, "--json"], env),
       );
       expect(status.sessions[0].android.emulatorAlive).toBe(true);
-      expect(status.sessions[0].android.serial).toBe(AUTO_ALLOCATED_SERIAL);
+      expect(status.sessions[0].android.serial).toBe(autoSerial);
 
       const destroyed = await runCli(
         ["session", "destroy", session.id, "--json"],

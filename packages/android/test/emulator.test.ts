@@ -563,6 +563,8 @@ describe("AVD pre-flight checks", () => {
       logDir: path.join(tmpRoot, "emu-shared-ro"),
       env: toolEnv,
       registryEnv,
+      // Keep to this file's window. The CLI test owns the 5556 floor (#306).
+      portRange: PORT_RANGE,
       bootTimeoutMs: 5_000,
       bootPollIntervalMs: 20,
     });
