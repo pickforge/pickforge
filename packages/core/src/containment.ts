@@ -360,16 +360,26 @@ export function containmentEnv(
 }
 
 function readProcStatFields(pid: number): string[] | undefined {
+  const read = readProcStatSnapshot(pid);
+  return read.kind === "fields" ? read.fields : undefined;
+}
+
+type ProcStatRead =
+  | { kind: "fields"; fields: string[] }
+  | { kind: "gone" | "unreadable" };
+
+function readProcStatSnapshot(pid: number): ProcStatRead {
   let content: string;
   try {
     content = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
-  } catch {
-    return undefined;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return { kind: code === "ENOENT" || code === "ESRCH" ? "gone" : "unreadable" };
   }
   const close = content.lastIndexOf(")");
-  if (close === -1) return undefined;
+  if (close === -1) return { kind: "unreadable" };
   // fields[0] is field 3 (state); field N maps to fields[N - 3].
-  return content.slice(close + 1).trim().split(/\s+/);
+  return { kind: "fields", fields: content.slice(close + 1).trim().split(/\s+/) };
 }
 
 type EnvironRead =
@@ -399,14 +409,18 @@ const PF_KTHREAD = 0x00200000;
  * possibly across many scans. Do not declare the scope empty until it settles.
  * This is not proof of ownership and never authorizes a signal.
  */
-function readMidExecIdentity(pid: number, entries: string[]): ProcessIdentity | undefined {
+function readMidExecIdentity(
+  pid: number,
+  entries: string[],
+  fields?: string[],
+): ProcessIdentity | undefined {
   if (entries.length !== 1 || entries[0] !== "") return undefined;
-  const fields = readProcStatFields(pid);
-  if (fields === undefined || fields[0] === "Z") return undefined;
-  if ((Number(fields[9 - 3]) & PF_KTHREAD) !== 0) return undefined;
+  const stat = fields ?? readProcStatFields(pid);
+  if (stat === undefined || stat[0] === "Z") return undefined;
+  if ((Number(stat[9 - 3]) & PF_KTHREAD) !== 0) return undefined;
   // A completed exec with an empty environment still has a nonzero env_end.
-  if (fields[51 - 3] !== "0") return undefined;
-  const startTicks = Number(fields[22 - 3]);
+  if (stat[51 - 3] !== "0") return undefined;
+  const startTicks = Number(stat[22 - 3]);
   return Number.isFinite(startTicks) ? { pid, startTicks } : undefined;
 }
 
@@ -671,10 +685,12 @@ function classifyCgroupEntries(
   midExec: Set<number>,
 ): MemberVerdict {
   if (entries.includes(`${TOKEN_ENV}=${token}`)) return "ours";
-  if (readMidExecIdentity(pid, entries) === undefined) {
-    // Check after each environ and mid-exec read before declaring it foreign.
-    return readProcStatFields(pid)?.[0] === "Z" ? "gone" : "foreign";
-  }
+  const stat = readProcStatSnapshot(pid);
+  if (stat.kind === "gone") return "gone";
+  if (stat.kind !== "fields") return "unknown";
+  // Membership collection confirms disappearance through cgroup.procs.
+  if (stat.fields[0] === "Z") return "gone";
+  if (readMidExecIdentity(pid, entries, stat.fields) === undefined) return "foreign";
   midExec.add(pid);
   return "unknown";
 }
@@ -807,24 +823,32 @@ function verifyCgroupMemberWithPriorProof(
 }
 
 function collectCgroupMembership(
+  cgroupDir: string,
   members: number[],
   token: string,
   priorProof: Map<number, ProcessIdentity>,
-): { undecided: number[]; foreign: number[]; proven: ProcessIdentity[]; midExec: Set<number> } {
+): { undecided: number[]; foreign: number[]; proven: ProcessIdentity[]; retryable: Set<number> } {
   const chain = selfAndAncestorIdentities();
   const inScope = new Set(members);
   const undecided: number[] = [];
   const foreign: number[] = [];
   const proven: ProcessIdentity[] = [];
-  const midExec = new Set<number>();
+  const retryable = new Set<number>();
   for (const pid of members) {
     if (chain.has(pid)) continue;
-    const verdict = verifyCgroupMemberWithPriorProof(pid, token, inScope, priorProof, midExec);
+    const verdict = verifyCgroupMemberWithPriorProof(pid, token, inScope, priorProof, retryable);
     if (verdict === "foreign") foreign.push(pid);
     else if (verdict === "unknown") undecided.push(pid);
-    else if (verdict !== "gone") proven.push(verdict);
+    else if (verdict === "gone") {
+      // A zombie leader can still have live threads listed by the kernel.
+      // Missing stat or environ alone also cannot prove cgroup departure.
+      if (readCgroupProcs(cgroupDir)?.includes(pid) !== false) {
+        undecided.push(pid);
+        retryable.add(pid);
+      }
+    } else proven.push(verdict);
   }
-  return { undecided, foreign, proven, midExec };
+  return { undecided, foreign, proven, retryable };
 }
 
 /**
@@ -850,7 +874,7 @@ async function verifyCgroupMembership(
     if (members === undefined) {
       return vacatedOr(cgroupDir, `could not read ${cgroupDir}/cgroup.procs`);
     }
-    const { undecided, foreign, proven, midExec } = collectCgroupMembership(members, token, priorProof);
+    const { undecided, foreign, proven, retryable } = collectCgroupMembership(cgroupDir, members, token, priorProof);
     if (foreign.length > 0) {
       return {
         refusal:
@@ -860,7 +884,7 @@ async function verifyCgroupMembership(
     }
     if (undecided.length === 0) return { members: proven };
     if (Date.now() >= deadline ||
-      (!retryUnreadable && undecided.some((pid) => !midExec.has(pid)))) {
+      (!retryUnreadable && undecided.some((pid) => !retryable.has(pid)))) {
       return {
         refusal:
           `refusing cgroup cleanup: could not verify that process(es) ` +
