@@ -672,7 +672,13 @@ function classifyCgroupEnvironment(
   const read = readEnviron(pid);
   if (read.kind !== "entries") return read.kind === "gone" ? "gone" : "unknown";
   if (read.entries.includes(`${TOKEN_ENV}=${token}`)) return "ours";
-  if (readMidExecIdentity(pid, read.entries) === undefined) return "foreign";
+  if (readMidExecIdentity(pid, read.entries) === undefined) {
+    // Exec may finish after the empty environ read but before the stat read.
+    // Re-read before refusing; the surrounding start-time checks still pin
+    // ownership across both environment reads.
+    const empty = read.entries.length === 1 && read.entries[0] === "";
+    return empty && processCarriesToken(pid, token) ? "ours" : "foreign";
+  }
   midExec.add(pid);
   return "unknown";
 }
