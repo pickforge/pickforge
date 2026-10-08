@@ -283,6 +283,7 @@ export {
   HUMAN_LEASE_FILE,
   HUMAN_LEASE_HEARTBEAT_MS,
   HUMAN_LEASE_TTL_MS,
+  AgentPermitUnavailableError,
   HumanControlActiveError,
   HumanLeaseDrainTimeoutError,
   HumanLeaseHeldError,
