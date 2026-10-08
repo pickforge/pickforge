@@ -32,6 +32,7 @@ import {
   destroyAndroidSession,
   teardownAndroidSession,
 } from "../src/index.js";
+import { holdTestPortLock } from "./port-lock.js";
 
 const tmpRoot = fs.mkdtempSync(
   path.join(os.tmpdir(), "pickforge-lab-android-reaper-"),
@@ -53,6 +54,9 @@ const toolEnv: EnvLike = { PATH: "", ANDROID_AVD_HOME: avdHome };
  * on this machine would hold and of the windows the other android tests use.
  */
 const BASE = 5648;
+
+// The window is host-global; see port-lock.ts (#293).
+holdTestPortLock("reaper");
 
 afterAll(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
