@@ -62,6 +62,14 @@ afterEach(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
+function hasMissingPid(...pids: (number | undefined)[]): boolean {
+  return pids.includes(undefined);
+}
+
+function isPositivePid(pid: number | undefined): pid is number {
+  return pid !== undefined && pid > 0;
+}
+
 function reapBrowserSessions() {
   return reapDeadRunningSessions(registryEnv, {
     browser: {
@@ -126,6 +134,25 @@ async function waitForEntry(
     throw new Error(`Stopped watching ${dir} before the expected entry appeared`);
   } finally {
     controller.abort();
+  }
+}
+
+/**
+ * Wait until fake Chrome `pid` has written `chrome.pid`. The fake writes it
+ * only after it installs any signal handlers its mode needs.
+ */
+async function waitForChromePidMarker(
+  sessionDir: string,
+  pid: number,
+  deadline: number,
+): Promise<void> {
+  const marker = path.join(sessionDir, "chrome.pid");
+  const written = (): boolean =>
+    fs.existsSync(marker) && fs.readFileSync(marker, "utf8").trim() === String(pid);
+  while (!written()) {
+    if (!isPidAlive(pid)) throw new Error(`Fake Chrome ${pid} exited before it was ready`);
+    if (Date.now() >= deadline) throw new Error(`Fake Chrome ${pid} was not ready in time`);
+    await scheduler.wait(10);
   }
 }
 
@@ -871,7 +898,9 @@ describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
       projectDir,
       registryEnv,
       env: spawnEnvFor("stubborn-stall"),
-      cdpTimeoutMs: 5000,
+      // The test ends startup itself by killing the leader. A short CDP
+      // timeout could fire first on a starved host and kill the group.
+      cdpTimeoutMs: TEST_TIMEOUT_MS,
     });
 
     const recordFile = await recordReady;
@@ -883,9 +912,7 @@ describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
     let childPid: number | undefined;
     let xvfbPid: number | undefined;
     while (
-      (leaderPid === undefined ||
-        childPid === undefined ||
-        xvfbPid === undefined) &&
+      hasMissingPid(leaderPid, childPid, xvfbPid) &&
       Date.now() < handoffDeadline
     ) {
       const current = await getSession(id, registryEnv);
@@ -895,30 +922,24 @@ describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
         leaderPid === undefined
           ? undefined
           : listProcessGroupMembers(leaderPid).find((pid) => pid !== leaderPid);
-      if (
-        leaderPid === undefined ||
-        childPid === undefined ||
-        xvfbPid === undefined
-      ) {
+      if (hasMissingPid(leaderPid, childPid, xvfbPid)) {
         await scheduler.yield();
       }
     }
     if (
-      leaderPid === undefined ||
-      leaderPid <= 0 ||
-      childPid === undefined ||
-      childPid <= 0 ||
-      xvfbPid === undefined ||
-      xvfbPid <= 0
+      !isPositivePid(leaderPid) ||
+      !isPositivePid(childPid) ||
+      !isPositivePid(xvfbPid)
     ) {
       throw new Error(
         "Browser ownership handoff did not persist a real leader and child PID",
       );
     }
-    // The durable record identifies the stable supervisor. Let its freshly
-    // spawned child finish installing the fake Chrome signal handlers before
-    // killing the supervisor, then prove the same child still owns the group.
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The durable record identifies the stable supervisor. Wait until its
+    // freshly spawned child has installed the fake Chrome signal handlers
+    // before killing the supervisor, then prove the same child still owns the
+    // group. A fixed delay let a loaded host signal the fake first (#297).
+    await waitForChromePidMarker(sessionDir, childPid, handoffDeadline);
     expect(listProcessGroupMembers(leaderPid)).toContain(childPid);
 
     process.kill(leaderPid, "SIGKILL");

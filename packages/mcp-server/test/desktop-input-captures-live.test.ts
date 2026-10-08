@@ -21,14 +21,17 @@ it.skipIf(!available)("associates real input capture pairs, geometry, inspection
     expect(created.ok).toBe(true);
     session = created.sessions[0].id;
     // Turn off the GTK caret blink in the session's private config home so only input changes pixels (#217).
-    const fixture = ': "${XDG_CONFIG_HOME:?}"; for v in 4.0 3.0; do mkdir -p "$XDG_CONFIG_HOME/gtk-$v" && printf \'[Settings]\\ngtk-cursor-blink=false\\n\' > "$XDG_CONFIG_HOME/gtk-$v/settings.ini" || exit 1; done; exec zenity --entry --title "Capture Fixture" --text "Synthetic input only"';
+    // The long blink timeout keeps a live caret blinking for 10 minutes instead of 10 s, so the stable wait below
+    // proves the blink is off however late it settles (#268).
+    const fixture = ': "${XDG_CONFIG_HOME:?}"; for v in 4.0 3.0; do mkdir -p "$XDG_CONFIG_HOME/gtk-$v" && printf \'[Settings]\\ngtk-cursor-blink=false\\ngtk-cursor-blink-timeout=600\\n\' > "$XDG_CONFIG_HOME/gtk-$v/settings.ini" || exit 1; done; exec zenity --entry --title "Capture Fixture" --text "Synthetic input only"';
     const launched = await call("desktop_exec", { command: "sh", args: ["-c", fixture], windowTimeoutMs: 10_000 });
     expect(launched.ok, JSON.stringify(launched)).toBe(true);
     const windows = await call("desktop_windows");
     const window = windows.windows.find((item: { name: string }) => item.name === "Capture Fixture");
     expect(window).toBeDefined();
     expect((await call("desktop_focus", { id: window.id, capture: "both" })).ok).toBe(true);
-    expect(await call("desktop_wait", { stableMs: 1300, timeoutMs: 8_000 })).toMatchObject({ ok: true, reason: "stable" }); // Longer than a 1.2 s blink cycle and shorter than the 10 s blink timeout, so a live caret fails.
+    // Longer than a 1.2 s blink cycle, so a live caret fails. The timeout leaves room for slow samples on a loaded host.
+    expect(await call("desktop_wait", { stableMs: 1300, timeoutMs: 30_000 })).toMatchObject({ ok: true, reason: "stable" });
     const marker = "capture-synthetic-value";
     const typed = await call("desktop_type", { text: marker, capture: "both" });
     expect(typed.ok, JSON.stringify(typed)).toBe(true);

@@ -150,7 +150,8 @@ export function makeFakeAndroidSdk(
       `    echo "$n" > "${bootCount}"`,
       `    if [ "$n" -ge ${bootAfterPolls} ]; then echo 1; else echo 0; fi ;;`,
       '  devices) printf "List of devices attached\\n" ;;',
-      `  *"emu kill"*) [ -f "${pidFile}" ] && kill "$(cat "${pidFile}")" 2>/dev/null ;;`,
+      // Shell builtins only: PATH may hold just the fake bin directory.
+      `  *"emu kill"*) [ -f "${pidFile}" ] && read -r pid < "${pidFile}" && kill "$pid" 2>/dev/null ;;`,
       "esac",
       "exit 0",
     ].join("\n"),
