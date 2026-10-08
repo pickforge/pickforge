@@ -110,6 +110,19 @@ const NEVER_BOOTING_ADB_SCRIPT = [
   "exit 0",
 ].join("\n");
 
+/** An adb that reports a finished boot only for the emulator on one port. */
+function bootingOnlyAdbScript(port: number): string {
+  return [
+    'case "$*" in',
+    `  *"-s emulator-${port} "*getprop*) echo 1 ;;`,
+    "  *getprop*) echo 0 ;;",
+    '  devices) printf "List of devices attached\\n" ;;',
+    '  *"emu kill"*) exit 0 ;;',
+    "esac",
+    "exit 0",
+  ].join("\n");
+}
+
 let homeCounter = 0;
 
 function makeRegistryEnv(): EnvLike {
@@ -418,8 +431,10 @@ describe("port collisions outside the reservation registry", () => {
 
   it("retries on a fresh port when the emulator itself reports a collision", async () => {
     const attempts = path.join(tmpRoot, "collision-attempts.txt");
+    // Only the retry port boots. A boot reported for the colliding port could
+    // win the race against that emulator's exit (#210).
     const sdk = makeFakeSdk(
-      BOOTING_ADB_SCRIPT,
+      bootingOnlyAdbScript(BASE + 2),
       [
         "#!/bin/sh",
         "PATH=/usr/bin:/bin",
@@ -463,8 +478,9 @@ describe("port collisions outside the reservation registry", () => {
   }, 20_000);
 
   it("gives up after the bounded retries and keeps the collision diagnosis", async () => {
+    // Every attempt collides, so no boot may be reported (#210).
     const sdk = makeFakeSdk(
-      BOOTING_ADB_SCRIPT,
+      NEVER_BOOTING_ADB_SCRIPT,
       '#!/bin/sh\necho "ERROR        | address already in use"\nexit 1\n',
     );
     const registryEnv = makeRegistryEnv();
