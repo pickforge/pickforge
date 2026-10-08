@@ -4,6 +4,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import path from "node:path";
 import {
   REAPER_CLEANUP_PENDING_META_KEY,
+  AgentPermitDrainTimeoutError,
   clearStaleHumanLease,
   checkHumanLeaseBusy,
   desktopHomePolicy,
@@ -344,8 +345,14 @@ async function rollbackFailedCreate(
   record: SessionRecord,
   state: DesktopStartupState,
   registryEnv: EnvLike,
+  error: unknown,
 ): Promise<void> {
-  await stopSessionAgentInput(record.id, registryEnv);
+  let gateError: unknown;
+  try { await stopSessionAgentInput(record.id, registryEnv); }
+  catch (failure) {
+    if (failure instanceof AgentPermitDrainTimeoutError) throw startupCleanupError(error, failure);
+    gateError = failure;
+  }
   const vncGone = await stopStartupVnc(record.id, state);
   const xvfbGone = await stopStartupXvfb(state);
   const contained = await destroyContainmentScope(state.containment);
@@ -366,7 +373,7 @@ async function rollbackFailedCreate(
   delete clearedMeta[REAPER_CLEANUP_PENDING_META_KEY];
   await updateSession(
     record.id,
-    cleanupComplete
+    cleanupComplete && gateError === undefined
       ? { status: "error", desktop: undefined, meta: clearedMeta }
       : {
           status: "error",
@@ -378,6 +385,13 @@ async function rollbackFailedCreate(
         },
     registryEnv,
   ).catch(() => {});
+  if (gateError !== undefined) throw startupCleanupError(error, gateError);
+}
+
+function startupCleanupError(error: unknown, cleanup: unknown): AggregateError {
+  const message = error instanceof Error ? error.message : String(error);
+  const detail = cleanup instanceof Error ? cleanup.message : String(cleanup);
+  return new AggregateError([error, cleanup], `${message}; input cleanup failed: ${detail}`, { cause: error });
 }
 
 export async function createDesktopSession(
@@ -445,7 +459,7 @@ export async function createDesktopSession(
     }
     return handle;
   } catch (error) {
-    await rollbackFailedCreate(record, state, registryEnv);
+    await rollbackFailedCreate(record, state, registryEnv, error);
     throw error;
   }
 }

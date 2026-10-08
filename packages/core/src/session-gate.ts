@@ -7,6 +7,9 @@ import { identityIsAlive, readProcessStartTicks } from "./proc.js";
 
 const OWNER = "owner";
 const LOCK_TIMEOUT_MS = 5_000;
+const STAGE_MAX_AGE_MS = 60_000;
+const STAGE_NAME = /^\.(?:desk|andr|duo|brow)-[0-9a-f]{6,}\.gate-stage-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+const OWNER_TEMP = /^\.owner\.tmp-([0-9]+)-[0-9]+$/;
 
 export class SessionInputClosedError extends Error {
   constructor(id: string) {
@@ -49,7 +52,7 @@ async function sweepDeadLock(root: DirHandle, name: string): Promise<void> {
       try { owner = JSON.parse(await handle.readFile("utf8")); }
       finally { await handle.close(); }
       if (typeof owner.ownerPid !== "number") throw new Error("Invalid session gate lock owner");
-      if (identityIsAlive(owner.ownerPid, owner.ownerStartTicks)) return;
+      if (owner.released !== true && identityIsAlive(owner.ownerPid, owner.ownerStartTicks)) return;
       await lock.unlinkChild(OWNER);
     }
     // A successor is published with its owner already present. This rmdir can
@@ -73,11 +76,67 @@ async function publishLock(root: DirHandle, stage: string, name: string): Promis
   }
 }
 
+async function stageOwnerIsDead(stage: DirHandle): Promise<boolean> {
+  if ((await stage.lstatChild(OWNER))?.isFile() === true) {
+    const file = await stage.openFile(OWNER, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    try {
+      const owner = JSON.parse(await file.readFile("utf8"));
+      return typeof owner.ownerPid === "number" && (owner.released === true || !identityIsAlive(owner.ownerPid, owner.ownerStartTicks));
+    } finally { await file.close(); }
+  }
+  // An empty or partly written stage has no published owner yet. Leave fresh
+  // stages and temp files belonging to live processes alone.
+  if (Date.now() - stage.stat.mtimeMs < STAGE_MAX_AGE_MS) return false;
+  for (const name of await stage.readEntryNames()) {
+    const match = OWNER_TEMP.exec(name);
+    if (match === null || identityIsAlive(Number(match[1]), undefined)) return false;
+  }
+  return true;
+}
+
+async function removeAbandonedStage(root: DirHandle, name: string): Promise<void> {
+  if ((await root.lstatChild(name))?.isDirectory() !== true) return;
+  await withDirHandle(root.openChild(name), async (stage) => {
+    if (!await stageOwnerIsDead(stage)) return;
+    const entries = await stage.readEntryNames();
+    for (const entry of entries) {
+      if (entry !== OWNER && !OWNER_TEMP.test(entry)) return;
+      const stat = await stage.lstatChild(entry);
+      if (stat !== undefined && !stat.isFile() && !stat.isSymbolicLink()) return;
+    }
+    for (const entry of entries) await stage.unlinkChild(entry);
+    await removeEmptyDirectory(root, name);
+  });
+}
+
+/** Reclaim only gate stages from dead owners or old, unfinished writes. */
+export async function sweepSessionGateStages(root: DirHandle, id?: string): Promise<void> {
+  for (const name of await root.readEntryNames()) {
+    if (!STAGE_NAME.test(name) || id !== undefined && !name.startsWith(`.${id}.gate-stage-`)) continue;
+    // A peer can publish or reclaim the stage between listing and opening it.
+    await removeAbandonedStage(root, name).catch((error) => {
+      if (error instanceof RunStorageAccessError || (error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    });
+  }
+}
+
+async function releaseOwner(lock: DirHandle): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try { await lock.unlinkChild(OWNER); return; }
+    catch { if (attempt < 2) await delay(5); }
+  }
+  // If unlink remains unavailable, record that this operation has finished.
+  // A later acquirer can sweep it even while this process remains alive.
+  await lock.writeFileAtomic(OWNER, JSON.stringify({ ownerPid: process.pid, released: true })).catch(() => {});
+}
+
 /** Serialize short registry writes, coordination initialization and gate closure. */
 export async function withSessionGate<T>(id: string, rootPath: string, action: (root: DirHandle) => Promise<T>): Promise<T> {
   await ensureDir(rootPath);
   const root = await DirHandle.open(rootPath);
   try {
+    await sweepSessionGateStages(root, id);
     const stage = `.${id}.gate-stage-${crypto.randomUUID()}`;
     const name = `.${id}.gate-lock`;
     const lock = await root.ensureChildDir(stage, 0o700);
@@ -91,7 +150,7 @@ export async function withSessionGate<T>(id: string, rootPath: string, action: (
       return await action(root);
     } finally {
       // Cleanup must not lose the result or descriptors returned by action.
-      await lock.unlinkChild(OWNER).catch(() => {});
+      await releaseOwner(lock);
       await removeEmptyDirectory(root, published ? name : stage).catch(() => {});
       await lock.close().catch(() => {});
     }

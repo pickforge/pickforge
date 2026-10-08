@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   REAPER_CLEANUP_PENDING_META_KEY,
+  AgentPermitDrainTimeoutError,
   createSession,
   destroySessionRecord,
   retainSessionLogs,
@@ -537,14 +538,19 @@ async function failBrowserCreation(
   state: BrowserCreationState,
   error: unknown,
 ): Promise<never> {
-  await stopSessionAgentInput(ctx.record.id, ctx.registryEnv);
+  let gateError: unknown;
+  try { await stopSessionAgentInput(ctx.record.id, ctx.registryEnv); }
+  catch (failure) {
+    if (failure instanceof AgentPermitDrainTimeoutError) throw startupCleanupError(error, failure);
+    gateError = failure;
+  }
   const browserGone = await stopFailedBrowser(state);
   state.browserDaemon?.release();
   const xvfbGone = await stopFailedXvfb(state, browserGone);
   const runtimeFailures =
     browserGone && xvfbGone ? await removeRuntimeData(ctx.layout) : [];
   const cleanupComplete =
-    browserGone && xvfbGone && runtimeFailures.length === 0;
+    gateError === undefined && browserGone && xvfbGone && runtimeFailures.length === 0;
   const desktop = failedDesktopInfo(state);
   const browser = failedBrowserInfo(ctx, state);
   const clearedMeta = { ...ctx.record.meta };
@@ -569,7 +575,11 @@ async function failBrowserCreation(
         },
     ctx.registryEnv,
   ).catch(() => {});
-  throw error;
+  throw gateError === undefined ? error : startupCleanupError(error, gateError);
+}
+
+function startupCleanupError(error: unknown, cleanup: unknown): AggregateError {
+  return new AggregateError([error, cleanup], `${asError(error).message}; input cleanup failed: ${asError(cleanup).message}`, { cause: error });
 }
 
 /**

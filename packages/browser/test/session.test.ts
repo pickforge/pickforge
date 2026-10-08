@@ -37,6 +37,7 @@ import {
 } from "../src/index.js";
 import { fakePath, writeExecutable, writeFakeChrome } from "./fakes.js";
 import type { FakeChromeMode } from "./fakes.js";
+import { DirHandle } from "../../core/src/dir-handle.js";
 
 // The browser package owns Chrome; Xvfb is the production display server (a
 // light, concurrency-tested dependency), so these tests fake only Chrome and
@@ -758,6 +759,64 @@ describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
     expect(
       fs.existsSync(path.join(browserSessionLogDir(id, registryEnv), "profile")),
     ).toBe(false);
+  }, TEST_TIMEOUT_MS);
+
+  it("stops Chrome and Xvfb after rollback gate failure and preserves the startup error", async () => {
+    const startup = new Error("browser running-record startup failure");
+    const gate = Object.assign(new Error("browser gate owner disk full"), { code: "ENOSPC" });
+    const realUpdate = core.updateSession;
+    const realWrite = DirHandle.prototype.writeFileAtomic;
+    let pids: number[] = [];
+    const update = vi.spyOn(core, "updateSession").mockImplementation(async (id, patch, env) => {
+      if (patch.status === "running") {
+        pids = [patch.desktop!.xvfbPid!, patch.browser!.browserPid];
+        throw startup;
+      }
+      return realUpdate(id, patch, env);
+    });
+    const write = vi.spyOn(DirHandle.prototype, "writeFileAtomic").mockImplementation(async function(this: DirHandle, name, data) {
+      if (pids.length > 0 && name === "owner") throw gate;
+      return realWrite.call(this, name, data);
+    });
+    try {
+      const result = await createBrowserSession({ projectDir, registryEnv, env: spawnEnvFor("ready") }).catch((error: unknown) => error);
+      expect(result).toBeInstanceOf(AggregateError);
+      expect(result).toMatchObject({ cause: startup, errors: [startup, gate], message: expect.stringContaining(startup.message) });
+      expect(pids).toHaveLength(2);
+      for (const pid of pids) expect(isPidAlive(pid)).toBe(false);
+      const records = await core.listSessions(registryEnv);
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({ status: "error", meta: { reaperCleanupPending: true } });
+    } finally {
+      update.mockRestore(); write.mockRestore();
+      for (const pid of pids) await stopPid(pid);
+    }
+    expect(await reapBrowserSessions()).toHaveLength(1);
+  }, TEST_TIMEOUT_MS);
+
+  it("keeps Chrome and Xvfb alive when rollback cannot drain permits", async () => {
+    const startup = new Error("browser startup failed before completion");
+    const timeout = new core.AgentPermitDrainTimeoutError(["held"]);
+    const realUpdate = core.updateSession;
+    let id: string | undefined;
+    let pids: number[] = [];
+    const update = vi.spyOn(core, "updateSession").mockImplementation(async (sessionId, patch, env) => {
+      if (patch.status === "running") {
+        id = sessionId; pids = [patch.desktop!.xvfbPid!, patch.browser!.browserPid];
+        throw startup;
+      }
+      return realUpdate(sessionId, patch, env);
+    });
+    const stop = vi.spyOn(core, "stopSessionAgentInput").mockRejectedValue(timeout);
+    try {
+      const result = await createBrowserSession({ projectDir, registryEnv, env: spawnEnvFor("ready") }).catch((error: unknown) => error);
+      expect(result).toMatchObject({ cause: startup, errors: [startup, timeout] });
+      expect(pids).toHaveLength(2);
+      for (const pid of pids) expect(isPidAlive(pid)).toBe(true);
+    } finally {
+      update.mockRestore(); stop.mockRestore();
+      if (id !== undefined) await destroyBrowserSession(id, registryEnv);
+    }
   }, TEST_TIMEOUT_MS);
 
   it("cleans up when cancellation occurs during the running-record commit", async () => {

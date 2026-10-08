@@ -156,6 +156,27 @@ describe("delayed takeover initialization", () => {
 });
 
 describe("session gate lock ownership", () => {
+  it.each([1, 3])("recovers after %s owner unlink failures before the next operation", async (failureCount) => {
+    const session = await record();
+    const unlink = DirHandle.prototype.unlinkChild;
+    let failures = 0;
+    vi.spyOn(DirHandle.prototype, "unlinkChild").mockImplementation(async function(this: DirHandle, name) {
+      if (name === "owner" && failures++ < failureCount) throw Object.assign(new Error("transient unlink failure"), { code: "EIO" });
+      return unlink.call(this, name);
+    });
+    expect(await withSessionGate(session.id, sessionsDir(env), async () => "first")).toBe("first");
+    expect(await withSessionGate(session.id, sessionsDir(env), async () => "next")).toBe("next");
+    expect(fs.existsSync(path.join(sessionsDir(env), `.${session.id}.gate-lock`))).toBe(false);
+  }, 2_000);
+
+  it("persists cleanup pending when gate writes remain unavailable", async () => {
+    const session = await record("starting");
+    vi.spyOn(DirHandle.prototype, "writeFileAtomic").mockRejectedValue(Object.assign(new Error("gate unavailable"), { code: "ENOSPC" }));
+    await expect(updateSession(session.id, { status: "running" }, env)).rejects.toThrow("gate unavailable");
+    await updateSession(session.id, { status: "error", meta: { reaperCleanupPending: true } }, env);
+    expect(await getSession(session.id, env)).toMatchObject({ status: "error", meta: { reaperCleanupPending: true } });
+  });
+
   it("does not remove a successor's live lock during delayed release", async () => {
     const session = await record();
     const reached = barrier();
@@ -194,5 +215,62 @@ describe("session gate lock ownership", () => {
       await expect(updateSession(session.id, { status: "running" }, env)).rejects.toThrow(SessionInputClosedError);
       expect(fs.readdirSync(sessionsDir(env)).some((name) => name.includes("gate-lock") || name.includes("gate-stage"))).toBe(false);
     } finally { child.kill("SIGKILL"); await exited; }
+  });
+});
+
+describe("abandoned session gate stages", () => {
+  async function killedWaiter(id: string, phase: string, index: number) {
+    const ready = path.join(home, `stage-ready-${index}`);
+    const worker = fileURLToPath(new URL("./workers/session-gate-worker.ts", import.meta.url));
+    const child = spawn("bun", [worker, sessionsDir(env), id, ready, phase], { stdio: "ignore" });
+    const exited = new Promise<void>((resolve, reject) => { child.once("error", reject); child.once("exit", () => resolve()); });
+    try { await vi.waitFor(() => expect(fs.existsSync(ready)).toBe(true), { timeout: 5_000 }); }
+    finally { child.kill("SIGKILL"); await exited; }
+  }
+
+  it.each(["acquisition", "prune"])("reclaims killed waiting processes during %s", async (sweep) => {
+    const session = await record();
+    const entered = barrier();
+    const release = barrier();
+    const holder = withSessionGate(session.id, sessionsDir(env), async () => { entered.resume(); await release.wait; });
+    const stages = () => fs.readdirSync(sessionsDir(env)).filter((name) => name.includes("gate-stage"));
+    try {
+      await entered.wait;
+      for (let index = 0; index < 3; index += 1) await killedWaiter(session.id, "waiting", index);
+      // Each new waiter also sweeps its dead predecessors.
+      expect(stages()).toHaveLength(1);
+      if (sweep === "prune") { expect(await pruneSessionLogs(0, env)).toEqual([]); expect(stages()).toEqual([]); }
+    } finally { release.resume(); await holder; }
+    await stopSessionAgentInput(session.id, env, 0);
+    expect(stages()).toEqual([]);
+    await retainSessionLogs(session, env);
+    await destroySessionRecord(session.id, env);
+    expect(await pruneSessionLogs(0, env)).toEqual([session.id]);
+  });
+
+  it("reclaims an old stage killed before its owner write and preserves unknown entries and symlinks", async () => {
+    const session = await record();
+    await killedWaiter(session.id, "before-owner", 0);
+    const root = sessionsDir(env);
+    const name = fs.readdirSync(root).find((entry) => entry.includes("gate-stage"))!;
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(fs.existsSync(path.join(root, name))).toBe(true);
+    const old = new Date(Date.now() - 61_000);
+    fs.writeFileSync(path.join(root, name, ".owner.tmp-4194311-1"), "partial");
+    fs.utimesSync(path.join(root, name), old, old);
+    const outside = path.join(home, "outside");
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, "keep"), "private");
+    const link = `.${session.id}.gate-stage-00000000-0000-0000-0000-000000000000`;
+    fs.symlinkSync(outside, path.join(root, link));
+    const unknown = `.${session.id}.gate-stage-00000000-0000-0000-0000-000000000001`;
+    fs.mkdirSync(path.join(root, unknown));
+    fs.writeFileSync(path.join(root, unknown, "owner"), JSON.stringify({ ownerPid: 4194311 }));
+    fs.writeFileSync(path.join(root, unknown, "keep"), "private");
+    await pruneSessionLogs(0, env);
+    expect(fs.existsSync(path.join(root, name))).toBe(false);
+    expect(fs.lstatSync(path.join(root, link)).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(path.join(outside, "keep"), "utf8")).toBe("private");
+    expect(fs.readFileSync(path.join(root, unknown, "keep"), "utf8")).toBe("private");
   });
 });

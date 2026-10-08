@@ -3,6 +3,7 @@ import path from "node:path";
 import { DirHandle, withDirHandle } from "./dir-handle.js";
 import { legacySessionsDirs, sessionsDir, type EnvLike } from "./paths.js";
 import { sessionDataDir, type SessionRecord } from "./session.js";
+import { sweepSessionGateStages } from "./session-gate.js";
 
 const MARKER = "stopped.json";
 const SESSION_ID = /^(desk|andr|duo|brow)-[0-9a-f]{6,}$/;
@@ -112,6 +113,7 @@ export async function pruneSessionLogs(
   for (const rootPath of roots) {
     if (!fs.existsSync(rootPath)) continue;
     await withDirHandle(DirHandle.open(rootPath), async (root) => {
+      await sweepSessionGateStages(root);
       for (const id of await root.readEntryNames()) {
         if (!SESSION_ID.test(id)) continue;
         if ((await root.lstatChild(id))?.isDirectory() !== true) continue;

@@ -326,7 +326,7 @@ export async function updateSession(
   if (!isValidSessionId(id)) {
     throw invalidSessionIdError(id);
   }
-  return withSessionGate(id, path.dirname(sessionPathForRead(id, env)), async () => {
+  const write = async () => {
     const existing = await getSession(id, env);
     if (existing === undefined) {
       throw new Error(`Session not found: ${id}`);
@@ -341,7 +341,14 @@ export async function updateSession(
     if (updated.status === "running") await checkSessionInputOpen(id, env);
     await writeFileAtomic(sessionPathForRead(id, env), serialize(updated));
     return updated;
-  });
+  };
+  try { return await withSessionGate(id, path.dirname(sessionPathForRead(id, env)), write); }
+  catch (error) {
+    // Failed startup must remain retryable even when its gate cannot be opened.
+    // This fallback can only publish a terminal error with cleanup pending.
+    if (patch.status !== "error" || patch.meta?.[REAPER_CLEANUP_PENDING_META_KEY] !== true) throw error;
+    return write();
+  }
 }
 
 export async function destroySessionRecord(
