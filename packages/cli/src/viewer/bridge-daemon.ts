@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import fs from "node:fs";
 import http from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
@@ -37,6 +38,33 @@ export interface EnsureViewerBridgeOptions {
   _cliEntry?: string;
   /** @internal Bound readiness waits in failure tests. */
   _readyMs?: number;
+}
+
+// The bridge spends most of its startup loading the CLI: about 0.4 s of CPU
+// on an idle host. With 16 busy loops on 2 CPUs it reported ready after up to
+// 8 s, but under 1 s of that was its own time; the rest was spent waiting for
+// a CPU (#301). The budget counts only the bridge's own time, so a hung bridge
+// still fails within 8 s on an idle host. The wall cap ends a bridge that never
+// gets a CPU. A bridge that exits fails at once.
+const READY_BUDGET_MS = 8_000;
+const READY_WALL_CAP_FACTOR = 8;
+
+/** Time the process's main thread spent runnable but waiting for a CPU. */
+function cpuWaitMs(pid: number): number {
+  try {
+    const fields = fs
+      .readFileSync(`/proc/${pid}/schedstat`, "utf8")
+      .trim()
+      .split(/\s+/);
+    const waitNs = Number(fields[1]);
+    return Number.isFinite(waitNs) && waitNs > 0 ? waitNs / 1e6 : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function seconds(ms: number): string {
+  return (ms / 1_000).toFixed(1);
 }
 
 function validPort(port: number | undefined): port is number {
@@ -213,9 +241,13 @@ async function startBridge(
       owned: true,
     },
   );
+  const startedAt = Date.now();
+  const budgetMs = options._readyMs ?? READY_BUDGET_MS;
+  const wallCapMs = budgetMs * READY_WALL_CAP_FACTOR;
+  let elapsedMs = 0;
+  let waitMs = 0;
   try {
-    const deadline = Date.now() + (options._readyMs ?? 8_000);
-    while (Date.now() < deadline) {
+    while (elapsedMs - waitMs < budgetMs && elapsedMs < wallCapMs) {
       const identity = readProcessIdentity(daemon.pid);
       if (identity === undefined) {
         throw new Error("Viewer bridge exited during startup");
@@ -246,8 +278,15 @@ async function startBridge(
         };
       }
       await sleep(25);
+      elapsedMs = Date.now() - startedAt;
+      waitMs = cpuWaitMs(daemon.pid);
     }
-    throw new Error("Viewer bridge readiness timed out");
+    throw new Error(
+      `Viewer bridge did not report readiness after ${seconds(elapsedMs)} s, ` +
+        `${seconds(waitMs)} s of it waiting for a CPU. ` +
+        `If the host is busy, retry when the load drops. ` +
+        `Otherwise see ${daemon.logPath}.`,
+    );
   } catch (error) {
     if (!(await stopOwnedDaemonGroup(daemon))) {
       throw new Error("Viewer bridge startup cleanup failed");

@@ -700,13 +700,20 @@ describe("detached bridge daemon", () => {
         { desktop: { display: ":991" } },
         registryEnv,
       );
-      await expect(
-        ensureViewerBridge(sessionId, {
-          registryEnv: registryEnv,
-          _cliEntry: await daemonEntry(kind),
-          _readyMs: 100,
-        }),
-      ).rejects.toThrow();
+      const failure = ensureViewerBridge(sessionId, {
+        registryEnv: registryEnv,
+        _cliEntry: await daemonEntry(kind),
+        _readyMs: 100,
+      });
+      if (kind === "hang") {
+        // The error says what timed out, how much was CPU wait, and where
+        // the bridge log is (#301).
+        await expect(failure).rejects.toThrow(
+          /^Viewer bridge did not report readiness after \d+\.\d s, \d+\.\d s of it waiting for a CPU\. If the host is busy, retry when the load drops\. Otherwise see .*viewer-bridge\.log\.$/,
+        );
+      } else {
+        await expect(failure).rejects.toThrow();
+      }
       expect(
         (await getSession(sessionId, registryEnv))?.desktop?.viewerBridgePid,
       ).toBeUndefined();

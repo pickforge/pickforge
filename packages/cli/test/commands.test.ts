@@ -853,7 +853,9 @@ describe("pickforge-lab session (desktop)", () => {
       );
       expect(fs.readFileSync(opens, "utf8").trim().split("\n")).toHaveLength(2);
     },
-    cliSpawnTimeout(7),
+    // Seven CLI calls, and two of them start a viewer bridge that loads the
+    // CLI again. Under heavy load this test took up to 69 s (#301).
+    cliSpawnTimeout(9),
   );
 
 
