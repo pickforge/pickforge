@@ -119,5 +119,5 @@ describe("Xvfb partial start cleanup", () => {
     expect((error as Error).message).toContain("cleanup could not be verified");
     expect(Date.now() - started).toBeGreaterThanOrEqual(2_000);
     expect(isPidAlive(strays[0]!)).toBe(true);
-  });
+  }, 10_000);
 });

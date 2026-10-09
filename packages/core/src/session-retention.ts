@@ -17,8 +17,9 @@ const LEASE_STAGING = new RegExp(
 // The writeFileAtomic temp for the marker, left when teardown dies before the rename.
 const MARKER_TEMP = /^\.stopped\.json\.tmp-(\d+)-\d+$/;
 
-// A temp whose writer may still run belongs to an overlapping retain. A reused
-// pid only keeps an orphan, which delays pruning but loses nothing.
+// A temp whose writer may still run belongs to an overlapping retain. If a
+// live process reuses the dead writer's pid, the orphan stays and blocks
+// pruning of that session, but no data is lost.
 function isOrphanMarkerTemp(name: string): boolean {
   const pid = MARKER_TEMP.exec(name)?.[1];
   return pid !== undefined && Number(pid) !== process.pid && !isPidAlive(Number(pid));
