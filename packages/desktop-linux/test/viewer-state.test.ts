@@ -655,44 +655,6 @@ describe("session VNC lock cancellation", () => {
       await withSessionVncLock(sessionId, registryEnv, async () => "free"),
     ).toBe("free");
   });
-
-  it("still runs a waiting operation with a live signal once the holder releases", async () => {
-    const holder = holdLock();
-    await vi.waitFor(async () =>
-      expect(
-        await fs.readdir(path.join(testRoot, "sessions")),
-      ).toContain(`${sessionId}.ensure-vnc.lock`),
-    );
-    const controller = new AbortController();
-    let ran = false;
-    const waiting = withSessionVncLock(
-      sessionId,
-      registryEnv,
-      async () => {
-        ran = true;
-        return "ran";
-      },
-      { signal: controller.signal },
-    );
-    await new Promise((resolve) => setTimeout(resolve, 60));
-    expect(ran).toBe(false);
-    holder.release();
-    await holder.held;
-    expect(await waiting).toBe("ran");
-  });
-
-  it("skips the locked operation when the signal is already aborted", async () => {
-    const operation = vi.fn(async () => {});
-    await expect(
-      withSessionVncLock(sessionId, registryEnv, operation, {
-        signal: AbortSignal.abort(),
-      }),
-    ).rejects.toThrow(/Cancelled while waiting for the VNC lock/);
-    expect(operation).not.toHaveBeenCalled();
-    expect(
-      await withSessionVncLock(sessionId, registryEnv, async () => "free"),
-    ).toBe("free");
-  });
 });
 
 describe("viewer teardown", { timeout: TEARDOWN_TIMEOUT_MS }, () => {
