@@ -56,8 +56,8 @@ function reapDeadRunningSessions(
           teardownDesktopSession(id, registryEnv, finalize, options),
       },
       android: {
-        teardown: (id, finalize) =>
-          teardownAndroidSession(id, registryEnv, {}, finalize),
+        teardown: (id, finalize, options) =>
+          teardownAndroidSession(id, registryEnv, {}, finalize, options),
       },
       browser: {
         teardown: (id, finalize, options) =>

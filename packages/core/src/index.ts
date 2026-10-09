@@ -349,6 +349,12 @@ export {
   retainSessionLogs,
 } from "./session-retention.js";
 
+export {
+  SESSION_VNC_LOCK_TIMEOUT_MS,
+  withSessionVncLock,
+  type SessionVncLockOptions,
+} from "./session-lock.js";
+
 export { latestOutcome, latestOutcomeStatus, recordEvidenceOutcome, isOutcomeRecord, EvidenceOutcomeError, type EvidenceOutcomeInput, type EvidenceOutcomeRecord } from "./evidence-outcome.js";
 export type { EvidenceDevice } from "./run.js";
 

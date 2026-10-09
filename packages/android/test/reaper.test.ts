@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
 
 let forceStopFailure = false;
+let beforeStop: (() => Promise<void>) | undefined;
 
 vi.mock("../src/emulator.js", async (importOriginal) => {
   const actual =
@@ -14,6 +15,7 @@ vi.mock("../src/emulator.js", async (importOriginal) => {
       if (forceStopFailure) {
         return false;
       }
+      await beforeStop?.();
       return actual.stopEmulator(opts);
     }),
   };
@@ -22,9 +24,14 @@ vi.mock("../src/emulator.js", async (importOriginal) => {
 import {
   REAPER_CLEANUP_PENDING_META_KEY,
   beginEvidenceRun,
+  createSession,
+  destroySessionRecord,
   getSession,
   isPidAlive,
   reapDeadRunningSessions,
+  sessionDataDir,
+  teardownLocalSession,
+  withSessionVncLock,
   type EnvLike,
 } from "@pickforge/lab-core";
 import {
@@ -32,6 +39,7 @@ import {
   destroyAndroidSession,
   teardownAndroidSession,
 } from "../src/index.js";
+import { stopEmulator } from "../src/emulator.js";
 import { holdTestPortLock } from "./port-lock.js";
 
 const tmpRoot = fs.mkdtempSync(
@@ -147,4 +155,90 @@ describe("android reaper tracking", () => {
       ),
     ).toMatchObject({ status: "failed" });
   }, 20_000);
+});
+
+async function until(condition: () => boolean, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return true;
+}
+
+describe("android-only teardown lock (#321)", () => {
+  it("serializes overlapping destroys of one session", async () => {
+    const sdk = makeFakeSdk();
+    const session = await createAndroidSession({
+      projectDir,
+      registryEnv,
+      sdk,
+      port: BASE + 2,
+      env: toolEnv,
+      bootPollIntervalMs: 20,
+      bootTimeoutMs: 5_000,
+    });
+    const sessions = path.join(home, "sessions");
+    const waiters = () =>
+      fs.readdirSync(sessions).filter((name) => name.startsWith(`${session.id}.ensure-vnc.lock.`)).length;
+    vi.mocked(stopEmulator).mockClear();
+    let stops = 0;
+    // Hold the first stop until the second destroy waits on the lock or,
+    // without a lock, reaches its own stop.
+    beforeStop = async () => {
+      stops += 1;
+      if (stops === 1) await until(() => stops > 1 || waiters() > 1, 2_000);
+    };
+    try {
+      const destroy = () =>
+        destroyAndroidSession(session.id, registryEnv, { sdk, env: toolEnv, timeoutMs: 300 });
+      const results = await Promise.allSettled([destroy(), destroy()]);
+      expect(results.map((result) => result.status).sort()).toEqual(["fulfilled", "rejected"]);
+      const rejected = results.find((result) => result.status === "rejected");
+      expect((rejected as PromiseRejectedResult).reason).toBeInstanceOf(Error);
+      expect(((rejected as PromiseRejectedResult).reason as Error).message).toBe(
+        `Android session not found: ${session.id}`,
+      );
+    } finally {
+      beforeStop = undefined;
+    }
+    expect(stopEmulator).toHaveBeenCalledTimes(1);
+    expect(await getSession(session.id, registryEnv)).toBeUndefined();
+    expect(isPidAlive(session.emulatorPid)).toBe(false);
+    const logDir = sessionDataDir(session.id, registryEnv);
+    expect(fs.readdirSync(logDir).filter((name) => name.includes("stopped.json"))).toEqual(["stopped.json"]);
+    expect(fs.readdirSync(sessions).filter((name) => name.startsWith(`${session.id}.ensure-vnc.lock`))).toEqual([]);
+  }, 20_000);
+
+  it("runs the duo Android leg inside the desktop lock without taking it again", async () => {
+    const record = await createSession({
+      type: "desktop+android",
+      projectDir,
+      status: "running",
+      desktop: { display: ":2995" },
+      android: { avdName: "fake" },
+    }, registryEnv);
+    const runtime = {
+      desktop: {
+        teardown: (id: string, finalize: () => Promise<void>) =>
+          withSessionVncLock(id, registryEnv, finalize),
+      },
+      android: {
+        teardown: (id: string, finalize: () => Promise<void>) =>
+          teardownAndroidSession(id, registryEnv, {}, finalize),
+      },
+    };
+    await teardownLocalSession(record, runtime, () => destroySessionRecord(record.id, registryEnv));
+    expect(await getSession(record.id, registryEnv)).toBeUndefined();
+  }, 5_000);
+  it("refuses a non-Android record without finalizing it", async () => {
+    const record = await createSession({ type: "browser", projectDir, status: "running" }, registryEnv);
+    const finalize = vi.fn(async () => {});
+    await expect(teardownAndroidSession(record.id, registryEnv, {}, finalize)).rejects.toThrow(
+      `Session ${record.id} is not an Android session`,
+    );
+    expect(finalize).not.toHaveBeenCalled();
+    expect(await getSession(record.id, registryEnv)).toBeDefined();
+    await destroySessionRecord(record.id, registryEnv);
+  });
 });

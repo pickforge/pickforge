@@ -141,7 +141,7 @@ function destroyRuntime(
     desktop: { destroy: (id) => destroyDesktopSession(id, ctx.env, { signal }) },
     browser: { destroy: (id) => destroyBrowserSession(id, ctx.env, { signal }) },
     android: {
-      destroy: (id) => destroyAndroidSession(id, ctx.env, { env: ctx.env }),
+      destroy: (id) => destroyAndroidSession(id, ctx.env, { env: ctx.env }, { signal }),
     },
   };
 }
@@ -157,8 +157,8 @@ function reaperRuntime(ctx: ServerContext): LocalSessionTeardownRuntime {
         teardownBrowserSession(id, ctx.env, finalize, options),
     },
     android: {
-      teardown: (id, finalize) =>
-        teardownAndroidSession(id, ctx.env, { env: ctx.env }, finalize),
+      teardown: (id, finalize, options) =>
+        teardownAndroidSession(id, ctx.env, { env: ctx.env }, finalize, options),
     },
   };
 }
