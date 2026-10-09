@@ -8,10 +8,12 @@ import {
   REAPER_CLEANUP_PENDING_META_KEY,
   sessionDataDir,
   updateSession,
+  withSessionVncLock,
   type AndroidSessionInfo,
   type EnvLike,
   type LocalSessionTeardownFinalizer,
   type SessionRecord,
+  type SessionVncLockOptions,
 } from "@pickforge/lab-core";
 import { listDevices } from "./adb.js";
 import { DEFAULT_AVD_NAME } from "./avd.js";
@@ -115,12 +117,13 @@ export async function createAndroidSession(
   const readOnly = opts.readOnly === true;
   await reapDeadRunningSessions(registryEnv, {
     android: {
-      teardown: (id, finalize) =>
+      teardown: (id, finalize, options) =>
         teardownAndroidSession(
           id,
           registryEnv,
           { sdk: opts.sdk, env: opts.env },
           finalize,
+          options,
         ),
     },
   });
@@ -182,16 +185,12 @@ async function retainAndroidOnlyLogs(record: SessionRecord, env: EnvLike): Promi
   }
 }
 
-export async function teardownAndroidSession(
-  id: string,
+async function stopAndRetainAndroid(
+  record: SessionRecord,
   registryEnv: EnvLike,
   opts: AndroidSessionOpOptions,
-  finalize: LocalSessionTeardownFinalizer,
 ): Promise<void> {
-  const record = await getSession(id, registryEnv);
-  if (record === undefined) {
-    throw new Error(`Android session not found: ${id}`);
-  }
+  const id = record.id;
   const android = record.android;
   if (android?.emulatorPid !== undefined || android?.serial !== undefined) {
     let stopped: boolean;
@@ -234,16 +233,50 @@ export async function teardownAndroidSession(
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Failed to retain logs of session ${record.id}: ${message}`, { cause: error });
   }
-  await finalize();
+}
+
+export async function teardownAndroidSession(
+  id: string,
+  registryEnv: EnvLike,
+  opts: AndroidSessionOpOptions,
+  finalize: LocalSessionTeardownFinalizer,
+  options: SessionVncLockOptions = {},
+): Promise<void> {
+  const record = await getSession(id, registryEnv);
+  if (record === undefined) {
+    throw new Error(`Android session not found: ${id}`);
+  }
+  if (record.type !== "android" || record.desktop !== undefined) {
+    // A desktop+android record runs this leg as the desktop teardown's
+    // finalize, which already holds the session lock. The lock is not reentrant.
+    await stopAndRetainAndroid(record, registryEnv, opts);
+    await finalize();
+    return;
+  }
+  // The session lock serializes overlapping teardowns, such as a reaper and
+  // an explicit destroy, as desktop teardown does.
+  await withSessionVncLock(id, registryEnv, async () => {
+    const current = await getSession(id, registryEnv);
+    if (current === undefined) {
+      throw new Error(`Android session not found: ${id}`);
+    }
+    await stopAndRetainAndroid(current, registryEnv, opts);
+    await finalize();
+  }, options);
 }
 
 export async function destroyAndroidSession(
   id: string,
   registryEnv: EnvLike = process.env,
   opts: AndroidSessionOpOptions = {},
+  options: SessionVncLockOptions = {},
 ): Promise<void> {
-  await teardownAndroidSession(id, registryEnv, opts, () =>
-    destroySessionRecord(id, registryEnv),
+  await teardownAndroidSession(
+    id,
+    registryEnv,
+    opts,
+    () => destroySessionRecord(id, registryEnv),
+    options,
   );
 }
 

@@ -128,8 +128,8 @@ const reaperRuntime: LocalSessionTeardownRuntime = {
       teardownBrowserSession(id, process.env, finalize, options),
   },
   android: {
-    teardown: (id, finalize) =>
-      teardownAndroidSession(id, process.env, {}, finalize),
+    teardown: (id, finalize, options) =>
+      teardownAndroidSession(id, process.env, {}, finalize, options),
   },
 };
 
