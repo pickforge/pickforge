@@ -175,6 +175,13 @@ export async function createAndroidSession(
   }
 }
 
+async function retainAndroidOnlyLogs(record: SessionRecord, env: EnvLike): Promise<void> {
+  // Shared retention belongs to the desktop leg, after its input drain.
+  if (record.type !== "desktop+android" && record.desktop === undefined) {
+    await retainSessionLogs(record, env);
+  }
+}
+
 export async function teardownAndroidSession(
   id: string,
   registryEnv: EnvLike,
@@ -222,7 +229,7 @@ export async function teardownAndroidSession(
     }
   }
   try {
-    await retainSessionLogs(record, registryEnv);
+    await retainAndroidOnlyLogs(record, registryEnv);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Failed to retain logs of session ${record.id}: ${message}`, { cause: error });

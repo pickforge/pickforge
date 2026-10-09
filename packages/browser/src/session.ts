@@ -4,6 +4,10 @@ import {
   REAPER_CLEANUP_PENDING_META_KEY,
   createSession,
   destroySessionRecord,
+  stopSessionAgentInput,
+  withSessionStartupPermit,
+  markSessionCleanupPendingIfInputClosed,
+  SESSION_DESTROY_DRAIN_TIMEOUT_MS,
   retainSessionLogs,
   getSession,
   isPidAlive,
@@ -32,7 +36,7 @@ import {
   stopOwnedSessionVnc,
   stopSessionViewer,
   withSessionVncLock,
-  type SessionVncLockOptions,
+  type SessionTeardownOptions,
   type XvfbHandle,
   type XvfbPartialStart,
 } from "@pickforge/lab-desktop-linux";
@@ -410,14 +414,15 @@ async function finishBrowserStartup(
   ctx: BrowserCreationContext,
   state: BrowserCreationState,
   desktop: DesktopSessionInfo,
+  checkInput: () => Promise<void>,
 ): Promise<BrowserSessionHandle> {
+  await checkInput();
   const xvfb = state.xvfb;
   if (xvfb === undefined) throw new Error("Xvfb startup state is incomplete");
   const browserDaemon = await launchBrowserDaemon(ctx, xvfb);
   state.browserDaemon = browserDaemon;
   const browserIdentity = await waitForOwnedIdentity(browserDaemon);
   if (browserIdentity === undefined) {
-    await stopOwnedBrowserDaemon(browserDaemon);
     throw new Error(
       `Chrome process ${browserDaemon.pid} could not be identified during startup; ` +
         `check the log at ${browserDaemon.logPath}`,
@@ -458,9 +463,11 @@ async function finishBrowserStartup(
     ...(browserVersion === undefined ? {} : { browserVersion }),
   };
   assertNotAborted(ctx.opts.signal);
+  await updateSession(ctx.record.id, { desktop, browser }, ctx.registryEnv);
+  await checkInput();
   await updateSession(
     ctx.record.id,
-    { status: "running", desktop, browser },
+    { status: "running" },
     ctx.registryEnv,
   );
   assertNotAborted(ctx.opts.signal);
@@ -537,6 +544,18 @@ async function failBrowserCreation(
   state: BrowserCreationState,
   error: unknown,
 ): Promise<never> {
+  try {
+    await stopSessionAgentInput(ctx.record.id, ctx.registryEnv);
+  } catch (cleanup) {
+    state.browserDaemon?.release();
+    await updateSession(ctx.record.id, {
+      status: "error",
+      desktop: failedDesktopInfo(state),
+      browser: failedBrowserInfo(ctx, state),
+      meta: { ...ctx.record.meta, [REAPER_CLEANUP_PENDING_META_KEY]: true },
+    }, ctx.registryEnv).catch(() => {});
+    throw new AggregateError([error, cleanup], `${asError(error).message}; ${asError(cleanup).message}`, { cause: error });
+  }
   const browserGone = await stopFailedBrowser(state);
   state.browserDaemon?.release();
   const xvfbGone = await stopFailedXvfb(state, browserGone);
@@ -571,6 +590,74 @@ async function failBrowserCreation(
   throw error;
 }
 
+async function recordPendingStartup(ctx: BrowserCreationContext, state: BrowserCreationState): Promise<void> {
+  await updateSession(ctx.record.id, {
+    status: "error",
+    desktop: failedDesktopInfo(state),
+    browser: failedBrowserInfo(ctx, state),
+    meta: { ...ctx.record.meta, [REAPER_CLEANUP_PENDING_META_KEY]: true },
+  }, ctx.registryEnv);
+}
+
+async function startBrowserSession(
+  ctx: BrowserCreationContext,
+  state: BrowserCreationState,
+  checkInput: () => Promise<void>,
+): Promise<BrowserSessionHandle> {
+  const { opts, registryEnv, spawnEnv, record, logDir, layout } = ctx;
+  assertNotAborted(opts.signal);
+  await checkInput();
+  await makeRuntimeDirs(layout);
+
+  try {
+    state.xvfb = await startXvfb({
+      ...(opts.width !== undefined ? { width: opts.width } : {}),
+      ...(opts.height !== undefined ? { height: opts.height } : {}),
+      logDir,
+      env: spawnEnv,
+      waitTimeoutMs: opts.xvfbWaitTimeoutMs ?? DEFAULT_XVFB_WAIT_TIMEOUT_MS,
+      displayStart: BROWSER_DISPLAY_START,
+      signal: opts.signal,
+      onSpawn: async (partial) => {
+        state.xvfbPartial = partial;
+        await updateSession(
+          record.id,
+          {
+            desktop: {
+              display: partial.display,
+              xvfbPid: partial.pid,
+              xvfbStartTimeTicks: partial.startTimeTicks,
+              width: partial.width,
+              height: partial.height,
+            },
+          },
+          registryEnv,
+        );
+      },
+    });
+  } catch (error) {
+    if (error instanceof XvfbStartError && error.partial !== undefined) {
+      state.xvfbPartial = error.partial;
+    }
+    throw error;
+  }
+  const xvfb = state.xvfb;
+  if (xvfb === undefined) throw new Error("Xvfb did not return a handle");
+  state.xvfbIdentity = {
+    pid: xvfb.pid,
+    startTicks: xvfb.startTimeTicks,
+  };
+  const desktop: DesktopSessionInfo = {
+    display: xvfb.display,
+    xvfbPid: xvfb.pid,
+    xvfbStartTimeTicks: state.xvfbIdentity.startTicks,
+    width: xvfb.width,
+    height: xvfb.height,
+  };
+
+  return await finishBrowserStartup(ctx, state, desktop, checkInput);
+}
+
 /**
  * Create an isolated headed-Chrome session: a private Xvfb display plus headed
  * Chrome on an ephemeral profile with a loopback CDP endpoint. A partial
@@ -591,8 +678,8 @@ export async function createBrowserSession(
 
   await reapDeadRunningSessions(registryEnv, {
     browser: {
-      teardown: (id, finalize) =>
-        teardownBrowserSession(id, registryEnv, finalize),
+      teardown: (id, finalize, options) =>
+        teardownBrowserSession(id, registryEnv, finalize, options),
     },
   });
   assertNotAborted(opts.signal);
@@ -614,58 +701,30 @@ export async function createBrowserSession(
   };
   const state: BrowserCreationState = {};
   try {
-    assertNotAborted(opts.signal);
-    await makeRuntimeDirs(layout);
-
-    try {
-      state.xvfb = await startXvfb({
-        ...(opts.width !== undefined ? { width: opts.width } : {}),
-        ...(opts.height !== undefined ? { height: opts.height } : {}),
-        logDir,
-        env: spawnEnv,
-        waitTimeoutMs: opts.xvfbWaitTimeoutMs ?? DEFAULT_XVFB_WAIT_TIMEOUT_MS,
-        displayStart: BROWSER_DISPLAY_START,
-        signal: opts.signal,
-        onSpawn: async (partial) => {
-          state.xvfbPartial = partial;
-          await updateSession(
-            record.id,
-            {
-              desktop: {
-                display: partial.display,
-                xvfbPid: partial.pid,
-                xvfbStartTimeTicks: partial.startTimeTicks,
-                width: partial.width,
-                height: partial.height,
-              },
-            },
-            registryEnv,
-          );
-        },
-      });
-    } catch (error) {
-      if (error instanceof XvfbStartError && error.partial !== undefined) {
-        state.xvfbPartial = error.partial;
+    return await withSessionStartupPermit(record.id, registryEnv, async (checkInput) => {
+      try {
+        return await startBrowserSession(ctx, state, checkInput);
+      } catch (error) {
+        // Preserve partial ownership before releasing the startup permit.
+        await recordPendingStartup(ctx, state).catch(() => {});
+        throw error;
       }
-      throw error;
-    }
-    const xvfb = state.xvfb;
-    if (xvfb === undefined) throw new Error("Xvfb did not return a handle");
-    state.xvfbIdentity = {
-      pid: xvfb.pid,
-      startTicks: xvfb.startTimeTicks,
-    };
-    const desktop: DesktopSessionInfo = {
-      display: xvfb.display,
-      xvfbPid: xvfb.pid,
-      xvfbStartTimeTicks: state.xvfbIdentity.startTicks,
-      width: xvfb.width,
-      height: xvfb.height,
-    };
-
-    return await finishBrowserStartup(ctx, state, desktop);
+    });
   } catch (error) {
-    return failBrowserCreation(ctx, state, error);
+    try {
+      return await withSessionVncLock(record.id, registryEnv, async () => {
+        if (await getSession(record.id, registryEnv) === undefined) {
+          state.browserDaemon?.release();
+          throw error;
+        }
+        return failBrowserCreation(ctx, state, error);
+      });
+    } catch (cleanup) {
+      if (cleanup !== error) {
+        await markSessionCleanupPendingIfInputClosed(record.id, registryEnv).catch(() => {});
+      }
+      throw cleanup;
+    }
   }
 }
 
@@ -745,6 +804,13 @@ async function stopBrowserDisplay(
   }
 }
 
+async function requireBrowserSession(id: string, env: EnvLike): Promise<SessionRecord> {
+  const record = await getSession(id, env);
+  if (record === undefined) throw new Error(`Browser session not found: ${id}`);
+  if (record.type !== "browser") throw new Error(`Session ${id} is not a browser session`);
+  return record;
+}
+
 /**
  * Destroy a browser session: kill the verified Chrome process group and confirm
  * it is dead, stop lazy VNC before the private Xvfb, then delete the ephemeral
@@ -757,107 +823,102 @@ export async function teardownBrowserSession(
   id: string,
   registryEnv: EnvLike,
   finalize: LocalSessionTeardownFinalizer,
-  options: SessionVncLockOptions = {},
+  options: SessionTeardownOptions = {},
 ): Promise<void> {
-  const initial = await getSession(id, registryEnv);
-  if (initial === undefined) {
-    throw new Error(`Browser session not found: ${id}`);
-  }
-  if (initial.type !== "browser") {
-    throw new Error(`Session ${id} is not a browser session`);
-  }
+  await requireBrowserSession(id, registryEnv);
 
   await withSessionVncLock(id, registryEnv, async () => {
-    const record = await getSession(id, registryEnv);
-    if (record === undefined) {
-      throw new Error(`Browser session not found: ${id}`);
-    }
-    if (record.type !== "browser") {
-      throw new Error(`Session ${id} is not a browser session`);
-    }
-
-    const failures: Error[] = [];
-    const browser = record.browser;
-    const { gone, error: groupError } = await stopBrowserGroup(
-      browser === undefined
-        ? undefined
-        : {
-            pid: browser.browserPid,
-            startTicks: browser.browserStartTimeTicks,
-          },
-    );
-    if (groupError !== undefined) {
-      failures.push(groupError);
-    } else if (!gone) {
-      failures.push(
-        new Error(
-          `Chrome process group (pid ${browser?.browserPid ?? "unknown"}) could not be verified as gone`,
-        ),
-      );
-    }
-
-    failures.push(...await stopSessionViewer(id, record.desktop, registryEnv));
-    await stopBrowserVnc(record, gone, failures);
-    await stopBrowserDisplay(record, gone, failures);
-
-    const sessionDir = browserSessionLogDir(id, registryEnv);
-    const layout = browserRuntimeLayout(sessionDir);
-    const profileDir = browser?.profileDir ?? layout.profileDir;
-    // Confinement guard: never delete a profile path a tampered record points
-    // outside the session directory.
-    const confined = await isProfileConfined(sessionDir, profileDir);
-    if (!confined) {
-      failures.push(
-        new Error(
-          `Refusing to delete profile outside the session directory: ${profileDir}`,
-        ),
-      );
-    } else if (gone) {
-      failures.push(...(await removeRuntimeData(layout, profileDir)));
-    } else {
-      failures.push(
-        new Error(
-          `Refusing to delete profile for ${id}: Chrome process group is still alive`,
-        ),
-      );
-    }
-
-    if (failures.length > 0) {
-      await updateSession(
-        id,
-        {
-          status: "error",
-          meta: {
-            ...record.meta,
-            [REAPER_CLEANUP_PENDING_META_KEY]: true,
-          },
-        },
-        registryEnv,
-      ).catch(() => {});
-      throw new AggregateError(
-        failures,
-        `Failed to fully destroy browser session ${id}`,
-      );
-    }
     try {
-      await retainSessionLogs(record, registryEnv);
+      await stopSessionAgentInput(id, registryEnv, options.inputDrainTimeoutMs, options.signal);
+      const record = await requireBrowserSession(id, registryEnv);
+
+      options.signal?.throwIfAborted();
+      const failures: Error[] = [];
+      const browser = record.browser;
+      const { gone, error: groupError } = await stopBrowserGroup(
+        browser === undefined
+          ? undefined
+          : {
+              pid: browser.browserPid,
+              startTicks: browser.browserStartTimeTicks,
+            },
+      );
+      if (groupError !== undefined) {
+        failures.push(groupError);
+      } else if (!gone) {
+        failures.push(
+          new Error(
+            `Chrome process group (pid ${browser?.browserPid ?? "unknown"}) could not be verified as gone`,
+          ),
+        );
+      }
+
+      failures.push(...await stopSessionViewer(id, record.desktop, registryEnv));
+      await stopBrowserVnc(record, gone, failures);
+      await stopBrowserDisplay(record, gone, failures);
+
+      const sessionDir = browserSessionLogDir(id, registryEnv);
+      const layout = browserRuntimeLayout(sessionDir);
+      const profileDir = browser?.profileDir ?? layout.profileDir;
+      // Confinement guard: never delete a profile path a tampered record points
+      // outside the session directory.
+      const confined = await isProfileConfined(sessionDir, profileDir);
+      if (!confined) {
+        failures.push(
+          new Error(
+            `Refusing to delete profile outside the session directory: ${profileDir}`,
+          ),
+        );
+      } else if (gone) {
+        failures.push(...(await removeRuntimeData(layout, profileDir)));
+      } else {
+        failures.push(
+          new Error(
+            `Refusing to delete profile for ${id}: Chrome process group is still alive`,
+          ),
+        );
+      }
+
+      if (failures.length > 0) {
+        await updateSession(
+          id,
+          {
+            status: "error",
+            meta: {
+              ...record.meta,
+              [REAPER_CLEANUP_PENDING_META_KEY]: true,
+            },
+          },
+          registryEnv,
+        ).catch(() => {});
+        throw new AggregateError(
+          failures,
+          `Failed to fully destroy browser session ${id}`,
+        );
+      }
+      try {
+        await retainSessionLogs(record, registryEnv);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`Failed to retain logs of session ${record.id}: ${message}`, { cause: error });
+      }
+      await finalize();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`Failed to retain logs of session ${record.id}: ${message}`, { cause: error });
+      await markSessionCleanupPendingIfInputClosed(id, registryEnv).catch(() => {});
+      throw error;
     }
-    await finalize();
   }, options);
 }
 
 export async function destroyBrowserSession(
   id: string,
   registryEnv: EnvLike = process.env,
-  options: SessionVncLockOptions = {},
+  options: SessionTeardownOptions = {},
 ): Promise<void> {
   await teardownBrowserSession(
     id,
     registryEnv,
     () => destroySessionRecord(id, registryEnv),
-    options,
+    { ...options, inputDrainTimeoutMs: options.inputDrainTimeoutMs ?? SESSION_DESTROY_DRAIN_TIMEOUT_MS },
   );
 }

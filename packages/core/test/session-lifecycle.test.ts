@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createLocalSessions,
   destroyLocalSessions,
@@ -11,6 +14,9 @@ import {
   type LocalSessionTeardownRuntime,
   type SessionRecord,
 } from "../src/index.js";
+
+const testHome = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lifecycle-"));
+afterEach(() => fs.rmSync(testHome, { recursive: true, force: true }));
 
 const desktopHandle = {
   id: "desk-123456",
@@ -274,7 +280,7 @@ describe("local session lifecycle", () => {
       },
     );
 
-    expect(calls).toEqual(["android", "desktop", "finalize"]);
+    expect(calls).toEqual(["desktop", "android", "finalize"]);
   });
 
   it("dispatches typed destroy and continues after individual failures", async () => {
@@ -300,6 +306,7 @@ describe("local session lifecycle", () => {
         }),
       ],
       runtime,
+      { env: { PICKFORGE_HOME: testHome } },
     );
 
     expect(result).toEqual({

@@ -16,6 +16,7 @@ import {
 import {
   desktopSessionLogDir,
   teardownDesktopSession,
+  destroyDesktopSession,
 } from "../../desktop-linux/src/session.js";
 import { isPidAlive, readProcessIdentity, stopPid } from "../src/proc.js";
 import {
@@ -31,9 +32,13 @@ import {
   isSessionProcessAlive,
   listSessions,
   sessionDataDir,
+  sessionInputClosedName,
   updateSession,
   type SessionLivenessCheck,
 } from "../src/session.js";
+import { DirHandle } from "../src/dir-handle.js";
+import { allocateDisplay, startXvfb } from "../../desktop-linux/src/display.js";
+import { stopSessionAgentInput, withSessionStartupPermit } from "../src/takeover.js";
 import { reapDeadRunningSessions as reapWithTypedRuntime } from "../src/session-lifecycle.js";
 
 let home: string;
@@ -47,16 +52,16 @@ function reapDeadRunningSessions(
     registryEnv,
     {
       desktop: {
-        teardown: (id, finalize) =>
-          teardownDesktopSession(id, registryEnv, finalize),
+        teardown: (id, finalize, options) =>
+          teardownDesktopSession(id, registryEnv, finalize, options),
       },
       android: {
         teardown: (id, finalize) =>
           teardownAndroidSession(id, registryEnv, {}, finalize),
       },
       browser: {
-        teardown: (id, finalize) =>
-          teardownBrowserSession(id, registryEnv, finalize),
+        teardown: (id, finalize, options) =>
+          teardownBrowserSession(id, registryEnv, finalize, options),
       },
     },
     isAlive,
@@ -1307,4 +1312,59 @@ describe("legacy session home fallback", () => {
     expect(fs.existsSync(newPath)).toBe(false);
     expect(await getSession("desk-1eaac5", {})).toBeUndefined();
   });
+});
+
+function barrier() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+it("preserves late startup ownership across closure and stops its real Xvfb", async () => {
+  const record = await createSession({ type: "desktop", projectDir: home }, env);
+  const ready = barrier();
+  const publish = barrier();
+  const startup = withSessionStartupPermit(record.id, env, async () => {
+    ready.resolve();
+    await publish.promise;
+    await updateSession(record.id, { desktop: { display: xvfb.display, xvfbPid: xvfb.pid, xvfbStartTimeTicks: xvfb.startTimeTicks } }, env);
+  });
+  const failed = expect(startup).rejects.toThrow("input is closed");
+  await ready.promise;
+  const xvfb = await startXvfb({ display: allocateDisplay({ start: 2900 }), logDir: sessionDataDir(record.id, env) });
+  const listed = barrier();
+  const read = DirHandle.prototype.readEntryNames;
+  const scan = vi.spyOn(DirHandle.prototype, "readEntryNames").mockImplementation(async function (this: DirHandle) {
+    const names = await read.call(this);
+    if (this.realDir.endsWith("/permits")) listed.resolve();
+    return names;
+  });
+  try {
+    const destroying = destroyDesktopSession(record.id, env);
+    await listed.promise;
+    expect(await getSession(record.id, env)).toEqual(record);
+    // Even a catch-path write must wait until startup finishes publication.
+    await expect(stopSessionAgentInput(record.id, env, 0)).rejects.toThrow("Timed out draining");
+    expect(await getSession(record.id, env)).toEqual(record);
+    expect(isPidAlive(xvfb.pid)).toBe(true);
+    publish.resolve();
+    await failed;
+    await destroying;
+    expect(isPidAlive(xvfb.pid)).toBe(false);
+    expect(await getSession(record.id, env)).toBeUndefined();
+  } finally {
+    publish.resolve();
+    await failed;
+    scan.mockRestore();
+    if (isPidAlive(xvfb.pid)) await stopPid(xvfb.pid);
+  }
+});
+
+it("keeps a completed rollback's error record for inspection", async () => {
+  const record = await createSession({ type: "desktop", projectDir: "/proj", status: "starting" }, env);
+  const failed = await updateSession(record.id, { status: "error", meta: { startFailure: "x11vnc missing" } }, env);
+  // Rollback closed input and finished cleanup, so no retry flag remains.
+  fs.writeFileSync(path.join(path.dirname(sessionDataDir(record.id, env)), sessionInputClosedName(record.id)), "");
+  expect(await reapDeadRunningSessions(env)).toEqual([]);
+  expect(await getSession(record.id, env)).toEqual(failed);
 });

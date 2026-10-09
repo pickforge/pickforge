@@ -120,12 +120,12 @@ const destroyRuntime: LocalSessionDestroyRuntime = {
 
 const reaperRuntime: LocalSessionTeardownRuntime = {
   desktop: {
-    teardown: (id, finalize) =>
-      teardownDesktopSession(id, process.env, finalize),
+    teardown: (id, finalize, options) =>
+      teardownDesktopSession(id, process.env, finalize, options),
   },
   browser: {
-    teardown: (id, finalize) =>
-      teardownBrowserSession(id, process.env, finalize),
+    teardown: (id, finalize, options) =>
+      teardownBrowserSession(id, process.env, finalize, options),
   },
   android: {
     teardown: (id, finalize) =>

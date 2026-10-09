@@ -34,6 +34,12 @@ let env: EnvLike;
 beforeEach(() => {
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-takeover-test-"));
   env = { ...process.env, PICKFORGE_HOME: path.join(tmpRoot, "home") };
+  const sessions = path.join(env.PICKFORGE_HOME as string, "sessions");
+  fs.mkdirSync(sessions, { recursive: true });
+  // Coordination writes now require a live registry record.
+  for (const id of ["desk-06a28cdb", "desk-08c87df1", "desk-09ea5ef3", "desk-0d065af2", "desk-0ef40916", "desk-11d6d2af", "desk-1eecaf4d", "desk-21829c99", "desk-34247649", "desk-34247649b2c3", "desk-7a9f5b8d", "desk-7ad2088a", "desk-8cb30b00", "desk-91bceeee", "desk-9213f980", "desk-930edda2", "desk-93d7ed9b", "desk-c4823b42", "desk-c492fdc4", "desk-cd747efb", "desk-d787225d", "desk-e259da98", "desk-e25c3d12", "desk-f2ad1c67", "desk-f2ad1c67b"]) {
+    fs.writeFileSync(path.join(sessions, `${id}.json`), JSON.stringify({ id, type: "desktop", status: "running", projectDir: tmpRoot, createdAt: new Date().toISOString() }));
+  }
 });
 
 afterEach(() => {
@@ -51,12 +57,12 @@ async function writeRawLease(sessionId: string, lease: HumanLease): Promise<stri
 
 describe("acquireHumanLease", () => {
   it("acquires a fresh lease and persists it atomically", async () => {
-    const lease = await acquireHumanLease("desk-a1", env);
-    expect(lease.sessionId).toBe("desk-a1");
+    const lease = await acquireHumanLease("desk-34247649", env);
+    expect(lease.sessionId).toBe("desk-34247649");
     expect(lease.ownerPid).toBe(process.pid);
     expect(lease.ttlMs).toBe(30_000);
     expect(lease.heartbeatMs).toBe(5_000);
-    const onDisk = await readHumanLease("desk-a1", env);
+    const onDisk = await readHumanLease("desk-34247649", env);
     expect(onDisk).toEqual(lease);
   });
 
@@ -66,16 +72,16 @@ describe("acquireHumanLease", () => {
     vi.spyOn(DirHandle.prototype, "linkChild").mockImplementation(async function(this: DirHandle, from, to) {
       if (to !== "human.lease.json") return link.call(this, from, to);
       const raw = fs.readFileSync(this.resolve(from), "utf8");
-      expect(JSON.parse(raw)).toMatchObject({ sessionId: "desk-publish", ownerPid: process.pid });
+      expect(JSON.parse(raw)).toMatchObject({ sessionId: "desk-08c87df1", ownerPid: process.pid });
       await link.call(this, from, to);
       published = true;
       expect(fs.statSync(this.resolve(to)).nlink).toBe(2);
       expect(fs.readFileSync(this.resolve(to), "utf8")).toBe(raw);
-      expect(await readHumanLease("desk-publish", env)).toEqual(JSON.parse(raw));
-      await expect(acquireHumanLease("desk-publish", env)).rejects.toThrow(HumanLeaseHeldError);
+      expect(await readHumanLease("desk-08c87df1", env)).toEqual(JSON.parse(raw));
     });
-    const lease = await acquireHumanLease("desk-publish", env);
+    const lease = await acquireHumanLease("desk-08c87df1", env);
     expect(published).toBe(true);
+    await expect(acquireHumanLease(lease.sessionId, env)).rejects.toThrow(HumanLeaseHeldError);
     const dir = path.join(env.PICKFORGE_HOME as string, "sessions", lease.sessionId);
     expect(fs.readdirSync(dir).sort()).toEqual(["human.lease.json", "permits"]);
     expect(fs.statSync(path.join(dir, "human.lease.json")).nlink).toBe(1);
@@ -98,8 +104,8 @@ describe("acquireHumanLease", () => {
         return link.call(this, from, to);
       });
     }
-    await expect(acquireHumanLease("desk-cleanup", env)).rejects.toThrow(`lease ${stage} failed`);
-    expect(fs.readdirSync(path.join(env.PICKFORGE_HOME as string, "sessions", "desk-cleanup"))).toEqual(["permits"]);
+    await expect(acquireHumanLease("desk-e25c3d12", env)).rejects.toThrow(`lease ${stage} failed`);
+    expect(fs.readdirSync(path.join(env.PICKFORGE_HOME as string, "sessions", "desk-e25c3d12"))).toEqual(["permits"]);
   });
 
   it("propagates staging EEXIST unchanged instead of reporting lease contention", async () => {
@@ -109,8 +115,8 @@ describe("acquireHumanLease", () => {
       if (name.startsWith(".human-lease-")) throw failure;
       return write.call(this, name, content);
     });
-    await expect(acquireHumanLease("desk-staging", env)).rejects.toBe(failure);
-    expect(await readHumanLease("desk-staging", env)).toBeUndefined();
+    await expect(acquireHumanLease("desk-0d065af2", env)).rejects.toBe(failure);
+    expect(await readHumanLease("desk-0d065af2", env)).toBeUndefined();
   });
 
   it("returns the published lease even when staging cleanup fails", async () => {
@@ -119,7 +125,7 @@ describe("acquireHumanLease", () => {
       if (name.startsWith(".human-lease-")) throw new Error("staging unlink failed");
       return unlink.call(this, name);
     });
-    const lease = await acquireHumanLease("desk-cleanup", env);
+    const lease = await acquireHumanLease("desk-e25c3d12", env);
     expect(await readHumanLease(lease.sessionId, env)).toEqual(lease);
     await expect(acquireHumanLease(lease.sessionId, env)).rejects.toThrow(HumanLeaseHeldError);
     expect(await releaseHumanLease(lease.sessionId, lease.leaseId, env)).toBe(true);
@@ -127,80 +133,80 @@ describe("acquireHumanLease", () => {
   });
 
   it("refuses a second acquisition while the lease is live", async () => {
-    const first = await acquireHumanLease("desk-a2", env);
-    await expect(acquireHumanLease("desk-a2", env)).rejects.toThrow(HumanLeaseHeldError);
+    const first = await acquireHumanLease("desk-e259da98", env);
+    await expect(acquireHumanLease("desk-e259da98", env)).rejects.toThrow(HumanLeaseHeldError);
     // The live lease is untouched by the failed attempt.
-    expect((await readHumanLease("desk-a2", env))?.leaseId).toBe(first.leaseId);
+    expect((await readHumanLease("desk-e259da98", env))?.leaseId).toBe(first.leaseId);
   });
 
   it("reports a dead-owner lease as stale and recoverable", async () => {
     const stale: HumanLease = {
       leaseId: "dead-lease",
-      sessionId: "desk-a3",
+      sessionId: "desk-c4823b42",
       ownerPid: DEAD_PID,
       createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
       ttlMs: 30_000,
       heartbeatMs: 5_000,
     };
-    const raw = await writeRawLease("desk-a3", stale);
+    const raw = await writeRawLease("desk-c4823b42", stale);
     expect(isHumanLeaseStale(stale)).toBe(true);
 
     let caught: StaleHumanLeaseError | undefined;
     try {
-      await acquireHumanLease("desk-a3", env);
+      await acquireHumanLease("desk-c4823b42", env);
     } catch (error) {
       caught = error as StaleHumanLeaseError;
     }
     expect(caught).toBeInstanceOf(StaleHumanLeaseError);
     expect(caught?.lease?.leaseId).toBe("dead-lease");
 
-    expect(await clearStaleHumanLease("desk-a3", raw, env)).toBe(true);
-    const fresh = await acquireHumanLease("desk-a3", env);
+    expect(await clearStaleHumanLease("desk-c4823b42", raw, env)).toBe(true);
+    const fresh = await acquireHumanLease("desk-c4823b42", env);
     expect(fresh.leaseId).not.toBe("dead-lease");
   });
 
   it("reports a TTL-expired lease as stale even with a live owner", async () => {
     const expired: HumanLease = {
       leaseId: "expired-lease",
-      sessionId: "desk-a4",
+      sessionId: "desk-cd747efb",
       ownerPid: process.pid,
       createdAt: new Date(Date.now() - 120_000).toISOString(),
       expiresAt: new Date(Date.now() - 60_000).toISOString(),
       ttlMs: 30_000,
       heartbeatMs: 5_000,
     };
-    await writeRawLease("desk-a4", expired);
-    await expect(acquireHumanLease("desk-a4", env)).rejects.toThrow(StaleHumanLeaseError);
+    await writeRawLease("desk-cd747efb", expired);
+    await expect(acquireHumanLease("desk-cd747efb", env)).rejects.toThrow(StaleHumanLeaseError);
   });
 
   it("drains pre-existing agent permits before returning", async () => {
-    const permit = await acquireAgentPermit("desk-a5", env);
-    const acquiring = acquireHumanLease("desk-a5", env, { drainTimeoutMs: 2_000 });
+    const permit = await acquireAgentPermit("desk-09ea5ef3", env);
+    const acquiring = acquireHumanLease("desk-09ea5ef3", env, { drainTimeoutMs: 2_000 });
     // Give the drain loop a moment to observe the permit as pending, then
     // release it — acquisition must complete once it drains.
     await new Promise((resolve) => setTimeout(resolve, 60));
     await releaseAgentPermit(permit);
-    await expect(acquiring).resolves.toMatchObject({ sessionId: "desk-a5" });
+    await expect(acquiring).resolves.toMatchObject({ sessionId: "desk-09ea5ef3" });
   });
 
   it("times out and releases its own lease when permits do not drain", async () => {
-    const permit = await acquireAgentPermit("desk-a6", env);
+    const permit = await acquireAgentPermit("desk-1eecaf4d", env);
     await expect(
-      acquireHumanLease("desk-a6", env, { drainTimeoutMs: 80 }),
+      acquireHumanLease("desk-1eecaf4d", env, { drainTimeoutMs: 80 }),
     ).rejects.toThrow(HumanLeaseDrainTimeoutError);
     // The lease created for the failed attempt must not linger.
-    expect(await readHumanLease("desk-a6", env)).toBeUndefined();
+    expect(await readHumanLease("desk-1eecaf4d", env)).toBeUndefined();
     await releaseAgentPermit(permit);
   });
 
   it("stores leases and permits beside a legacy session record", async () => {
     const fakeHome = path.join(tmpRoot, "legacy-home");
     vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
-    const id = "desk-a1b2c3";
+    const id = "desk-34247649b2c3";
     const legacySessions = path.join(fakeHome, ".picklab", "sessions");
     fs.mkdirSync(legacySessions, { recursive: true });
-    fs.writeFileSync(path.join(legacySessions, `${id}.json`), "{}\n");
+    fs.writeFileSync(path.join(legacySessions, `${id}.json`), JSON.stringify({ id, status: "running" }));
 
     const lease = await acquireHumanLease(id, {});
     const permit = await acquireAgentPermit(id, {});
@@ -218,36 +224,40 @@ describe("acquireHumanLease", () => {
   });
 
   it("sweeps a permit owned by a dead process instead of blocking the drain", async () => {
-    const dir = path.join(env.PICKFORGE_HOME as string, "sessions", "desk-a7", "permits");
+    const dir = path.join(env.PICKFORGE_HOME as string, "sessions", "desk-93d7ed9b", "permits");
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
       path.join(dir, "dead-permit.json"),
       JSON.stringify({
         permitId: "dead-permit",
-        sessionId: "desk-a7",
+        sessionId: "desk-93d7ed9b",
         ownerPid: DEAD_PID,
         createdAt: new Date().toISOString(),
       }),
     );
-    const lease = await acquireHumanLease("desk-a7", env, { drainTimeoutMs: 500 });
-    expect(lease.sessionId).toBe("desk-a7");
+    const lease = await acquireHumanLease("desk-93d7ed9b", env, { drainTimeoutMs: 500 });
+    expect(lease.sessionId).toBe("desk-93d7ed9b");
     expect(fs.existsSync(path.join(dir, "dead-permit.json"))).toBe(false);
   });
 });
 
 describe("withAgentPermit", () => {
   it("runs the action and cleans up its permit when no lease is held", async () => {
-    const result = await withAgentPermit("desk-b1", env, async () => "ran");
+    const result = await withAgentPermit("desk-21829c99", env, async () => "ran");
     expect(result).toBe("ran");
-    const permitsDir = path.join(env.PICKFORGE_HOME as string, "sessions", "desk-b1", "permits");
+    const permitsDir = path.join(env.PICKFORGE_HOME as string, "sessions", "desk-21829c99", "permits");
     expect(fs.existsSync(permitsDir) ? fs.readdirSync(permitsDir) : []).toEqual([]);
   });
 
   it("types storage failures during acquisition without running the action", async () => {
     const failure = new Error("permit storage failed");
-    vi.spyOn(fs.promises, "writeFile").mockRejectedValue(failure);
+    const write = DirHandle.prototype.writeFileAtomic;
+    vi.spyOn(DirHandle.prototype, "writeFileAtomic").mockImplementation(async function (this: DirHandle, name, content) {
+      if (name.startsWith(".agent-permit-")) throw failure;
+      return write.call(this, name, content);
+    });
     const action = vi.fn(async () => "sent");
-    const error = await withAgentPermit("desk-storage", env, action).catch((error: unknown) => error);
+    const error = await withAgentPermit("desk-0ef40916", env, action).catch((error: unknown) => error);
     expect(error).toBeInstanceOf(AgentPermitUnavailableError);
     expect(error).toMatchObject({ code: "agent_permit_unavailable", cause: failure });
     expect(action).not.toHaveBeenCalled();
@@ -266,27 +276,27 @@ describe("withAgentPermit", () => {
       return unlink(file);
     });
     const action = vi.fn(async () => "sent");
-    const error = await withAgentPermit("desk-recheck", env, action).catch((error: unknown) => error);
+    const error = await withAgentPermit("desk-d787225d", env, action).catch((error: unknown) => error);
     expect(error).toBeInstanceOf(AgentPermitUnavailableError);
     expect(error).toMatchObject({ cause: failure });
     expect(action).not.toHaveBeenCalled();
     expect(release.mock.calls.filter(([file]) => String(file).endsWith(".json"))).toHaveLength(1);
-    const dir = path.join(env.PICKFORGE_HOME as string, "sessions", "desk-recheck", "permits");
+    const dir = path.join(env.PICKFORGE_HOME as string, "sessions", "desk-d787225d", "permits");
     expect(fs.readdirSync(dir)).toHaveLength(cleanupFails ? 1 : 0);
   });
 
   it("keeps human refusal when releasing its permit also fails", async () => {
-    await acquireHumanLease("desk-refused", env);
+    await acquireHumanLease("desk-06a28cdb", env);
     vi.spyOn(fs.promises, "unlink").mockRejectedValue(new Error("permit release failed"));
     const action = vi.fn(async () => "sent");
-    await expect(withAgentPermit("desk-refused", env, action)).rejects.toThrow(HumanControlActiveError);
+    await expect(withAgentPermit("desk-06a28cdb", env, action)).rejects.toThrow(HumanControlActiveError);
     expect(action).not.toHaveBeenCalled();
   });
 
   it("propagates an action error unchanged and releases its permit", async () => {
     const failure = new Error("action failed");
-    await expect(withAgentPermit("desk-action", env, async () => { throw failure; })).rejects.toBe(failure);
-    const dir = path.join(env.PICKFORGE_HOME as string, "sessions", "desk-action", "permits");
+    await expect(withAgentPermit("desk-7ad2088a", env, async () => { throw failure; })).rejects.toBe(failure);
+    const dir = path.join(env.PICKFORGE_HOME as string, "sessions", "desk-7ad2088a", "permits");
     expect(fs.readdirSync(dir)).toEqual([]);
   });
 
@@ -298,20 +308,20 @@ describe("withAgentPermit", () => {
       return unlink(file);
     });
     const action = vi.fn(async () => "sent");
-    await expect(withAgentPermit("desk-release", env, action)).rejects.toBe(failure);
+    await expect(withAgentPermit("desk-930edda2", env, action)).rejects.toBe(failure);
     expect(action).toHaveBeenCalledOnce();
   });
 
   it("fails closed and never runs the action while human control is active", async () => {
-    await acquireHumanLease("desk-b2", env);
+    await acquireHumanLease("desk-8cb30b00", env);
     let ran = false;
     await expect(
-      withAgentPermit("desk-b2", env, async () => {
+      withAgentPermit("desk-8cb30b00", env, async () => {
         ran = true;
       }),
     ).rejects.toThrow(HumanControlActiveError);
     expect(ran).toBe(false);
-    const permitsDir = path.join(env.PICKFORGE_HOME as string, "sessions", "desk-b2", "permits");
+    const permitsDir = path.join(env.PICKFORGE_HOME as string, "sessions", "desk-8cb30b00", "permits");
     expect(fs.existsSync(permitsDir) ? fs.readdirSync(permitsDir) : []).toEqual([]);
   });
 
@@ -323,19 +333,19 @@ describe("withAgentPermit", () => {
     // `acquireHumanLease`, whose drain would otherwise wait on this same
     // permit — the recheck ordering being asserted here is independent of
     // that drain mechanics.
-    const permit = await acquireAgentPermit("desk-b3", env);
-    expect(await checkHumanLeaseBusy("desk-b3", env)).toBeUndefined();
+    const permit = await acquireAgentPermit("desk-7a9f5b8d", env);
+    expect(await checkHumanLeaseBusy("desk-7a9f5b8d", env)).toBeUndefined();
     const lease: HumanLease = {
       leaseId: "concurrent-lease",
-      sessionId: "desk-b3",
+      sessionId: "desk-7a9f5b8d",
       ownerPid: process.pid,
       createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 30_000).toISOString(),
       ttlMs: 30_000,
       heartbeatMs: 5_000,
     };
-    await writeRawLease("desk-b3", lease);
-    expect(await checkHumanLeaseBusy("desk-b3", env)).toMatchObject({
+    await writeRawLease("desk-7a9f5b8d", lease);
+    expect(await checkHumanLeaseBusy("desk-7a9f5b8d", env)).toMatchObject({
       leaseId: "concurrent-lease",
     });
     await releaseAgentPermit(permit);
@@ -344,23 +354,23 @@ describe("withAgentPermit", () => {
   it("does not fail closed against a stale lease", async () => {
     const stale: HumanLease = {
       leaseId: "dead-lease-b4",
-      sessionId: "desk-b4",
+      sessionId: "desk-c492fdc4",
       ownerPid: DEAD_PID,
       createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
       ttlMs: 30_000,
       heartbeatMs: 5_000,
     };
-    await writeRawLease("desk-b4", stale);
-    const result = await withAgentPermit("desk-b4", env, async () => "ran");
+    await writeRawLease("desk-c492fdc4", stale);
+    const result = await withAgentPermit("desk-c492fdc4", env, async () => "ran");
     expect(result).toBe("ran");
   });
 });
 
 describe("renewHumanLease / releaseHumanLease", () => {
   it("extends expiresAt only for the owning leaseId", async () => {
-    const lease = await acquireHumanLease("desk-c1", env);
-    const renewed = await renewHumanLease("desk-c1", lease.leaseId, env, {
+    const lease = await acquireHumanLease("desk-f2ad1c67", env);
+    const renewed = await renewHumanLease("desk-f2ad1c67", lease.leaseId, env, {
       vncPid: 12345,
       vncPort: 5901,
     });
@@ -371,11 +381,11 @@ describe("renewHumanLease / releaseHumanLease", () => {
     expect(renewed?.vncPid).toBe(12345);
     expect(renewed?.vncPort).toBe(5901);
 
-    expect(await renewHumanLease("desk-c1", "not-the-owner", env)).toBeUndefined();
+    expect(await renewHumanLease("desk-f2ad1c67", "not-the-owner", env)).toBeUndefined();
   });
 
   it("refuses to resurrect a lease that has already gone stale by TTL, even for its own owner (P0-B)", async () => {
-    const lease = await acquireHumanLease("desk-c1b", env);
+    const lease = await acquireHumanLease("desk-f2ad1c67b", env);
     // The owner is this very process (alive), but the TTL has elapsed
     // without a timely renewal — the agent must be able to observe the
     // lease as free the instant that happens, so a straggling renewal must
@@ -384,45 +394,45 @@ describe("renewHumanLease / releaseHumanLease", () => {
     expect(isHumanLeaseStale(lease, now)).toBe(true);
 
     expect(
-      await renewHumanLease("desk-c1b", lease.leaseId, env, {}, now),
+      await renewHumanLease("desk-f2ad1c67b", lease.leaseId, env, {}, now),
     ).toBeUndefined();
     // Untouched: no expiresAt extension, no partial write.
-    expect(await readHumanLease("desk-c1b", env)).toEqual(lease);
+    expect(await readHumanLease("desk-f2ad1c67b", env)).toEqual(lease);
   });
 
   it("only releases the lease it owns", async () => {
-    const lease = await acquireHumanLease("desk-c2", env);
-    expect(await releaseHumanLease("desk-c2", "not-the-owner", env)).toBe(false);
-    expect(await readHumanLease("desk-c2", env)).toBeDefined();
-    expect(await releaseHumanLease("desk-c2", lease.leaseId, env)).toBe(true);
-    expect(await readHumanLease("desk-c2", env)).toBeUndefined();
+    const lease = await acquireHumanLease("desk-9213f980", env);
+    expect(await releaseHumanLease("desk-9213f980", "not-the-owner", env)).toBe(false);
+    expect(await readHumanLease("desk-9213f980", env)).toBeDefined();
+    expect(await releaseHumanLease("desk-9213f980", lease.leaseId, env)).toBe(true);
+    expect(await readHumanLease("desk-9213f980", env)).toBeUndefined();
   });
 });
 
 describe("getTakeoverStatus", () => {
   it("reports agent-active, human-active, and stale", async () => {
-    expect(await getTakeoverStatus("desk-d1", env)).toEqual({
-      sessionId: "desk-d1",
+    expect(await getTakeoverStatus("desk-11d6d2af", env)).toEqual({
+      sessionId: "desk-11d6d2af",
       active: false,
     });
 
-    const lease = await acquireHumanLease("desk-d1", env);
-    const active = await getTakeoverStatus("desk-d1", env);
+    const lease = await acquireHumanLease("desk-11d6d2af", env);
+    const active = await getTakeoverStatus("desk-11d6d2af", env);
     expect(active.active).toBe(true);
     expect(active.lease?.leaseId).toBe(lease.leaseId);
 
-    await releaseHumanLease("desk-d1", lease.leaseId, env);
+    await releaseHumanLease("desk-11d6d2af", lease.leaseId, env);
     const stale: HumanLease = {
       leaseId: "dead-lease-d1",
-      sessionId: "desk-d1",
+      sessionId: "desk-11d6d2af",
       ownerPid: DEAD_PID,
       createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
       ttlMs: 30_000,
       heartbeatMs: 5_000,
     };
-    await writeRawLease("desk-d1", stale);
-    const staleStatus = await getTakeoverStatus("desk-d1", env);
+    await writeRawLease("desk-11d6d2af", stale);
+    const staleStatus = await getTakeoverStatus("desk-11d6d2af", env);
     expect(staleStatus).toMatchObject({ active: false, stale: true });
   });
 });
@@ -475,11 +485,13 @@ describe("real separate-process concurrency", () => {
       // holds the lease until both have attempted, so spawn skew cannot turn
       // the race into two sequential claims (#278).
       const home = path.join(tmpRoot, "race-home");
+      fs.mkdirSync(path.join(home, "sessions"), { recursive: true });
+      fs.writeFileSync(path.join(home, "sessions", "desk-91bceeee.json"), JSON.stringify({ id: "desk-91bceeee", status: "running" }));
       const barrier = path.join(tmpRoot, "race-barrier");
       fs.mkdirSync(barrier);
       const names = ["a", "b"];
       const running = names.map((name) =>
-        run([acquireWorker, home, "desk-race", barrier, name, String(names.length)]),
+        run([acquireWorker, home, "desk-91bceeee", barrier, name, String(names.length)]),
       );
       await waitForFiles(barrier, names.map((name) => `ready-${name}`), 8_000);
       fs.writeFileSync(path.join(barrier, "go"), "");

@@ -163,6 +163,7 @@ export {
   type EnsureSessionVncOptions,
   type EnsuredSessionVnc,
   type SessionVncLockOptions,
+  type SessionTeardownOptions,
   type StartSessionVncOptions,
 } from "./session.js";
 

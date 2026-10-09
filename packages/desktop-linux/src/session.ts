@@ -27,6 +27,10 @@ import {
   stopProcessGroupVerified,
   updateSession,
   withAgentPermit,
+  withSessionStartupPermit,
+  stopSessionAgentInput,
+  markSessionCleanupPendingIfInputClosed,
+  SESSION_DESTROY_DRAIN_TIMEOUT_MS,
   type ContainmentScope,
   type DesktopSessionInfo,
   type DesktopHomePolicy,
@@ -122,6 +126,8 @@ interface DesktopStartupState {
 export interface StartSessionVncOptions {
   /** Internal takeover authority for private control infrastructure only. */
   humanLeaseId?: string;
+  /** Creation already holds its startup permit through ownership publication. */
+  starting?: boolean;
   display: string;
   port?: number;
   env?: EnvLike;
@@ -172,7 +178,15 @@ export async function startSessionVnc(
     }
     return start();
   }
-  return policy === "inherit" ? withAgentPermit(id, registryEnv, start) : start();
+  // Creation holds its startup permit through VNC ownership publication.
+  if (opts.starting === true) {
+    if (record?.status !== "starting") {
+      throw new Error(`Session ${id} is not starting; startup VNC authority is unavailable`);
+    }
+    return start();
+  }
+  if (policy !== "inherit") return start();
+  return withAgentPermit(id, registryEnv, start);
 }
 
 function requireVncBinary(opts: CreateDesktopSessionOptions): void {
@@ -343,6 +357,16 @@ async function rollbackFailedCreate(
   state: DesktopStartupState,
   registryEnv: EnvLike,
 ): Promise<void> {
+  try {
+    await stopSessionAgentInput(record.id, registryEnv);
+  } catch (error) {
+    await updateSession(record.id, {
+      status: "error",
+      desktop: pendingDesktopInfo(state),
+      meta: { ...record.meta, [REAPER_CLEANUP_PENDING_META_KEY]: true },
+    }, registryEnv).catch(() => {});
+    throw error;
+  }
   const vncGone = await stopStartupVnc(record.id, state);
   const xvfbGone = await stopStartupXvfb(state);
   const contained = await destroyContainmentScope(state.containment);
@@ -377,6 +401,65 @@ async function rollbackFailedCreate(
   ).catch(() => {});
 }
 
+async function recordPendingStartup(record: SessionRecord, state: DesktopStartupState, env: EnvLike): Promise<void> {
+  await updateSession(record.id, {
+    status: "error",
+    desktop: pendingDesktopInfo(state),
+    meta: { ...record.meta, [REAPER_CLEANUP_PENDING_META_KEY]: true },
+  }, env);
+}
+
+async function startDesktopSession(
+  record: SessionRecord,
+  opts: CreateDesktopSessionOptions,
+  state: DesktopStartupState,
+  registryEnv: EnvLike,
+  checkInput: () => Promise<void>,
+): Promise<DesktopSessionHandle> {
+  await checkInput();
+  await createDesktopRuntimeDir(state.runtime);
+  const xvfb = await startSessionXvfb(record.id, opts, state, registryEnv);
+  state.xvfb = xvfb;
+  const viewOnly = opts.vncControl !== true;
+  if (opts.vnc === true || opts.vncControl === true) {
+    await checkInput();
+    state.vnc = await startSessionVnc(record.id, registryEnv, {
+      display: xvfb.display,
+      env: opts.env,
+      viewOnly,
+      starting: true,
+    }).catch((error: unknown) => {
+      // A failed startup still owns whatever it spawned: keep the partial so
+      // rollback can decide about the runtime dir and the retry record.
+      if (error instanceof VncStartError && error.partial !== undefined) {
+        state.vncPartial = error.partial;
+      }
+      throw error;
+    });
+  }
+  const desktop = runningDesktopInfo(state, xvfb, viewOnly);
+  // Publish owned resources while the startup permit still protects them.
+  await updateSession(record.id, { desktop }, registryEnv);
+  await checkInput();
+  await updateSession(record.id, { status: "running" }, registryEnv);
+
+  const handle: DesktopSessionHandle = {
+    id: record.id,
+    display: xvfb.display,
+    xvfbPid: xvfb.pid,
+    runtimeDir: state.runtime.runtimeDir,
+    containment: state.containment,
+    logDir: desktopSessionLogDir(record.id, registryEnv),
+  };
+  if (state.vnc !== undefined) {
+    handle.vncPid = state.vnc.pid;
+    handle.vncStartTimeTicks = state.vnc.startTimeTicks;
+    handle.vncPort = state.vnc.port;
+    handle.vncViewOnly = viewOnly;
+  }
+  return handle;
+}
+
 export async function createDesktopSession(
   opts: CreateDesktopSessionOptions,
 ): Promise<DesktopSessionHandle> {
@@ -385,8 +468,8 @@ export async function createDesktopSession(
   if (wantsVnc) requireVncBinary(opts);
   await reapDeadRunningSessions(registryEnv, {
     desktop: {
-      teardown: (id, finalize) =>
-        teardownDesktopSession(id, registryEnv, finalize),
+      teardown: (id, finalize, options) =>
+        teardownDesktopSession(id, registryEnv, finalize, options),
     },
   });
   const record = await createSession(
@@ -401,49 +484,26 @@ export async function createDesktopSession(
   };
 
   try {
-    const start = async () => {
-      await createDesktopRuntimeDir(state.runtime);
-      return startSessionXvfb(record.id, opts, state, registryEnv);
-    };
-    const xvfb = state.homePolicy === "inherit"
-      ? await withAgentPermit(record.id, registryEnv, start)
-      : await start();
-    state.xvfb = xvfb;
-    const viewOnly = opts.vncControl !== true;
-    if (wantsVnc) {
-      state.vnc = await startSessionVnc(record.id, registryEnv, {
-        display: xvfb.display,
-        env: opts.env,
-        viewOnly,
-      }).catch((error: unknown) => {
-        // A failed startup still owns whatever it spawned: keep the partial so
-        // rollback can decide about the runtime dir and the retry record.
-        if (error instanceof VncStartError && error.partial !== undefined) {
-          state.vncPartial = error.partial;
-        }
+    return await withSessionStartupPermit(record.id, registryEnv, async (checkInput) => {
+      try {
+        return await startDesktopSession(record, opts, state, registryEnv, checkInput);
+      } catch (error) {
+        // Preserve partial ownership before releasing the startup permit.
+        await recordPendingStartup(record, state, registryEnv).catch(() => {});
         throw error;
-      });
-    }
-    const desktop = runningDesktopInfo(state, xvfb, viewOnly);
-    await updateSession(record.id, { status: "running", desktop }, registryEnv);
-
-    const handle: DesktopSessionHandle = {
-      id: record.id,
-      display: xvfb.display,
-      xvfbPid: xvfb.pid,
-      runtimeDir: state.runtime.runtimeDir,
-      containment: state.containment,
-      logDir,
-    };
-    if (state.vnc !== undefined) {
-      handle.vncPid = state.vnc.pid;
-      handle.vncStartTimeTicks = state.vnc.startTimeTicks;
-      handle.vncPort = state.vnc.port;
-      handle.vncViewOnly = viewOnly;
-    }
-    return handle;
+      }
+    });
   } catch (error) {
-    await rollbackFailedCreate(record, state, registryEnv);
+    try {
+      await withSessionVncLock(record.id, registryEnv, async () => {
+        if (await getSession(record.id, registryEnv) !== undefined) {
+          await rollbackFailedCreate(record, state, registryEnv);
+        }
+      });
+    } catch (cleanup) {
+      await markSessionCleanupPendingIfInputClosed(record.id, registryEnv).catch(() => {});
+      throw new AggregateError([error, cleanup], `${asError(error).message}; ${asError(cleanup).message}`, { cause: error });
+    }
     throw error;
   }
 }
@@ -535,6 +595,10 @@ async function throwIfSessionGone(
   if ((await getSession(id, registryEnv)) === undefined) {
     throw new Error(`Session not found: ${id}`);
   }
+}
+
+export interface SessionTeardownOptions extends SessionVncLockOptions {
+  inputDrainTimeoutMs?: number;
 }
 
 export interface SessionVncLockOptions {
@@ -995,70 +1059,77 @@ export async function teardownDesktopSession(
   id: string,
   registryEnv: EnvLike,
   finalize: LocalSessionTeardownFinalizer,
-  options: SessionVncLockOptions = {},
+  options: SessionTeardownOptions = {},
 ): Promise<void> {
   if ((await getSession(id, registryEnv)) === undefined) {
     throw new Error(`Desktop session not found: ${id}`);
   }
   await withSessionVncLock(id, registryEnv, async () => {
-    const record = await getSession(id, registryEnv);
-    if (record === undefined) {
-      throw new Error(`Desktop session not found: ${id}`);
-    }
-    const desktop = record.desktop;
-    const failures: Error[] = [];
-    // Apps first: they are clients of the display, and killing the display out
-    // from under them would leave the escape this cleanup exists to catch.
-    const containedGone = await stopSessionContainment(desktop, failures);
-    failures.push(...await stopSessionViewer(id, desktop, registryEnv));
-    const vncGone = await stopSessionVnc(id, desktop, failures);
-    const xvfbGone = await stopSessionXvfb(desktop, failures);
-    await removeSessionRuntime(
-      id,
-      registryEnv,
-      desktop,
-      containedGone && vncGone && xvfbGone,
-      failures,
-    );
-
-    if (failures.length > 0) {
-      await updateSession(
-        id,
-        {
-          status: "error",
-          meta: {
-            ...record.meta,
-            [REAPER_CLEANUP_PENDING_META_KEY]: true,
-          },
-        },
-        registryEnv,
-      ).catch(() => {});
-      throw new AggregateError(
-        failures,
-        `Failed to stop ${failures.length} process(es) of desktop session ${id}: ` +
-          failures.map((failure) => failure.message).join("; "),
-      );
-    }
     try {
-      await retainSessionLogs(record, registryEnv);
+      await stopSessionAgentInput(id, registryEnv, options.inputDrainTimeoutMs, options.signal);
+      const record = await getSession(id, registryEnv);
+      if (record === undefined) {
+        throw new Error(`Desktop session not found: ${id}`);
+      }
+      options.signal?.throwIfAborted();
+      const desktop = record.desktop;
+      const failures: Error[] = [];
+      // Apps first: they are clients of the display, and killing the display out
+      // from under them would leave the escape this cleanup exists to catch.
+      const containedGone = await stopSessionContainment(desktop, failures);
+      failures.push(...await stopSessionViewer(id, desktop, registryEnv));
+      const vncGone = await stopSessionVnc(id, desktop, failures);
+      const xvfbGone = await stopSessionXvfb(desktop, failures);
+      await removeSessionRuntime(
+        id,
+        registryEnv,
+        desktop,
+        containedGone && vncGone && xvfbGone,
+        failures,
+      );
+
+      if (failures.length > 0) {
+        await updateSession(
+          id,
+          {
+            status: "error",
+            meta: {
+              ...record.meta,
+              [REAPER_CLEANUP_PENDING_META_KEY]: true,
+            },
+          },
+          registryEnv,
+        ).catch(() => {});
+        throw new AggregateError(
+          failures,
+          `Failed to stop ${failures.length} process(es) of desktop session ${id}: ` +
+            failures.map((failure) => failure.message).join("; "),
+        );
+      }
+      try {
+        await retainSessionLogs(record, registryEnv);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`Failed to retain logs of session ${record.id}: ${message}`, { cause: error });
+      }
+      await finalize();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`Failed to retain logs of session ${record.id}: ${message}`, { cause: error });
+      await markSessionCleanupPendingIfInputClosed(id, registryEnv).catch(() => {});
+      throw error;
     }
-    await finalize();
   }, options);
 }
 
 export async function destroyDesktopSession(
   id: string,
   registryEnv: EnvLike = process.env,
-  options: SessionVncLockOptions = {},
+  options: SessionTeardownOptions = {},
 ): Promise<void> {
   await teardownDesktopSession(
     id,
     registryEnv,
     () => destroySessionRecord(id, registryEnv),
-    options,
+    { ...options, inputDrainTimeoutMs: options.inputDrainTimeoutMs ?? SESSION_DESTROY_DRAIN_TIMEOUT_MS },
   );
 }
 

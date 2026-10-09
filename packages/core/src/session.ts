@@ -150,8 +150,19 @@ export function takeoverIdentityName(id: string): string {
   return `.${id}.takeover-identity`;
 }
 
+/** Irreversible sibling marker. Retention and pruning leave it in place. */
+export function sessionInputClosedName(id: string): string {
+  return `.${id}.input-closed`;
+}
+
 function serialize(record: SessionRecord): string {
   return `${JSON.stringify(record, null, 2)}\n`;
+}
+
+function isSessionIdReserved(id: string, env: EnvLike): boolean {
+  const root = sessionsDir(env);
+  return [id, takeoverIdentityName(id), sessionInputClosedName(id)]
+    .some((name) => fs.existsSync(path.join(root, name)));
 }
 
 export async function createSession(
@@ -168,8 +179,7 @@ export async function createSession(
       projectDir: input.projectDir,
     };
     // Retained directories and unretired takeover bindings reserve IDs.
-    if (fs.existsSync(path.join(sessionsDir(env), record.id))) continue;
-    if (fs.existsSync(path.join(sessionsDir(env), takeoverIdentityName(record.id)))) continue;
+    if (isSessionIdReserved(record.id, env)) continue;
     if (input.desktop !== undefined) record.desktop = input.desktop;
     if (input.android !== undefined) record.android = input.android;
     if (input.browser !== undefined) record.browser = input.browser;
