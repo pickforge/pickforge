@@ -116,6 +116,26 @@ describe("explicit session log pruning", () => {
     expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
   });
 
+  it("removes an orphan stopped.json temp so a later retain permits pruning", async () => {
+    const { record, dir } = await stopped();
+    // A teardown killed between the temp write and the rename leaves this behind.
+    fs.writeFileSync(path.join(dir, ".stopped.json.tmp-123-4"), "{");
+    fs.writeFileSync(path.join(dir, ".stopped.json.tmp-notes"), "mine");
+    fs.mkdirSync(path.join(dir, ".stopped.json.tmp-123-5"));
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    await retainSessionLogs(record, env);
+    expect(fs.readdirSync(dir).sort()).toEqual([
+      ".stopped.json.tmp-123-5", ".stopped.json.tmp-notes", "stopped.json", "xvfb.log",
+    ]);
+    // Unknown entries still block pruning.
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(fs.readFileSync(path.join(dir, ".stopped.json.tmp-notes"), "utf8")).toBe("mine");
+    fs.unlinkSync(path.join(dir, ".stopped.json.tmp-notes"));
+    fs.rmdirSync(path.join(dir, ".stopped.json.tmp-123-5"));
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+    expect(fs.existsSync(dir)).toBe(false);
+  });
+
   it.each(["xvfb.log", "stopped.json"])("never follows a %s symlink", async (name) => {
     const { dir } = await stopped();
     const outside = path.join(home, "outside");

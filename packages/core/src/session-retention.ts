@@ -13,6 +13,8 @@ const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const LEASE_STAGING = new RegExp(
   `^(\\.human-lease-${UUID}|\\.\\.human-lease-${UUID}\\.tmp-\\d+-\\d+|\\.human\\.lease\\.json\\.tmp-\\d+-\\d+)$`,
 );
+// The writeFileAtomic temp for the marker, left when teardown dies before the rename.
+const MARKER_TEMP = /^\.stopped\.json\.tmp-\d+-\d+$/;
 
 /** Called only after typed teardown has confirmed its processes are gone. */
 export async function retainSessionLogs(
@@ -25,9 +27,10 @@ export async function retainSessionLogs(
       for (const name of ["permits", "human.lease.json"]) {
         await fs.promises.rm(handle.resolve(name), { recursive: true, force: true });
       }
-      // A lease publisher killed before its cleanup leaves staging files behind.
+      // A lease publisher or an earlier teardown killed before its cleanup
+      // leaves staging files behind.
       for (const name of await handle.readEntryNames()) {
-        if (!LEASE_STAGING.test(name)) continue;
+        if (!LEASE_STAGING.test(name) && !MARKER_TEMP.test(name)) continue;
         if ((await handle.lstatChild(name))?.isDirectory() === false) await handle.unlinkChild(name);
       }
       await handle.writeFileAtomic(MARKER, JSON.stringify({
