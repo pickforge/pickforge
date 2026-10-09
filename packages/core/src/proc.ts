@@ -582,13 +582,7 @@ export function parseProcStat(content: string): ProcStat | undefined {
   const pgrp = Number(fields[5 - 3]);
   const numThreads = Number(fields[20 - 3]);
   const startTicks = Number(fields[22 - 3]);
-  if (
-    state === undefined ||
-    !Number.isFinite(ppid) ||
-    !Number.isFinite(pgrp) ||
-    !Number.isFinite(numThreads) ||
-    !Number.isFinite(startTicks)
-  ) {
+  if (state === undefined || ![ppid, pgrp, numThreads, startTicks].every(Number.isFinite)) {
     return undefined;
   }
   return { state, ppid, pgrp, numThreads, startTicks };
