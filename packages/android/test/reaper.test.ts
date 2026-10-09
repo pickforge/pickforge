@@ -231,4 +231,14 @@ describe("android-only teardown lock (#321)", () => {
     await teardownLocalSession(record, runtime, () => destroySessionRecord(record.id, registryEnv));
     expect(await getSession(record.id, registryEnv)).toBeUndefined();
   }, 5_000);
+  it("refuses a non-Android record without finalizing it", async () => {
+    const record = await createSession({ type: "browser", projectDir, status: "running" }, registryEnv);
+    const finalize = vi.fn(async () => {});
+    await expect(teardownAndroidSession(record.id, registryEnv, {}, finalize)).rejects.toThrow(
+      `Session ${record.id} is not an Android session`,
+    );
+    expect(finalize).not.toHaveBeenCalled();
+    expect(await getSession(record.id, registryEnv)).toBeDefined();
+    await destroySessionRecord(record.id, registryEnv);
+  });
 });

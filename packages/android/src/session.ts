@@ -254,6 +254,9 @@ export async function teardownAndroidSession(
   if (record === undefined) {
     throw new Error(`Android session not found: ${id}`);
   }
+  if (record.type !== "android" && record.type !== "desktop+android") {
+    throw new Error(`Session ${id} is not an Android session`);
+  }
   if (record.type !== "android" || record.desktop !== undefined) {
     // A desktop+android record runs this leg as the desktop teardown's
     // finalize, which already holds the session lock. The lock is not reentrant.
