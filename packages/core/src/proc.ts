@@ -561,6 +561,8 @@ interface ProcStat {
   state: string;
   ppid: number;
   pgrp: number;
+  /** Field 20: threads in the thread group, counting a zombie leader. */
+  numThreads: number;
   startTicks: number;
 }
 
@@ -578,16 +580,12 @@ export function parseProcStat(content: string): ProcStat | undefined {
   const state = fields[0];
   const ppid = Number(fields[4 - 3]);
   const pgrp = Number(fields[5 - 3]);
+  const numThreads = Number(fields[20 - 3]);
   const startTicks = Number(fields[22 - 3]);
-  if (
-    state === undefined ||
-    !Number.isFinite(ppid) ||
-    !Number.isFinite(pgrp) ||
-    !Number.isFinite(startTicks)
-  ) {
+  if (state === undefined || ![ppid, pgrp, numThreads, startTicks].every(Number.isFinite)) {
     return undefined;
   }
-  return { state, ppid, pgrp, startTicks };
+  return { state, ppid, pgrp, numThreads, startTicks };
 }
 
 function readProcStat(pid: number): ProcStat | undefined {
@@ -666,8 +664,8 @@ export function isProcessGroupAlive(pgid: number): boolean {
   }
 }
 
-/** List the PIDs of live, non-zombie processes whose stat matches. */
-function listLiveProcesses(matches: (stat: ProcStat) => boolean): number[] {
+/** List the PIDs of processes, zombies included, whose stat matches. */
+function listProcesses(matches: (stat: ProcStat) => boolean): number[] {
   let entries: string[];
   try {
     entries = fs.readdirSync("/proc");
@@ -679,11 +677,16 @@ function listLiveProcesses(matches: (stat: ProcStat) => boolean): number[] {
     if (!/^\d+$/.test(entry)) continue;
     const pid = Number(entry);
     const stat = readProcStat(pid);
-    if (stat !== undefined && stat.state !== "Z" && matches(stat)) {
+    if (stat !== undefined && matches(stat)) {
       pids.push(pid);
     }
   }
   return pids;
+}
+
+/** List the PIDs of live, non-zombie processes whose stat matches. */
+function listLiveProcesses(matches: (stat: ProcStat) => boolean): number[] {
+  return listProcesses((stat) => stat.state !== "Z" && matches(stat));
 }
 
 /** List the PIDs whose process group id equals `pgid`. */
@@ -721,17 +724,45 @@ function leaderGroupMismatch(leader: ProcStat, identity: ProcessIdentity): boole
   return leader.startTicks !== identity.startTicks || leader.pgrp !== identity.pid;
 }
 
+/**
+ * Whether a process still runs code or holds resources, for the group stop
+ * path only. A zombie thread-group leader can still have threads that run or
+ * exit, because Linux shows the leader as Z once its own thread exits. Each
+ * other thread leaves num_threads only after it releases its memory and files.
+ * So a zombie with more than one thread still counts here.
+ *
+ * Identity checks such as `processIdentityMatches` keep treating every zombie
+ * as dead, because their callers use that for ownership and PID-reuse rules.
+ */
+function statCountsAsPresent(stat: ProcStat): boolean {
+  return stat.state !== "Z" || stat.numThreads > 1;
+}
+
+/** Group members that still count as present, including zombies with threads. */
+function listPresentGroupMembers(pgid: number): number[] {
+  return listProcesses((stat) => stat.pgrp === pgid && statCountsAsPresent(stat));
+}
+
+function leaderStillPresent(identity: ProcessIdentity): boolean {
+  const stat = readProcStat(identity.pid);
+  return (
+    stat !== undefined &&
+    stat.startTicks === identity.startTicks &&
+    statCountsAsPresent(stat)
+  );
+}
+
 function processGroupGone(identity: ProcessIdentity): boolean {
   return (
-    listProcessGroupMembers(identity.pid).length === 0 &&
-    !processIdentityMatches(identity)
+    listPresentGroupMembers(identity.pid).length === 0 &&
+    !leaderStillPresent(identity)
   );
 }
 
 function missingLeaderOutcome(identity: ProcessIdentity): StopProcessGroupResult {
   return {
     outcome:
-      listProcessGroupMembers(identity.pid).length === 0
+      listPresentGroupMembers(identity.pid).length === 0
         ? "already-dead"
         : "reused",
     signaled: false,
@@ -753,12 +784,12 @@ async function waitForProcessGroupExit(
 }
 
 function classifyAfterTerm(identity: ProcessIdentity): StopProcessGroupResult | undefined {
-  const members = listProcessGroupMembers(identity.pid);
+  const members = listPresentGroupMembers(identity.pid);
   const currentLeader = readProcStat(identity.pid);
   if (currentLeader !== undefined && leaderGroupMismatch(currentLeader, identity)) {
     return { outcome: "reused", signaled: true };
   }
-  if (members.length === 0 && (currentLeader === undefined || currentLeader.state === "Z")) {
+  if (members.length === 0 && (currentLeader === undefined || !statCountsAsPresent(currentLeader))) {
     return { outcome: "terminated", signaled: true };
   }
   return undefined;
@@ -772,6 +803,8 @@ function classifyAfterTerm(identity: ProcessIdentity): StopProcessGroupResult | 
  * After that verified group receives SIGTERM, a missing leader does not make
  * its surviving same-pgid members unsafe: the pgid cannot be reused while they
  * remain, so SIGKILL escalation is valid. A reused live leader is still refused.
+ * A zombie leader or member with other threads still counts as present, so
+ * the group is not reported gone until those threads exit.
  *
  * The leader must have been spawned as a process-group leader (e.g. `spawn`
  * with `detached: true`), so its PID doubles as the group id.
