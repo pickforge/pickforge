@@ -355,6 +355,41 @@ describe("process identity and group termination", () => {
     }
   });
 
+  it("waits in the SIGTERM phase while a zombie leader still has live threads", async () => {
+    const pid = 1_234_567;
+    const startTicks = 456;
+    let termed = false;
+    let readsAfterTerm = 0;
+    const read = vi
+      .spyOn(fs, "readFileSync")
+      .mockImplementation(((_filePath: fs.PathOrFileDescriptor) => {
+        if (!termed) return procStat(pid, "S", pid, startTicks);
+        readsAfterTerm += 1;
+        return procStat(pid, "Z", pid, startTicks, readsAfterTerm <= 6 ? 2 : 1);
+      }) as typeof fs.readFileSync);
+    const entries = vi
+      .spyOn(fs, "readdirSync")
+      .mockReturnValue([String(pid)] as never);
+    const kill = vi.spyOn(process, "kill").mockImplementation((_pid, signal) => {
+      if (signal === "SIGTERM") termed = true;
+      return true;
+    });
+    try {
+      const result = await stopProcessGroupVerified(
+        { pid, startTicks },
+        { timeoutMs: 2_000 },
+      );
+
+      expect(result).toEqual({ outcome: "terminated", signaled: true });
+      expect(kill.mock.calls).toEqual([[-pid, "SIGTERM"]]);
+      expect(readsAfterTerm).toBeGreaterThan(6);
+    } finally {
+      kill.mockRestore();
+      entries.mockRestore();
+      read.mockRestore();
+    }
+  });
+
   it("reports survival while a zombie leader keeps a live thread after SIGKILL", async () => {
     const pid = 1_234_567;
     const startTicks = 456;
