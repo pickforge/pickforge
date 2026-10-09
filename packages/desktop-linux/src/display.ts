@@ -25,6 +25,7 @@ const SOCKET_POLL_INTERVAL_MS = 100;
 const DEFAULT_WAIT_TIMEOUT_MS = 10_000;
 const ALLOCATION_RETRY_LIMIT = 5;
 const IDENTITY_WAIT_TIMEOUT_MS = 1_000;
+const OWNED_EXIT_TIMEOUT_MS = 2_000;
 
 export interface XvfbArgsOptions {
   display: string;
@@ -356,6 +357,26 @@ async function waitForOwnedIdentity(
   }
 }
 
+/**
+ * Wait until Node has reaped our own child. The verified group stop accepts a
+ * zombie leader while the process's other threads still exit, so only the
+ * child's exit event proves the whole process is gone.
+ */
+function waitForOwnedExit(daemon: OwnedDaemonHandle): Promise<boolean> {
+  if (childHasExited(daemon)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const onExit = (): void => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    const timer = setTimeout(() => {
+      daemon.child.off("exit", onExit);
+      resolve(false);
+    }, OWNED_EXIT_TIMEOUT_MS);
+    daemon.child.once("exit", onExit);
+  });
+}
+
 async function cleanupPartialStart(
   partial: XvfbPartialStart,
   daemon: OwnedDaemonHandle,
@@ -374,6 +395,7 @@ async function cleanupPartialStart(
   if (!processGone) {
     processGone = await stopOwnedDaemon(daemon);
   } else {
+    processGone = await waitForOwnedExit(daemon);
     daemon.release();
   }
   const displayReleased = inspectDisplayRelease(partial.display, {

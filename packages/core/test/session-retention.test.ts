@@ -116,6 +116,63 @@ describe("explicit session log pruning", () => {
     expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
   });
 
+  it("removes an orphan stopped.json temp so a later retain permits pruning", async () => {
+    const { record, dir } = await stopped();
+    // A teardown killed between the temp write and the rename leaves this behind.
+    // No Linux pid reaches 2147483647, so its writer is dead.
+    fs.writeFileSync(path.join(dir, ".stopped.json.tmp-2147483647-4"), "{");
+    const live = `.stopped.json.tmp-${process.pid}-999999`;
+    fs.writeFileSync(path.join(dir, live), "{");
+    fs.writeFileSync(path.join(dir, ".stopped.json.tmp-notes"), "mine");
+    fs.mkdirSync(path.join(dir, ".stopped.json.tmp-2147483647-5"));
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    await retainSessionLogs(record, env);
+    expect(fs.readdirSync(dir).sort()).toEqual([
+      ".stopped.json.tmp-2147483647-5", live, ".stopped.json.tmp-notes", "stopped.json", "xvfb.log",
+    ].sort());
+    // Unknown entries and a temp from a live writer still block pruning.
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(fs.readFileSync(path.join(dir, ".stopped.json.tmp-notes"), "utf8")).toBe("mine");
+    fs.unlinkSync(path.join(dir, ".stopped.json.tmp-notes"));
+    fs.rmdirSync(path.join(dir, ".stopped.json.tmp-2147483647-5"));
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    fs.unlinkSync(path.join(dir, live));
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+    expect(fs.existsSync(dir)).toBe(false);
+  });
+
+  it("keeps the marker temp of an overlapping retain for the same session", async () => {
+    const { record, dir } = await stopped();
+    let notifyPaused!: () => void;
+    let resume!: () => void;
+    const paused = new Promise<void>((resolve) => { notifyPaused = resolve; });
+    const gate = new Promise<void>((resolve) => { resume = resolve; });
+    const rename = fs.promises.rename.bind(fs.promises);
+    let captured = false;
+    const spy = vi.spyOn(fs.promises, "rename").mockImplementation(async (source, target) => {
+      if (!captured && String(target).endsWith(`${path.sep}stopped.json`)) {
+        captured = true;
+        notifyPaused();
+        await gate;
+      }
+      await rename(source, target);
+    });
+    try {
+      const first = retainSessionLogs(record, env);
+      await paused;
+      const second = retainSessionLogs(record, env);
+      await expect(second).resolves.toBeUndefined();
+      resume();
+      await expect(first).resolves.toBeUndefined();
+    } finally {
+      resume();
+      spy.mockRestore();
+    }
+    expect(fs.readdirSync(dir).sort()).toEqual(["stopped.json", "xvfb.log"]);
+    expect(JSON.parse(fs.readFileSync(path.join(dir, "stopped.json"), "utf8")).id).toBe(record.id);
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+  });
+
   it.each(["xvfb.log", "stopped.json"])("never follows a %s symlink", async (name) => {
     const { dir } = await stopped();
     const outside = path.join(home, "outside");
