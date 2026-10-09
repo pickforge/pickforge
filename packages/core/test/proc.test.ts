@@ -325,7 +325,7 @@ describe("process identity and group termination", () => {
     let killed = false;
     const read = vi
       .spyOn(fs, "readFileSync")
-      .mockImplementation((() =>
+      .mockImplementation(((_filePath: fs.PathOrFileDescriptor) =>
         procStat(pid, "Z", pid, startTicks, killed ? 1 : 2)) as typeof fs.readFileSync);
     const entries = vi
       .spyOn(fs, "readdirSync")
