@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,6 +10,7 @@ import {
   listProcessGroupMembers,
   parseProcStat,
   processIdentityMatches,
+  readProcessGroupLeaderIdentity,
   readProcessIdentity,
   readProcessStartTicks,
   runCommand,
@@ -20,6 +21,9 @@ import {
 } from "../src/proc.js";
 
 const node = process.execPath;
+const hasPython3 =
+  process.platform === "linux" &&
+  spawnSync("python3", ["-c", "import ctypes"], { stdio: "ignore" }).status === 0;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -220,10 +224,12 @@ describe("process identity and group termination", () => {
     state: string,
     pgrp: number,
     startTicks: number,
+    numThreads = 1,
   ): string {
     const fields = Array.from({ length: 20 }, () => "0");
     fields[0] = state;
     fields[2] = String(pgrp);
+    fields[17] = String(numThreads);
     fields[19] = String(startTicks);
     return `${pid} (browser) ${fields.join(" ")}`;
   }
@@ -248,12 +254,14 @@ describe("process identity and group termination", () => {
     fields[0] = "Z";
     fields[1] = "7";
     fields[2] = "123";
+    fields[17] = "3";
     fields[19] = "456";
 
     expect(parseProcStat(`123 (worker (test)) ${fields.join(" ")}`)).toEqual({
       state: "Z",
       ppid: 7,
       pgrp: 123,
+      numThreads: 3,
       startTicks: 456,
     });
   });
@@ -310,6 +318,205 @@ describe("process identity and group termination", () => {
       read.mockRestore();
     }
   });
+
+  it("does not report a zombie leader gone while its other threads remain", async () => {
+    const pid = 1_234_567;
+    const startTicks = 456;
+    let killed = false;
+    const read = vi
+      .spyOn(fs, "readFileSync")
+      .mockImplementation((() =>
+        procStat(pid, "Z", pid, startTicks, killed ? 1 : 2)) as typeof fs.readFileSync);
+    const entries = vi
+      .spyOn(fs, "readdirSync")
+      .mockReturnValue([String(pid)] as never);
+    const kill = vi.spyOn(process, "kill").mockImplementation((_pid, signal) => {
+      if (signal === "SIGKILL") killed = true;
+      return true;
+    });
+    try {
+      // The identity check still treats every zombie as dead.
+      expect(processIdentityMatches({ pid, startTicks })).toBe(false);
+
+      const result = await stopProcessGroupVerified(
+        { pid, startTicks },
+        { timeoutMs: 0 },
+      );
+
+      expect(result).toEqual({ outcome: "terminated", signaled: true });
+      expect(kill.mock.calls).toEqual([
+        [-pid, "SIGTERM"],
+        [-pid, "SIGKILL"],
+      ]);
+    } finally {
+      kill.mockRestore();
+      entries.mockRestore();
+      read.mockRestore();
+    }
+  });
+
+  it("reports survival while a zombie leader keeps a live thread after SIGKILL", async () => {
+    const pid = 1_234_567;
+    const startTicks = 456;
+    const read = vi
+      .spyOn(fs, "readFileSync")
+      .mockReturnValue(procStat(pid, "Z", pid, startTicks, 2));
+    const entries = vi.spyOn(fs, "readdirSync").mockReturnValue([]);
+    const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+    vi.useFakeTimers();
+    try {
+      const pending = stopProcessGroupVerified(
+        { pid, startTicks },
+        { timeoutMs: 100 },
+      );
+      await vi.advanceTimersByTimeAsync(1_200);
+
+      await expect(pending).resolves.toEqual({
+        outcome: "survived",
+        signaled: true,
+      });
+      expect(kill.mock.calls).toEqual([
+        [-pid, "SIGTERM"],
+        [-pid, "SIGKILL"],
+      ]);
+    } finally {
+      vi.useRealTimers();
+      kill.mockRestore();
+      entries.mockRestore();
+      read.mockRestore();
+    }
+  });
+
+  it("escalates while a zombie group member still has live threads", async () => {
+    const pid = 1_234_567;
+    const memberPid = pid + 1;
+    const startTicks = 456;
+    let killed = false;
+    const read = vi
+      .spyOn(fs, "readFileSync")
+      .mockImplementation(((filePath: fs.PathOrFileDescriptor) =>
+        String(filePath).endsWith(`/${pid}/stat`)
+          ? procStat(pid, "Z", pid, startTicks)
+          : procStat(memberPid, "Z", pid, startTicks + 1, killed ? 1 : 3)) as typeof fs.readFileSync);
+    const entries = vi
+      .spyOn(fs, "readdirSync")
+      .mockReturnValue([String(pid), String(memberPid)] as never);
+    const kill = vi.spyOn(process, "kill").mockImplementation((_pid, signal) => {
+      if (signal === "SIGKILL") killed = true;
+      return true;
+    });
+    try {
+      expect(listProcessGroupMembers(pid)).toEqual([]);
+
+      const result = await stopProcessGroupVerified(
+        { pid, startTicks },
+        { timeoutMs: 0 },
+      );
+
+      expect(result).toEqual({ outcome: "terminated", signaled: true });
+      expect(kill.mock.calls).toEqual([
+        [-pid, "SIGTERM"],
+        [-pid, "SIGKILL"],
+      ]);
+    } finally {
+      kill.mockRestore();
+      entries.mockRestore();
+      read.mockRestore();
+    }
+  });
+
+  it("does not call a group already dead while a zombie member has live threads", async () => {
+    const pid = 1_234_567;
+    const memberPid = pid + 1;
+    const read = vi
+      .spyOn(fs, "readFileSync")
+      .mockImplementation(((filePath: fs.PathOrFileDescriptor) => {
+        if (String(filePath).endsWith(`/${pid}/stat`)) {
+          throw Object.assign(new Error("gone"), { code: "ENOENT" });
+        }
+        return procStat(memberPid, "Z", pid, 789, 2);
+      }) as typeof fs.readFileSync);
+    const entries = vi
+      .spyOn(fs, "readdirSync")
+      .mockReturnValue([String(memberPid)] as never);
+    const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+    try {
+      const result = await stopProcessGroupVerified({ pid, startTicks: 456 });
+
+      expect(result).toEqual({ outcome: "reused", signaled: false });
+      expect(kill).not.toHaveBeenCalled();
+    } finally {
+      kill.mockRestore();
+      entries.mockRestore();
+      read.mockRestore();
+    }
+  });
+
+  it.skipIf(!hasPython3)(
+    "does not return while a real zombie leader still has a running thread",
+    async () => {
+      // The main thread exits through pthread_exit, so the leader shows Z
+      // while a second thread keeps running. SIGTERM is ignored, so only
+      // SIGKILL ends that thread.
+      const script = [
+        "import ctypes, signal, threading, time",
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+        "threading.Thread(target=lambda: time.sleep(60)).start()",
+        "ctypes.CDLL(None).pthread_exit(None)",
+      ].join("\n");
+      const child = spawn("python3", ["-c", script], {
+        detached: true,
+        stdio: "ignore",
+      });
+      const pid = child.pid;
+      if (pid === undefined) {
+        throw new Error("child process did not expose a pid");
+      }
+      // Read /proc/<pid>/status so the check does not depend on parseProcStat.
+      const readStatus = (): { state?: string; threads: number } => {
+        let status: string;
+        try {
+          status = fs.readFileSync(`/proc/${pid}/status`, "utf8");
+        } catch {
+          return { threads: 0 };
+        }
+        return {
+          state: /^State:\s+(\S)/m.exec(status)?.[1],
+          threads: Number(/^Threads:\s+(\d+)/m.exec(status)?.[1] ?? 0),
+        };
+      };
+      try {
+        const deadline = Date.now() + 5_000;
+        let status = readStatus();
+        while (
+          Date.now() < deadline &&
+          !(status.state === "Z" && status.threads > 1)
+        ) {
+          await delay(20);
+          status = readStatus();
+        }
+        expect(status.state).toBe("Z");
+        expect(status.threads).toBeGreaterThan(1);
+        const identity = readProcessGroupLeaderIdentity(pid);
+        expect(identity).toBeDefined();
+
+        const result = await stopProcessGroupVerified(
+          identity as ProcessIdentity,
+          { timeoutMs: 200 },
+        );
+
+        expect(readStatus().threads).toBeLessThanOrEqual(1);
+        expect(result).toEqual({ outcome: "terminated", signaled: true });
+      } finally {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          // group already gone
+        }
+      }
+    },
+    15_000,
+  );
 
   it("matches a live identity and rejects a start-time mismatch", () => {
     const self = readProcessIdentity(process.pid);
