@@ -37,16 +37,10 @@ async function readVncLockOwner(lockPath: string): Promise<VncLockOwner | null> 
     const value: unknown = JSON.parse(
       await fs.promises.readFile(lockPath, "utf8"),
     );
-    if (
-      typeof value === "object" &&
-      value !== null &&
-      "pid" in value &&
-      typeof value.pid === "number" &&
-      Number.isInteger(value.pid) &&
-      "token" in value &&
-      typeof value.token === "string"
-    ) {
-      return { pid: value.pid, token: value.token };
+    if (typeof value !== "object" || value === null) return null;
+    const { pid, token } = value as { pid?: unknown; token?: unknown };
+    if (typeof pid === "number" && Number.isInteger(pid) && typeof token === "string") {
+      return { pid, token };
     }
   } catch (error) {
     if (errorCode(error) === "ENOENT") return null;

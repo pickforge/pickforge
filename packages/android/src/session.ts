@@ -185,7 +185,7 @@ async function retainAndroidOnlyLogs(record: SessionRecord, env: EnvLike): Promi
   }
 }
 
-async function stopAndRetainAndroid(
+async function stopAndroidEmulator(
   record: SessionRecord,
   registryEnv: EnvLike,
   opts: AndroidSessionOpOptions,
@@ -227,6 +227,14 @@ async function stopAndRetainAndroid(
       );
     }
   }
+}
+
+async function stopAndRetainAndroid(
+  record: SessionRecord,
+  registryEnv: EnvLike,
+  opts: AndroidSessionOpOptions,
+): Promise<void> {
+  await stopAndroidEmulator(record, registryEnv, opts);
   try {
     await retainAndroidOnlyLogs(record, registryEnv);
   } catch (error) {
