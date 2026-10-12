@@ -412,23 +412,27 @@ function readEnviron(pid: number): EnvironRead {
     content = fs.readFileSync(`/proc/${pid}/environ`, "latin1");
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { kind: "gone" };
     if (code === "ESRCH") return readZombieLeaderEnviron(pid);
-    return code === "ENOENT" ? { kind: "gone" } : { kind: "unreadable" };
+    return readThreadsOfZombieLeader(pid, { kind: "unreadable" });
   }
-  if (content === "") {
-    const stat = readProcStatSnapshot(pid);
-    if (stat.kind === "fields" && stat.fields[0] === "Z" && Number(stat.fields[20 - 3]) > 1) {
-      return readZombieLeaderEnviron(pid, stat);
-    }
-  }
+  if (content === "") return readThreadsOfZombieLeader(pid, { kind: "entries", entries: [""] });
   return { kind: "entries", entries: content.split("\0") };
+}
+
+/** Read through another thread if `pid` is a zombie leader with live threads. */
+function readThreadsOfZombieLeader(pid: number, otherwise: EnvironRead): EnvironRead {
+  const stat = readProcStatSnapshot(pid);
+  const zombieLeader =
+    stat.kind === "fields" && stat.fields[0] === "Z" && Number(stat.fields[20 - 3]) > 1;
+  return zombieLeader ? readZombieLeaderEnviron(pid, stat) : otherwise;
 }
 
 /**
  * A thread-group leader that exited before its other threads has no memory of
  * its own. Depending on the kernel, its `environ` then fails with ESRCH or
- * reads as empty. The other threads share that memory and still run, so read
- * the environment through one of them.
+ * EACCES, or reads as empty. The other threads share that memory and still
+ * run, so read the environment through one of them.
  */
 function readZombieLeaderEnviron(
   pid: number,

@@ -1213,19 +1213,20 @@ describe("containment identity safety", () => {
     });
   }, 20_000);
 
-  it.each(["fails with ESRCH", "reads as empty"] as const)(
+  it.each(["fails with ESRCH", "fails with EACCES", "reads as empty"] as const)(
     "does not report a zombie leader with a live thread as gone when its environ %s",
     async (leaderEnviron) => {
       await withOwnedStatFixture("desk-stat-zombie-thread", async ({ scope, pid, read }) => {
-        // Depending on the kernel, the leader's environ fails with ESRCH or reads
-        // as empty (#322). Its other thread shares the memory and still shows the token.
+        // Depending on the kernel, the leader's environ fails with ESRCH or EACCES,
+        // or reads as empty (#322). Its other thread shares the memory and still shows the token.
         const tid = "4194303";
         const readdir = fs.readdirSync;
         let threadReads = 0;
         fs.readFileSync = ((file, ...args) => {
           if (file === `/proc/${pid}/environ`) {
             if (leaderEnviron === "reads as empty") return "";
-            throw Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+            const code = leaderEnviron === "fails with EACCES" ? "EACCES" : "ESRCH";
+            throw Object.assign(new Error(code), { code });
           }
           if (file === `/proc/${pid}/task/${tid}/environ`) {
             threadReads += 1;
@@ -1263,7 +1264,7 @@ describe("containment identity safety", () => {
     async () => {
       // The main thread exits through pthread_exit, so the leader shows Z
       // while a second thread keeps running. On a real kernel the leader's
-      // environ then fails with ESRCH or reads as empty, depending on the kernel (#322).
+      // environ then fails with ESRCH or EACCES, or reads as empty, depending on the kernel (#322).
       const scope = createContainmentScope({ id: "desk-real-zombie", useCgroup: false });
       const script = [
         "import ctypes, threading, time",
