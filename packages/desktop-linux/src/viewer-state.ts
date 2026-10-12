@@ -7,10 +7,10 @@ import {
   getSession,
   sessionDataDir,
   identityIsAlive,
-  listProcessGroupMembers,
   processIdentityMatches,
   readProcessIdentity,
   readProcessGroupLeaderIdentity,
+  readProcessGroupPresence,
 } from "@pickforge/lab-core";
 import type { DesktopSessionInfo, EnvLike } from "@pickforge/lab-core";
 import { withSessionVncLock } from "./session.js";
@@ -650,8 +650,14 @@ function remainingViewerProcesses(owner: ViewerProcessOwner): number[] {
       return [];
     }
   }
-  const members = listProcessGroupMembers(owner.pid);
-  if (identityIsAlive(owner.pid) && !members.includes(owner.pid)) {
+  // Count zombies whose other threads still run, as the verified group stop
+  // does. An unreadable entry or an unreadable leader keeps the group present.
+  const group = readProcessGroupPresence(owner.pid);
+  const members = group.members;
+  if (
+    (group.unverified || identityIsAlive(owner.pid)) &&
+    !members.includes(owner.pid)
+  ) {
     members.push(owner.pid);
   }
   return members;
