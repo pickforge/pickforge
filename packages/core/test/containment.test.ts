@@ -1028,6 +1028,36 @@ describe("containment identity safety", () => {
     );
   }, 20_000);
 
+  it("does not call a live process gone when its environ fails with ESRCH", async () => {
+    await withOwnedStatFixture("desk-environ-esrch-live", async ({ scope, pid, read, kill }) => {
+      // A zombie leader's surviving thread can exec between reads, so the
+      // process is live again with one thread. That is not proof it is gone.
+      let environReads = 0;
+      const terminatingSignals: Parameters<typeof process.kill>[1][] = [];
+      fs.readFileSync = ((file, ...args) => {
+        if (file === `/proc/${pid}/environ` && ++environReads > 1) {
+          throw Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+        }
+        return read.call(fs, file, ...args);
+      }) as typeof fs.readFileSync;
+      process.kill = (target, signal) => {
+        if (target === pid && signal !== 0) terminatingSignals.push(signal);
+        return kill.call(process, target, signal);
+      };
+
+      const result = await destroyContainmentScope(scope, {
+        termTimeoutMs: 300,
+        killTimeoutMs: 300,
+      });
+
+      expect(environReads).toBeGreaterThanOrEqual(2);
+      expect(result.confirmed).toBe(false);
+      expect(result.survivors).toContain(pid);
+      expect(terminatingSignals).toEqual([]);
+      expect(isPidAlive(pid)).toBe(true);
+    });
+  }, 20_000);
+
   it("never confirms cleanup while an identified process has unreadable stat", async () => {
     await withOwnedStatFixture("desk-stat-unreadable", async ({ scope, pid, startTicks, uid, read, kill }) => {
       const stat = `/proc/${pid}/stat`;

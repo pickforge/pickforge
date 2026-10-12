@@ -415,15 +415,13 @@ function readEnviron(pid: number): EnvironRead {
     if (code === "ESRCH") return readZombieLeaderEnviron(pid);
     return code === "ENOENT" ? { kind: "gone" } : { kind: "unreadable" };
   }
-  if (content === "" && isZombieLeaderWithThreads(pid)) {
-    return readZombieLeaderEnviron(pid);
+  if (content === "") {
+    const stat = readProcStatSnapshot(pid);
+    if (stat.kind === "fields" && stat.fields[0] === "Z" && Number(stat.fields[20 - 3]) > 1) {
+      return readZombieLeaderEnviron(pid, stat);
+    }
   }
   return { kind: "entries", entries: content.split("\0") };
-}
-
-function isZombieLeaderWithThreads(pid: number): boolean {
-  const stat = readProcStatSnapshot(pid);
-  return stat.kind === "fields" && stat.fields[0] === "Z" && Number(stat.fields[20 - 3]) > 1;
 }
 
 /**
@@ -432,11 +430,16 @@ function isZombieLeaderWithThreads(pid: number): boolean {
  * reads as empty. The other threads share that memory and still run, so read
  * the environment through one of them.
  */
-function readZombieLeaderEnviron(pid: number): EnvironRead {
-  const stat = readProcStatSnapshot(pid);
+function readZombieLeaderEnviron(
+  pid: number,
+  stat: ProcStatRead = readProcStatSnapshot(pid),
+): EnvironRead {
   if (stat.kind === "gone") return stat;
   if (stat.kind !== "fields") return { kind: "unreadable" };
-  // With no other thread, ESRCH keeps meaning the process is gone.
+  // A live process here may have just exec'd from a surviving thread; that
+  // proves nothing either way.
+  if (stat.fields[0] !== "Z") return { kind: "unreadable" };
+  // With no other thread, the zombie is gone.
   if (!(Number(stat.fields[20 - 3]) > 1)) return { kind: "gone" };
   let tids: string[];
   try {
