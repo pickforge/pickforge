@@ -753,9 +753,13 @@ function leaderGroupMismatch(leader: ProcStat, identity: ProcessIdentity): boole
  * Identity checks such as `processIdentityMatches` keep treating every zombie
  * as dead, because their callers use that for ownership and PID-reuse rules.
  */
-function statCountsAsPresent(stat: ProcStat): boolean {
+export function statCountsAsPresent(stat: {
+  state: string | undefined;
+  numThreads: number;
+}): boolean {
   return stat.state !== "Z" || stat.numThreads > 1;
 }
+
 
 export interface ProcessGroupPresence {
   /** Members that still count as present, including zombies with threads. */

@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { readPickforgeEnv } from "./env-compat.js";
-import { parseProcStat, type ProcessIdentity } from "./proc.js";
+import { parseProcStat, statCountsAsPresent, type ProcessIdentity } from "./proc.js";
 
 /**
  * Containment for apps launched into a lab session.
@@ -365,18 +365,18 @@ function readProcStatFields(pid: number): string[] | undefined {
 }
 
 /**
- * Whether a stat state and num_threads (field 20) describe an exited process.
- * A zombie thread-group leader can still have live threads (#320, #322), so
- * it only counts as gone once it is the last thread left.
+ * Whether raw stat fields describe a present process. A zombie thread-group
+ * leader can still have live threads (#320, #322), so it only counts as gone
+ * once it is the last thread left.
  */
-function zombieIsGone(state: string | undefined, numThreads: number): boolean {
-  return state === "Z" && !(numThreads > 1);
+function fieldsCountAsPresent(fields: string[]): boolean {
+  return statCountsAsPresent({ state: fields[0], numThreads: Number(fields[20 - 3]) });
 }
 
 /** A present process's start time, including a zombie leader with threads. */
 function readPresentStartTicks(pid: number): number | undefined {
   const fields = readProcStatFields(pid);
-  if (fields === undefined || zombieIsGone(fields[0], Number(fields[20 - 3]))) {
+  if (fields === undefined || !fieldsCountAsPresent(fields)) {
     return undefined;
   }
   const startTicks = Number(fields[22 - 3]);
@@ -424,7 +424,7 @@ function readEnviron(pid: number): EnvironRead {
 function readThreadsOfZombieLeader(pid: number, otherwise: EnvironRead): EnvironRead {
   const stat = readProcStatSnapshot(pid);
   const zombieLeader =
-    stat.kind === "fields" && stat.fields[0] === "Z" && Number(stat.fields[20 - 3]) > 1;
+    stat.kind === "fields" && stat.fields[0] === "Z" && fieldsCountAsPresent(stat.fields);
   return zombieLeader ? readZombieLeaderEnviron(pid, stat) : otherwise;
 }
 
@@ -444,7 +444,7 @@ function readZombieLeaderEnviron(
   // proves nothing either way.
   if (stat.fields[0] !== "Z") return { kind: "unreadable" };
   // With no other thread, the zombie is gone.
-  if (!(Number(stat.fields[20 - 3]) > 1)) return { kind: "gone" };
+  if (!fieldsCountAsPresent(stat.fields)) return { kind: "gone" };
   let tids: string[];
   try {
     tids = fs.readdirSync(`/proc/${pid}/task`);
@@ -526,7 +526,7 @@ function probeToken(identity: ProcessIdentity, token: string): TokenProbe {
     return code === "ENOENT" || code === "ESRCH" ? "gone" : "unverified";
   }
   if (stat === undefined) return "unverified";
-  if (zombieIsGone(stat.state, stat.numThreads)) return "gone";
+  if (!statCountsAsPresent(stat)) return "gone";
   if (stat.startTicks !== identity.startTicks) return "mismatch";
   if (read.kind !== "entries") return "unverified";
   return read.entries.includes(`${TOKEN_ENV}=${token}`) ? "match" : "unverified";
@@ -548,7 +548,7 @@ function readParentAndStart(
   pid: number,
 ): { ppid: number; startTicks: number } | undefined {
   const fields = readProcStatFields(pid);
-  if (fields === undefined || zombieIsGone(fields[0], Number(fields[20 - 3]))) {
+  if (fields === undefined || !fieldsCountAsPresent(fields)) {
     return undefined;
   }
   const ppid = Number(fields[4 - 3]);
@@ -760,7 +760,7 @@ function classifyCgroupEntries(
   if (stat.kind === "gone") return "gone";
   if (stat.kind !== "fields") return "unknown";
   // Membership collection confirms disappearance through cgroup.procs.
-  if (zombieIsGone(stat.fields[0], Number(stat.fields[20 - 3]))) return "gone";
+  if (!fieldsCountAsPresent(stat.fields)) return "gone";
   if (readMidExecIdentity(pid, entries, stat.fields) === undefined) return "foreign";
   midExec.add(pid);
   return "unknown";
@@ -1050,7 +1050,7 @@ function probeCgroupIdentity(identity: ProcessIdentity): TokenProbe {
     return code === "ENOENT" || code === "ESRCH" ? "gone" : "unverified";
   }
   if (stat === undefined) return "unverified";
-  if (zombieIsGone(stat.state, stat.numThreads)) return "gone";
+  if (!statCountsAsPresent(stat)) return "gone";
   return stat.startTicks === identity.startTicks ? "match" : "mismatch";
 }
 
