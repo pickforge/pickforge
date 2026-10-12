@@ -764,8 +764,22 @@ describe("start failure diagnostics", () => {
 
   it("reports the boot mode from the emulator log and honours cold boot", async () => {
     const argsFile = path.join(tmpRoot, "boot-mode-args.txt");
+    const warmLog = path.join(tmpRoot, "emu-warm", "emulator.log");
+    const coldLog = path.join(tmpRoot, "emu-cold", "emulator.log");
+    // A real emulator logs the snapshot line before the guest can report a
+    // finished boot. Report boot only once the fake has written it (#328).
+    const bootedOnceLogged = (port: number, log: string) =>
+      `  *"-s emulator-${port} "*getprop*) ` +
+      `grep -qs "Loading snapshot" ${JSON.stringify(log)} && echo 1 || echo 0 ;;`;
     const sdk = makeFakeSdk(
-      BOOTING_ADB_SCRIPT,
+      [
+        'case "$*" in',
+        bootedOnceLogged(5580, warmLog),
+        bootedOnceLogged(5582, coldLog),
+        '  *"emu kill"*) exit 0 ;;',
+        "esac",
+        "exit 0",
+      ].join("\n"),
       [
         "#!/bin/sh",
         "PATH=/usr/bin:/bin",
