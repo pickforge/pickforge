@@ -1303,7 +1303,7 @@ describe("containment identity safety", () => {
         };
         const probe = (file: string): string =>
           read(file, (content) => `${content.length} bytes, token ${content.includes(scope.token)}`);
-        const describe = (): string =>
+        const kernelView = (): string =>
           JSON.stringify({
             kernel: os.release(),
             stat: read(`/proc/${pid}/stat`, (content) => content.trim()),
@@ -1313,7 +1313,7 @@ describe("containment identity safety", () => {
               environ: probe(`/proc/${pid}/task/${tid}/environ`),
             })),
           });
-        expect(listContainedProcesses(scope.token), describe()).toContain(pid);
+        expect(listContainedProcesses(scope.token), kernelView()).toContain(pid);
 
         const result = await destroyContainmentScope(scope, SWEEP_BUDGET);
         expect(result.confirmed, result.reason).toBe(true);
