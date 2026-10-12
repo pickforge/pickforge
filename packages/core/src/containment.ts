@@ -407,22 +407,30 @@ type EnvironRead =
   | { kind: "unreadable" };
 
 function readEnviron(pid: number): EnvironRead {
+  let content: string;
   try {
-    return {
-      kind: "entries",
-      entries: fs.readFileSync(`/proc/${pid}/environ`, "latin1").split("\0"),
-    };
+    content = fs.readFileSync(`/proc/${pid}/environ`, "latin1");
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ESRCH") return readZombieLeaderEnviron(pid);
     return code === "ENOENT" ? { kind: "gone" } : { kind: "unreadable" };
   }
+  if (content === "" && isZombieLeaderWithThreads(pid)) {
+    return readZombieLeaderEnviron(pid);
+  }
+  return { kind: "entries", entries: content.split("\0") };
+}
+
+function isZombieLeaderWithThreads(pid: number): boolean {
+  const stat = readProcStatSnapshot(pid);
+  return stat.kind === "fields" && stat.fields[0] === "Z" && Number(stat.fields[20 - 3]) > 1;
 }
 
 /**
  * A thread-group leader that exited before its other threads has no memory of
- * its own, so its `environ` fails with ESRCH. The other threads share that
- * memory and still run, so read the environment through one of them.
+ * its own. Depending on the kernel, its `environ` then fails with ESRCH or
+ * reads as empty. The other threads share that memory and still run, so read
+ * the environment through one of them.
  */
 function readZombieLeaderEnviron(pid: number): EnvironRead {
   const stat = readProcStatSnapshot(pid);

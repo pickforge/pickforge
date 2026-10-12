@@ -479,7 +479,7 @@ describe("cgroup cleanup guards (simulated cgroup)", () => {
         checkedMembership = true;
       }
       if (file === `/proc/${member}/stat` && readEnvironment) {
-        if (!sawZombie) {
+        if (!checkedMembership) {
           sawZombie = true;
           return stat.replace(/\) \S+ /, ") Z ");
         }
