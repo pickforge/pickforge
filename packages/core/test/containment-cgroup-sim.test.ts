@@ -479,7 +479,7 @@ describe("cgroup cleanup guards (simulated cgroup)", () => {
         checkedMembership = true;
       }
       if (file === `/proc/${member}/stat` && readEnvironment) {
-        if (!sawZombie) {
+        if (!checkedMembership) {
           sawZombie = true;
           return stat.replace(/\) \S+ /, ") Z ");
         }
@@ -746,6 +746,74 @@ describe("cgroup cleanup guards (simulated cgroup)", () => {
     expect(vi.mocked(process.kill).mock.calls).toContainEqual([remaining, "SIGKILL"]);
     expect(isPidAlive(zombie)).toBe(true);
     expect(isPidAlive(remaining)).toBe(false);
+  }, 20_000);
+
+  /**
+   * Show a live member as a zombie thread-group leader whose other thread
+   * still runs (#322). The leader's own environ fails with ESRCH, as on a real
+   * kernel, and the live thread's environ is the member's real one.
+   */
+  function showAsZombieLeaderWithThread(member: number): { threadReads: () => number } {
+    const tid = "4194303";
+    const read = vi.mocked(fs.readFileSync).getMockImplementation() as typeof fs.readFileSync;
+    let threadReads = 0;
+    vi.mocked(fs.readFileSync).mockImplementation(((file, ...args) => {
+      if (file === `/proc/${member}/environ`) {
+        throw Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+      }
+      if (file === `/proc/${member}/task/${tid}/environ`) {
+        threadReads += 1;
+        return read(`/proc/${member}/environ`, ...args);
+      }
+      if (file !== `/proc/${member}/stat`) return read(file, ...args);
+      const stat = String(read(file, ...args));
+      const close = stat.lastIndexOf(")");
+      const fields = stat.slice(close + 1).trim().split(/\s+/);
+      // Once the real process has exited, show its real zombie.
+      if (fields[0] === "Z") return stat;
+      fields[0] = "Z";
+      fields[20 - 3] = "2";
+      return `${stat.slice(0, close + 1)} ${fields.join(" ")}\n`;
+    }) as typeof fs.readFileSync);
+    const readdir = fs.readdirSync;
+    vi.spyOn(fs, "readdirSync").mockImplementation(((target, ...args) =>
+      target === `/proc/${member}/task`
+        ? [String(member), tid]
+        : Reflect.apply(readdir, fs, [target, ...args])) as typeof fs.readdirSync);
+    return { threadReads: () => threadReads };
+  }
+
+  it("signals a proven zombie leader while its other thread still runs", async () => {
+    const member = spawnMember(scope());
+    const fake = newFake({ members: [member] });
+    installFakeCgroup(fake);
+    const zombie = showAsZombieLeaderWithThread(member);
+
+    const result = await destroy();
+
+    expect(result.confirmed, result.reason).toBe(true);
+    expect(result.signaled).toContain(member);
+    expect(vi.mocked(process.kill).mock.calls).toContainEqual([member, "SIGKILL"]);
+    expect(isPidAlive(member)).toBe(false);
+    expect(fake.removed).toBe(true);
+    expect(zombie.threadReads()).toBeGreaterThan(0);
+  }, 20_000);
+
+  it("refuses a foreign zombie leader while its other thread still runs", async () => {
+    const stranger = spawnMember(undefined);
+    const fake = newFake({ members: [stranger] });
+    installFakeCgroup(fake);
+    const zombie = showAsZombieLeaderWithThread(stranger);
+
+    const result = await destroy();
+
+    expect(result.confirmed).toBe(false);
+    expect(result.reason).toMatch(/do not carry this session's containment token: \d+/);
+    expect(result.signaled).not.toContain(stranger);
+    expect(vi.mocked(process.kill).mock.calls.some(([pid, signal]) => pid === stranger && signal !== 0)).toBe(false);
+    expect(isPidAlive(stranger)).toBe(true);
+    expect(fake.removed).toBe(false);
+    expect(zombie.threadReads()).toBeGreaterThan(0);
   }, 20_000);
 
   it.each([true, false])(

@@ -28,6 +28,9 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const BUN = /[\\/]bun$/.test(process.execPath) ? process.execPath : "bun";
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-containment-"));
 const strays = new Set<number>();
+const hasPython3 =
+  process.platform === "linux" &&
+  spawnSync("python3", ["-c", "import ctypes"], { stdio: "ignore" }).status === 0;
 
 // Scope ids that name a directory in the shared delegated cgroup get a
 // per-run suffix. Two concurrent runs of this file would otherwise share one
@@ -1025,6 +1028,36 @@ describe("containment identity safety", () => {
     );
   }, 20_000);
 
+  it("does not call a live process gone when its environ fails with ESRCH", async () => {
+    await withOwnedStatFixture("desk-environ-esrch-live", async ({ scope, pid, read, kill }) => {
+      // A zombie leader's surviving thread can exec between reads, so the
+      // process is live again with one thread. That is not proof it is gone.
+      let environReads = 0;
+      const terminatingSignals: Parameters<typeof process.kill>[1][] = [];
+      fs.readFileSync = ((file, ...args) => {
+        if (file === `/proc/${pid}/environ` && ++environReads > 1) {
+          throw Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+        }
+        return read.call(fs, file, ...args);
+      }) as typeof fs.readFileSync;
+      process.kill = (target, signal) => {
+        if (target === pid && signal !== 0) terminatingSignals.push(signal);
+        return kill.call(process, target, signal);
+      };
+
+      const result = await destroyContainmentScope(scope, {
+        termTimeoutMs: 300,
+        killTimeoutMs: 300,
+      });
+
+      expect(environReads).toBeGreaterThanOrEqual(2);
+      expect(result.confirmed).toBe(false);
+      expect(result.survivors).toContain(pid);
+      expect(terminatingSignals).toEqual([]);
+      expect(isPidAlive(pid)).toBe(true);
+    });
+  }, 20_000);
+
   it("never confirms cleanup while an identified process has unreadable stat", async () => {
     await withOwnedStatFixture("desk-stat-unreadable", async ({ scope, pid, startTicks, uid, read, kill }) => {
       const stat = `/proc/${pid}/stat`;
@@ -1179,6 +1212,123 @@ describe("containment identity safety", () => {
       expect(isPidAlive(pid)).toBe(false);
     });
   }, 20_000);
+
+  it.each(["fails with ESRCH", "fails with EACCES", "reads as empty"] as const)(
+    "does not report a zombie leader with a live thread as gone when its environ %s",
+    async (leaderEnviron) => {
+      await withOwnedStatFixture("desk-stat-zombie-thread", async ({ scope, pid, read }) => {
+        // Depending on the kernel, the leader's environ fails with ESRCH or EACCES,
+        // or reads as empty (#322). Its other thread shares the memory and still shows the token.
+        const tid = "4194303";
+        const readdir = fs.readdirSync;
+        let threadReads = 0;
+        fs.readFileSync = ((file, ...args) => {
+          if (file === `/proc/${pid}/environ`) {
+            if (leaderEnviron === "reads as empty") return "";
+            const code = leaderEnviron === "fails with EACCES" ? "EACCES" : "ESRCH";
+            throw Object.assign(new Error(code), { code });
+          }
+          if (file === `/proc/${pid}/task/${tid}/environ`) {
+            threadReads += 1;
+            return read.call(fs, `/proc/${pid}/environ`, ...args);
+          }
+          if (file !== `/proc/${pid}/stat`) return read.call(fs, file, ...args);
+          const value = String(read.call(fs, file, ...args));
+          const close = value.lastIndexOf(")");
+          const fields = value.slice(close + 1).trim().split(/\s+/);
+          if (fields[0] === "Z") return value;
+          fields[0] = "Z";
+          fields[20 - 3] = "2";
+          return `${value.slice(0, close + 1)} ${fields.join(" ")}\n`;
+        }) as typeof fs.readFileSync;
+        fs.readdirSync = ((target, ...args) =>
+          target === `/proc/${pid}/task`
+            ? [String(pid), tid]
+            : Reflect.apply(readdir, fs, [target, ...args])) as typeof fs.readdirSync;
+        try {
+          const result = await destroyContainmentScope(scope, SWEEP_BUDGET);
+          expect(result.confirmed, result.reason).toBe(true);
+          expect(result.signaled).toContain(pid);
+          expect(isPidAlive(pid)).toBe(false);
+          expect(threadReads).toBeGreaterThan(0);
+        } finally {
+          fs.readdirSync = readdir;
+        }
+      });
+    },
+    20_000,
+  );
+
+  it.skipIf(!hasPython3)(
+    "cleans up a real zombie leader with a live thread",
+    async () => {
+      // The main thread exits through pthread_exit, so the leader shows Z
+      // while a second thread keeps running. On a real kernel the leader's
+      // environ then fails with ESRCH or EACCES, or reads as empty, depending on the kernel (#322).
+      const scope = createContainmentScope({ id: "desk-real-zombie", useCgroup: false });
+      const script = [
+        "import ctypes, threading, time",
+        "threading.Thread(target=lambda: time.sleep(60)).start()",
+        "ctypes.CDLL(None).pthread_exit(None)",
+      ].join("\n");
+      const pid = spawnInScope(scope, "python3", ["-c", script]);
+      // Read /proc/<pid>/status so the check does not depend on parseProcStat.
+      const readStatus = (): { state?: string; threads: number } => {
+        let status: string;
+        try {
+          status = fs.readFileSync(`/proc/${pid}/status`, "utf8");
+        } catch {
+          return { threads: 0 };
+        }
+        return {
+          state: /^State:\s+(\S)/m.exec(status)?.[1],
+          threads: Number(/^Threads:\s+(\d+)/m.exec(status)?.[1] ?? 0),
+        };
+      };
+      try {
+        expect(
+          await waitFor(() => {
+            const status = readStatus();
+            return status.state === "Z" && status.threads > 1;
+          }),
+        ).toBe(true);
+        // What this kernel shows for the leader and its threads, if the scan
+        // misses it.
+        const read = (file: string, show: (content: string) => string): string => {
+          try {
+            return show(fs.readFileSync(file, "latin1"));
+          } catch (error) {
+            return String((error as NodeJS.ErrnoException).code);
+          }
+        };
+        const probe = (file: string): string =>
+          read(file, (content) => `${content.length} bytes, token ${content.includes(scope.token)}`);
+        const kernelView = (): string =>
+          JSON.stringify({
+            kernel: os.release(),
+            stat: read(`/proc/${pid}/stat`, (content) => content.trim()),
+            environ: probe(`/proc/${pid}/environ`),
+            tasks: fs.readdirSync(`/proc/${pid}/task`).map((tid) => ({
+              tid,
+              environ: probe(`/proc/${pid}/task/${tid}/environ`),
+            })),
+          });
+        expect(listContainedProcesses(scope.token), kernelView()).toContain(pid);
+
+        const result = await destroyContainmentScope(scope, SWEEP_BUDGET);
+        expect(result.confirmed, result.reason).toBe(true);
+        expect(result.signaled).toContain(pid);
+        expect(await waitFor(() => !isPidAlive(pid))).toBe(true);
+      } finally {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          /* already gone */
+        }
+      }
+    },
+    20_000,
+  );
 
   it("keeps an identified process that becomes tokenless at the same start time", async () => {
     const scope = createContainmentScope({ id: "desk-id07", useCgroup: false });
