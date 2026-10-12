@@ -570,13 +570,53 @@ describe("process identity and group termination", () => {
       );
 
       expect(result).toEqual({ outcome: "unverified", signaled: true });
-      expect(kill.mock.calls).toEqual([[-pid, "SIGTERM"]]);
+      expect(kill.mock.calls.filter(([, signal]) => signal !== 0)).toEqual([
+        [-pid, "SIGTERM"],
+      ]);
     } finally {
       kill.mockRestore();
       entries.mockRestore();
       read.mockRestore();
     }
   });
+
+  it.each([
+    ["reused", "reused"],
+    ["unreadable", "unverified"],
+  ] as const)(
+    "does not escalate when the last leader read before SIGKILL is %s",
+    async (change, outcome) => {
+      const pid = 1_234_567;
+      const startTicks = 456;
+      let reads = 0;
+      const read = vi.spyOn(fs, "readFileSync").mockImplementation(((
+        _filePath: fs.PathOrFileDescriptor,
+      ) => {
+        reads++;
+        if (reads <= 2) return procStat(pid, "S", pid, startTicks);
+        return change === "unreadable" ? eperm() : procStat(pid, "S", pid, startTicks + 1);
+      }) as typeof fs.readFileSync);
+      const entries = vi
+        .spyOn(fs, "readdirSync")
+        .mockReturnValue([String(pid)] as never);
+      const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+      try {
+        const result = await stopProcessGroupVerified(
+          { pid, startTicks },
+          { timeoutMs: 0 },
+        );
+
+        expect(result).toEqual({ outcome, signaled: true });
+        expect(kill.mock.calls.filter(([, signal]) => signal !== 0)).toEqual([
+          [-pid, "SIGTERM"],
+        ]);
+      } finally {
+        kill.mockRestore();
+        entries.mockRestore();
+        read.mockRestore();
+      }
+    },
+  );
 
   it("reports an unverified group when stat reads fail after SIGKILL", async () => {
     const pid = 1_234_567;

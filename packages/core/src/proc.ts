@@ -846,6 +846,8 @@ async function waitForProcessGroupExit(
 }
 
 function classifyAfterTerm(identity: ProcessIdentity): StopProcessGroupResult | undefined {
+  const members = groupMembersState(identity.pid);
+  // Read the leader last, so the identity check is the final one before SIGKILL.
   const currentLeader = readProcStatEntry(identity.pid);
   if (currentLeader === "unreadable") {
     // The leader can no longer be checked for PID reuse, so do not escalate.
@@ -854,7 +856,7 @@ function classifyAfterTerm(identity: ProcessIdentity): StopProcessGroupResult | 
   if (currentLeader !== "gone" && leaderGroupMismatch(currentLeader, identity)) {
     return { outcome: "reused", signaled: true };
   }
-  if (processGroupState(identity) === "gone") {
+  if (members === "gone" && (currentLeader === "gone" || !statCountsAsPresent(currentLeader))) {
     return { outcome: "terminated", signaled: true };
   }
   return undefined;
