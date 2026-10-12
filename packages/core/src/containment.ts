@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { readPickforgeEnv } from "./env-compat.js";
-import { parseProcStat, readProcessStartTicks, type ProcessIdentity } from "./proc.js";
+import { parseProcStat, type ProcessIdentity } from "./proc.js";
 
 /**
  * Containment for apps launched into a lab session.
@@ -364,6 +364,25 @@ function readProcStatFields(pid: number): string[] | undefined {
   return read.kind === "fields" ? read.fields : undefined;
 }
 
+/**
+ * Whether a stat state and num_threads (field 20) describe an exited process.
+ * A zombie thread-group leader can still have live threads (#320, #322), so
+ * it only counts as gone once it is the last thread left.
+ */
+function zombieIsGone(state: string | undefined, numThreads: number): boolean {
+  return state === "Z" && !(numThreads > 1);
+}
+
+/** A present process's start time, including a zombie leader with threads. */
+function readPresentStartTicks(pid: number): number | undefined {
+  const fields = readProcStatFields(pid);
+  if (fields === undefined || zombieIsGone(fields[0], Number(fields[20 - 3]))) {
+    return undefined;
+  }
+  const startTicks = Number(fields[22 - 3]);
+  return Number.isFinite(startTicks) ? startTicks : undefined;
+}
+
 type ProcStatRead =
   | { kind: "fields"; fields: string[] }
   | { kind: "gone" | "unreadable" };
@@ -395,10 +414,40 @@ function readEnviron(pid: number): EnvironRead {
     };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    return code === "ENOENT" || code === "ESRCH"
-      ? { kind: "gone" }
-      : { kind: "unreadable" };
+    if (code === "ESRCH") return readZombieLeaderEnviron(pid);
+    return code === "ENOENT" ? { kind: "gone" } : { kind: "unreadable" };
   }
+}
+
+/**
+ * A thread-group leader that exited before its other threads has no memory of
+ * its own, so its `environ` fails with ESRCH. The other threads share that
+ * memory and still run, so read the environment through one of them.
+ */
+function readZombieLeaderEnviron(pid: number): EnvironRead {
+  const stat = readProcStatSnapshot(pid);
+  if (stat.kind === "gone") return stat;
+  if (stat.kind !== "fields") return { kind: "unreadable" };
+  // With no other thread, ESRCH keeps meaning the process is gone.
+  if (!(Number(stat.fields[20 - 3]) > 1)) return { kind: "gone" };
+  let tids: string[];
+  try {
+    tids = fs.readdirSync(`/proc/${pid}/task`);
+  } catch {
+    return { kind: "unreadable" };
+  }
+  for (const tid of tids) {
+    if (tid === String(pid)) continue;
+    try {
+      return {
+        kind: "entries",
+        entries: fs.readFileSync(`/proc/${pid}/task/${tid}/environ`, "latin1").split("\0"),
+      };
+    } catch {
+      // That thread may be exiting too; try the next one.
+    }
+  }
+  return { kind: "unreadable" };
 }
 
 const PF_KTHREAD = 0x00200000;
@@ -438,7 +487,8 @@ type TokenProbe = "match" | "gone" | "mismatch" | "unverified";
  * process that was scanned and still carries the token.
  *
  * - `match`: the token is there. Signal it.
- * - `gone`: `/proc/<pid>` is missing or the process is a zombie. Skip.
+ * - `gone`: `/proc/<pid>` is missing or the process is a zombie with no
+ *   other live thread. Skip.
  * - `mismatch`: the PID is alive with a *different* start time: the number
  *   was recycled by an unrelated process. Refused, never signalled.
  * - `unverified`: the start identity is unavailable, or the same start time
@@ -461,7 +511,7 @@ function probeToken(identity: ProcessIdentity, token: string): TokenProbe {
     return code === "ENOENT" || code === "ESRCH" ? "gone" : "unverified";
   }
   if (stat === undefined) return "unverified";
-  if (stat.state === "Z") return "gone";
+  if (zombieIsGone(stat.state, stat.numThreads)) return "gone";
   if (stat.startTicks !== identity.startTicks) return "mismatch";
   if (read.kind !== "entries") return "unverified";
   return read.entries.includes(`${TOKEN_ENV}=${token}`) ? "match" : "unverified";
@@ -479,7 +529,9 @@ function readParentAndStart(
   pid: number,
 ): { ppid: number; startTicks: number } | undefined {
   const fields = readProcStatFields(pid);
-  if (fields === undefined || fields[0] === "Z") return undefined;
+  if (fields === undefined || zombieIsGone(fields[0], Number(fields[20 - 3]))) {
+    return undefined;
+  }
   const ppid = Number(fields[4 - 3]);
   const startTicks = Number(fields[22 - 3]);
   return Number.isFinite(ppid) && Number.isFinite(startTicks)
@@ -509,7 +561,7 @@ function listContainedIdentities(
       }
       continue;
     }
-    const startTicks = readProcessStartTicks(pid);
+    const startTicks = readPresentStartTicks(pid);
     if (startTicks === undefined) continue;
     if (excluded.get(pid) === startTicks) continue;
     found.push({ pid, startTicks });
@@ -689,7 +741,7 @@ function classifyCgroupEntries(
   if (stat.kind === "gone") return "gone";
   if (stat.kind !== "fields") return "unknown";
   // Membership collection confirms disappearance through cgroup.procs.
-  if (stat.fields[0] === "Z") return "gone";
+  if (zombieIsGone(stat.fields[0], Number(stat.fields[20 - 3]))) return "gone";
   if (readMidExecIdentity(pid, entries, stat.fields) === undefined) return "foreign";
   midExec.add(pid);
   return "unknown";
@@ -799,7 +851,7 @@ function verifyCgroupMemberIdentity(
   const identity = readParentAndStart(pid);
   const verdict = classifyCgroupMember(pid, token, members, midExec);
   if (verdict === "foreign" || verdict === "gone") return verdict;
-  if (identity === undefined || readProcessStartTicks(pid) !== identity.startTicks) {
+  if (identity === undefined || readPresentStartTicks(pid) !== identity.startTicks) {
     return "unknown";
   }
   if (verdict === "unknown") return verdict;
@@ -979,7 +1031,7 @@ function probeCgroupIdentity(identity: ProcessIdentity): TokenProbe {
     return code === "ENOENT" || code === "ESRCH" ? "gone" : "unverified";
   }
   if (stat === undefined) return "unverified";
-  if (stat.state === "Z") return "gone";
+  if (zombieIsGone(stat.state, stat.numThreads)) return "gone";
   return stat.startTicks === identity.startTicks ? "match" : "mismatch";
 }
 

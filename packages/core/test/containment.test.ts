@@ -1180,6 +1180,46 @@ describe("containment identity safety", () => {
     });
   }, 20_000);
 
+  it("does not report a zombie leader with a live thread as gone", async () => {
+    await withOwnedStatFixture("desk-stat-zombie-thread", async ({ scope, pid, read }) => {
+      // The leader's environ fails with ESRCH, as on a real kernel (#322).
+      // Its other thread shares the memory and still shows the token.
+      const tid = "4194303";
+      const readdir = fs.readdirSync;
+      let threadReads = 0;
+      fs.readFileSync = ((file, ...args) => {
+        if (file === `/proc/${pid}/environ`) {
+          throw Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+        }
+        if (file === `/proc/${pid}/task/${tid}/environ`) {
+          threadReads += 1;
+          return read.call(fs, `/proc/${pid}/environ`, ...args);
+        }
+        if (file !== `/proc/${pid}/stat`) return read.call(fs, file, ...args);
+        const value = String(read.call(fs, file, ...args));
+        const close = value.lastIndexOf(")");
+        const fields = value.slice(close + 1).trim().split(/\s+/);
+        if (fields[0] === "Z") return value;
+        fields[0] = "Z";
+        fields[20 - 3] = "2";
+        return `${value.slice(0, close + 1)} ${fields.join(" ")}\n`;
+      }) as typeof fs.readFileSync;
+      fs.readdirSync = ((target, ...args) =>
+        target === `/proc/${pid}/task`
+          ? [String(pid), tid]
+          : readdir.call(fs, target, ...args)) as typeof fs.readdirSync;
+      try {
+        const result = await destroyContainmentScope(scope, SWEEP_BUDGET);
+        expect(result.confirmed, result.reason).toBe(true);
+        expect(result.signaled).toContain(pid);
+        expect(isPidAlive(pid)).toBe(false);
+        expect(threadReads).toBeGreaterThan(0);
+      } finally {
+        fs.readdirSync = readdir;
+      }
+    });
+  }, 20_000);
+
   it("keeps an identified process that becomes tokenless at the same start time", async () => {
     const scope = createContainmentScope({ id: "desk-id07", useCgroup: false });
     const pid = spawnInScope(scope, "/bin/sleep", ["300"]);
