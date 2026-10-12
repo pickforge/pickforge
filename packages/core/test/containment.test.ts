@@ -1263,7 +1263,7 @@ describe("containment identity safety", () => {
     async () => {
       // The main thread exits through pthread_exit, so the leader shows Z
       // while a second thread keeps running. On a real kernel the leader's
-      // environ then fails with ESRCH (#322).
+      // environ then fails with ESRCH or reads as empty, depending on the kernel (#322).
       const scope = createContainmentScope({ id: "desk-real-zombie", useCgroup: false });
       const script = [
         "import ctypes, threading, time",
