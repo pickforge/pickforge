@@ -11,6 +11,8 @@ import {
   parseProcStat,
   processIdentityMatches,
   readProcessGroupLeaderIdentity,
+  presentProcessIdentityMatches,
+  readPresentProcessIdentity,
   readProcessIdentity,
   readProcessStartTicks,
   runCommand,
@@ -277,6 +279,30 @@ describe("process identity and group termination", () => {
     try {
       expect(readProcessStartTicks(123)).toBeUndefined();
       expect(readProcessIdentity(123)).toBeUndefined();
+    } finally {
+      read.mockRestore();
+    }
+  });
+
+  it.each([
+    ["a zombie with a live thread", () => procStat(123, "Z", 123, 456, 2), 456, true],
+    ["a zombie with no other thread", () => procStat(123, "Z", 123, 456, 1), undefined, false],
+    ["a live process with other start ticks", () => procStat(123, "S", 123, 457), 457, false],
+    [
+      "an unreadable stat",
+      () => {
+        throw Object.assign(new Error("denied"), { code: "EPERM" });
+      },
+      undefined,
+      false,
+    ],
+  ] as const)("reads a present identity for %s", (_label, stat, startTicks, matches) => {
+    const read = vi
+      .spyOn(fs, "readFileSync")
+      .mockImplementation((() => stat()) as unknown as typeof fs.readFileSync);
+    try {
+      expect(readPresentProcessIdentity(123)?.startTicks).toBe(startTicks);
+      expect(presentProcessIdentityMatches({ pid: 123, startTicks: 456 })).toBe(matches);
     } finally {
       read.mockRestore();
     }

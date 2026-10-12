@@ -7,7 +7,9 @@ import {
   getSession,
   sessionDataDir,
   identityIsAlive,
+  presentProcessIdentityMatches,
   processIdentityMatches,
+  readPresentProcessIdentity,
   readProcessIdentity,
   readProcessGroupLeaderIdentity,
   readProcessGroupPresence,
@@ -683,16 +685,40 @@ function processHasViewerProfile(
   if (profileDir === undefined) {
     return false;
   }
+  return readProcessArguments(pid).some(
+    (argument) =>
+      argument === profileDir || argument === `--user-data-dir=${profileDir}`,
+  );
+}
+
+/**
+ * Read a process's arguments. A zombie leader with live threads shows an
+ * empty cmdline, so read it through one of its other threads instead.
+ */
+function readProcessArguments(pid: number): string[] {
+  const own = readCmdline(`/proc/${pid}/cmdline`);
+  if (own !== "") {
+    return own.split("\0");
+  }
+  let tids: string[];
   try {
-    const argumentsList = fs
-      .readFileSync(`/proc/${pid}/cmdline`, "utf8")
-      .split("\0");
-    return argumentsList.some(
-      (argument) =>
-        argument === profileDir || argument === `--user-data-dir=${profileDir}`,
-    );
+    tids = fs.readdirSync(`/proc/${pid}/task`);
   } catch {
-    return false;
+    return [];
+  }
+  for (const tid of tids) {
+    if (tid === String(pid)) continue;
+    const content = readCmdline(`/proc/${pid}/task/${tid}/cmdline`);
+    if (content !== "") return content.split("\0");
+  }
+  return [];
+}
+
+function readCmdline(file: string): string {
+  try {
+    return fs.readFileSync(file, "utf8");
+  } catch {
+    return "";
   }
 }
 
@@ -713,16 +739,18 @@ function signalOwnedViewerProcesses(
   if (owner.pid === undefined) {
     return false;
   }
+  // A zombie leader or member with other live threads still counts, as in the
+  // verified group stop. The identity recheck stays the last read before a signal.
   const leader = readProcessGroupLeaderIdentity(owner.pid);
   if (leader !== undefined && leader.startTicks === owner.startTicks) {
-    if (processIdentityMatches(leader)) {
+    if (presentProcessIdentityMatches(leader)) {
       signalViewerPid(-leader.pid, signal);
       return true;
     }
   }
   let signaled = false;
   for (const pid of remainingViewerProcesses(owner)) {
-    const identity = readProcessIdentity(pid);
+    const identity = readPresentProcessIdentity(pid);
     if (identity === undefined) {
       continue;
     }
@@ -732,7 +760,7 @@ function signalOwnedViewerProcesses(
       continue;
     }
     // Recheck the captured identity after reading cmdline and before every signal.
-    if (processIdentityMatches(identity)) {
+    if (presentProcessIdentityMatches(identity)) {
       signalViewerPid(pid, signal);
       signaled = true;
     }

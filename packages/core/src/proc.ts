@@ -744,8 +744,8 @@ function leaderGroupMismatch(leader: ProcStat, identity: ProcessIdentity): boole
 }
 
 /**
- * Whether a process still runs code or holds resources, for the group stop
- * path only. A zombie thread-group leader can still have threads that run or
+ * Whether a process still runs code or holds resources, for group stop and
+ * containment paths. A zombie thread-group leader can still have threads that run or
  * exit, because Linux shows the leader as Z once its own thread exits. Each
  * other thread leaves num_threads only after it releases its memory and files.
  * So a zombie with more than one thread still counts here.
@@ -753,8 +753,32 @@ function leaderGroupMismatch(leader: ProcStat, identity: ProcessIdentity): boole
  * Identity checks such as `processIdentityMatches` keep treating every zombie
  * as dead, because their callers use that for ownership and PID-reuse rules.
  */
-function statCountsAsPresent(stat: ProcStat): boolean {
+export function statCountsAsPresent(stat: {
+  state: string | undefined;
+  numThreads: number;
+}): boolean {
   return stat.state !== "Z" || stat.numThreads > 1;
+}
+
+/**
+ * Snapshot a process's identity with the group stop rule: a zombie with other
+ * live threads still counts. Undefined if it is gone, a zombie with no other
+ * thread, or its stat is unreadable.
+ */
+export function readPresentProcessIdentity(pid: number): ProcessIdentity | undefined {
+  const stat = readProcStat(pid);
+  return stat === undefined || !statCountsAsPresent(stat)
+    ? undefined
+    : { pid, startTicks: stat.startTicks };
+}
+
+/**
+ * Confirm, immediately before a group stop signal, that the PID still has its
+ * recorded start time and still counts as present, including a zombie with
+ * other live threads. An unreadable stat never matches.
+ */
+export function presentProcessIdentityMatches(identity: ProcessIdentity): boolean {
+  return readPresentProcessIdentity(identity.pid)?.startTicks === identity.startTicks;
 }
 
 export interface ProcessGroupPresence {
