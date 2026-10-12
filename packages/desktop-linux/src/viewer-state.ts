@@ -685,16 +685,40 @@ function processHasViewerProfile(
   if (profileDir === undefined) {
     return false;
   }
+  return readProcessArguments(pid).some(
+    (argument) =>
+      argument === profileDir || argument === `--user-data-dir=${profileDir}`,
+  );
+}
+
+/**
+ * Read a process's arguments. A zombie leader with live threads shows an
+ * empty cmdline, so read it through one of its other threads instead.
+ */
+function readProcessArguments(pid: number): string[] {
+  const own = readCmdline(`/proc/${pid}/cmdline`);
+  if (own !== "") {
+    return own.split("\0");
+  }
+  let tids: string[];
   try {
-    const argumentsList = fs
-      .readFileSync(`/proc/${pid}/cmdline`, "utf8")
-      .split("\0");
-    return argumentsList.some(
-      (argument) =>
-        argument === profileDir || argument === `--user-data-dir=${profileDir}`,
-    );
+    tids = fs.readdirSync(`/proc/${pid}/task`);
   } catch {
-    return false;
+    return [];
+  }
+  for (const tid of tids) {
+    if (tid === String(pid)) continue;
+    const content = readCmdline(`/proc/${pid}/task/${tid}/cmdline`);
+    if (content !== "") return content.split("\0");
+  }
+  return [];
+}
+
+function readCmdline(file: string): string {
+  try {
+    return fs.readFileSync(file, "utf8");
+  } catch {
+    return "";
   }
 }
 

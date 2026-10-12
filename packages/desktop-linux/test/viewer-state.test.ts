@@ -1091,6 +1091,51 @@ process.stdin.on('end', () => process.exit(0)).resume();
       }
     },
   );
+  it.skipIf(!hasPython3)(
+    "stops an orphaned zombie member with a live thread and removes the launch",
+    async () => {
+      const launchRecord = await record();
+      // The Node leader starts the zombie member with the viewer profile in its
+      // arguments, records its own identity, then exits once stdin closes.
+      const memberScript = `
+const { spawn } = require('node:child_process');
+const child = spawn('python3', ['-c', ${JSON.stringify(zombieWithThreadScript)}, ${JSON.stringify(`--user-data-dir=${launchRecord.profileDir}`)}], { stdio: 'ignore' });
+process.stdout.write(String(child.pid));
+process.stdin.on('end', () => process.exit(0)).resume();
+`;
+      const leader = spawn(process.execPath, ["-e", memberScript], {
+        detached: true,
+        stdio: ["pipe", "pipe", "ignore"],
+      });
+      const groupId = leader.pid!;
+      try {
+        const [ready] = await once(leader.stdout!, "data");
+        const zombiePid = Number(ready.toString());
+        Object.assign(launchRecord, readProcessGroupLeaderIdentity(groupId));
+        leader.stdin!.end();
+        await once(leader, "exit");
+        const deadline = Date.now() + 5_000;
+        while (Date.now() < deadline && !isZombieWithThreads(zombiePid)) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        expect(isZombieWithThreads(zombiePid)).toBe(true);
+        await writeViewerLaunchRecord(launchRecord, registryEnv);
+
+        expect(
+          await stopSessionViewer(sessionId, undefined, registryEnv),
+        ).toEqual([]);
+        expect(listProcessGroupMembers(groupId)).toEqual([]);
+        expect(isZombieWithThreads(zombiePid)).toBe(false);
+        await expect(fs.lstat(launchRecord.profileDir)).rejects.toThrow();
+      } finally {
+        try {
+          process.kill(-groupId, "SIGKILL");
+        } catch {
+          // group already gone
+        }
+      }
+    },
+  );
   it("keeps the launch while an unreadable member may remain after its leader exits", async () => {
     const launchRecord = await record();
     const group = await viewerProcessGroup(launchRecord, [[]]);

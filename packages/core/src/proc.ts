@@ -744,8 +744,8 @@ function leaderGroupMismatch(leader: ProcStat, identity: ProcessIdentity): boole
 }
 
 /**
- * Whether a process still runs code or holds resources, for the group stop
- * path only. A zombie thread-group leader can still have threads that run or
+ * Whether a process still runs code or holds resources, for group stop and
+ * containment paths. A zombie thread-group leader can still have threads that run or
  * exit, because Linux shows the leader as Z once its own thread exits. Each
  * other thread leaves num_threads only after it releases its memory and files.
  * So a zombie with more than one thread still counts here.
