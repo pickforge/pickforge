@@ -2,6 +2,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use saphyr::{LoadableYamlNode, Yaml};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -145,13 +146,14 @@ pub fn detect_flutter(project_dir: &Path) -> Result<(), FrameworkError> {
         Err(error) => return Err(FrameworkError::PubspecUnreadable(error.to_string())),
     };
 
-    let pubspec: serde_yaml_ng::Value = serde_yaml_ng::from_str(&raw)
+    let documents = Yaml::load_from_str(&raw)
         .map_err(|error| FrameworkError::PubspecMalformed(error.to_string()))?;
-    let sdk = pubspec
-        .get("dependencies")
-        .and_then(|dependencies| dependencies.get("flutter"))
-        .and_then(|flutter| flutter.get("sdk"))
-        .and_then(serde_yaml_ng::Value::as_str);
+    let sdk = documents
+        .first()
+        .and_then(|pubspec| pubspec.as_mapping_get("dependencies"))
+        .and_then(|dependencies| dependencies.as_mapping_get("flutter"))
+        .and_then(|flutter| flutter.as_mapping_get("sdk"))
+        .and_then(Yaml::as_str);
 
     if sdk == Some("flutter") {
         Ok(())
