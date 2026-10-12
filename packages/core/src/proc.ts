@@ -760,6 +760,26 @@ export function statCountsAsPresent(stat: {
   return stat.state !== "Z" || stat.numThreads > 1;
 }
 
+/**
+ * Snapshot a process's identity with the group stop rule: a zombie with other
+ * live threads still counts. Undefined if it is gone, a zombie with no other
+ * thread, or its stat is unreadable.
+ */
+export function readPresentProcessIdentity(pid: number): ProcessIdentity | undefined {
+  const stat = readProcStat(pid);
+  return stat === undefined || !statCountsAsPresent(stat)
+    ? undefined
+    : { pid, startTicks: stat.startTicks };
+}
+
+/**
+ * Confirm, immediately before a group stop signal, that the PID still has its
+ * recorded start time and still counts as present, including a zombie with
+ * other live threads. An unreadable stat never matches.
+ */
+export function presentProcessIdentityMatches(identity: ProcessIdentity): boolean {
+  return readPresentProcessIdentity(identity.pid)?.startTicks === identity.startTicks;
+}
 
 export interface ProcessGroupPresence {
   /** Members that still count as present, including zombies with threads. */

@@ -1057,6 +1057,40 @@ process.stdin.on('end', () => process.exit(0)).resume();
       }
     },
   );
+  it.skipIf(!hasPython3)(
+    "stops a zombie leader with a live thread and removes the launch",
+    async () => {
+      const launchRecord = await record();
+      const leader = spawn("python3", ["-c", zombieWithThreadScript], {
+        detached: true,
+        stdio: "ignore",
+      });
+      children.push(leader);
+      const groupId = leader.pid!;
+      try {
+        const deadline = Date.now() + 5_000;
+        while (Date.now() < deadline && !isZombieWithThreads(groupId)) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        expect(isZombieWithThreads(groupId)).toBe(true);
+        Object.assign(launchRecord, readProcessGroupLeaderIdentity(groupId));
+        await writeViewerLaunchRecord(launchRecord, registryEnv);
+
+        expect(
+          await stopSessionViewer(sessionId, undefined, registryEnv),
+        ).toEqual([]);
+        expect(listProcessGroupMembers(groupId)).toEqual([]);
+        expect(isZombieWithThreads(groupId)).toBe(false);
+        await expect(fs.lstat(launchRecord.profileDir)).rejects.toThrow();
+      } finally {
+        try {
+          process.kill(-groupId, "SIGKILL");
+        } catch {
+          // group already gone
+        }
+      }
+    },
+  );
   it("keeps the launch while an unreadable member may remain after its leader exits", async () => {
     const launchRecord = await record();
     const group = await viewerProcessGroup(launchRecord, [[]]);

@@ -7,7 +7,9 @@ import {
   getSession,
   sessionDataDir,
   identityIsAlive,
+  presentProcessIdentityMatches,
   processIdentityMatches,
+  readPresentProcessIdentity,
   readProcessIdentity,
   readProcessGroupLeaderIdentity,
   readProcessGroupPresence,
@@ -713,16 +715,18 @@ function signalOwnedViewerProcesses(
   if (owner.pid === undefined) {
     return false;
   }
+  // A zombie leader or member with other live threads still counts, as in the
+  // verified group stop. The identity recheck stays the last read before a signal.
   const leader = readProcessGroupLeaderIdentity(owner.pid);
   if (leader !== undefined && leader.startTicks === owner.startTicks) {
-    if (processIdentityMatches(leader)) {
+    if (presentProcessIdentityMatches(leader)) {
       signalViewerPid(-leader.pid, signal);
       return true;
     }
   }
   let signaled = false;
   for (const pid of remainingViewerProcesses(owner)) {
-    const identity = readProcessIdentity(pid);
+    const identity = readPresentProcessIdentity(pid);
     if (identity === undefined) {
       continue;
     }
@@ -732,7 +736,7 @@ function signalOwnedViewerProcesses(
       continue;
     }
     // Recheck the captured identity after reading cmdline and before every signal.
-    if (processIdentityMatches(identity)) {
+    if (presentProcessIdentityMatches(identity)) {
       signalViewerPid(pid, signal);
       signaled = true;
     }
