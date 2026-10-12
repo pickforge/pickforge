@@ -28,6 +28,9 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const BUN = /[\\/]bun$/.test(process.execPath) ? process.execPath : "bun";
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-containment-"));
 const strays = new Set<number>();
+const hasPython3 =
+  process.platform === "linux" &&
+  spawnSync("python3", ["-c", "import ctypes"], { stdio: "ignore" }).status === 0;
 
 // Scope ids that name a directory in the shared delegated cgroup get a
 // per-run suffix. Two concurrent runs of this file would otherwise share one
@@ -1219,6 +1222,56 @@ describe("containment identity safety", () => {
       }
     });
   }, 20_000);
+
+  it.skipIf(!hasPython3)(
+    "cleans up a real zombie leader with a live thread",
+    async () => {
+      // The main thread exits through pthread_exit, so the leader shows Z
+      // while a second thread keeps running. On a real kernel the leader's
+      // environ then fails with ESRCH (#322).
+      const scope = createContainmentScope({ id: "desk-real-zombie", useCgroup: false });
+      const script = [
+        "import ctypes, threading, time",
+        "threading.Thread(target=lambda: time.sleep(60)).start()",
+        "ctypes.CDLL(None).pthread_exit(None)",
+      ].join("\n");
+      const pid = spawnInScope(scope, "python3", ["-c", script]);
+      // Read /proc/<pid>/status so the check does not depend on parseProcStat.
+      const readStatus = (): { state?: string; threads: number } => {
+        let status: string;
+        try {
+          status = fs.readFileSync(`/proc/${pid}/status`, "utf8");
+        } catch {
+          return { threads: 0 };
+        }
+        return {
+          state: /^State:\s+(\S)/m.exec(status)?.[1],
+          threads: Number(/^Threads:\s+(\d+)/m.exec(status)?.[1] ?? 0),
+        };
+      };
+      try {
+        expect(
+          await waitFor(() => {
+            const status = readStatus();
+            return status.state === "Z" && status.threads > 1;
+          }),
+        ).toBe(true);
+        expect(listContainedProcesses(scope.token)).toContain(pid);
+
+        const result = await destroyContainmentScope(scope, SWEEP_BUDGET);
+        expect(result.confirmed, result.reason).toBe(true);
+        expect(result.signaled).toContain(pid);
+        expect(await waitFor(() => !isPidAlive(pid))).toBe(true);
+      } finally {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          /* already gone */
+        }
+      }
+    },
+    20_000,
+  );
 
   it("keeps an identified process that becomes tokenless at the same start time", async () => {
     const scope = createContainmentScope({ id: "desk-id07", useCgroup: false });

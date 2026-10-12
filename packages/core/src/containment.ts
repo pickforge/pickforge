@@ -524,7 +524,11 @@ function readParentPid(pid: number): number | undefined {
   return Number.isFinite(ppid) ? ppid : undefined;
 }
 
-/** A live process's parent and start time from a single `stat` read. */
+/**
+ * A process's parent and start time from a single `stat` read. A zombie
+ * leader with live threads still counts, so the ancestor walk passes through
+ * it; a zombie with no live threads reads as gone.
+ */
 function readParentAndStart(
   pid: number,
 ): { ppid: number; startTicks: number } | undefined {
