@@ -1291,7 +1291,28 @@ describe("containment identity safety", () => {
             return status.state === "Z" && status.threads > 1;
           }),
         ).toBe(true);
-        expect(listContainedProcesses(scope.token)).toContain(pid);
+        // What this kernel shows for the leader and its threads, if the scan
+        // misses it.
+        const read = (file: string, show: (content: string) => string): string => {
+          try {
+            return show(fs.readFileSync(file, "latin1"));
+          } catch (error) {
+            return String((error as NodeJS.ErrnoException).code);
+          }
+        };
+        const probe = (file: string): string =>
+          read(file, (content) => `${content.length} bytes, token ${content.includes(scope.token)}`);
+        const describe = (): string =>
+          JSON.stringify({
+            kernel: os.release(),
+            stat: read(`/proc/${pid}/stat`, (content) => content.trim()),
+            environ: probe(`/proc/${pid}/environ`),
+            tasks: fs.readdirSync(`/proc/${pid}/task`).map((tid) => ({
+              tid,
+              environ: probe(`/proc/${pid}/task/${tid}/environ`),
+            })),
+          });
+        expect(listContainedProcesses(scope.token), describe()).toContain(pid);
 
         const result = await destroyContainmentScope(scope, SWEEP_BUDGET);
         expect(result.confirmed, result.reason).toBe(true);
