@@ -1,8 +1,11 @@
 //! Project identity and framework detection.
 
+use std::fmt;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
+use serde::de::{MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -135,6 +138,92 @@ pub enum FrameworkError {
     NotFlutter,
 }
 
+// Only strings and mappings are needed for detection. Consume every other
+// value, including collection keys, so the parser still validates the whole file.
+enum PubspecValue {
+    String(String),
+    Mapping(Vec<(Self, Self)>),
+    Other,
+}
+
+impl PubspecValue {
+    fn get(&self, key: &str) -> Option<&Self> {
+        match self {
+            Self::Mapping(entries) => entries
+                .iter()
+                .find_map(|(candidate, value)| (candidate.as_str() == Some(key)).then_some(value)),
+            _ => None,
+        }
+    }
+
+    fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::String(value) => Some(value),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PubspecValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ValueVisitor;
+
+        impl<'de> Visitor<'de> for ValueVisitor {
+            type Value = PubspecValue;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a YAML value")
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(PubspecValue::Other)
+            }
+
+            fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+                Ok(PubspecValue::Other)
+            }
+
+            fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+                Ok(PubspecValue::Other)
+            }
+
+            fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+                Ok(PubspecValue::Other)
+            }
+
+            fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+                Ok(PubspecValue::Other)
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(PubspecValue::String(value.to_owned()))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+                Ok(PubspecValue::String(value))
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> Result<Self::Value, A::Error> {
+                while sequence.next_element::<PubspecValue>()?.is_some() {}
+                Ok(PubspecValue::Other)
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut mapping: A) -> Result<Self::Value, A::Error> {
+                let mut entries = Vec::new();
+                while let Some(entry) = mapping.next_entry::<PubspecValue, PubspecValue>()? {
+                    entries.push(entry);
+                }
+                Ok(PubspecValue::Mapping(entries))
+            }
+        }
+
+        deserializer.deserialize_any(ValueVisitor)
+    }
+}
+
 /// Detect a Flutter project by parsing `pubspec.yaml` structurally: only a
 /// `dependencies.flutter.sdk: flutter` entry counts.
 pub fn detect_flutter(project_dir: &Path) -> Result<(), FrameworkError> {
@@ -191,14 +280,14 @@ pub fn detect_flutter(project_dir: &Path) -> Result<(), FrameworkError> {
     // A generic value also validates unknown fields, including recursive aliases
     // that typed structs can skip. Parse the whole stream with a one-document
     // budget so malformed content after `...` also fails. Empty YAML is not Flutter.
-    let pubspecs = serde_saphyr::from_multiple_with_options::<serde_json::Value>(&raw, options)
+    let pubspecs = serde_saphyr::from_multiple_with_options::<PubspecValue>(&raw, options)
         .map_err(|error| FrameworkError::PubspecMalformed(error.to_string()))?;
     let sdk = pubspecs
         .first()
         .and_then(|pubspec| pubspec.get("dependencies"))
         .and_then(|dependencies| dependencies.get("flutter"))
         .and_then(|flutter| flutter.get("sdk"))
-        .and_then(serde_json::Value::as_str);
+        .and_then(PubspecValue::as_str);
 
     if sdk == Some("flutter") {
         Ok(())

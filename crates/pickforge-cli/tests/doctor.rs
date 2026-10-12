@@ -245,7 +245,9 @@ fn multi_document_yaml_is_malformed() {
 fn invalid_typed_scalars_and_unknown_aliases_are_malformed() {
     for (extra, expected) in [
         ("version: !!int nope\n", "invalid u64"),
-        ("!!int nope: ignored\n", "tagged scalar into string"),
+        ("!!int nope: ignored\n", "invalid u64"),
+        ("? [!!int nope]\n: ignored\n", "invalid u64"),
+        ("? {value: !!int nope}\n: ignored\n", "invalid u64"),
         ("version: !!int \"nope\"\n", "invalid u64"),
         ("version: !!float nope\n", "invalid floating point"),
         ("version: !!bool nope\n", "invalid boolean"),
@@ -317,6 +319,48 @@ fn shallow_aliases_still_detect_flutter() {
     );
 }
 
+fn assert_flutter_pubspec(pubspec: &str) {
+    let temp = TempDir::new().unwrap();
+    write_project(temp.path(), Some(pubspec));
+    let report = diagnose(temp.path(), &env_with(temp.path(), &all_tools()));
+    assert!(report.ready, "{pubspec}\n{report:?}");
+    assert_eq!(report.project.framework.as_deref(), Some("flutter"));
+    assert_eq!(
+        check(&report, "project.framework").status,
+        CheckStatus::Pass
+    );
+}
+
+#[test]
+fn null_mapping_keys_still_detect_flutter() {
+    for key in ["~", "null", "!!null null"] {
+        assert_flutter_pubspec(&format!("{key}: x\n{FLUTTER_PUBSPEC}"));
+    }
+}
+
+#[test]
+fn complex_mapping_keys_still_detect_flutter() {
+    for entry in ["? [a, b]\n: c\n", "? {a: b}\n: c\n"] {
+        assert_flutter_pubspec(&format!("{entry}{FLUTTER_PUBSPEC}"));
+    }
+}
+
+#[test]
+fn boolean_and_numeric_mapping_keys_still_detect_flutter() {
+    for key in [
+        "true",
+        "false",
+        "1",
+        "-1",
+        "1.5",
+        "!!bool true",
+        "!!int 1",
+        "!!float 1.5",
+    ] {
+        assert_flutter_pubspec(&format!("{key}: x\n{FLUTTER_PUBSPEC}"));
+    }
+}
+
 #[test]
 fn custom_tags_cannot_hide_the_flutter_sdk_entry() {
     for pubspec in [
@@ -346,6 +390,10 @@ fn empty_and_non_mapping_pubspecs_are_not_flutter() {
         "dependencies: {flutter: {sdk: 123}}\n",
         "dependencies: {flutter: {sdk: !!null \"flutter\"}}\n",
         "dependencies: {flutter: {sdk: !!binary Zmx1dHRlcg==}}\n",
+        "? [dependencies]\n: {flutter: {sdk: flutter}}\n",
+        "dependencies:\n  ? [flutter]\n  : {sdk: flutter}\n",
+        "dependencies:\n  flutter:\n    ? [sdk]\n    : flutter\n",
+        "dependencies: {flutter: {true: flutter}}\n",
     ] {
         let temp = TempDir::new().unwrap();
         write_project(temp.path(), Some(pubspec));
