@@ -3,6 +3,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use saphyr::{LoadableYamlNode, Yaml};
+use saphyr_parser::{Event, Parser};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -134,6 +135,54 @@ pub enum FrameworkError {
     NotFlutter,
 }
 
+/// Deepest collection nesting accepted in `pubspec.yaml`.
+const MAX_PUBSPEC_DEPTH: usize = 128;
+
+/// Refuse deeply nested YAML before building a tree. Dropping a tree that is
+/// nested very deep overflows the stack, and the parser alone does not recurse.
+fn check_pubspec_depth(raw: &str) -> Result<(), FrameworkError> {
+    let mut depth = 0usize;
+    for event in Parser::new_from_str(raw) {
+        let (event, _) =
+            event.map_err(|error| FrameworkError::PubspecMalformed(error.to_string()))?;
+        match event {
+            Event::SequenceStart(..) | Event::MappingStart(..) => {
+                depth += 1;
+                if depth > MAX_PUBSPEC_DEPTH {
+                    return Err(FrameworkError::PubspecMalformed(format!(
+                        "nesting deeper than {MAX_PUBSPEC_DEPTH} levels"
+                    )));
+                }
+            }
+            Event::SequenceEnd | Event::MappingEnd => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Whether a node holds a scalar that failed its tag conversion or an
+/// unknown alias. The depth check bounds this recursion.
+fn has_bad_value(node: &Yaml) -> bool {
+    match node {
+        Yaml::BadValue => true,
+        Yaml::Sequence(items) => items.iter().any(has_bad_value),
+        Yaml::Mapping(entries) => entries
+            .iter()
+            .any(|(key, value)| has_bad_value(key) || has_bad_value(value)),
+        Yaml::Tagged(_, inner) => has_bad_value(inner),
+        _ => false,
+    }
+}
+
+/// The node under any custom tags, so a tagged value still matches.
+fn untagged<'a, 'input>(node: &'a Yaml<'input>) -> &'a Yaml<'input> {
+    match node {
+        Yaml::Tagged(_, inner) => untagged(inner),
+        other => other,
+    }
+}
+
 /// Detect a Flutter project by parsing `pubspec.yaml` structurally: only a
 /// `dependencies.flutter.sdk: flutter` entry counts.
 pub fn detect_flutter(project_dir: &Path) -> Result<(), FrameworkError> {
@@ -146,14 +195,25 @@ pub fn detect_flutter(project_dir: &Path) -> Result<(), FrameworkError> {
         Err(error) => return Err(FrameworkError::PubspecUnreadable(error.to_string())),
     };
 
+    check_pubspec_depth(&raw)?;
     let documents = Yaml::load_from_str(&raw)
         .map_err(|error| FrameworkError::PubspecMalformed(error.to_string()))?;
+    if documents.len() > 1 {
+        return Err(FrameworkError::PubspecMalformed(
+            "more than one YAML document".to_string(),
+        ));
+    }
+    if documents.iter().any(has_bad_value) {
+        return Err(FrameworkError::PubspecMalformed(
+            "a value that is not valid for its type or alias".to_string(),
+        ));
+    }
     let sdk = documents
         .first()
-        .and_then(|pubspec| pubspec.as_mapping_get("dependencies"))
-        .and_then(|dependencies| dependencies.as_mapping_get("flutter"))
-        .and_then(|flutter| flutter.as_mapping_get("sdk"))
-        .and_then(Yaml::as_str);
+        .and_then(|pubspec| untagged(pubspec).as_mapping_get("dependencies"))
+        .and_then(|dependencies| untagged(dependencies).as_mapping_get("flutter"))
+        .and_then(|flutter| untagged(flutter).as_mapping_get("sdk"))
+        .and_then(|sdk| untagged(sdk).as_str());
 
     if sdk == Some("flutter") {
         Ok(())

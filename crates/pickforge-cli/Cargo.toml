@@ -19,7 +19,8 @@ clap = { version = "4", features = ["derive"] }
 directories = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-saphyr = "0.2.1"
+saphyr = { version = "0.2.1", default-features = false }
+saphyr-parser = "0.2.1"
 sha2 = "0.10"
 regex = "1"
 thiserror = "2"

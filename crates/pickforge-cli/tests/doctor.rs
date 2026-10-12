@@ -171,6 +171,90 @@ fn malformed_yaml_fails_cleanly() {
 }
 
 #[test]
+fn deeply_nested_yaml_fails_cleanly() {
+    let temp = TempDir::new().unwrap();
+    let project_dir = temp.path().join("app");
+    write_project(
+        &project_dir,
+        Some(&format!("{}a\n", "- ".repeat(1_000_000))),
+    );
+
+    let report = diagnose(&project_dir, &env_with(temp.path(), &all_tools()));
+
+    let framework = check(&report, "project.framework");
+    assert_eq!(framework.status, CheckStatus::Fail);
+    assert!(
+        framework
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("nesting deeper than"),
+        "{framework:?}"
+    );
+}
+
+#[test]
+fn multi_document_yaml_is_malformed() {
+    let temp = TempDir::new().unwrap();
+    let project_dir = temp.path().join("app");
+    write_project(
+        &project_dir,
+        Some(&format!("{FLUTTER_PUBSPEC}---\nname: other\n")),
+    );
+
+    let report = diagnose(&project_dir, &env_with(temp.path(), &all_tools()));
+
+    let framework = check(&report, "project.framework");
+    assert_eq!(framework.status, CheckStatus::Fail);
+    assert!(
+        framework
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("more than one YAML document"),
+        "{framework:?}"
+    );
+}
+
+#[test]
+fn invalid_typed_scalars_and_unknown_aliases_are_malformed() {
+    for extra in ["version: !!int nope\n", "other: *missing\n"] {
+        let temp = TempDir::new().unwrap();
+        let project_dir = temp.path().join("app");
+        write_project(&project_dir, Some(&format!("{FLUTTER_PUBSPEC}{extra}")));
+
+        let report = diagnose(&project_dir, &env_with(temp.path(), &all_tools()));
+
+        let framework = check(&report, "project.framework");
+        assert_eq!(framework.status, CheckStatus::Fail, "{extra}");
+        assert!(
+            framework.detail.as_deref().unwrap().contains("not valid"),
+            "{framework:?}"
+        );
+    }
+}
+
+#[test]
+fn custom_tags_do_not_hide_the_flutter_sdk_entry() {
+    for pubspec in [
+        "name: app\ndependencies:\n  flutter:\n    sdk: !custom flutter\n",
+        "name: app\ndependencies: !custom\n  flutter: !custom\n    sdk: flutter\n",
+    ] {
+        let temp = TempDir::new().unwrap();
+        let project_dir = temp.path().join("app");
+        write_project(&project_dir, Some(pubspec));
+
+        let report = diagnose(&project_dir, &env_with(temp.path(), &all_tools()));
+
+        assert_eq!(
+            check(&report, "project.framework").status,
+            CheckStatus::Pass,
+            "{pubspec}"
+        );
+    }
+}
+
+#[test]
 fn missing_project_directory_fails_without_panicking() {
     let temp = TempDir::new().unwrap();
     let project_dir = temp.path().join("nope");
