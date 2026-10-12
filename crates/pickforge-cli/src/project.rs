@@ -182,7 +182,13 @@ impl NodeHeights {
                 (anchor, 0)
             }
             Event::Alias(id) => {
-                let height = self.anchored.get(&id).copied().unwrap_or(0);
+                // The parser rejects unknown names, so a missing height means an
+                // alias to an anchor whose collection is still open.
+                let Some(&height) = self.anchored.get(&id) else {
+                    return Err(FrameworkError::PubspecMalformed(
+                        "an alias to an anchor that is still open".to_string(),
+                    ));
+                };
                 self.within_limit(height)?;
                 (0, height)
             }

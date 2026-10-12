@@ -222,6 +222,7 @@ fn invalid_typed_scalars_and_unknown_aliases_are_malformed() {
         ("version: !!int nope\n", "not valid for its type"),
         ("!!int nope: ignored\n", "not valid for its type"),
         ("other: *missing\n", "unknown anchor"),
+        ("other: &self [*self]\n", "still open"),
     ] {
         let temp = TempDir::new().unwrap();
         let project_dir = temp.path().join("app");
