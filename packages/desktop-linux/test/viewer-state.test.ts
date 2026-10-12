@@ -1,8 +1,9 @@
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import net from "node:net";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -12,6 +13,7 @@ import {
   readProcessIdentity,
   identityIsAlive,
   listProcessGroupMembers,
+  readProcessGroupLeaderIdentity,
 } from "@pickforge/lab-core";
 import {
   prepareViewerLaunch,
@@ -28,6 +30,30 @@ import {
 } from "../src/viewer-state.js";
 import { withSessionVncLock, teardownDesktopSession } from "../src/session.js";
 import { teardownBrowserSession } from "../../browser/src/session.js";
+
+const hasPython3 =
+  process.platform === "linux" &&
+  spawnSync("python3", ["-c", "import ctypes"], { stdio: "ignore" }).status === 0;
+// The main thread exits through pthread_exit, so the process shows Z while a
+// second thread keeps running.
+const zombieWithThreadScript = [
+  "import ctypes, threading, time",
+  "threading.Thread(target=lambda: time.sleep(60)).start()",
+  "ctypes.CDLL(None).pthread_exit(None)",
+].join("\n");
+
+function isZombieWithThreads(pid: number): boolean {
+  let status: string;
+  try {
+    status = fsSync.readFileSync(`/proc/${pid}/status`, "utf8");
+  } catch {
+    return false;
+  }
+  return (
+    /^State:\s+Z/m.test(status) &&
+    Number(/^Threads:\s+(\d+)/m.exec(status)?.[1] ?? 0) > 1
+  );
+}
 
 let testRoot: string;
 let registryEnv: NodeJS.ProcessEnv;
@@ -974,6 +1000,83 @@ setInterval(() => {}, 1000);
       expect(finalize).toHaveBeenCalledOnce();
     },
   );
+  it.skipIf(!hasPython3).each(["leader", "member"] as const)(
+    "keeps the launch while a zombie %s still has live threads",
+    async (zombie) => {
+      const launchRecord = await record();
+      // For "member", a Node leader starts the zombie in its group, records
+      // its own identity, then exits once the test closes its stdin.
+      const memberScript = `
+const { spawn } = require('node:child_process');
+const child = spawn('python3', ['-c', ${JSON.stringify(zombieWithThreadScript)}], { stdio: 'ignore' });
+process.stdout.write(String(child.pid));
+process.stdin.on('end', () => process.exit(0)).resume();
+`;
+      const leader =
+        zombie === "leader"
+          ? spawn("python3", ["-c", zombieWithThreadScript], {
+              detached: true,
+              stdio: "ignore",
+            })
+          : spawn(process.execPath, ["-e", memberScript], {
+              detached: true,
+              stdio: ["pipe", "pipe", "ignore"],
+            });
+      const groupId = leader.pid!;
+      try {
+        let zombiePid = groupId;
+        if (zombie === "member") {
+          const [ready] = await once(leader.stdout!, "data");
+          zombiePid = Number(ready.toString());
+          Object.assign(launchRecord, readProcessGroupLeaderIdentity(groupId));
+          leader.stdin!.end();
+          await once(leader, "exit");
+        }
+        const deadline = Date.now() + 5_000;
+        while (Date.now() < deadline && !isZombieWithThreads(zombiePid)) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        expect(isZombieWithThreads(zombiePid)).toBe(true);
+        if (zombie === "leader") {
+          Object.assign(launchRecord, readProcessGroupLeaderIdentity(groupId));
+        }
+        await writeViewerLaunchRecord(launchRecord, registryEnv);
+
+        await prepareViewerLaunch(sessionId, registryEnv);
+        expect(await fs.lstat(launchRecord.profileDir)).toBeDefined();
+        await expect(
+          removeViewerLaunch(sessionId, launchRecord.launchId, registryEnv),
+        ).rejects.toThrow(/alive/);
+        expect(await fs.lstat(launchRecord.profileDir)).toBeDefined();
+      } finally {
+        try {
+          process.kill(-groupId, "SIGKILL");
+        } catch {
+          // group already gone
+        }
+      }
+    },
+  );
+  it("keeps the launch while an unreadable member may remain after its leader exits", async () => {
+    const launchRecord = await record();
+    const group = await viewerProcessGroup(launchRecord, [[]]);
+    Object.assign(launchRecord, group.leaderIdentity);
+    await writeViewerLaunchRecord(launchRecord, registryEnv);
+    await exitGroupLeader(group.leader);
+    const memberStat = `/proc/${group.members[0]!.pid}/stat`;
+    const original = fsSync.readFileSync;
+    vi.spyOn(fsSync, "readFileSync").mockImplementation(((target, ...rest) => {
+      if (String(target) === memberStat) {
+        throw Object.assign(new Error("denied"), { code: "EPERM" });
+      }
+      return original.call(fsSync, target, ...rest);
+    }) as typeof fsSync.readFileSync);
+
+    await expect(
+      removeViewerLaunch(sessionId, launchRecord.launchId, registryEnv),
+    ).rejects.toThrow(/alive/);
+    expect(await fs.lstat(launchRecord.profileDir)).toBeDefined();
+  });
   it("leaves sessions without viewers alone and refuses unknown live identities", async () => {
     expect(await stopSessionViewer(sessionId, undefined, registryEnv)).toEqual(
       [],

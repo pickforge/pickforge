@@ -588,15 +588,28 @@ export function parseProcStat(content: string): ProcStat | undefined {
   return { state, ppid, pgrp, numThreads, startTicks };
 }
 
-function readProcStat(pid: number): ProcStat | undefined {
+/**
+ * A `/proc/<pid>/stat` read. Only ENOENT and ESRCH mean the process is gone.
+ * Any other failure, such as EPERM or EACCES under `hidepid`, or an unparsable
+ * line, is "unreadable": it proves nothing about whether the process exists.
+ */
+type ProcStatRead = ProcStat | "gone" | "unreadable";
+
+function readProcStatEntry(pid: number): ProcStatRead {
   let content: string;
   try {
     content = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
-  } catch {
-    // Unreadable is not proof of death: EPERM still has a live process.
-    return undefined;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ESRCH" ? "gone" : "unreadable";
   }
-  return parseProcStat(content);
+  return parseProcStat(content) ?? "unreadable";
+}
+
+function readProcStat(pid: number): ProcStat | undefined {
+  // Unreadable is not proof of death: EPERM still has a live process.
+  const read = readProcStatEntry(pid);
+  return typeof read === "string" ? undefined : read;
 }
 
 /** Read a process's start time in clock ticks, or undefined if it is gone. */
@@ -699,11 +712,17 @@ export function listChildProcesses(ppid: number): number[] {
   return listLiveProcesses((stat) => stat.ppid === ppid);
 }
 
+/**
+ * `unverified` means a `/proc` read failed for a reason other than the process
+ * being gone, such as EPERM, so the group may still exist. Like `reused` and
+ * `survived`, it is not a success: callers must keep any state the group uses.
+ */
 export type StopProcessGroupOutcome =
   | "already-dead"
   | "reused"
   | "terminated"
-  | "survived";
+  | "survived"
+  | "unverified";
 
 export interface StopProcessGroupResult {
   outcome: StopProcessGroupOutcome;
@@ -738,36 +757,79 @@ function statCountsAsPresent(stat: ProcStat): boolean {
   return stat.state !== "Z" || stat.numThreads > 1;
 }
 
-/** Group members that still count as present, including zombies with threads. */
-function listPresentGroupMembers(pgid: number): number[] {
-  return listProcesses((stat) => stat.pgrp === pgid && statCountsAsPresent(stat));
+export interface ProcessGroupPresence {
+  /** Members that still count as present, including zombies with threads. */
+  members: number[];
+  /**
+   * True when no readable member is present, but some `/proc` entry could not
+   * be read and a signal-0 probe shows the group still exists. The unreadable
+   * entry may be a member, so the group is not proven gone.
+   */
+  unverified: boolean;
 }
 
-function leaderStillPresent(identity: ProcessIdentity): boolean {
-  const stat = readProcStat(identity.pid);
-  return (
-    stat !== undefined &&
-    stat.startTicks === identity.startTicks &&
-    statCountsAsPresent(stat)
-  );
-}
-
-function processGroupGone(identity: ProcessIdentity): boolean {
-  return (
-    listPresentGroupMembers(identity.pid).length === 0 &&
-    !leaderStillPresent(identity)
-  );
-}
-
-function missingLeaderOutcome(identity: ProcessIdentity): StopProcessGroupResult {
+/**
+ * Scan `/proc` for the members of a process group with the group stop rule:
+ * a zombie with other threads still counts as present, and an unreadable
+ * entry never proves the group gone.
+ */
+export function readProcessGroupPresence(pgid: number): ProcessGroupPresence {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync("/proc");
+  } catch {
+    return { members: [], unverified: isProcessGroupAlive(pgid) };
+  }
+  const members: number[] = [];
+  let unreadable = false;
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    const stat = readProcStatEntry(Number(entry));
+    if (stat === "unreadable") {
+      unreadable = true;
+    } else if (stat !== "gone" && stat.pgrp === pgid && statCountsAsPresent(stat)) {
+      members.push(Number(entry));
+    }
+  }
   return {
-    outcome:
-      listPresentGroupMembers(identity.pid).length === 0
-        ? "already-dead"
-        : "reused",
-    signaled: false,
+    members,
+    unverified: members.length === 0 && unreadable && isProcessGroupAlive(pgid),
   };
 }
+
+type GroupState = "gone" | "present" | "unverified";
+
+function groupMembersState(pgid: number): GroupState {
+  const presence = readProcessGroupPresence(pgid);
+  if (presence.members.length > 0) return "present";
+  return presence.unverified ? "unverified" : "gone";
+}
+
+/** Whether the recorded leader or any group member may still remain. */
+function processGroupState(identity: ProcessIdentity): GroupState {
+  const leader = readProcStatEntry(identity.pid);
+  if (leader === "unreadable") return "unverified";
+  if (
+    leader !== "gone" &&
+    leader.startTicks === identity.startTicks &&
+    statCountsAsPresent(leader)
+  ) {
+    return "present";
+  }
+  return groupMembersState(identity.pid);
+}
+
+const MISSING_LEADER_OUTCOMES: Record<GroupState, StopProcessGroupOutcome> = {
+  gone: "already-dead",
+  present: "reused",
+  unverified: "unverified",
+};
+
+const AFTER_KILL_OUTCOMES: Record<GroupState, StopProcessGroupOutcome> = {
+  gone: "terminated",
+  present: "survived",
+  unverified: "unverified",
+};
 
 async function waitForProcessGroupExit(
   identity: ProcessIdentity,
@@ -775,7 +837,7 @@ async function waitForProcessGroupExit(
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (processGroupGone(identity)) {
+    if (processGroupState(identity) === "gone") {
       return true;
     }
     await sleep(POLL_INTERVAL_MS);
@@ -784,12 +846,17 @@ async function waitForProcessGroupExit(
 }
 
 function classifyAfterTerm(identity: ProcessIdentity): StopProcessGroupResult | undefined {
-  const members = listPresentGroupMembers(identity.pid);
-  const currentLeader = readProcStat(identity.pid);
-  if (currentLeader !== undefined && leaderGroupMismatch(currentLeader, identity)) {
+  const members = groupMembersState(identity.pid);
+  // Read the leader last, so the identity check is the final one before SIGKILL.
+  const currentLeader = readProcStatEntry(identity.pid);
+  if (currentLeader === "unreadable") {
+    // The leader can no longer be checked for PID reuse, so do not escalate.
+    return { outcome: "unverified", signaled: true };
+  }
+  if (currentLeader !== "gone" && leaderGroupMismatch(currentLeader, identity)) {
     return { outcome: "reused", signaled: true };
   }
-  if (members.length === 0 && (currentLeader === undefined || !statCountsAsPresent(currentLeader))) {
+  if (members === "gone" && (currentLeader === "gone" || !statCountsAsPresent(currentLeader))) {
     return { outcome: "terminated", signaled: true };
   }
   return undefined;
@@ -804,7 +871,9 @@ function classifyAfterTerm(identity: ProcessIdentity): StopProcessGroupResult | 
  * its surviving same-pgid members unsafe: the pgid cannot be reused while they
  * remain, so SIGKILL escalation is valid. A reused live leader is still refused.
  * A zombie leader or member with other threads still counts as present, so
- * the group is not reported gone until those threads exit.
+ * the group is not reported gone until those threads exit. An unreadable
+ * leader stat is never treated as gone: before SIGTERM it refuses the stop,
+ * and after it the stop does not escalate. Both return `unverified`.
  *
  * The leader must have been spawned as a process-group leader (e.g. `spawn`
  * with `detached: true`), so its PID doubles as the group id.
@@ -814,9 +883,15 @@ export async function stopProcessGroupVerified(
   opts: { timeoutMs?: number } = {},
 ): Promise<StopProcessGroupResult> {
   const timeoutMs = opts.timeoutMs ?? 5_000;
-  const leader = readProcStat(identity.pid);
-  if (leader === undefined) {
-    return missingLeaderOutcome(identity);
+  const leader = readProcStatEntry(identity.pid);
+  if (leader === "unreadable") {
+    return { outcome: "unverified", signaled: false };
+  }
+  if (leader === "gone") {
+    return {
+      outcome: MISSING_LEADER_OUTCOMES[groupMembersState(identity.pid)],
+      signaled: false,
+    };
   }
   if (leaderGroupMismatch(leader, identity)) {
     return { outcome: "reused", signaled: false };
@@ -832,9 +907,8 @@ export async function stopProcessGroupVerified(
     return afterTerm;
   }
   signalGroup(identity.pid, "SIGKILL");
-  const gone = await waitForProcessGroupExit(identity, 1_000);
-  return {
-    outcome: gone || processGroupGone(identity) ? "terminated" : "survived",
-    signaled: true,
-  };
+  if (await waitForProcessGroupExit(identity, 1_000)) {
+    return { outcome: "terminated", signaled: true };
+  }
+  return { outcome: AFTER_KILL_OUTCOMES[processGroupState(identity)], signaled: true };
 }
