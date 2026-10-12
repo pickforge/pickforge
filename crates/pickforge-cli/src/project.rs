@@ -1,5 +1,6 @@
 //! Project identity and framework detection.
 
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
 use saphyr::{LoadableYamlNode, Yaml};
@@ -135,43 +136,75 @@ pub enum FrameworkError {
     NotFlutter,
 }
 
-/// Deepest collection nesting accepted in `pubspec.yaml`.
+/// Deepest collection nesting accepted in `pubspec.yaml`, after aliases.
 const MAX_PUBSPEC_DEPTH: usize = 128;
 
-/// Refuse deeply nested YAML before building a tree. Dropping a tree that is
-/// nested very deep overflows the stack, and the parser alone does not recurse.
-fn check_pubspec_depth(raw: &str) -> Result<(), FrameworkError> {
-    let mut depth = 0usize;
+/// Check the YAML events before building a tree. Dropping a very deep tree
+/// overflows the stack, and an alias copies its whole anchored subtree, so the
+/// alias counts with that subtree's height. A scalar that fails its type tag
+/// is malformed, also as a mapping key, which the tree would not keep.
+fn check_pubspec_events(raw: &str) -> Result<(), FrameworkError> {
+    let mut heights = NodeHeights::default();
     for event in Parser::new_from_str(raw) {
         let (event, _) =
             event.map_err(|error| FrameworkError::PubspecMalformed(error.to_string()))?;
-        match event {
-            Event::SequenceStart(..) | Event::MappingStart(..) => {
-                depth += 1;
-                if depth > MAX_PUBSPEC_DEPTH {
-                    return Err(FrameworkError::PubspecMalformed(format!(
-                        "nesting deeper than {MAX_PUBSPEC_DEPTH} levels"
-                    )));
-                }
-            }
-            Event::SequenceEnd | Event::MappingEnd => depth = depth.saturating_sub(1),
-            _ => {}
-        }
+        heights.record(event)?;
     }
     Ok(())
 }
 
-/// Whether a node holds a scalar that failed its tag conversion or an
-/// unknown alias. The depth check bounds this recursion.
-fn has_bad_value(node: &Yaml) -> bool {
-    match node {
-        Yaml::BadValue => true,
-        Yaml::Sequence(items) => items.iter().any(has_bad_value),
-        Yaml::Mapping(entries) => entries
-            .iter()
-            .any(|(key, value)| has_bad_value(key) || has_bad_value(value)),
-        Yaml::Tagged(_, inner) => has_bad_value(inner),
-        _ => false,
+/// The height of each node in the tree that the YAML events would build.
+#[derive(Default)]
+struct NodeHeights {
+    /// Each open collection, with its anchor id and its height so far.
+    open: Vec<(usize, usize)>,
+    anchored: HashMap<usize, usize>,
+}
+
+impl NodeHeights {
+    fn record(&mut self, event: Event) -> Result<(), FrameworkError> {
+        let (anchor, height) = match event {
+            Event::SequenceStart(anchor, _) | Event::MappingStart(anchor, _) => {
+                self.open.push((anchor, 1));
+                return self.within_limit(0);
+            }
+            Event::SequenceEnd | Event::MappingEnd => match self.open.pop() {
+                Some(closed) => closed,
+                None => return Ok(()),
+            },
+            Event::Scalar(value, style, anchor, tag) => {
+                let parsed = Yaml::value_from_cow_and_metadata(value, style, tag.as_ref());
+                if matches!(parsed, Yaml::BadValue) {
+                    return Err(FrameworkError::PubspecMalformed(
+                        "a value that is not valid for its type".to_string(),
+                    ));
+                }
+                (anchor, 0)
+            }
+            Event::Alias(id) => {
+                let height = self.anchored.get(&id).copied().unwrap_or(0);
+                self.within_limit(height)?;
+                (0, height)
+            }
+            _ => return Ok(()),
+        };
+        if anchor > 0 {
+            self.anchored.insert(anchor, height);
+        }
+        if let Some(parent) = self.open.last_mut() {
+            parent.1 = parent.1.max(height + 1);
+        }
+        Ok(())
+    }
+
+    /// Whether a node of `height` inside the open collections fits the limit.
+    fn within_limit(&self, height: usize) -> Result<(), FrameworkError> {
+        if self.open.len() + height > MAX_PUBSPEC_DEPTH {
+            return Err(FrameworkError::PubspecMalformed(format!(
+                "nesting deeper than {MAX_PUBSPEC_DEPTH} levels"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -195,17 +228,12 @@ pub fn detect_flutter(project_dir: &Path) -> Result<(), FrameworkError> {
         Err(error) => return Err(FrameworkError::PubspecUnreadable(error.to_string())),
     };
 
-    check_pubspec_depth(&raw)?;
+    check_pubspec_events(&raw)?;
     let documents = Yaml::load_from_str(&raw)
         .map_err(|error| FrameworkError::PubspecMalformed(error.to_string()))?;
     if documents.len() > 1 {
         return Err(FrameworkError::PubspecMalformed(
             "more than one YAML document".to_string(),
-        ));
-    }
-    if documents.iter().any(has_bad_value) {
-        return Err(FrameworkError::PubspecMalformed(
-            "a value that is not valid for its type or alias".to_string(),
         ));
     }
     let sdk = documents

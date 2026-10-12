@@ -218,7 +218,11 @@ fn multi_document_yaml_is_malformed() {
 
 #[test]
 fn invalid_typed_scalars_and_unknown_aliases_are_malformed() {
-    for extra in ["version: !!int nope\n", "other: *missing\n"] {
+    for (extra, expected) in [
+        ("version: !!int nope\n", "not valid for its type"),
+        ("!!int nope: ignored\n", "not valid for its type"),
+        ("other: *missing\n", "unknown anchor"),
+    ] {
         let temp = TempDir::new().unwrap();
         let project_dir = temp.path().join("app");
         write_project(&project_dir, Some(&format!("{FLUTTER_PUBSPEC}{extra}")));
@@ -228,10 +232,57 @@ fn invalid_typed_scalars_and_unknown_aliases_are_malformed() {
         let framework = check(&report, "project.framework");
         assert_eq!(framework.status, CheckStatus::Fail, "{extra}");
         assert!(
-            framework.detail.as_deref().unwrap().contains("not valid"),
+            framework.detail.as_deref().unwrap().contains(expected),
             "{framework:?}"
         );
     }
+}
+
+#[test]
+fn chained_aliases_count_toward_the_nesting_limit() {
+    // Each anchor nests the previous alias 100 levels deeper, so the event
+    // stream stays shallow while the built tree would be thousands deep.
+    let mut pubspec = String::from(FLUTTER_PUBSPEC);
+    pubspec.push_str("chain:\n");
+    let mut previous = String::from("0");
+    for anchor in 0..128 {
+        let value = format!("{}{previous}{}", "[".repeat(100), "]".repeat(100));
+        pubspec.push_str(&format!("  - &a{anchor} {value}\n"));
+        previous = format!("*a{anchor}");
+    }
+    let temp = TempDir::new().unwrap();
+    let project_dir = temp.path().join("app");
+    write_project(&project_dir, Some(&pubspec));
+
+    let report = diagnose(&project_dir, &env_with(temp.path(), &all_tools()));
+
+    let framework = check(&report, "project.framework");
+    assert_eq!(framework.status, CheckStatus::Fail);
+    assert!(
+        framework
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("nesting deeper than"),
+        "{framework:?}"
+    );
+}
+
+#[test]
+fn shallow_aliases_still_detect_flutter() {
+    let temp = TempDir::new().unwrap();
+    let project_dir = temp.path().join("app");
+    write_project(
+        &project_dir,
+        Some("name: app\nbase: &sdk {sdk: flutter}\ndependencies:\n  flutter: *sdk\n"),
+    );
+
+    let report = diagnose(&project_dir, &env_with(temp.path(), &all_tools()));
+
+    assert_eq!(
+        check(&report, "project.framework").status,
+        CheckStatus::Pass
+    );
 }
 
 #[test]
