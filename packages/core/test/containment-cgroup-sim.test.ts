@@ -779,7 +779,7 @@ describe("cgroup cleanup guards (simulated cgroup)", () => {
     vi.spyOn(fs, "readdirSync").mockImplementation(((target, ...args) =>
       target === `/proc/${member}/task`
         ? [String(member), tid]
-        : readdir.call(fs, target, ...args)) as typeof fs.readdirSync);
+        : Reflect.apply(readdir, fs, [target, ...args])) as typeof fs.readdirSync);
     return { threadReads: () => threadReads };
   }
 

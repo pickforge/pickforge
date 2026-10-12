@@ -1207,7 +1207,7 @@ describe("containment identity safety", () => {
       fs.readdirSync = ((target, ...args) =>
         target === `/proc/${pid}/task`
           ? [String(pid), tid]
-          : readdir.call(fs, target, ...args)) as typeof fs.readdirSync;
+          : Reflect.apply(readdir, fs, [target, ...args])) as typeof fs.readdirSync;
       try {
         const result = await destroyContainmentScope(scope, SWEEP_BUDGET);
         expect(result.confirmed, result.reason).toBe(true);
