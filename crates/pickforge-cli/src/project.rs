@@ -1,5 +1,6 @@
 //! Project identity and framework detection.
 
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -7,6 +8,7 @@ use thiserror::Error;
 
 const PROJECT_ID_HASH_LENGTH: usize = 16;
 const PROJECT_ID_SLUG_LENGTH: usize = 40;
+const PUBSPEC_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 /// Absolute path with `.`/`..` removed, without touching the filesystem.
 fn lexically_absolute(path: &Path) -> PathBuf {
@@ -137,21 +139,66 @@ pub enum FrameworkError {
 /// `dependencies.flutter.sdk: flutter` entry counts.
 pub fn detect_flutter(project_dir: &Path) -> Result<(), FrameworkError> {
     let pubspec_path = project_dir.join("pubspec.yaml");
-    let raw = match std::fs::read_to_string(&pubspec_path) {
-        Ok(raw) => raw,
+    let file = match std::fs::File::open(&pubspec_path) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(FrameworkError::PubspecMissing)
         }
         Err(error) => return Err(FrameworkError::PubspecUnreadable(error.to_string())),
     };
 
-    let pubspec: serde_yaml_ng::Value = serde_yaml_ng::from_str(&raw)
+    // Bound the read before allocating or parsing attacker-controlled contents.
+    let mut raw = Vec::new();
+    file.take((PUBSPEC_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut raw)
+        .map_err(|error| FrameworkError::PubspecUnreadable(error.to_string()))?;
+    if raw.len() > PUBSPEC_MAX_BYTES {
+        return Err(FrameworkError::PubspecMalformed(format!(
+            "input exceeds {PUBSPEC_MAX_BYTES} bytes"
+        )));
+    }
+    let raw = String::from_utf8(raw)
+        .map_err(|error| FrameworkError::PubspecUnreadable(error.to_string()))?;
+
+    let options = serde_saphyr::options! {
+        budget: serde_saphyr::budget! {
+            max_depth: 64,
+            flow_nesting_limit: 64,
+            max_documents: 1,
+            max_events: 100_000,
+            max_nodes: 50_000,
+            max_aliases: 1_000,
+            max_anchors: 1_000,
+            max_recorded_anchor_events: 100_000,
+            max_recorded_anchor_bytes: PUBSPEC_MAX_BYTES,
+            max_total_scalar_bytes: PUBSPEC_MAX_BYTES,
+        },
+        alias_limits: serde_saphyr::alias_limits! {
+            max_total_replayed_events: 100_000,
+            max_replay_stack_depth: 32,
+            max_alias_expansions_per_anchor: 1_000,
+        },
+        duplicate_keys: serde_saphyr::DuplicateKeyPolicy::Error,
+        merge_keys: serde_saphyr::MergeKeyPolicy::AsOrdinary,
+        strict_booleans: true,
+        reject_unsupported_tags: true,
+        // Preserve scalar spelling instead of decoding a binary SDK into "flutter".
+        ignore_binary_tag_for_string: true,
+        reject_non_finite_typeless_float: false,
+        emit_comments: false,
+        with_snippet: false,
+    };
+    // A generic value also validates unknown fields, including recursive aliases
+    // that typed structs can skip. Parse the whole stream with a one-document
+    // budget so malformed content after `...` also fails. Empty YAML is not Flutter.
+    let pubspecs = serde_saphyr::from_multiple_with_options::<serde_json::Value>(&raw, options)
         .map_err(|error| FrameworkError::PubspecMalformed(error.to_string()))?;
-    let sdk = pubspec
-        .get("dependencies")
+    let sdk = pubspecs
+        .first()
+        .and_then(|pubspec| pubspec.get("dependencies"))
         .and_then(|dependencies| dependencies.get("flutter"))
         .and_then(|flutter| flutter.get("sdk"))
-        .and_then(serde_yaml_ng::Value::as_str);
+        .and_then(serde_json::Value::as_str);
 
     if sdk == Some("flutter") {
         Ok(())
