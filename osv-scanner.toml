@@ -1,6 +1,1 @@
 # Scan all dependency findings. Each exception needs a reason and an expiry.
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2024-0449"
-ignoreUntil = 2027-01-12
-reason = "unsafe-libyaml is unmaintained, with no known vulnerability. pickforge-cli reads only pubspec.yaml through serde_yaml_ng. Replacing it is tracked in #332."

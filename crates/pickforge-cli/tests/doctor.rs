@@ -1,6 +1,9 @@
 //! Library-level coverage of `pickforge doctor` through its public interface.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use assert_cmd::Command;
 
 use pickforge_cli::report::CheckStatus;
 use pickforge_cli::{diagnose, project, state, DoctorReport, Environment};
@@ -168,6 +171,309 @@ fn malformed_yaml_fails_cleanly() {
     let framework = check(&report, "project.framework");
     assert_eq!(framework.status, CheckStatus::Fail);
     assert!(framework.detail.is_some());
+}
+
+fn assert_not_flutter_process(project_dir: &Path, root: &Path) {
+    let output = Command::cargo_bin("pickforge")
+        .unwrap()
+        .env_clear()
+        .env("PATH", fake_bin(root, &all_tools()))
+        .env("HOME", root.join("home"))
+        .env("USERPROFILE", root.join("home"))
+        .env("PICKFORGE_HOME", root.join("state"))
+        .args(["doctor", "--json", "--project-dir"])
+        .arg(project_dir)
+        .timeout(Duration::from_secs(5))
+        .assert()
+        .code(1);
+    let json: serde_json::Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    assert_eq!(json["project"]["framework"], serde_json::Value::Null);
+    assert_eq!(json["ready"], false);
+    let stderr = String::from_utf8_lossy(&output.get_output().stderr);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
+// Check both the library error and a bounded child process. A panic, signal,
+// timeout or false Flutter detection must fail the hostile-input tests.
+fn assert_hostile_pubspec(pubspec: &str, expected: &str) {
+    let temp = TempDir::new().unwrap();
+    let project_dir = temp.path().join("app");
+    write_project(&project_dir, Some(pubspec));
+
+    assert_not_flutter_process(&project_dir, temp.path());
+
+    let result = project::detect_flutter(&project_dir);
+    assert!(
+        matches!(&result, Err(project::FrameworkError::PubspecMalformed(message)) if message.contains(expected)),
+        "expected malformed YAML containing {expected:?}, got {result:?}"
+    );
+    let report = diagnose(&project_dir, &env_with(temp.path(), &all_tools()));
+    assert_eq!(report.project.framework, None);
+    assert_eq!(
+        check(&report, "project.framework").status,
+        CheckStatus::Fail
+    );
+}
+
+#[test]
+fn deeply_nested_yaml_fails_cleanly() {
+    assert_hostile_pubspec(&format!("{}a\n", "- ".repeat(1_000_000)), "depth");
+    assert_hostile_pubspec(&"[".repeat(10_000), "recursion limit");
+    assert_hostile_pubspec(
+        &format!(
+            "{FLUTTER_PUBSPEC}other: {}0{}\n",
+            "[".repeat(10_000),
+            "]".repeat(10_000)
+        ),
+        "recursion limit",
+    );
+}
+
+#[test]
+fn multi_document_yaml_is_malformed() {
+    for pubspec in [
+        format!("{FLUTTER_PUBSPEC}---\nname: other\n"),
+        format!("---\nname: other\n---\n{FLUTTER_PUBSPEC}"),
+        format!("{FLUTTER_PUBSPEC}---\n"),
+        format!("{FLUTTER_PUBSPEC}...\n---\nname: other\n"),
+    ] {
+        assert_hostile_pubspec(&pubspec, "document");
+    }
+}
+
+#[test]
+fn invalid_typed_scalars_and_unknown_aliases_are_malformed() {
+    for (extra, expected) in [
+        ("version: !!int nope\n", "invalid u64"),
+        ("!!int nope: ignored\n", "invalid u64"),
+        ("? [!!int nope]\n: ignored\n", "invalid u64"),
+        ("? {value: !!int nope}\n: ignored\n", "invalid u64"),
+        ("version: !!int \"nope\"\n", "invalid u64"),
+        ("version: !!float nope\n", "invalid floating point"),
+        ("version: !!bool nope\n", "invalid boolean"),
+        ("other: *missing\n", "unknown anchor"),
+        ("other: &self [*self]\n", "recursive references"),
+    ] {
+        assert_hostile_pubspec(&format!("{FLUTTER_PUBSPEC}{extra}"), expected);
+    }
+}
+
+#[test]
+fn oversized_typed_integer_is_malformed_unlike_serde_yaml_ng() {
+    assert_hostile_pubspec(
+        &format!("{FLUTTER_PUBSPEC}version: !!int 18446744073709551616\n"),
+        "invalid u64",
+    );
+}
+
+#[test]
+fn invalid_core_tags_cannot_make_flutter_strings() {
+    for (sdk, expected) in [
+        ("!!int flutter", "invalid u64"),
+        ("!!int \"flutter\"", "invalid u64"),
+        ("!!float \"flutter\"", "invalid floating point"),
+        ("!!bool \"flutter\"", "invalid boolean"),
+        ("!!map flutter", "tag"),
+        ("!!seq flutter", "tag"),
+    ] {
+        assert_hostile_pubspec(
+            &format!("dependencies: {{flutter: {{sdk: {sdk}}}}}\n"),
+            expected,
+        );
+    }
+}
+
+#[test]
+fn chained_aliases_count_toward_the_nesting_limit() {
+    // The source stays below the depth limit; alias replay adds nested levels.
+    let mut pubspec = String::from(FLUTTER_PUBSPEC);
+    pubspec.push_str("chain:\n");
+    let mut previous = String::from("0");
+    for anchor in 0..128 {
+        let value = format!("{}{previous}{}", "[".repeat(24), "]".repeat(24));
+        pubspec.push_str(&format!("  - &a{anchor} {value}\n"));
+        previous = format!("*a{anchor}");
+    }
+    assert_hostile_pubspec(&pubspec, "depth");
+}
+
+#[test]
+fn alias_expansion_bomb_is_malformed() {
+    let mut pubspec = String::from(FLUTTER_PUBSPEC);
+    pubspec.push_str("a: &a [lol,lol,lol,lol,lol,lol,lol,lol,lol,lol]\n");
+    let mut previous = 'a';
+    for anchor in 'b'..='i' {
+        pubspec.push_str(&format!("{anchor}: &{anchor} ["));
+        pubspec.push_str(&vec![format!("*{previous}"); 10].join(","));
+        pubspec.push_str("]\n");
+        previous = anchor;
+    }
+    assert!(pubspec.len() < 512);
+    assert_hostile_pubspec(&pubspec, "budget breached");
+}
+
+#[test]
+fn alias_scalar_byte_amplification_is_malformed() {
+    assert_hostile_pubspec(
+        &format!(
+            "{FLUTTER_PUBSPEC}a: &x \"{}\"\nb: *x\n",
+            "x".repeat(3 * 1024 * 1024)
+        ),
+        "budget breached: ScalarBytes",
+    );
+}
+
+#[test]
+fn shallow_aliases_still_detect_flutter() {
+    let temp = TempDir::new().unwrap();
+    let project_dir = temp.path().join("app");
+    write_project(
+        &project_dir,
+        Some("name: app\nbase: &sdk {sdk: flutter}\ndependencies:\n  flutter: *sdk\n"),
+    );
+    let report = diagnose(&project_dir, &env_with(temp.path(), &all_tools()));
+    assert_eq!(
+        check(&report, "project.framework").status,
+        CheckStatus::Pass
+    );
+}
+
+fn assert_flutter_pubspec(pubspec: &str) {
+    let temp = TempDir::new().unwrap();
+    write_project(temp.path(), Some(pubspec));
+    let report = diagnose(temp.path(), &env_with(temp.path(), &all_tools()));
+    assert!(report.ready, "{pubspec}\n{report:?}");
+    assert_eq!(report.project.framework.as_deref(), Some("flutter"));
+    assert_eq!(
+        check(&report, "project.framework").status,
+        CheckStatus::Pass
+    );
+}
+
+#[test]
+fn pubspec_parsing_works_on_a_one_mib_caller_stack() {
+    std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        .spawn(|| {
+            // Root mapping plus 63 containers reaches the current depth budget.
+            for (open, close) in [("[", "]"), ("{a: ", "}")] {
+                assert_flutter_pubspec(&format!(
+                    "{FLUTTER_PUBSPEC}other: {}0{}\n",
+                    open.repeat(63),
+                    close.repeat(63)
+                ));
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn null_mapping_keys_still_detect_flutter() {
+    for key in ["~", "null", "!!null null"] {
+        assert_flutter_pubspec(&format!("{key}: x\n{FLUTTER_PUBSPEC}"));
+    }
+}
+
+#[test]
+fn complex_mapping_keys_still_detect_flutter() {
+    for entry in ["? [a, b]\n: c\n", "? {a: b}\n: c\n"] {
+        assert_flutter_pubspec(&format!("{entry}{FLUTTER_PUBSPEC}"));
+    }
+}
+
+#[test]
+fn boolean_and_numeric_mapping_keys_still_detect_flutter() {
+    for key in [
+        "true",
+        "false",
+        "1",
+        "-1",
+        "1.5",
+        "!!bool true",
+        "!!int 1",
+        "!!float 1.5",
+    ] {
+        assert_flutter_pubspec(&format!("{key}: x\n{FLUTTER_PUBSPEC}"));
+    }
+}
+
+#[test]
+fn custom_tags_cannot_hide_the_flutter_sdk_entry() {
+    for pubspec in [
+        "name: app\ndependencies:\n  flutter:\n    sdk: !custom flutter\n",
+        "name: app\ndependencies: !custom\n  flutter: !custom\n    sdk: flutter\n",
+        "dependencies: {flutter: {sdk: !<tag:example.com,2026:custom> flutter}}\n",
+    ] {
+        assert_hostile_pubspec(pubspec, "tag");
+    }
+    assert_hostile_pubspec(&format!("{FLUTTER_PUBSPEC}other: !custom ignored\n"), "tag");
+}
+
+#[test]
+fn malformed_content_after_document_end_is_rejected() {
+    assert_hostile_pubspec(&format!("{FLUTTER_PUBSPEC}...\n[\n"), "");
+}
+
+#[test]
+fn empty_and_non_mapping_pubspecs_are_not_flutter() {
+    for pubspec in [
+        "",
+        "# empty\n",
+        "null\n",
+        "[]\n",
+        "flutter\n",
+        "dependencies: []\n",
+        "dependencies: {flutter: {sdk: 123}}\n",
+        "dependencies: {flutter: {sdk: !!null \"flutter\"}}\n",
+        "dependencies: {flutter: {sdk: !!binary Zmx1dHRlcg==}}\n",
+        "? [dependencies]\n: {flutter: {sdk: flutter}}\n",
+        "dependencies:\n  ? [flutter]\n  : {sdk: flutter}\n",
+        "dependencies:\n  flutter:\n    ? [sdk]\n    : flutter\n",
+        "dependencies: {flutter: {true: flutter}}\n",
+    ] {
+        let temp = TempDir::new().unwrap();
+        write_project(temp.path(), Some(pubspec));
+        assert_eq!(
+            project::detect_flutter(temp.path()),
+            Err(project::FrameworkError::NotFlutter),
+            "{pubspec}"
+        );
+        assert_not_flutter_process(temp.path(), temp.path());
+    }
+}
+
+#[test]
+fn missing_and_unreadable_pubspecs_keep_their_errors() {
+    let temp = TempDir::new().unwrap();
+    assert_eq!(
+        project::detect_flutter(temp.path()),
+        Err(project::FrameworkError::PubspecMissing)
+    );
+    std::fs::write(temp.path().join("pubspec.yaml"), [0xff]).unwrap();
+    assert!(matches!(
+        project::detect_flutter(temp.path()),
+        Err(project::FrameworkError::PubspecUnreadable(_))
+    ));
+    let directory = temp.path().join("directory");
+    std::fs::create_dir_all(directory.join("pubspec.yaml")).unwrap();
+    assert!(matches!(
+        project::detect_flutter(&directory),
+        Err(project::FrameworkError::PubspecUnreadable(_))
+    ));
+}
+
+#[test]
+fn oversized_pubspec_is_malformed() {
+    assert_hostile_pubspec(
+        &format!("{FLUTTER_PUBSPEC}#{}", "x".repeat(4 * 1024 * 1024)),
+        "input exceeds",
+    );
+    assert_hostile_pubspec(
+        &format!("{FLUTTER_PUBSPEC}#{}", "é".repeat(2 * 1024 * 1024)),
+        "input exceeds",
+    );
 }
 
 #[test]
