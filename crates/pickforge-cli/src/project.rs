@@ -252,13 +252,15 @@ pub fn detect_flutter(project_dir: &Path) -> Result<(), FrameworkError> {
 
     // Recursive Serde visitors can exhaust Windows' 1 MiB main-thread stack
     // before reaching the depth budget. Parse and drop values on a fixed stack.
+    // A debug build uses about 22 KiB per nesting level, so 8 MiB covers the
+    // max_depth of 64 below with about 5x headroom. Resize both together.
     std::thread::Builder::new()
         .name("pubspec-parser".to_owned())
         .stack_size(PUBSPEC_PARSE_STACK_BYTES)
         .spawn(move || parse_pubspec(&raw))
         .map_err(|error| FrameworkError::PubspecUnreadable(error.to_string()))?
         .join()
-        .map_err(|_| FrameworkError::PubspecMalformed("YAML parser thread panicked".to_owned()))?
+        .map_err(|_| FrameworkError::PubspecUnreadable("internal YAML parser error".to_owned()))?
 }
 
 fn parse_pubspec(raw: &str) -> Result<(), FrameworkError> {
