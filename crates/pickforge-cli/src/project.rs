@@ -12,6 +12,7 @@ use thiserror::Error;
 const PROJECT_ID_HASH_LENGTH: usize = 16;
 const PROJECT_ID_SLUG_LENGTH: usize = 40;
 const PUBSPEC_MAX_BYTES: usize = 4 * 1024 * 1024;
+const PUBSPEC_PARSE_STACK_BYTES: usize = 8 * 1024 * 1024;
 
 /// Absolute path with `.`/`..` removed, without touching the filesystem.
 fn lexically_absolute(path: &Path) -> PathBuf {
@@ -249,6 +250,18 @@ pub fn detect_flutter(project_dir: &Path) -> Result<(), FrameworkError> {
     let raw = String::from_utf8(raw)
         .map_err(|error| FrameworkError::PubspecUnreadable(error.to_string()))?;
 
+    // Recursive Serde visitors can exhaust Windows' 1 MiB main-thread stack
+    // before reaching the depth budget. Parse and drop values on a fixed stack.
+    std::thread::Builder::new()
+        .name("pubspec-parser".to_owned())
+        .stack_size(PUBSPEC_PARSE_STACK_BYTES)
+        .spawn(move || parse_pubspec(&raw))
+        .map_err(|error| FrameworkError::PubspecUnreadable(error.to_string()))?
+        .join()
+        .map_err(|_| FrameworkError::PubspecMalformed("YAML parser thread panicked".to_owned()))?
+}
+
+fn parse_pubspec(raw: &str) -> Result<(), FrameworkError> {
     let options = serde_saphyr::options! {
         budget: serde_saphyr::budget! {
             max_depth: 64,
@@ -280,7 +293,7 @@ pub fn detect_flutter(project_dir: &Path) -> Result<(), FrameworkError> {
     // A generic value also validates unknown fields, including recursive aliases
     // that typed structs can skip. Parse the whole stream with a one-document
     // budget so malformed content after `...` also fails. Empty YAML is not Flutter.
-    let pubspecs = serde_saphyr::from_multiple_with_options::<PubspecValue>(&raw, options)
+    let pubspecs = serde_saphyr::from_multiple_with_options::<PubspecValue>(raw, options)
         .map_err(|error| FrameworkError::PubspecMalformed(error.to_string()))?;
     let sdk = pubspecs
         .first()

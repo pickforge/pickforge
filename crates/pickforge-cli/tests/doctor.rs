@@ -259,6 +259,14 @@ fn invalid_typed_scalars_and_unknown_aliases_are_malformed() {
 }
 
 #[test]
+fn oversized_typed_integer_is_malformed_unlike_serde_yaml_ng() {
+    assert_hostile_pubspec(
+        &format!("{FLUTTER_PUBSPEC}version: !!int 18446744073709551616\n"),
+        "invalid u64",
+    );
+}
+
+#[test]
 fn invalid_core_tags_cannot_make_flutter_strings() {
     for (sdk, expected) in [
         ("!!int flutter", "invalid u64"),
@@ -305,6 +313,17 @@ fn alias_expansion_bomb_is_malformed() {
 }
 
 #[test]
+fn alias_scalar_byte_amplification_is_malformed() {
+    assert_hostile_pubspec(
+        &format!(
+            "{FLUTTER_PUBSPEC}a: &x \"{}\"\nb: *x\n",
+            "x".repeat(3 * 1024 * 1024)
+        ),
+        "budget breached: ScalarBytes",
+    );
+}
+
+#[test]
 fn shallow_aliases_still_detect_flutter() {
     let temp = TempDir::new().unwrap();
     let project_dir = temp.path().join("app");
@@ -329,6 +348,25 @@ fn assert_flutter_pubspec(pubspec: &str) {
         check(&report, "project.framework").status,
         CheckStatus::Pass
     );
+}
+
+#[test]
+fn pubspec_parsing_works_on_a_one_mib_caller_stack() {
+    std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        .spawn(|| {
+            // Root mapping plus 63 containers reaches the current depth budget.
+            for (open, close) in [("[", "]"), ("{a: ", "}")] {
+                assert_flutter_pubspec(&format!(
+                    "{FLUTTER_PUBSPEC}other: {}0{}\n",
+                    open.repeat(63),
+                    close.repeat(63)
+                ));
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]
