@@ -487,6 +487,136 @@ describe("process identity and group termination", () => {
     }
   });
 
+  const eperm = (): never => {
+    throw Object.assign(new Error("denied"), { code: "EPERM" });
+  };
+
+  it("refuses to stop a group whose leader stat is unreadable", async () => {
+    const pid = 1_234_567;
+    const read = vi.spyOn(fs, "readFileSync").mockImplementation(eperm);
+    const entries = vi
+      .spyOn(fs, "readdirSync")
+      .mockReturnValue([String(pid)] as never);
+    const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+    try {
+      const result = await stopProcessGroupVerified(
+        { pid, startTicks: 456 },
+        { timeoutMs: 0 },
+      );
+
+      expect(result).toEqual({ outcome: "unverified", signaled: false });
+      expect(kill).not.toHaveBeenCalled();
+    } finally {
+      kill.mockRestore();
+      entries.mockRestore();
+      read.mockRestore();
+    }
+  });
+
+  it.each([
+    ["still exists", "unverified", true],
+    ["is gone", "already-dead", false],
+  ] as const)(
+    "with a gone leader and unreadable entries, a group that %s is %s",
+    async (_label, outcome, groupAlive) => {
+      const pid = 1_234_567;
+      const read = vi
+        .spyOn(fs, "readFileSync")
+        .mockImplementation(((filePath: fs.PathOrFileDescriptor) => {
+          if (String(filePath).endsWith(`/${pid}/stat`)) {
+            throw Object.assign(new Error("gone"), { code: "ENOENT" });
+          }
+          return eperm();
+        }) as typeof fs.readFileSync);
+      const entries = vi
+        .spyOn(fs, "readdirSync")
+        .mockReturnValue([String(pid + 1)] as never);
+      const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+        if (groupAlive) return true;
+        throw Object.assign(new Error("no such group"), { code: "ESRCH" });
+      });
+      try {
+        const result = await stopProcessGroupVerified({ pid, startTicks: 456 });
+
+        expect(result).toEqual({ outcome, signaled: false });
+        expect(kill.mock.calls).toEqual([[-pid, 0]]);
+      } finally {
+        kill.mockRestore();
+        entries.mockRestore();
+        read.mockRestore();
+      }
+    },
+  );
+
+  it("does not escalate or report termination once stat reads fail after SIGTERM", async () => {
+    const pid = 1_234_567;
+    const startTicks = 456;
+    let termed = false;
+    const read = vi
+      .spyOn(fs, "readFileSync")
+      .mockImplementation(((_filePath: fs.PathOrFileDescriptor) =>
+        termed ? eperm() : procStat(pid, "S", pid, startTicks)) as typeof fs.readFileSync);
+    const entries = vi
+      .spyOn(fs, "readdirSync")
+      .mockReturnValue([String(pid)] as never);
+    const kill = vi.spyOn(process, "kill").mockImplementation((_pid, signal) => {
+      if (signal === "SIGTERM") termed = true;
+      return true;
+    });
+    try {
+      const result = await stopProcessGroupVerified(
+        { pid, startTicks },
+        { timeoutMs: 0 },
+      );
+
+      expect(result).toEqual({ outcome: "unverified", signaled: true });
+      expect(kill.mock.calls).toEqual([[-pid, "SIGTERM"]]);
+    } finally {
+      kill.mockRestore();
+      entries.mockRestore();
+      read.mockRestore();
+    }
+  });
+
+  it("reports an unverified group when stat reads fail after SIGKILL", async () => {
+    const pid = 1_234_567;
+    const startTicks = 456;
+    let killed = false;
+    const read = vi
+      .spyOn(fs, "readFileSync")
+      .mockImplementation(((_filePath: fs.PathOrFileDescriptor) =>
+        killed ? eperm() : procStat(pid, "S", pid, startTicks)) as typeof fs.readFileSync);
+    const entries = vi
+      .spyOn(fs, "readdirSync")
+      .mockReturnValue([String(pid)] as never);
+    const kill = vi.spyOn(process, "kill").mockImplementation((_pid, signal) => {
+      if (signal === "SIGKILL") killed = true;
+      return true;
+    });
+    vi.useFakeTimers();
+    try {
+      const pending = stopProcessGroupVerified(
+        { pid, startTicks },
+        { timeoutMs: 0 },
+      );
+      await vi.advanceTimersByTimeAsync(1_200);
+
+      await expect(pending).resolves.toEqual({
+        outcome: "unverified",
+        signaled: true,
+      });
+      expect(kill.mock.calls.filter(([, signal]) => signal !== 0)).toEqual([
+        [-pid, "SIGTERM"],
+        [-pid, "SIGKILL"],
+      ]);
+    } finally {
+      vi.useRealTimers();
+      kill.mockRestore();
+      entries.mockRestore();
+      read.mockRestore();
+    }
+  });
+
   it.skipIf(!hasPython3)(
     "does not return while a real zombie leader still has a running thread",
     async () => {
