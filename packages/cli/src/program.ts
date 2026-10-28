@@ -57,6 +57,7 @@ import {
 import { runSetupAndroid } from "./commands/setup-android.js";
 import { runSetupLabUser } from "./commands/setup-lab-user.js";
 import { runTakeoverStatus, runTakeoverWatchdog } from "./commands/takeover.js";
+import { runViewerHost } from "./commands/viewer-host.js";
 import { runViewerBridge } from "./commands/viewer-bridge.js";
 import { runWatch } from "./commands/watch.js";
 
@@ -287,6 +288,13 @@ function registerWatchAndBrowserCommands(program: Command): void {
   // Internal, undocumented commands spawned by pickforge-lab itself — not a
   // supported public CLI surface.
   const internal = program.command("internal", { hidden: true });
+
+  internal
+    .command("viewer-host", { hidden: true })
+    .requiredOption("--session <id>", "session id")
+    .requiredOption("--binary <path>", "native viewer binary")
+    .requiredOption("--viewer-version <version>", "expected viewer version")
+    .action(async (opts) => { process.exitCode = await runViewerHost(opts); });
 
   internal
     .command("viewer-bridge", { hidden: true })

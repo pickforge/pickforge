@@ -94,15 +94,25 @@ crossing record may exceed it; Pickforge then writes one durable metadata-only
 truncation marker and stops appending payloads. Pickforge retains the latest 20
 finalized evidence runs, while active/running and legacy runs are not pruned.
 
+The native `pickforge-viewer` path starts no network server.
+It connects to the session's local X socket with empty authorization and never reads `~/.Xauthority`.
+The host verifies the session's Xvfb arguments, UID, process start time, lock PID, and socket ownership before launch.
+The viewer window uses the caller's graphical environment. The capture target is passed through explicit launch arguments.
+The detached host uses stdio for viewer commands and a Unix socket for local watch operations.
+That socket is mode 0600 inside the session's mode 0700 `viewer` directory.
+Readiness records include verified host and viewer process identities and the socket inode.
+The socket accepts only status, expand, collapse, and shutdown. It cannot grant control or inject input.
+Teardown checks process identities before stopping the host and viewer, and uses SIGKILL if SIGTERM fails.
+
 ## VNC binds to loopback (SEC-01 — mitigated)
 
 The desktop VNC server (`x11vnc`) is started with `-localhost`, so it listens on
 `127.0.0.1` only and is not reachable from the network. It runs without a VNC
 password (`-nopw`); that is safe precisely because the socket never leaves the
-loopback interface. Normal `--vnc` and `pickforge-lab watch` observation is
+loopback interface. Normal `--vnc` and fallback `pickforge-lab watch` observation is
 server-enforced read-only (`-viewonly`): a connecting client cannot inject
 keyboard or mouse input into the session, only watch it. `pickforge-lab watch`
-starts this server lazily and closing its host-side viewer does not stop VNC,
+starts this server lazily on the fallback path. Closing its host-side viewer does not stop VNC,
 Xvfb, or the session. `--vnc-control` is an explicit writable escape hatch for
 entering a password, API key, or OTP directly into the lab app. Watch refuses
 to reuse an active writable server rather than weakening its read-only

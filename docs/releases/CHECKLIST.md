@@ -97,6 +97,10 @@ npx --yes @sentry/cli@3.8.0 sourcemaps inject packages/cli/dist
 cargo build --release --locked
 rm -rf /tmp/candidate && mkdir -p /tmp/candidate/npm /tmp/candidate/assets
 (cd packages/cli && npm pack --pack-destination /tmp/candidate/npm)
+cargo build --release --locked -p pickforge-viewer
+cp target/release/pickforge-viewer /tmp/candidate/assets/pickforge-viewer-linux-x86_64
+strip /tmp/candidate/assets/pickforge-viewer-linux-x86_64
+(cd /tmp/candidate/assets && sha256sum pickforge-viewer-linux-x86_64 > pickforge-viewer-linux-x86_64.sha256)
 cp target/release/pickforge /tmp/candidate/assets/pickforge-linux-x86_64
 strip /tmp/candidate/assets/pickforge-linux-x86_64
 (cd /tmp/candidate/assets && sha256sum pickforge-linux-x86_64 > pickforge-linux-x86_64.sha256)
@@ -245,16 +249,21 @@ gh release download "$TAG" --repo "$REPO" --dir "$ASSET_DIR"
 (
   cd "$ASSET_DIR"
   sha256sum -c pickforge-linux-x86_64.sha256
+  sha256sum -c pickforge-viewer-linux-x86_64.sha256
   sha256sum -c pickforge-macos-arm64.sha256
 )
 chmod +x "$ASSET_DIR/pickforge-linux-x86_64"
 test "$($ASSET_DIR/pickforge-linux-x86_64 --version)" = "pickforge $VERSION"
+chmod +x "$ASSET_DIR/pickforge-viewer-linux-x86_64"
+test "$($ASSET_DIR/pickforge-viewer-linux-x86_64 --version)" = "pickforge-viewer $VERSION"
 ```
 
 The asset list must be exactly:
 
 - `pickforge-linux-x86_64`
 - `pickforge-linux-x86_64.sha256`
+- `pickforge-viewer-linux-x86_64`
+- `pickforge-viewer-linux-x86_64.sha256`
 - `pickforge-macos-arm64`
 - `pickforge-macos-arm64.sha256`
 

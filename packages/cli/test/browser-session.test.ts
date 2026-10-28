@@ -322,6 +322,8 @@ describe.skipIf(!hasXvfb)("built CLI browser lifecycle", () => {
           'server.listen(port, "127.0.0.1");\n' +
           'process.on("SIGTERM", () => server.close(() => process.exit(0)));\n',
       );
+      // This test covers noVNC even when CI installs the real native viewer.
+      writeExecutable(path.join(binDir, "pickforge-viewer"), "#!/bin/sh\nexit 1\n");
       // The viewer prefers "chromium"; this fake shadows any real one.
       writeExecutable(
         path.join(binDir, "chromium"),

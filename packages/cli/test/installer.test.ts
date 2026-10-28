@@ -122,6 +122,10 @@ beforeAll(async () => {
     .update(fs.readFileSync(rustAsset))
     .digest("hex");
   fs.writeFileSync(`${rustAsset}.sha256`, `${rustHash}  pickforge-linux-x86_64\n`);
+  const viewerAsset = path.join(releaseDir, "pickforge-viewer-linux-x86_64");
+  writeExecutable(viewerAsset, `#!/bin/sh\nprintf '%s\\n' 'pickforge-viewer ${cliVersion}'\n`);
+  const viewerHash = createHash("sha256").update(fs.readFileSync(viewerAsset)).digest("hex");
+  fs.writeFileSync(`${viewerAsset}.sha256`, `${viewerHash}  pickforge-viewer-linux-x86_64\n`);
   releaseBaseUrl = pathToFileURL(releaseDir).href;
 
   const packDir = path.join(suiteDir, "pack");
@@ -171,6 +175,9 @@ describe("install.sh", () => {
       expect(result.stdout).toContain(`pickforge ${cliVersion} installed at`);
       expect(result.stdout).toContain("pickforge-lab agents install");
       expect(result.stdout).toContain("pickforge doctor");
+      const viewerVersion = await run(path.join(prefix, "bin", "pickforge-viewer"), ["--version"], { env: baseEnv(home) });
+      expect(viewerVersion.code, describeFailure(viewerVersion)).toBe(0);
+      expect(viewerVersion.stdout.trim()).toBe(`pickforge-viewer ${cliVersion}`);
 
       const binary = path.join(prefix, "bin", "pickforge-lab");
       const version = await run(binary, ["--version"], { env: baseEnv(home) });
@@ -218,6 +225,25 @@ describe("install.sh", () => {
     },
     NETWORK_TIMEOUT,
   );
+
+  it.each(["checksum", "version"])("rejects a viewer with a bad %s", async (failure) => {
+    const { home, dir } = makeCase(`viewer-bad-${failure}`);
+    const prefix = path.join(dir, "prefix");
+    const assets = path.join(dir, "release");
+    fs.cpSync(fileURLToPath(releaseBaseUrl), assets, { recursive: true });
+    const viewer = path.join(assets, "pickforge-viewer-linux-x86_64");
+    if (failure === "version") writeExecutable(viewer, "#!/bin/sh\nprintf '%s\\n' 'pickforge-viewer 0.0.0'\n");
+    const hash = failure === "checksum" ? "0".repeat(64) : createHash("sha256").update(fs.readFileSync(viewer)).digest("hex");
+    fs.writeFileSync(`${viewer}.sha256`, `${hash}  pickforge-viewer-linux-x86_64\n`);
+    const result = await run("sh", [installScript], { cwd: dir, env: baseEnv(home, {
+      PICKFORGE_INSTALL_FROM_TARBALL: tarball, PICKFORGE_INSTALL_RUNTIME: "npm",
+      PICKFORGE_INSTALL_RELEASE_BASE_URL: pathToFileURL(assets).href, npm_config_prefix: prefix,
+    }) });
+    expect(result.code, describeFailure(result)).toBe(1);
+    expect(result.stderr).toContain(failure === "checksum" ? "checksum verification failed" : "downloaded viewer reported");
+    expect(fs.existsSync(path.join(prefix, "bin", "pickforge-viewer"))).toBe(false);
+    expect(fs.existsSync(path.join(prefix, "bin", "pickforge"))).toBe(true);
+  }, NETWORK_TIMEOUT);
 
   it(
     "refuses unsupported Rust targets after installing the TypeScript commands",

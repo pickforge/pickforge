@@ -17,13 +17,14 @@ import {
   writeViewerLaunchRecord,
   type ViewerBrowserKind,
   type ViewerHyprlandLaunch,
-  type ViewerLaunchRecord,
+  type BrowserViewerLaunchRecord as ViewerLaunchRecord,
   type ViewerWindowSize,
 } from "@pickforge/lab-desktop-linux";
 import { buildViewerUrl } from "./contract.js";
 import {
   detectHyprland,
   disableViewerRule,
+  disableViewerOpacityRule,
   hyprlandRuleName,
   installViewerRule,
   viewerClassPattern,
@@ -437,7 +438,10 @@ async function startLocked(
     const recorded = await recordSpawnedBrowser(record, spawned, opts.registryEnv);
     return { record: recorded, spawned };
   } catch (error) {
-    if (hyprland !== undefined) await disableViewerRule(hyprland, hyprland.ruleName);
+    if (hyprland !== undefined) {
+      await disableViewerRule(hyprland, hyprland.ruleName);
+      await disableViewerOpacityRule(hyprland, hyprland.ruleName);
+    }
     if (!(error instanceof ViewerLaunchKeptError)) {
       await removeViewerLaunch(opts.sessionId, launchId, opts.registryEnv).catch(() => {});
     }
@@ -494,6 +498,7 @@ async function runLaunch(
     return result;
   }
   const status = await spawned.exited;
+  if (record.hyprland !== undefined) await disableViewerOpacityRule(record.hyprland, record.hyprland.ruleName);
   // A launch that cannot be removed now is pruned by a later launch.
   await removeViewerLaunch(opts.sessionId, record.launchId, opts.registryEnv).catch(() => {});
   return { ...result, ...status };
