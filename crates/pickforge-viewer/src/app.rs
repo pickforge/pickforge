@@ -399,14 +399,7 @@ impl App {
     fn relayout(&mut self) {
         let (w, h) = (self.size.width, self.size.height);
         self.update_pause();
-        // IME commits are text for the session, so IME is on only then.
-        let ime = self.controller.forwarding(self.mode);
-        if ime != self.ime_allowed {
-            if let Some(window) = &self.window {
-                window.set_ime_allowed(ime);
-                self.ime_allowed = ime;
-            }
-        }
+        self.sync_ime();
         if w == 0 || h == 0 {
             return;
         }
@@ -429,15 +422,7 @@ impl App {
         });
         let top = self.bar.as_ref().map_or(0, |b| b.rect.h).min(h);
         let content = Rect::new(0, top as i32, w, h - top);
-        // The banner hides while controlling. The thumbnail shows the
-        // message only, because a thumbnail click only expands.
-        let with_button = self.mode != Mode::Thumbnail && self.controller.can_take();
-        self.banner = match self.controller.attention() {
-            Some(message) if !self.controller.controlling() => {
-                Banner::layout(content, message, self.metrics, with_button, &mut self.text)
-            }
-            _ => None,
-        };
+        self.layout_banner(content);
         let image = geometry::fit(self.session.0, self.session.1, content);
         if image != self.image || self.scaler.is_none() {
             self.image = image;
@@ -456,6 +441,30 @@ impl App {
         self.cursor_drawn = None;
         self.update_hover();
         self.damage_all();
+    }
+
+    fn sync_ime(&mut self) {
+        // IME commits are text for the session, so IME is on only then.
+        let ime = self.controller.forwarding(self.mode);
+        if ime == self.ime_allowed {
+            return;
+        }
+        if let Some(window) = &self.window {
+            window.set_ime_allowed(ime);
+            self.ime_allowed = ime;
+        }
+    }
+
+    fn layout_banner(&mut self, content: Rect) {
+        // The banner hides while controlling. The thumbnail shows the
+        // message only, because a thumbnail click only expands.
+        let with_button = self.mode != Mode::Thumbnail && self.controller.can_take();
+        self.banner = match self.controller.attention() {
+            Some(message) if !self.controller.controlling() => {
+                Banner::layout(content, message, self.metrics, with_button, &mut self.text)
+            }
+            _ => None,
+        };
     }
 
     fn update_pause(&mut self) {

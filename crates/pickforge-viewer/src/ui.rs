@@ -561,63 +561,101 @@ pub fn wrap(
     max_lines: usize,
     mut measure: impl FnMut(&str) -> f32,
 ) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    let mut line = String::new();
-    let mut truncated = false;
-    'words: for word in message.split_whitespace() {
-        let mut rest = word;
-        while !rest.is_empty() {
-            let joined = if line.is_empty() {
-                rest.to_owned()
-            } else {
-                format!("{line} {rest}")
-            };
-            if measure(&joined) <= max_w {
-                line = joined;
-                break;
-            }
-            if !line.is_empty() {
-                if lines.len() + 1 == max_lines {
-                    truncated = true;
-                    break 'words;
-                }
-                lines.push(std::mem::take(&mut line));
-                continue;
-            }
-            // One word wider than the line: take what fits, at least one
-            // character.
-            let mut end = rest.chars().next().map_or(0, char::len_utf8);
-            for (i, c) in rest.char_indices().skip(1) {
-                if measure(&rest[..i + c.len_utf8()]) > max_w {
-                    break;
-                }
-                end = i + c.len_utf8();
-            }
-            line = rest[..end].to_owned();
-            rest = &rest[end..];
-            if !rest.is_empty() {
-                if lines.len() + 1 == max_lines {
-                    truncated = true;
-                    break 'words;
-                }
-                lines.push(std::mem::take(&mut line));
-            }
-        }
-    }
-    if !line.is_empty() {
-        lines.push(line);
-    }
+    let mut wrapper = Wrapper {
+        lines: Vec::new(),
+        line: String::new(),
+        max_w,
+        max_lines,
+    };
+    let truncated = message
+        .split_whitespace()
+        .any(|word| !wrapper.add_word(word, &mut measure));
+    let mut lines = wrapper.finish();
     if truncated {
-        if let Some(last) = lines.last_mut() {
-            while !last.is_empty() && measure(&format!("{last}{ELLIPSIS}")) > max_w {
-                last.pop();
-            }
-            let trimmed = last.trim_end().len();
-            last.truncate(trimmed);
-            last.push_str(ELLIPSIS);
-        }
+        ellipsize(&mut lines, max_w, &mut measure);
     }
     lines
+}
+
+struct Wrapper {
+    lines: Vec<String>,
+    line: String,
+    max_w: f32,
+    max_lines: usize,
+}
+
+impl Wrapper {
+    /// Adds `word`. Returns false when no line is left for the rest.
+    fn add_word(&mut self, word: &str, measure: &mut impl FnMut(&str) -> f32) -> bool {
+        let mut rest = word;
+        while !rest.is_empty() {
+            let joined = if self.line.is_empty() {
+                rest.to_owned()
+            } else {
+                format!("{} {rest}", self.line)
+            };
+            if measure(&joined) <= self.max_w {
+                self.line = joined;
+                return true;
+            }
+            if self.line.is_empty() {
+                // One word wider than the line: take what fits, at least
+                // one character.
+                let end = fitting_prefix(rest, self.max_w, measure);
+                self.line = rest[..end].to_owned();
+                rest = &rest[end..];
+                if rest.is_empty() {
+                    return true;
+                }
+            }
+            if !self.break_line() {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Starts a new line. Returns false when the current line is the last.
+    fn break_line(&mut self) -> bool {
+        if self.lines.len() + 1 == self.max_lines {
+            return false;
+        }
+        self.lines.push(std::mem::take(&mut self.line));
+        true
+    }
+
+    fn finish(mut self) -> Vec<String> {
+        if !self.line.is_empty() {
+            self.lines.push(self.line);
+        }
+        self.lines
+    }
+}
+
+/// The byte length of the longest prefix of `word` within `max_w`, at
+/// least one character.
+fn fitting_prefix(word: &str, max_w: f32, measure: &mut impl FnMut(&str) -> f32) -> usize {
+    let mut end = word.chars().next().map_or(0, char::len_utf8);
+    for (i, c) in word.char_indices().skip(1) {
+        if measure(&word[..i + c.len_utf8()]) > max_w {
+            break;
+        }
+        end = i + c.len_utf8();
+    }
+    end
+}
+
+/// Ends the last line with an ellipsis, trimmed to fit `max_w`.
+fn ellipsize(lines: &mut [String], max_w: f32, measure: &mut impl FnMut(&str) -> f32) {
+    let Some(last) = lines.last_mut() else {
+        return;
+    };
+    while !last.is_empty() && measure(&format!("{last}{ELLIPSIS}")) > max_w {
+        last.pop();
+    }
+    let trimmed = last.trim_end().len();
+    last.truncate(trimmed);
+    last.push_str(ELLIPSIS);
 }
 
 /// The attention banner: the host's message and, when control can be
