@@ -638,6 +638,7 @@ The VNC fallback returns its server to read-only when control ends.
 Each session gets its own isolated display or emulator, so several agents and projects can run labs side by side. When a command or tool is called without an explicit session id, the default resolves per project: only running sessions created for the same project directory are considered. Pass `session` ids (CLI: `--session <id>`) to target a specific lab, including one belonging to another project.
 
 `pickforge-lab browser devtools-mcp` is intentionally stricter: it always resolves exactly one live browser session for the current project. It does not accept a session id, browser URL, or WebSocket endpoint.
+A project can therefore have one live browser session at a time. With two, the relay refuses to start and names both; destroy all but one.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/pickforge/pickforge/main/assets/brand/pickforge-run-lab-mock.svg" alt="PICKFORGE · RUN LAB — desktop session, Android emulator, live screenshots, logs, and agent terminal" width="900">
@@ -886,6 +887,14 @@ It reads the session's verified Xvfb display directly, without starting VNC, a b
 A detached host keeps it running after an automatic launch returns.
 Closing the viewer leaves the session running. Session destruction stops both host and viewer.
 
+Without `--session`, `watch` picks the one running desktop-capable session created for this project.
+The project is the current directory, or `--project-dir`.
+When the project has more than one, it lists their ids and asks for `--session <id>`.
+`--session <id>` picks that session, also from another project.
+Each viewer shows its session id and project folder name in the window title and on the thumbnail, such as `desk-1a2b3c · my-app`.
+A long folder name ends with an ellipsis on the thumbnail.
+Each viewer expands, collapses and closes on its own, so viewers for two sessions do not affect each other.
+
 The native window starts as a 384 pixel wide thumbnail.
 A click expands it without sending input to the session.
 The expanded watch bar has Take control, Fullscreen, Collapse, and Close. Escape collapses in watch mode.
@@ -915,7 +924,7 @@ Viewer launch defaults to manual. Set the global or project `.picklab/config.jso
 Automatic launch uses the same native-first selection and returns after readiness and bounded placement.
 Explicit `watch` waits for the viewer to close.
 With no graphical session or supported fallback browser, it prints the noVNC URL and an SSH tunnel command.
-No matching session produces the create command. Multiple matches require `--session`.
+No matching session produces the create command.
 `--viewer` and `--vnc-control` are rejected together before creation.
 Automatic viewing is suppressed for an explicitly writable `--vnc-control` session.
 

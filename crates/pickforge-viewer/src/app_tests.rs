@@ -11,6 +11,7 @@ fn app() -> App {
             class: "test".into(),
             thumbnail_width: 100,
             placement: Placement::SelfPlaced,
+            label: None,
         },
         (100, 100),
         Arc::new(Mutex::new(Shared::new(100, 100))),
@@ -106,4 +107,19 @@ fn x11_pause_refresh_observes_unmap_and_iconic_state_without_resize() {
     now += X11_PAUSE_INTERVAL;
     app.refresh_x11_pause(now);
     assert!(!app.control.is_paused());
+}
+
+#[test]
+fn thumbnail_keeps_the_session_label_above_an_attention_banner() {
+    let mut app = app();
+    app.config.label = Some("desk-1a2b3c \u{b7} my-app".into());
+    app.size = PhysicalSize::new(384, 240);
+    let message = "Please sign in to continue".to_string();
+    app.controller
+        .on_command(&Command::Attention { message }, app.mode, Instant::now());
+    app.relayout();
+    let (pill, shown) = app.label_pill.clone().expect("label");
+    let banner = app.banner.clone().expect("banner");
+    assert_eq!(shown, "desk-1a2b3c \u{b7} my-app");
+    assert!(banner.rect.y >= pill.bottom(), "{banner:?} {pill:?}");
 }

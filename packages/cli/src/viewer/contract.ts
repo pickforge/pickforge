@@ -3,6 +3,7 @@
  * server), the passive viewer page and the launcher (pickforge/pickforge#207).
  * The page mirrors these values in `page/viewer.js`; keep both in sync.
  */
+import path from "node:path";
 
 /** The bridge binds and is reached only on this address, never `localhost`. */
 export const VIEWER_HOST = "127.0.0.1";
@@ -59,7 +60,30 @@ export const VIEWER_CLOSE_CODES = {
   shuttingDown: 4004,
 } as const;
 
-/** The launch URL. The token travels in the fragment, so it is never sent in a page request. */
-export function buildViewerUrl(port: number, launchId: string, token: string): string {
-  return `http://${VIEWER_HOST}:${port}${viewerPagePath(launchId)}#token=${token}`;
+/** Longest viewer label in characters. The native viewer cuts longer ones. */
+export const VIEWER_LABEL_MAX_CHARS = 256;
+const PROJECT_NAME_MAX_CHARS = 128;
+/** Control, format, bidi and line or paragraph separator characters. */
+const HIDDEN_CHARACTERS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+
+/**
+ * The viewer's title and thumbnail text: the session id, then the project
+ * folder name. Sessions have no name of their own (pickforge/pickforge#367).
+ */
+export function viewerLabel(sessionId: string, projectDir: string): string {
+  const name = [...path.basename(projectDir).replace(HIDDEN_CHARACTERS, "").trim()];
+  if (name.length === 0) return sessionId;
+  const shown = name.length > PROJECT_NAME_MAX_CHARS
+    ? `${name.slice(0, PROJECT_NAME_MAX_CHARS - 1).join("")}\u2026`
+    : name.join("");
+  return `${sessionId} \u00b7 ${shown}`;
+}
+
+/**
+ * The launch URL. The token and the label travel in the fragment, so they
+ * are never sent in a page request.
+ */
+export function buildViewerUrl(port: number, launchId: string, token: string, label?: string): string {
+  const fragment = label === undefined ? "" : `&label=${encodeURIComponent(label)}`;
+  return `http://${VIEWER_HOST}:${port}${viewerPagePath(launchId)}#token=${token}${fragment}`;
 }

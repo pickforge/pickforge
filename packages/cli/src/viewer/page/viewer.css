@@ -67,6 +67,33 @@ body[data-mode="expanded"] #shield {
   pointer-events: none;
 }
 
+/* The session label, in the thumbnail only. */
+#label {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 20;
+  box-sizing: border-box;
+  max-width: calc(100vw - 16px);
+  margin: 0;
+  padding: 5px 10px;
+  overflow: hidden;
+  border: 1px solid var(--color-hairline-strong);
+  border-radius: var(--radius-pill);
+  background: rgba(15, 15, 17, 0.88);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+#label[hidden],
+body[data-mode="expanded"] #label {
+  display: none;
+}
+
 #status-text {
   overflow: hidden;
   text-overflow: ellipsis;

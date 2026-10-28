@@ -14,6 +14,11 @@ const RETRY_MAX_MS = 10000;
 const WRITABLE_RETRY_MS = 5000;
 const STATUS_API_PATH = "/api/status";
 const STATUS_TIMEOUT_MS = 5000;
+/** Mirrors VIEWER_LABEL_MAX_CHARS. */
+const LABEL_MAX_CHARS = 256;
+/** Control, format, bidi and line or paragraph separator characters. */
+const HIDDEN_CHARACTERS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+const TITLE = "Pickforge viewer";
 /** Consecutive failed status probes that mean the bridge is gone for good. */
 const MAX_PROBE_FAILURES = 2;
 
@@ -83,17 +88,30 @@ function writeStored(name, value) {
   }
 }
 
-/** The token arrives in the fragment once, then lives in sessionStorage. */
-function takeToken() {
-  const fromHash = new URLSearchParams(location.hash.slice(1)).get("token");
+/**
+ * The token and the label arrive in the fragment once, then live in
+ * sessionStorage.
+ */
+function takeFragment() {
+  const params = new URLSearchParams(location.hash.slice(1));
   if (location.hash !== "") {
     history.replaceState(null, "", location.pathname + location.search);
   }
-  if (fromHash) {
-    writeStored("token", fromHash);
-    return fromHash;
+  const token = params.get("token");
+  if (token) {
+    writeStored("token", token);
+    writeStored("label", params.get("label") ?? "");
+    return { token, label: params.get("label") ?? "" };
   }
-  return readStored("token");
+  return { token: readStored("token"), label: readStored("label") };
+}
+
+/** Shows the session label in the title and the thumbnail, as plain text. */
+function showLabel(raw) {
+  const label = [...raw.replace(HIDDEN_CHARACTERS, "").trim()].slice(0, LABEL_MAX_CHARS).join("");
+  document.title = label === "" ? TITLE : `${label} \u00b7 ${TITLE}`;
+  element("label").textContent = label;
+  element("label").hidden = label === "";
 }
 
 function setStatus(status) {
@@ -281,7 +299,9 @@ function onKeyDown(event) {
 function start() {
   const match = /^\/viewer\/([^/]+)$/.exec(location.pathname);
   state.launchId = match !== null && LAUNCH_ID_PATTERN.test(match[1]) ? match[1] : "";
-  state.token = state.launchId === "" ? "" : takeToken();
+  const fragment = state.launchId === "" ? { token: "", label: "" } : takeFragment();
+  state.token = fragment.token;
+  showLabel(fragment.label);
   const shield = element("shield");
   for (const type of SHIELDED_EVENTS) {
     shield.addEventListener(type, onShieldEvent, { capture: true, passive: false });

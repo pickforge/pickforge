@@ -3,11 +3,17 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
+import { fileURLToPath } from "node:url";
 import { afterEach, expect, it } from "vitest";
-import { createSession, runCommand } from "@pickforge/lab-core";
-import { startXvfb, stopXvfb, findOnPath, screenshot, type XvfbHandle } from "@pickforge/lab-desktop-linux";
+import { createSession, getSession, processIdentityMatches, runCommand, type EnvLike } from "@pickforge/lab-core";
+import {
+  startXvfb, stopXvfb, findOnPath, screenshot, startNativeViewerHost, requestNativeViewerHost, stopSessionViewer,
+  stopNativeViewerHost, type NativeViewerHostIdentity, type XvfbHandle,
+} from "@pickforge/lab-desktop-linux";
 import { unusedTestDisplay } from "../../desktop-linux/test/test-resources.js";
+import { ensureCliBuilt } from "./build-once.js";
 import { readViewerLines } from "../src/viewer/native-host.js";
+import { nativeViewerVersion } from "../src/viewer/native.js";
 
 const binary = findOnPath("pickforge-viewer");
 const required = process.env.PICKFORGE_REQUIRE_VIEWER === "1";
@@ -18,7 +24,9 @@ let root: string | undefined;
 let child: ChildProcess | undefined;
 let terminal: ChildProcess | undefined;
 const displays: XvfbHandle[] = [];
+const viewerSessions: { id: string; env: EnvLike }[] = [];
 afterEach(async () => {
+  for (const { id, env } of viewerSessions.splice(0)) await stopSessionViewer(id, undefined, env);
   if (child !== undefined && child.exitCode === null && child.signalCode === null) {
     const exited = once(child, "exit");
     child.kill("SIGKILL");
@@ -77,3 +85,90 @@ it.skipIf(binary === null && !required)("real viewer draws the watched frame on 
   expect(pixels.ok).toBe(true);
   expect(pixels.stdout.toLowerCase()).toContain("#179ac3");
 }, 30_000);
+
+/** The viewer window's title and geometry on the host display. */
+async function viewerWindow(pid: number, env: NodeJS.ProcessEnv): Promise<{ title: string; geometry: string }> {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const search = await runCommand("xdotool", ["search", "--onlyvisible", "--pid", String(pid)], { env });
+    const id = search.ok ? search.stdout.trim().split("\n")[0] : undefined;
+    if (id) {
+      const title = await runCommand("xdotool", ["getwindowname", id], { env });
+      const geometry = await runCommand("xdotool", ["getwindowgeometry", "--shell", id], { env });
+      if (title.ok && geometry.ok) return { title: title.stdout.trim(), geometry: geometry.stdout.trim() };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`No viewer window for pid ${pid}`);
+}
+
+async function viewerMode(host: NativeViewerHostIdentity): Promise<string | undefined> {
+  const response = await requestNativeViewerHost(host, { op: "status" });
+  return response.ok ? response.mode : undefined;
+}
+
+async function waitForMode(host: NativeViewerHostIdentity, mode: string): Promise<void> {
+  await expect.poll(() => viewerMode(host), { timeout: 5_000 }).toBe(mode);
+}
+
+function alive(host: NativeViewerHostIdentity): boolean {
+  return processIdentityMatches({ pid: host.pid, startTicks: host.startTicks }) &&
+    processIdentityMatches({ pid: host.viewerPid, startTicks: host.viewerStartTicks });
+}
+
+it.skipIf(binary === null && !required)("two viewers expand, collapse and close on their own and show their session", async () => {
+  expect(binary, "PICKFORGE_REQUIRE_VIEWER requires pickforge-viewer on PATH").not.toBeNull();
+  expect(missing, "Live viewer dependencies must be present").toEqual([]);
+  await ensureCliBuilt();
+  const cliEntry = fileURLToPath(new URL("../dist/pickforge-lab.js", import.meta.url));
+  root = fs.mkdtempSync(path.join(os.tmpdir(), "pf-viewer-pair-"));
+  const hostDisplay = await startXvfb({ display: unusedTestDisplay(), logDir: root, width: 1280, height: 800, env: process.env });
+  displays.push(hostDisplay);
+  const env: NodeJS.ProcessEnv = { ...process.env, PICKFORGE_HOME: root, DISPLAY: hostDisplay.display };
+  delete env.WAYLAND_DISPLAY;
+  delete env.HYPRLAND_INSTANCE_SIGNATURE;
+  const sessions: { id: string; name: string; display: XvfbHandle }[] = [];
+  for (const name of ["alpha", "beta"]) {
+    const projectDir = path.join(root, name);
+    fs.mkdirSync(projectDir);
+    const display = await startXvfb({ display: unusedTestDisplay(), logDir: projectDir, width: 640, height: 480, env });
+    displays.push(display);
+    const { id } = await createSession({ type: "desktop", status: "running", projectDir,
+      desktop: { display: display.display, xvfbPid: display.pid, xvfbStartTimeTicks: display.startTimeTicks, width: 640, height: 480, homePolicy: "private" } }, env);
+    viewerSessions.push({ id, env });
+    sessions.push({ id, name, display });
+  }
+  const [a, b] = await Promise.all(sessions.map(({ id }) =>
+    startNativeViewerHost({ sessionId: id, cliEntry, binary: binary!, version: nativeViewerVersion, env })));
+  for (const [index, host] of [a!, b!].entries()) {
+    const { id, name } = sessions[index]!;
+    expect((await viewerWindow(host.viewerPid, env)).title).toBe(`${id} \u00b7 ${name} \u00b7 Pickforge viewer`);
+    await waitForMode(host, "thumbnail");
+  }
+  const bBefore = await viewerWindow(b!.viewerPid, env);
+  const aThumbnail = await viewerWindow(a!.viewerPid, env);
+
+  await requestNativeViewerHost(a!, { op: "expand" });
+  await waitForMode(a!, "expanded");
+  await expect.poll(async () => (await viewerWindow(a!.viewerPid, env)).geometry, { timeout: 5_000 }).not.toBe(aThumbnail.geometry);
+  expect(await viewerMode(b!)).toBe("thumbnail");
+  expect(await viewerWindow(b!.viewerPid, env)).toEqual(bBefore);
+
+  await requestNativeViewerHost(a!, { op: "collapse" });
+  await waitForMode(a!, "thumbnail");
+  expect(await viewerMode(b!)).toBe("thumbnail");
+  expect(await viewerWindow(b!.viewerPid, env)).toEqual(bBefore);
+
+  await stopNativeViewerHost(sessions[0]!.id, env);
+  expect(processIdentityMatches({ pid: a!.viewerPid, startTicks: a!.viewerStartTicks })).toBe(false);
+  expect(alive(b!)).toBe(true);
+  expect(await viewerMode(b!)).toBe("thumbnail");
+  expect(await viewerWindow(b!.viewerPid, env)).toEqual(bBefore);
+  for (const { id, display } of sessions) {
+    expect((await getSession(id, env))?.status).toBe("running");
+    expect(processIdentityMatches({ pid: display.pid, startTicks: display.startTimeTicks })).toBe(true);
+  }
+
+  await stopNativeViewerHost(sessions[1]!.id, env);
+  expect(alive(b!)).toBe(false);
+  expect((await getSession(sessions[1]!.id, env))?.status).toBe("running");
+}, 60_000);

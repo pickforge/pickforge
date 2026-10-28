@@ -20,7 +20,7 @@ import {
   type BrowserViewerLaunchRecord as ViewerLaunchRecord,
   type ViewerWindowSize,
 } from "@pickforge/lab-desktop-linux";
-import { buildViewerUrl } from "./contract.js";
+import { buildViewerUrl, viewerLabel } from "./contract.js";
 import {
   detectHyprland,
   disableViewerRule,
@@ -410,7 +410,7 @@ async function startLocked(
   const { launchId, profileDir } = await prepareViewerLaunch(opts.sessionId, opts.registryEnv);
   const sizes = viewerWindowSizes(opts.desktop);
   const argsOptions = {
-    url: buildViewerUrl(opts.bridgePort, launchId, opts.token),
+    url: buildViewerUrl(opts.bridgePort, launchId, opts.token, viewerLabel(opts.sessionId, session.projectDir)),
     profileDir,
     launchId,
     size: sizes.thumbnail,

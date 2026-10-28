@@ -17,6 +17,7 @@ import { NativeControl } from "./native-control.js";
 import { NativeRequests } from "./native-requests.js";
 import type { SpawnWatchdogFn } from "../commands/takeover-hold.js";
 import { viewerWindowSizes, viewerWindowClass } from "./launch.js";
+import { viewerLabel } from "./contract.js";
 import {
   detectHyprland, hyprlandRuleName, viewerClassPattern, installViewerRule,
   disableViewerRule, disableViewerOpacityRule, waitForViewerWindow, applyHyprlandWindowMode,
@@ -352,6 +353,7 @@ export async function runNativeViewerHost(options: NativeHostOptions): Promise<n
       "--display", target.display, "--xvfb-pid", String(target.pid), "--xvfb-start-ticks", String(target.startTicks),
       "--width", String(sizes.expanded.width), "--height", String(sizes.expanded.height - 32),
       "--class", viewerWindowClass(launchId), "--thumbnail-width", "384", "--placement", hyprland === undefined ? "self" : "host",
+      "--label", viewerLabel(options.session, session.projectDir),
     ], { env, shell: false, detached: false, stdio: ["pipe", "pipe", "pipe"] });
     await once(child, "spawn");
     const viewerIdentity = readProcessIdentity(child.pid!);
