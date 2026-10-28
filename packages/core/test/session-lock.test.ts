@@ -22,16 +22,12 @@ function lockPath(): string {
 }
 
 function holdLock(): { held: Promise<void>; release: () => void } {
-  let release: (() => void) | undefined;
-  const held = withSessionVncLock(
-    sessionId,
-    env,
-    () =>
-      new Promise<void>((resolve) => {
-        release = resolve;
-      }),
-  );
-  return { held, release: () => release?.() };
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const held = withSessionVncLock(sessionId, env, () => gate);
+  return { held, release };
 }
 
 describe("session VNC lock", () => {
@@ -75,13 +71,12 @@ describe("session VNC lock", () => {
 
   it("names the session lock, not VNC, when the wait times out", async () => {
     const holder = holdLock();
-    await vi.waitFor(() => expect(fs.existsSync(lockPath())).toBe(true));
-    // Each clock read jumps a full wait, so the first poll is past the deadline.
-    let clock = Date.now();
-    const now = vi
-      .spyOn(Date, "now")
-      .mockImplementation(() => (clock += SESSION_VNC_LOCK_TIMEOUT_MS));
+    const now = vi.spyOn(Date, "now");
     try {
+      await vi.waitFor(() => expect(fs.existsSync(lockPath())).toBe(true));
+      // Each clock read jumps a full wait, so the first poll is past the deadline.
+      let clock = Date.now();
+      now.mockImplementation(() => (clock += SESSION_VNC_LOCK_TIMEOUT_MS));
       await expect(withSessionVncLock(sessionId, env, async () => {})).rejects.toThrow(
         `Timed out waiting for the lock of session ${sessionId}`,
       );
