@@ -135,7 +135,7 @@ it.each(["desktop_click", "desktop_focus"])("refuses failed %s and missing inspe
   await interaction();
   await expect(recordEvidenceOutcome(project, run.runId, { ...input, inspectedScreenshots: [] })).rejects.toThrow(/Recording alone/);
 });
-it.each(["desktop_focus", "desktop_click", "android_tap", "android_back", "chrome_devtools/fill", "chrome_devtools/press_key"])("accepts pass with %s and an inspected screenshot", async (tool) => {
+it.each(["desktop_focus", "desktop_click", "android_tap", "android_swipe", "android_back", "chrome_devtools/fill", "chrome_devtools/press_key"])("accepts pass with %s and an inspected screenshot", async (tool) => {
   await interaction(tool);
   expect((await recordEvidenceOutcome(project, run.runId, input)).status).toBe("pass");
 });
