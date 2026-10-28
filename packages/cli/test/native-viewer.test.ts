@@ -207,6 +207,19 @@ describe.skipIf(!available)("native viewer host", () => {
     expect(fs.existsSync(readiness)).toBe(false);
   }, 20_000);
 
+  it("refuses dead readiness whose socket was replaced", async () => {
+    const previous = await start();
+    await stopNativeViewerHost(sessionId, env);
+    await withViewerDir(sessionId, env, false, (directory) => writeViewerPrivateFile(directory, "host.json", JSON.stringify(previous)));
+    fs.rmSync(previous.socket, { force: true });
+    const server = net.createServer();
+    await new Promise<void>((resolve) => server.listen(previous.socket, resolve));
+    try {
+      await expect(stopNativeViewerHost(sessionId, env)).rejects.toThrow("Unsafe stale viewer socket");
+      expect(fs.existsSync(previous.socket)).toBe(true);
+    } finally { await new Promise((resolve) => server.close(resolve)); }
+  }, 20_000);
+
   it.each([{ readyPid: 1 }, { readyVersion: "0.0.0" }, { noReady: true }])("cleans failed readiness %j", async (behavior) => {
     await expect(start(behavior)).rejects.toThrow(/startup|readiness/);
     for (const call of fakes.calls().filter((entry) => entry.tool === "viewer")) {

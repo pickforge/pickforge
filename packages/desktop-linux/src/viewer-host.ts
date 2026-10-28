@@ -4,7 +4,7 @@ import net from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   getSession, startDaemon, stopOwnedDaemonGroup, processIdentityMatches,
-  readProcessIdentity, sessionDataDir, type EnvLike, type ProcessIdentity,
+  readProcessIdentity, sessionDataDir, type DirHandle, type EnvLike, type ProcessIdentity,
 } from "@pickforge/lab-core";
 import { withSessionVncLock, SESSION_VNC_LOCK_TIMEOUT_MS } from "./session.js";
 import { verifyOwnedDisplayTarget } from "./x11-target.js";
@@ -84,6 +84,17 @@ export async function findNativeViewerHost(sessionId: string, env: EnvLike = pro
   } catch { return undefined; }
 }
 
+/** Remove readiness whose host and viewer are both gone, refusing a replaced socket. */
+async function removeDeadReadiness(directory: DirHandle, host: NativeViewerHostIdentity): Promise<void> {
+  const socket = await directory.lstatChild("host.sock");
+  if (socket !== undefined) {
+    const safe = [socket.isSocket(), socket.uid === process.getuid?.(), socket.ino === host.socketIno, socket.dev === host.socketDev];
+    if (!safe.every(Boolean)) throw new Error("Unsafe stale viewer socket");
+  }
+  await directory.unlinkChild("host.sock");
+  await directory.unlinkChild("host.json");
+}
+
 export async function stopNativeViewerHost(sessionId: string, env: EnvLike = process.env): Promise<void> {
   await withSessionVncLock(sessionId, env, () => stopNativeViewerHostLocked(sessionId, env));
 }
@@ -98,12 +109,7 @@ async function stopNativeViewerHostLocked(sessionId: string, env: EnvLike): Prom
     const hostAlive = processIdentityMatches({ pid: host.pid, startTicks: host.startTicks });
     const viewerAlive = processIdentityMatches({ pid: host.viewerPid, startTicks: host.viewerStartTicks });
     if (!hostAlive && !viewerAlive) {
-      const socket = await directory.lstatChild("host.sock");
-      if (socket !== undefined && (!socket.isSocket() || socket.uid !== process.getuid?.())) {
-        throw new Error("Unsafe stale viewer socket");
-      }
-      await directory.unlinkChild("host.sock");
-      await directory.unlinkChild("host.json");
+      await removeDeadReadiness(directory, host);
       return;
     }
     const record = await readViewerLaunchRecord(sessionId, host.launchId, env);
