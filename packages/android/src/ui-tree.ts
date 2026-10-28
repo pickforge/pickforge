@@ -66,6 +66,11 @@ function parseAttrs(source: string): Record<string, string> {
 }
 
 /** Parse the flat XML that `uiautomator dump` writes. */
+function hierarchyRotation(attrSource: string): number | undefined {
+  const value = Number.parseInt(parseAttrs(attrSource).rotation ?? "", 10);
+  return Number.isInteger(value) ? value : undefined;
+}
+
 export function parseUiHierarchy(xml: string): UiHierarchy {
   const roots: UiNode[] = [];
   const stack: UiNode[] = [];
@@ -74,10 +79,7 @@ export function parseUiHierarchy(xml: string): UiHierarchy {
   for (const match of xml.matchAll(TAG_RE)) {
     const [, closing, tag, attrSource, selfClosing] = match;
     if (tag === "hierarchy") {
-      if (closing === "") {
-        const value = Number.parseInt(parseAttrs(attrSource).rotation ?? "", 10);
-        rotation = Number.isInteger(value) ? value : undefined;
-      }
+      if (closing === "") rotation = hierarchyRotation(attrSource);
       continue;
     }
     if (closing === "/") {
@@ -86,15 +88,8 @@ export function parseUiHierarchy(xml: string): UiHierarchy {
     }
     const node: UiNode = { attrs: parseAttrs(attrSource), children: [] };
     nodeCount += 1;
-    const parent = stack.at(-1);
-    if (parent === undefined) {
-      roots.push(node);
-    } else {
-      parent.children.push(node);
-    }
-    if (selfClosing === "") {
-      stack.push(node);
-    }
+    (stack.at(-1)?.children ?? roots).push(node);
+    if (selfClosing === "") stack.push(node);
   }
   return { rotation, roots, nodeCount };
 }
@@ -103,12 +98,11 @@ function flag(node: UiNode, name: string): boolean {
   return node.attrs[name] === "true";
 }
 
+const CONTENT_ATTRS = ["text", "content-desc", "resource-id"];
+const ACTION_FLAGS = ["clickable", "long-clickable", "scrollable", "checkable"];
+
 function hasContent(node: UiNode): boolean {
-  return (
-    (node.attrs.text ?? "") !== "" ||
-    (node.attrs["content-desc"] ?? "") !== "" ||
-    (node.attrs["resource-id"] ?? "") !== ""
-  );
+  return CONTENT_ATTRS.some((name) => (node.attrs[name] ?? "") !== "");
 }
 
 function isEditable(node: UiNode): boolean {
@@ -116,13 +110,7 @@ function isEditable(node: UiNode): boolean {
 }
 
 function isActionable(node: UiNode): boolean {
-  return (
-    flag(node, "clickable") ||
-    flag(node, "long-clickable") ||
-    flag(node, "scrollable") ||
-    flag(node, "checkable") ||
-    isEditable(node)
-  );
+  return ACTION_FLAGS.some((name) => flag(node, name)) || isEditable(node);
 }
 
 function keep(node: UiNode): boolean {
