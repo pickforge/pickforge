@@ -384,6 +384,37 @@ describe("session marker horizon", () => {
     expect(exist(files)).toEqual([true, true]);
   });
 
+  it("does not rebuild storage for a caller that resumes after its markers are pruned", async () => {
+    const record = await createSession({ type: "desktop", status: "running", projectDir: home }, env);
+    await withAgentPermit(record.id, env, async () => {});
+    const closure = markers(record.id)[1]!;
+    const lstat = fs.promises.lstat;
+    let paused!: () => void;
+    let resume!: () => void;
+    const reached = new Promise<void>((resolve) => { paused = resolve; });
+    const gate = new Promise<void>((resolve) => { resume = resolve; });
+    let armed = true;
+    vi.spyOn(fs.promises, "lstat").mockImplementation((async (file: fs.PathLike, options?: fs.StatOptions) => {
+      // The late caller read the running record and stops before its closure check.
+      if (armed && file === closure) { armed = false; paused(); await gate; }
+      return lstat(file, options);
+    }) as typeof fs.promises.lstat);
+    let delivered = false;
+    const late = withAgentPermit(record.id, env, async () => { delivered = true; });
+    await reached;
+    await stopSessionAgentInput(record.id, env, 0);
+    await retainSessionLogs(record, env);
+    await destroySessionRecord(record.id, env);
+    setStoppedAt(record.id, past());
+    backdate(markers(record.id));
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+    resume();
+    await expect(late).rejects.toThrow(AgentPermitUnavailableError);
+    expect(delivered).toBe(false);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+  });
+
   it("accepts a marker that a concurrent prune removed first, and refuses a replaced one", async () => {
     const files = orphanMarkers("desk-0badc0de");
     const unlink = DirHandle.prototype.unlinkOwnedFile;

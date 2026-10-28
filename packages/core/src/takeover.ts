@@ -87,6 +87,11 @@ async function withSessionDirectory<T>(
     const raw = await readTextIfPresent(parent.resolve(marker));
     if (!create && await parent.lstatChild(sessionId) === undefined &&
       (raw === undefined || await parent.lstatChild(sessionInputClosedName(sessionId)) !== undefined)) return undefined;
+    // A caller that read the record before teardown and resumes after prune
+    // retired the markers must not rebuild storage that nothing prunes.
+    if (create && raw === undefined && await getSession(sessionId, env) === undefined) {
+      throw new Error(`Session ${sessionId} not found; input is unavailable`);
+    }
     return withDirHandle(
       create && raw === undefined ? parent.ensureChildDir(sessionId, 0o700) : parent.openChild(sessionId),
       (session) => withCoordinationIdentity(parent, session, marker, raw, create, action),
