@@ -177,12 +177,12 @@ npm or GitHub releases. (#398)
 
 ## Validation
 
-- Local gates on `183140d`, the 0.7.1 branch with main merged: frozen install,
+- Local gates on `5f031e1`, the 0.7.1 branch with main merged: frozen install,
   typecheck, lint, `cargo fmt --check`, clippy with `-D warnings` for the
   Linux and Windows targets, the Rust workspace tests on Xvfb (260 passed), and
   `cargo build --release` with `pickforge 0.7.1` and `pickforge-viewer 0.7.1`
   version checks. The TypeScript suite ran with coverage and with the desktop,
-  browser and native viewer requirements on: 3,345 passed, 4 skipped, 90.27%
+  browser and native viewer requirements on: 3,345 passed, 4 skipped, 90.25%
   of lines covered. The build passed.
 - The opt-in live Flutter test passed with Flutter 3.41.6.
 - A device pass ran on Omarchy (Arch Linux) x86_64 with Flutter 3.41.6 and
