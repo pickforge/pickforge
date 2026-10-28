@@ -889,7 +889,7 @@ fn redact_secrets(value: &str) -> String {
         // unquoted value stops at a backslash, so that JSON string stays valid.
         // Any scheme word (Bearer, Basic, Digest, ...) belongs to the credential, and so do
         // Digest's `name="value"` parameters.
-        Regex::new(r#"(?i)(\bauthorization\b[ \t]*[:=][ \t]*)(?:\\"(?:[^"\\]|\\[^"])*\\"|"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|(?:[a-z][a-z0-9-]*[ \t]+)?(?:[\w-]+=(?:"[^"\r\n]*"|[^\s,;"'<>\\]*)(?:[ \t]*,[ \t]*[\w-]+=(?:"[^"\r\n]*"|[^\s,;"'<>\\]*))*|(?:[^\s,;"'<>\\]|\\[^"\s])+))"#).unwrap(),
+        Regex::new(r#"(?i)(\bauthorization\b[ \t]*[:=][ \t]*)(?:\\"(?:[^"\\]|\\[^"])*\\"|"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|(?:[a-z][a-z0-9-]*[ \t]+)?(?:[\w-]+[ \t]*=[ \t]*(?:"(?:[^"\\\r\n]|\\.)*"|(?:[^\s,;"'<>\\]|\\[^"\s])*)(?:[ \t]*,[ \t]*[\w-]+[ \t]*=[ \t]*(?:"(?:[^"\\\r\n]|\\.)*"|(?:[^\s,;"'<>\\]|\\[^"\s])*))*|(?:[^\s,;"'<>\\]|\\[^"\s])+))"#).unwrap(),
         // An unquoted cookie stops at quotes and angle brackets, so the rest of a
         // one-line XML tree or a JSON string survives.
         Regex::new(r#"(?i)(\b(?:set-cookie|cookie)\b[ \t]*[:=][ \t]*)(?:\\"(?:[^"\\]|\\[^"])*\\"|"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[^\r\n"'<>\\]+)"#).unwrap(),
@@ -1744,6 +1744,12 @@ mod tests {
             assert!(!stored.contains(secret), "{secret} in {stored}");
         }
         assert!(stored.contains("max_tokens=9"), "{stored}");
+        for header in [
+            r#"Authorization: Digest username="alice", response = "digestsecret123""#,
+            r#"Authorization: Digest username="a\"b", response="digestsecret123""#,
+        ] {
+            assert_eq!(redact_secrets(header), "Authorization: [REDACTED]");
+        }
         assert_eq!(
             redact_secrets(r#"{"password":"false","token":"x"}"#),
             r#"{"password":"false","token":"[REDACTED]"}"#
