@@ -87,6 +87,7 @@ export {
 export {
   back,
   buildClearLogcatArgs,
+  buildDensityArgs,
   buildInstallApkArgs,
   buildKeyeventArgs,
   buildLaunchAppArgs,
@@ -101,6 +102,7 @@ export {
   buildUiDumpArgs,
   clearLogcat,
   escapeInputText,
+  getScreenDensity,
   getUiTree,
   home,
   installApk,
@@ -126,6 +128,23 @@ export {
   type LaunchAppResult,
   type LogcatArgsOptions,
 } from "./adb.js";
+
+export {
+  assertUiTreeMaxChars,
+  compactUiTree,
+  DEFAULT_COMPACT_MAX_CHARS,
+  DEFAULT_RAW_MAX_CHARS,
+  limitRawUiTree,
+  MAX_NODE_TEXT_CHARS,
+  MAX_UI_TREE_MAX_CHARS,
+  MIN_UI_TREE_MAX_CHARS,
+  parseUiHierarchy,
+  parseWmDensity,
+  type CompactUiTree,
+  type CompactUiTreeOptions,
+  type UiHierarchy,
+  type UiNode,
+} from "./ui-tree.js";
 
 export {
   DEFAULT_LMK_QUIET_S,

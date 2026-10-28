@@ -133,6 +133,13 @@ session teardown are also more reliable.
   reload and hot restart keep the connection. After a full rebuild, connect
   again to the new DTD URI. When the server is not connected, the skill uses
   Pickforge screenshots, the Android UI tree, logcat and adb. (#360)
+- `android_get_ui_tree` returns a compact tree instead of the raw
+  uiautomator XML. It keeps every node with text, a content description, a
+  resource id or an action, and their hierarchy. Bounds stay in device pixels,
+  and the result reports the screen density. Output stops at `maxChars`
+  (default 20000) and says when it truncates. `raw: true` returns the XML. On
+  Settings, Flutter and Compose screens, the response shrinks by about 83 to
+  88 percent in tokens. (#351)
 
 ## Fixes
 
