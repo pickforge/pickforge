@@ -262,7 +262,7 @@ fn push_string(
     let root = frames.len() == 1;
     match frames.last_mut() {
         Some(Frame::Object { key, audit_map, .. }) if *key == Key::Expected => {
-            let name: String = serde_json::from_str(token).unwrap_or_default();
+            let name = serde_json::from_str(token).unwrap_or_else(|_| token.to_owned());
             *key = key_kind(&name, *audit_map, lighthouse && root);
             stored.push_str(&redact_json_string(token, false));
         }
@@ -340,8 +340,11 @@ fn string_end(bytes: &[u8], start: usize) -> usize {
     bytes.len()
 }
 
+/// A string that does not decode, such as one that ends in half of an emoji, is replaced whole.
 fn redact_json_string(token: &str, secret: bool) -> String {
-    let value: String = serde_json::from_str(token).unwrap_or_default();
+    let Ok(value) = serde_json::from_str::<String>(token) else {
+        return format!("\"{REDACTED}\"");
+    };
     if secret && !is_flag(&value) {
         return format!("\"{REDACTED}\"");
     }
@@ -686,10 +689,29 @@ mod tests {
         let audit = &stored["audits"]["third-party-cookies"];
         assert_eq!(audit["id"], "third-party-cookies");
         assert_eq!(audit["details"]["password"]["value"], REDACTED);
+        let line = "password={\"v\":1}\n";
+        assert_eq!(
+            redact_text_artifact(line, ArtifactOrigin::Lighthouse),
+            "password=[REDACTED]\n"
+        );
+    }
+
+    #[test]
+    fn json_strings_that_do_not_decode_are_replaced_whole() {
+        let json = r#"{"msg":"token=abc \ud83d","password\ud800":"pw1","n":1}"#;
+        assert_eq!(
+            redact_text_artifact(json, ArtifactOrigin::DevtoolsConsole),
+            r#"{"msg":"[REDACTED]","[REDACTED]":"[REDACTED]","n":1}"#
+        );
     }
 
     #[test]
     fn rewritten_xml_keeps_literal_ampersands_and_kept_references_apart() {
+        let doubled = "<h><node text=\"Tom &amp;amp; Jerry &amp;nbsp; token=abc\"/><n>x &amp;lt; y password=zz</n></h>";
+        assert_eq!(
+            redact_text_artifact(doubled, ArtifactOrigin::AndroidUiTree),
+            "<h><node text=\"Tom &amp;amp; Jerry &amp;nbsp; token=[REDACTED]\"/><n>x &amp;lt; y password=[REDACTED]</n></h>"
+        );
         let tree = "<h><node text=\"&amp;bogus; password=abc\" desc=\"&amp;lt; token=t1\" hint=\"a&nbsp;b token=t2\" note=\"&#1;\u{FDD2} token=t3\"/></h>";
         let stored = redact_text_artifact(tree, ArtifactOrigin::AtspiTree);
         assert_eq!(
