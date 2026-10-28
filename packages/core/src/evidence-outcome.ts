@@ -85,7 +85,7 @@ export function sanitizeOutcome(input: EvidenceOutcomeInput, recordedAt = new Da
  */
 const INTERACTION_TOOLS: ReadonlySet<string> = new Set([
   "desktop_focus", "desktop_click", "desktop_double_click", "desktop_drag", "desktop_scroll", "desktop_type", "desktop_key",
-  "android_tap", "android_type", "android_back", "android_home",
+  "android_tap", "android_swipe", "android_type", "android_back", "android_home",
   ...["click", "click_at", "drag", "fill", "fill_form", "handle_dialog", "hover", "navigate_page", "press_key", "type_text", "upload_file"]
     .map((name) => `chrome_devtools/${name}`),
 ]);

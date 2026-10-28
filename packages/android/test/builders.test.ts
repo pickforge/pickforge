@@ -10,6 +10,7 @@ import {
   buildPidofArgs,
   buildResolveLauncherArgs,
   buildScreenshotArgs,
+  buildSwipeArgs,
   buildTapArgs,
   buildTypeTextArgs,
   buildUiCatArgs,
@@ -19,6 +20,8 @@ import {
   escapeInputText,
   KEYCODE_BACK,
   KEYCODE_HOME,
+  MAX_SWIPE_COORDINATE,
+  MAX_SWIPE_DURATION_MS,
   parseAdbDevices,
   parseResolvedLauncher,
   parseEmulatorListAvds,
@@ -260,6 +263,48 @@ describe("adb arg builders", () => {
     ]);
     expect(() => buildTapArgs(SERIAL, -1, 0)).toThrow(/Invalid x coordinate/);
     expect(() => buildTapArgs(SERIAL, 0, 1.5)).toThrow(/Invalid y coordinate/);
+  });
+
+  it("builds swipe args with an optional duration", () => {
+    const gesture = { fromX: 160, fromY: 500, toX: 160, toY: 120 };
+    expect(buildSwipeArgs(SERIAL, gesture)).toEqual(
+      ["-s", SERIAL, "shell", "input", "swipe", "160", "500", "160", "120"],
+    );
+    expect(buildSwipeArgs(SERIAL, { ...gesture, durationMs: 0 }).at(-1)).toBe("0");
+    expect(
+      buildSwipeArgs(SERIAL, {
+        fromX: 0,
+        fromY: MAX_SWIPE_COORDINATE,
+        toX: MAX_SWIPE_COORDINATE,
+        toY: 0,
+        durationMs: MAX_SWIPE_DURATION_MS,
+      }).slice(5),
+    ).toEqual(["0", "16383", "16383", "0", "10000"]);
+  });
+
+  it("rejects swipe coordinates and durations out of bounds", () => {
+    const gesture = { fromX: 1, fromY: 2, toX: 3, toY: 4 };
+    expect(() => buildSwipeArgs(SERIAL, { ...gesture, fromX: -1 })).toThrow(
+      /Invalid fromX coordinate -1/,
+    );
+    expect(() => buildSwipeArgs(SERIAL, { ...gesture, fromY: 1.5 })).toThrow(
+      /Invalid fromY coordinate/,
+    );
+    expect(() => buildSwipeArgs(SERIAL, { ...gesture, toX: 16_384 })).toThrow(
+      /Invalid toX coordinate 16384: expected an integer from 0 to 16383/,
+    );
+    expect(() => buildSwipeArgs(SERIAL, { ...gesture, toY: Number.NaN })).toThrow(
+      /Invalid toY coordinate/,
+    );
+    expect(() => buildSwipeArgs(SERIAL, { ...gesture, durationMs: 10_001 })).toThrow(
+      /Invalid duration 10001/,
+    );
+    expect(() => buildSwipeArgs(SERIAL, { ...gesture, durationMs: -1 })).toThrow(
+      /Invalid duration/,
+    );
+    for (const value of HOSTILE) {
+      expect(() => buildSwipeArgs(value, gesture)).toThrow(/Invalid device serial/);
+    }
   });
 
   it("builds keyevent args including back and home keycodes", () => {

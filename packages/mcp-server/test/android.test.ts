@@ -142,6 +142,64 @@ describe("android tools (fake adb)", () => {
     ).toEqual([]);
   });
 
+  it("swipes with argv arrays and records both endpoints in evidence", async () => {
+    const report = parseToolJson(
+      await lab.client.callTool({
+        name: "android_swipe",
+        arguments: { fromX: 160, fromY: 500, toX: 150, toY: 120, durationMs: 400 },
+      }),
+    );
+    expect(report).toMatchObject({
+      ok: true,
+      serial: FAKE_SERIAL,
+      sessionId,
+      fromX: 160,
+      fromY: 500,
+      toX: 150,
+      toY: 120,
+      durationMs: 400,
+    });
+    await lab.client.callTool({
+      name: "android_swipe",
+      arguments: { fromX: 1, fromY: 2, toX: 3, toY: 4 },
+    });
+    expect(adbLogLines(adbLog)).toEqual([
+      `-s ${FAKE_SERIAL} shell input swipe 160 500 150 120 400`,
+      `-s ${FAKE_SERIAL} shell input swipe 1 2 3 4`,
+    ]);
+    const [manifest] = await listRuns(dirs.projectDir);
+    const records = await readActions(
+      path.join(dirs.projectDir, ".picklab", "runs", manifest!.runId),
+    );
+    expect(records[0]).toMatchObject({
+      source: "mcp",
+      tool: "android_swipe",
+      sessionId,
+      status: "ok",
+      target: { fromX: 160, fromY: 500, x: 150, y: 120 },
+    });
+    expect(records[1]).toMatchObject({
+      target: { fromX: 1, fromY: 2, x: 3, y: 4 },
+    });
+  });
+
+  it("rejects swipe coordinates and durations out of bounds before adb", async () => {
+    for (const args of [
+      { fromX: -1, fromY: 0, toX: 0, toY: 0 },
+      { fromX: 0, fromY: 0, toX: 16_384, toY: 0 },
+      { fromX: 0, fromY: 0.5, toX: 0, toY: 0 },
+      { fromX: 0, fromY: 0, toX: 0, toY: 0, durationMs: 10_001 },
+      { fromX: 0, fromY: 0, toX: 0, toY: 0, durationMs: -5 },
+    ]) {
+      const result = await lab.client.callTool({
+        name: "android_swipe",
+        arguments: args,
+      });
+      expect((result as { isError?: boolean }).isError).toBe(true);
+    }
+    expect(adbLogLines(adbLog)).toEqual([]);
+  });
+
   it("does not create evidence when capture is disabled", async () => {
     await saveProjectConfig(dirs.projectDir, {
       evidence: { enabled: false },
@@ -308,20 +366,92 @@ describe("android tools (fake adb)", () => {
     expect(adbLogLines(adbLog).join("\n")).not.toMatch(/install -r|am start/);
   });
 
-  it("returns the ui tree xml with secrets redacted", async () => {
+  it("returns a compact ui tree with secrets redacted and density", async () => {
+    const xml =
+      '<?xml version="1.0"?><hierarchy rotation="0">' +
+      '<node class="android.widget.FrameLayout" package="a.b" bounds="[0,0][100,200]">' +
+      '<node class="android.widget.Button" text="Save" package="a.b" clickable="true" password="false" bounds="[10,20][90,60]" />' +
+      `<node class="android.widget.TextView" text="token=${PLANTED_TOKEN}" package="a.b" bounds="[0,70][100,90]" />` +
+      "</node></hierarchy>";
+    const xmlFile = path.join(dirs.root, "ui.xml");
+    fs.writeFileSync(xmlFile, xml);
+    writeScript(
+      path.join(dirs.root, "adb-sdk", "platform-tools", "adb"),
+      [
+        'PATH="/usr/bin:/bin:$PATH"',
+        `printf '%s\\n' "$*" >> "${adbLog}"`,
+        'case "$*" in',
+        '  *"uiautomator dump"*) echo dumped ;;',
+        `  *"cat /sdcard/pickforge-lab-ui.xml"*) cat '${xmlFile}' ;;`,
+        '  *"wm density"*) echo "Physical density: 440"; echo "Override density: 420" ;;',
+        "esac",
+        "exit 0",
+      ].join("\n"),
+    );
+    const result = await lab.client.callTool({
+      name: "android_get_ui_tree",
+      arguments: {},
+    });
+    const report = parseToolJson(result);
+    expect(report).toMatchObject({
+      ok: true,
+      format: "compact",
+      density: 420,
+      nodes: 2,
+      totalNodes: 3,
+      truncated: false,
+      empty: false,
+    });
+    expect(report.xml).toBeUndefined();
+    const content = (result as { content: Array<{ type: string; text: string }> })
+      .content;
+    expect(content[1]).toEqual({
+      type: "text",
+      text:
+        'Button "Save" pkg=a.b [10,20][90,60] clickable\n' +
+        'TextView "token=[REDACTED]" pkg=a.b [0,70][100,90]',
+    });
+    expect(JSON.stringify(result)).not.toContain(PLANTED_TOKEN);
+    expect(adbLogLines(adbLog)).toEqual([
+      `-s ${FAKE_SERIAL} shell uiautomator dump /sdcard/pickforge-lab-ui.xml`,
+      `-s ${FAKE_SERIAL} exec-out cat /sdcard/pickforge-lab-ui.xml`,
+      `-s ${FAKE_SERIAL} shell rm -f /sdcard/pickforge-lab-ui.xml`,
+      `-s ${FAKE_SERIAL} shell wm density`,
+    ]);
+  });
+
+  it("returns raw ui tree xml on request, redacted and size limited", async () => {
     const report = parseToolJson(
       await lab.client.callTool({
         name: "android_get_ui_tree",
-        arguments: {},
+        arguments: { raw: true },
       }),
     );
     expect(report.ok).toBe(true);
+    expect(report.format).toBe("raw");
+    expect(report.density).toBeNull();
+    expect(report.truncated).toBe(false);
     expect(report.xml).toContain("<hierarchy");
     expect(report.xml).toContain("[REDACTED]");
     expect(report.xml).not.toContain(PLANTED_TOKEN);
-    expect(adbLogLines(adbLog)).toContain(
-      `-s ${FAKE_SERIAL} shell uiautomator dump /sdcard/pickforge-lab-ui.xml`,
-    );
+    expect(report.totalChars).toBe(report.xml.length);
+  });
+
+  it("rejects a tiny maxChars before any adb call", async () => {
+    const tiny = await lab.client.callTool({
+      name: "android_get_ui_tree",
+      arguments: { maxChars: 10 },
+    });
+    expect((tiny as { isError?: boolean }).isError).toBe(true);
+    expect(adbLogLines(adbLog)).toEqual([]);
+    const result = await lab.client.callTool({
+      name: "android_get_ui_tree",
+      arguments: { maxChars: 1000 },
+    });
+    const report = parseToolJson(result);
+    expect(report).toMatchObject({ ok: true, empty: false, nodes: 1 });
+    const text = (result as { content: Array<{ text: string }> }).content[1]!.text;
+    expect(text).toBe('node "token=[REDACTED]"');
   });
 
   it("redacts secrets from android_logcat output", async () => {

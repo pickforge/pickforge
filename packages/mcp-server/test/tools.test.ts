@@ -43,6 +43,7 @@ const EXPECTED_TOOLS = [
   "android_launch_app",
   "android_screenshot",
   "android_tap",
+  "android_swipe",
   "android_type",
   "android_back",
   "android_home",
