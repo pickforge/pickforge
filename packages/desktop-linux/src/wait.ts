@@ -13,8 +13,9 @@ export const DEFAULT_DESKTOP_WAIT_TIMEOUT_MS = 10_000;
 export const MAX_DESKTOP_WAIT_TIMEOUT_MS = 300_000;
 export const DEFAULT_STABLE_MS = 500;
 export const MAX_STABLE_MS = 60_000;
-/** SIGTERM-to-SIGKILL escalation plus forced settlement of retained pipes: 2s each.
- * Filesystem and scheduling delays are additional, not covered by this allowance. */
+/** The longest cleanup of a timed-out wait command. A compare gets 2s for SIGTERM-to-SIGKILL
+ * escalation and 2s for forced settlement of retained pipes; captures and window queries get
+ * CANCEL_KILL_GRACE_MS for each. Filesystem and scheduling delays are additional. */
 export const WAIT_SUBPROCESS_KILL_GRACE_MS = 4_000;
 const SAMPLE_GAP_MS = 100;
 const WINDOW_QUERY_MS = 5_000;
