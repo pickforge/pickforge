@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import WebSocket from "ws";
 import {
   REAPER_CLEANUP_PENDING_META_KEY,
   createSession,
@@ -55,6 +56,7 @@ import { buildSupervisedBrowserCommand } from "./supervisor.js";
 import {
   abandonedBrowserProfileStartup,
   claimBrowserProfile,
+  namedProfileBrowserEndpoint,
   releaseBrowserProfile,
   validateBrowserProfileName,
 } from "./profiles.js";
@@ -307,46 +309,45 @@ async function stopBrowserGroup(
 }
 
 /** Flush named-profile cookies before the verified group-stop fallback. */
-async function closeNamedProfileBrowser(record: SessionRecord): Promise<void> {
-  if (record.browser?.profileMode !== "named" && namedProfile(record) === undefined) return;
+async function closeNamedProfileBrowser(record: SessionRecord, env: EnvLike, signal?: AbortSignal): Promise<void> {
+  const profileName = namedProfile(record);
   const browser = record.browser;
-  if (browser?.cdpPort === undefined) return;
+  if (profileName === undefined || browser?.cdpPort === undefined) return;
   const identity = { pid: browser.browserPid, startTicks: browser.browserStartTimeTicks };
   if (!processIdentityMatches(identity)) return;
-  const deadline = Date.now() + 3_000;
   try {
-    const response = await fetch(`http://127.0.0.1:${browser.cdpPort}/json/version`, {
-      signal: AbortSignal.timeout(3_000),
-      redirect: "error",
-    });
-    const version = await response.json() as { webSocketDebuggerUrl?: unknown };
-    if (typeof version.webSocketDebuggerUrl !== "string") return;
-    const url = new URL(version.webSocketDebuggerUrl);
-    if (url.protocol !== "ws:" || url.host !== `127.0.0.1:${browser.cdpPort}`) return;
-    if (!processIdentityMatches(identity)) return;
-    await requestBrowserClose(url, Math.max(1, deadline - Date.now()), identity);
-    while (processIdentityMatches(identity) && Date.now() < deadline) await sleep(50);
+    signal?.throwIfAborted();
+    const url = await namedProfileBrowserEndpoint(profileName, browser.cdpPort, env);
+    if (url === undefined || !await requestBrowserClose(url, identity, signal)) return;
+    const deadline = Date.now() + 10_000;
+    while (processIdentityMatches(identity) && Date.now() < deadline) await sleep(50, signal);
   } catch {
     // CDP is best effort. Always continue to the verified group stop.
   }
 }
 
-async function requestBrowserClose(url: URL, timeoutMs: number, identity: ProcessIdentity): Promise<void> {
+async function requestBrowserClose(url: URL, identity: ProcessIdentity, signal?: AbortSignal): Promise<boolean> {
+  signal?.throwIfAborted();
   const socket = new WebSocket(url);
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(finish, timeoutMs);
-    function finish(): void {
+  return new Promise<boolean>((resolve) => {
+    let finished = false;
+    const timer = setTimeout(() => finish(false), 3_000);
+    const aborted = (): void => finish(false);
+    function finish(sent: boolean): void {
+      if (finished) return;
+      finished = true;
       clearTimeout(timer);
-      socket.close();
-      resolve();
+      signal?.removeEventListener("abort", aborted);
+      socket.terminate();
+      resolve(sent);
     }
-    socket.addEventListener("error", finish, { once: true });
-    socket.addEventListener("close", finish, { once: true });
-    socket.addEventListener("message", finish, { once: true });
-    socket.addEventListener("open", () => {
-      if (!processIdentityMatches(identity)) { finish(); return; }
-      socket.send(JSON.stringify({ id: 1, method: "Browser.close" }));
-    }, { once: true });
+    signal?.addEventListener("abort", aborted, { once: true });
+    socket.on("error", () => finish(false));
+    socket.once("close", () => finish(false));
+    socket.once("open", () => {
+      if (!processIdentityMatches(identity)) { finish(false); return; }
+      socket.send(JSON.stringify({ id: 1, method: "Browser.close" }), (error) => finish(!error));
+    });
   });
 }
 
@@ -937,7 +938,7 @@ export async function teardownBrowserSession(
       options.signal?.throwIfAborted();
       const failures: Error[] = [];
       const browser = record.browser;
-      await closeNamedProfileBrowser(record);
+      await closeNamedProfileBrowser(record, registryEnv, options.signal);
       const { gone, error: groupError } = await stopBrowserGroup(
         browser === undefined
           ? undefined

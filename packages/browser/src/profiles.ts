@@ -9,6 +9,7 @@ import {
   pickforgeHome,
   processIdentityMatches,
   readProcessIdentity,
+  readBoundedFileIn,
   readProcessGroupLeaderIdentity,
   type EnvLike,
   type ProcessIdentity,
@@ -109,6 +110,26 @@ async function openProfile(root: DirHandle, name: string, create: boolean): Prom
   } catch (error) {
     await dir.close();
     throw error;
+  }
+}
+
+/** Read the launch-specific CDP capability through the pinned private profile. */
+export async function namedProfileBrowserEndpoint(name: string, port: number, env: EnvLike): Promise<URL | undefined> {
+  validateBrowserProfileName(name);
+  const root = await openProfiles(env, false);
+  if (root === undefined) return undefined;
+  try {
+    const dir = await openProfile(root, name, false);
+    try {
+      const content = await readBoundedFileIn(dir, "DevToolsActivePort", Date.now() + 3_000, { maxBytes: 1024 });
+      const [recordedPort, browserPath] = content.toString("utf8").trimEnd().split("\n");
+      if (recordedPort !== String(port) || !/^\/devtools\/browser\/[a-zA-Z0-9-]+$/.test(browserPath ?? "")) return undefined;
+      return new URL(`ws://127.0.0.1:${port}${browserPath}`);
+    } finally {
+      await dir.close();
+    }
+  } finally {
+    await root.close();
   }
 }
 
@@ -257,17 +278,15 @@ async function acquire(root: DirHandle, name: string, sessionId: string, env: En
   }
 }
 
-async function singletonOwnerUsesProfile(pid: number, profileDir: string): Promise<boolean> {
+async function singletonOwnerUsesProfile(pid: number, dir: DirHandle): Promise<boolean> {
   let argv: string[];
   try {
     argv = (await fs.promises.readFile(`/proc/${pid}/cmdline`, "utf8")).split("\0");
   } catch (error) {
-    if (errno(error) === "ENOENT" || errno(error) === "ESRCH") return false;
+    if (["ENOENT", "ESRCH", "EACCES"].includes(errno(error) ?? "")) return false;
     throw error;
   }
-  const executable = path.basename(argv[0] ?? "");
-  if (!/^(?:google-chrome(?:-stable|-beta|-unstable)?|chrome|chromium(?:-browser)?)$/.test(executable)) return false;
-  return argv.includes(`--user-data-dir=${profileDir}`);
+  return [dir.realDir, dir.dir].some((profileDir) => argv.includes(`--user-data-dir=${profileDir}`));
 }
 
 async function clearSingletons(dir: DirHandle, profileName: string): Promise<void> {
@@ -276,7 +295,7 @@ async function clearSingletons(dir: DirHandle, profileName: string): Promise<voi
     if (!lock.isSymbolicLink()) throw new Error(`Refusing browser profile "${profileName}": remove the unknown SingletonLock file`);
     const target = await fs.promises.readlink(dir.resolve("SingletonLock"));
     const match = /^(.*)-(\d+)$/.exec(target);
-    if (match === null || await singletonOwnerUsesProfile(Number(match[2]), dir.realDir)) {
+    if (match === null || await singletonOwnerUsesProfile(Number(match[2]), dir)) {
       throw new Error(`Refusing browser profile "${profileName}": SingletonLock owner is not confirmed dead; remove SingletonLock after closing Chrome`);
     }
   }

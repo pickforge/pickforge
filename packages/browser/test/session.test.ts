@@ -1,8 +1,10 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { WebSocketServer } from "ws";
 import { scheduler } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -58,6 +60,43 @@ beforeEach(() => {
 afterEach(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
+
+/** Stand in for a CDP server that may have reused the recorded port. */
+async function closeEndpoint(session: BrowserSessionHandle, handshakeDelayMs = 0) {
+  const browserPath = "/devtools/browser/test-launch-guid";
+  const server = http.createServer((_req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ webSocketDebuggerUrl: `ws://127.0.0.1:${port}${browserPath}` }));
+  });
+  const connections = new Set<net.Socket>();
+  server.on("connection", (socket) => {
+    connections.add(socket);
+    socket.on("close", () => connections.delete(socket));
+  });
+  const websocket = new WebSocketServer({
+    server,
+    path: browserPath,
+    verifyClient: (_info, done) => { setTimeout(() => done(true), handshakeDelayMs); },
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("Missing test CDP port");
+  const port = address.port;
+  const record = (await getSession(session.id, registryEnv))!;
+  await updateSession(session.id, { browser: { ...record.browser!, cdpPort: port } }, registryEnv);
+  fs.writeFileSync(path.join(session.profileDir, "DevToolsActivePort"), `${port}\n${browserPath}\n`);
+  return {
+    websocket,
+    port,
+    close: async () => {
+      for (const socket of connections) socket.destroy();
+      await Promise.all([
+        new Promise<void>((resolve) => websocket.close(() => resolve())),
+        new Promise<void>((resolve) => server.close(() => resolve())),
+      ]);
+    },
+  };
+}
 
 function hasMissingPid(...pids: (number | undefined)[]): boolean {
   return pids.includes(undefined);
@@ -1267,16 +1306,108 @@ describe.skipIf(!hasXvfb)("named browser profile lifecycle", () => {
 
   it("stops the verified browser group when the named profile CDP close fails", async () => {
     const session = await createBrowserSession({ projectDir, registryEnv, env: spawnEnvFor("ready"), profile: "ops" });
-    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("CDP unavailable"));
+    const fetch = vi.spyOn(globalThis, "fetch");
     try {
       await destroyBrowserSession(session.id, registryEnv);
-      expect(fetch).toHaveBeenCalledWith(`http://127.0.0.1:${session.cdpPort}/json/version`, expect.any(Object));
+      expect(fetch).not.toHaveBeenCalled();
       expect(isPidAlive(session.browserPid)).toBe(false);
       expect(isPidAlive(session.xvfbPid)).toBe(false);
       expect(await getSession(session.id, registryEnv)).toBeUndefined();
       expect(fs.existsSync(session.profileDir)).toBe(true);
     } finally {
       fetch.mockRestore();
+      await destroyBrowserSession(session.id, registryEnv).catch(() => {});
+    }
+  }, TEST_TIMEOUT_MS);
+
+  it("closes the named browser without a global WebSocket", async () => {
+    const session = await createBrowserSession({ projectDir, registryEnv, env: spawnEnvFor("ready"), profile: "ops" });
+    const endpoint = await closeEndpoint(session);
+    const commands: unknown[] = [];
+    endpoint.websocket.on("connection", (socket) => socket.on("message", (data) => {
+      commands.push(JSON.parse(data.toString()));
+      process.kill(-session.browserPid, "SIGTERM");
+    }));
+    vi.stubGlobal("WebSocket", undefined);
+    try {
+      await destroyBrowserSession(session.id, registryEnv);
+      expect(commands).toEqual([{ id: 1, method: "Browser.close" }]);
+    } finally {
+      vi.unstubAllGlobals();
+      await endpoint.close();
+      await destroyBrowserSession(session.id, registryEnv).catch(() => {});
+    }
+  }, TEST_TIMEOUT_MS);
+
+  it.each(["reused port", "mismatched port", "missing file", "symlinked file"])(
+    "does not close another browser with a lingering supervisor and %s", async (scenario) => {
+      const session = await createBrowserSession({ projectDir, registryEnv, env: spawnEnvFor("ready"), profile: "ops" });
+      const endpoint = await closeEndpoint(session);
+      const connected = vi.fn();
+      endpoint.websocket.on("connection", connected);
+      const file = path.join(session.profileDir, "DevToolsActivePort");
+      if (scenario === "reused port") fs.writeFileSync(file, `${endpoint.port}\n/devtools/browser/previous-launch-guid\n`);
+      if (scenario === "mismatched port") fs.writeFileSync(file, "1\n/devtools/browser/test-launch-guid\n");
+      if (scenario === "missing file") fs.unlinkSync(file);
+      if (scenario === "symlinked file") {
+        fs.renameSync(file, `${file}-outside`);
+        fs.symlinkSync(`${file}-outside`, file);
+      }
+      const fetch = vi.spyOn(globalThis, "fetch");
+      try {
+        await destroyBrowserSession(session.id, registryEnv);
+        expect(connected).not.toHaveBeenCalled();
+        expect(fetch).not.toHaveBeenCalled();
+        expect(isPidAlive(session.browserPid)).toBe(false);
+      } finally {
+        fetch.mockRestore();
+        await endpoint.close();
+        await destroyBrowserSession(session.id, registryEnv).catch(() => {});
+      }
+    }, TEST_TIMEOUT_MS,
+  );
+
+  it("gives Chrome its exit budget after a slow websocket handshake", async () => {
+    const session = await createBrowserSession({ projectDir, registryEnv, env: spawnEnvFor("ready"), profile: "ops" });
+    const endpoint = await closeEndpoint(session, 2_000);
+    let exitedCleanly = false;
+    let exitTimer: ReturnType<typeof setTimeout> | undefined;
+    endpoint.websocket.on("connection", (socket) => socket.on("message", () => {
+      exitTimer = setTimeout(() => {
+        exitedCleanly = isPidAlive(session.browserPid);
+        if (exitedCleanly) process.kill(-session.browserPid, "SIGTERM");
+      }, 2_000);
+    }));
+    try {
+      await destroyBrowserSession(session.id, registryEnv);
+      expect(exitedCleanly).toBe(true);
+      expect(isPidAlive(session.browserPid)).toBe(false);
+    } finally {
+      clearTimeout(exitTimer);
+      await endpoint.close();
+      await destroyBrowserSession(session.id, registryEnv).catch(() => {});
+    }
+  }, TEST_TIMEOUT_MS);
+
+  it.each(["handshake", "exit"])("aborts the CDP %s wait and still stops the verified group", async (phase) => {
+    const session = await createBrowserSession({ projectDir, registryEnv, env: spawnEnvFor("ready"), profile: "ops" });
+    const endpoint = await closeEndpoint(session, phase === "handshake" ? 2_000 : 0);
+    const controller = new AbortController();
+    let abortAt = 0;
+    const abort = () => { abortAt = Date.now(); controller.abort(); };
+    let abortTimer: ReturnType<typeof setTimeout> | undefined;
+    if (phase === "handshake") abortTimer = setTimeout(abort, 200);
+    else endpoint.websocket.on("connection", (socket) => socket.on("message", () => {
+      abortTimer = setTimeout(abort, 100);
+    }));
+    try {
+      await destroyBrowserSession(session.id, registryEnv, { signal: controller.signal });
+      expect(abortAt).toBeGreaterThan(0);
+      expect(Date.now() - abortAt).toBeLessThan(1_500);
+      expect(isPidAlive(session.browserPid)).toBe(false);
+    } finally {
+      clearTimeout(abortTimer);
+      await endpoint.close();
       await destroyBrowserSession(session.id, registryEnv).catch(() => {});
     }
   }, TEST_TIMEOUT_MS);
