@@ -26,6 +26,8 @@ use x11rb::NONE;
 
 /// Pixel scroll distance that makes one wheel step.
 pub const PIXELS_PER_STEP: f64 = 20.0;
+/// The most wheel steps one scroll event sends per axis.
+pub const MAX_SCROLL_STEPS: u32 = 32;
 /// Most new keycode bindings one injector makes. The spare keycodes are
 /// shared with the agent's typing, so a long session must not use them all.
 pub const MAX_BINDINGS: usize = 64;
@@ -211,7 +213,7 @@ fn take_steps(total: &mut f64, positive: u8, negative: u8, steps: &mut Vec<(u8, 
     *total -= whole;
     if whole != 0.0 {
         let button = if whole > 0.0 { positive } else { negative };
-        steps.push((button, whole.abs().min(1000.0) as u32));
+        steps.push((button, whole.abs().min(f64::from(MAX_SCROLL_STEPS)) as u32));
     }
 }
 
@@ -439,6 +441,11 @@ impl<C: Clock> Injector<C> {
     fn send_steps(&mut self, steps: Vec<(u8, u32)>) -> Result<(), InjectError> {
         for (button, count) in steps {
             for _ in 0..count {
+                // A grant can end partway through a burst.
+                if let Err(e) = self.check() {
+                    self.conn.flush()?;
+                    return Err(e);
+                }
                 self.send_button(button, true)?;
                 self.send_button(button, false)?;
             }
@@ -849,6 +856,12 @@ mod tests {
         assert_eq!(scroll.pixels(0.0, -5.0), vec![(5, 1)]);
         assert_eq!(scroll.pixels(0.0, 45.0), vec![(4, 2)]);
         assert_eq!(scroll.lines(0.0, -1.0), vec![(5, 1)]);
+
+        let mut scroll = ScrollAccumulator::default();
+        assert_eq!(
+            scroll.lines(-1e9, 1e9),
+            vec![(4, MAX_SCROLL_STEPS), (7, MAX_SCROLL_STEPS)]
+        );
     }
 
     #[test]
