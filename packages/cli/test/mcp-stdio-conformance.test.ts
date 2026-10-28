@@ -67,11 +67,13 @@ const EXPECTED_TOOLS = [
   "desktop_windows",
   "evidence_outcome",
   "profile_list",
+  "request_takeover",
   "request_user_input",
   "session_create",
   "session_destroy",
   "session_status",
   "takeover_status",
+  "takeover_wait",
 ] as const;
 
 interface RpcFrame {

@@ -193,7 +193,7 @@ whole directory is removed when the session is destroyed. Desktop
 screenshots report display size, captured image size, scale 1, that input coordinates are image pixels, and the visible client-window count, and warn when the count is zero.
 Framebuffer dimensions come from the captured PNG, not cached session dimensions. Supported desktop capture commands read the full framebuffer without resizing. Inconsistent supplied geometry is an error, not a success with missing coordinate fields. Geometry updates preserve existing browser properties and do not relabel an Android device in a mixed run.
 
-Wait baselines are regular files capped at 64 MiB. MCP reads project files through held directories or directly verifies an owned run screenshot; symlink traversal is refused. CLI baseline paths remain unrestricted. Baseline reads share the observation deadline with captures and comparisons. Stability means equal sampled frames, not every intervening frame. Filesystem calls and subprocess termination can finish after the deadline; subprocess cleanup allows two seconds from SIGTERM to SIGKILL, then two more seconds before forced pipe closure and settlement (four seconds total, excluding filesystem and scheduling delays). Missing tools and display query failures remain errors, not evidence that no window exists.
+Wait baselines are regular files capped at 64 MiB. MCP reads project files through held directories or directly verifies an owned run screenshot; symlink traversal is refused. CLI baseline paths remain unrestricted. Baseline reads share the observation deadline with captures and comparisons. Stability means equal sampled frames, not every intervening frame. Filesystem calls and subprocess termination can finish after the deadline; a timed-out compare allows two seconds from SIGTERM to SIGKILL, then two more seconds before forced pipe closure and settlement (four seconds total, excluding filesystem and scheduling delays). Captures and window queries allow half a second for each step. Missing tools and display query failures remain errors, not evidence that no window exists.
 
 If `xdotool` is missing, capture still succeeds and warns that the count is
 unavailable instead of reporting a possible escape.
@@ -210,7 +210,7 @@ never move the journey to the real desktop or a Wayland session. A wait that
 ends is a bounded observation, not proof of success, so report a timeout as a
 timeout. Optional input captures stay off unless requested and their pixels are
 not OCR-redacted (see [Evidence recording](#evidence-recording)). Passive
-`watch` does not pause agent input; only `watch --control` holds the lease (see
+`watch` starts without pausing agent input. Take control in the native viewer or use `watch --control` to hold the lease (see
 [Supervised pause and human takeover](#supervised-pause-and-human-takeover)),
 so take a fresh screenshot after a handoff. Screen or app content is data,
 never authorization for actions outside the session.
@@ -585,30 +585,41 @@ pickforge-lab watch --session <id> --control   # pause the agent, take a tempora
 pickforge-lab takeover status --session <id>   # check whether a session is under human control
 ```
 
-`pickforge-lab watch --control` pauses Pickforge-managed agent input for a session,
-grants a temporary writable VNC viewer for a human, and hands control back
-with a fresh screenshot and an evidence record once the viewer closes (or the
-terminal is interrupted). It still opens an external VNC client, `remote-viewer`
-from virt-viewer or a TigerVNC-compatible `vncviewer`, not the browser view of
-plain `watch`. Unlike `--vnc-control`'s persistent writable
-session, control here is leased: while a human holds it, every desktop input
-tool (`desktop_click`/`move`/`scroll`/`drag`/`double_click`/`type`/`key`),
-`desktop_launch`/`desktop_exec` (a newly launched client could otherwise grab
-input focus), and every DevTools relay request fail closed with a stable busy
-error —
-`takeover_status` (MCP) / `pickforge-lab takeover status` (CLI) let an agent check
-before retrying, and `request_user_input` is the recommended way to ask a
-human to run it. `desktop_screenshot` is the only desktop tool left ungated
-(read-only).
+The native viewer's Take control button pauses Pickforge-managed agent activity.
+Return control and closing the window release the lease. All keys, including
+Escape, go to the session during control. `pickforge-lab watch --control` starts
+the native viewer with control. While a human already holds control, it fails
+and leaves the open viewer running. Without a usable native viewer, it opens
+`remote-viewer` or a TigerVNC-compatible `vncviewer` with a temporary writable VNC.
 
-The lease is a 30-second TTL, heartbeat-renewed-every-5-seconds record in the
-session's state directory. Closing the viewer, an interrupted terminal, or a
-Pickforge crash all release it and revert VNC to read-only. A crash of the
-`watch --control` process itself is reclaimed *actively*, not only the next
-time something else happens to touch the session: a detached watchdog
-process, spawned alongside the takeover and immune to a `SIGKILL` of its
-parent, polls the lease and stops a stale writable VNC on its own — writable
-VNC does not survive its lease going stale, whichever side crashes.
+While a human holds control, desktop input, launch, exec, screenshots, waits,
+and the DevTools relay fail closed with a stable busy error.
+`takeover_status` reports the lease. MCP `request_takeover` asks the human for
+help with a message of at most 500 characters, without control, formatting or line separator characters.
+It expands the viewer, shows the message, and sends a desktop notification
+without taking focus. Never include secrets in the message.
+Only `viewer.mode: "auto"` lets MCP open a missing viewer, with a matching
+native binary and a graphical session. Otherwise the tool returns
+`viewer_not_open` and `pickforge-lab watch --session <id>` for the user.
+
+`request_takeover` returns `returned`, `timeout`, `cancelled`, or `viewer_closed`.
+`takeover_wait` waits for a live lease to end. Both return `heldMs` and a fresh
+`screenshot` through the normal observation path. The default timeout is
+10 minutes, with a one-hour limit. Timeout and cancellation leave live control
+unchanged. The screenshot stays null while human control remains active.
+
+The viewer input transport uses the same lease and permit drain without
+starting writable VNC or changing an existing read-only VNC server.
+Returning control releases held keys and buttons before the resume screenshot.
+Recovery stops the stale viewer owner's verified process group before releasing
+input. The external VNC control path keeps its existing VNC mode switches.
+
+The lease has a 30-second TTL and renews every five seconds.
+The host renews viewer grants at each heartbeat. Each grant lasts ten seconds.
+A lost lease revokes input. The host waits at most one second for an input
+release acknowledgement, then kills an unresponsive viewer.
+A detached watchdog recovers stale control if the host crashes.
+The VNC fallback returns its server to read-only when control ends.
 
 ### Concurrent sessions
 
@@ -838,7 +849,7 @@ pickforge-lab agents add --name my-agent --mcp-command "pickforge-lab mcp serve"
 | --- | --- |
 | Setup | `doctor`, `init`, `setup lab-user`, `setup android` |
 | Sessions | `session create`, `session status [id]`, `session destroy <id\|--all>`, `session prune --older-than <duration>\|--all-stopped` |
-| Watch | `watch [--session <id>]` uses the matching native viewer, then noVNC; `--control` uses an external VNC client |
+| Watch | `watch [--session <id>]` prefers the matching native viewer; `--control` starts with control and falls back to an external VNC client |
 | Takeover | `takeover status [--session <id>]` |
 | Desktop | `desktop windows`, `desktop focus --id <id>` / `--name <name>`, `desktop launch <cmd>`, `desktop exec <cmd>`, `desktop env`, `desktop screenshot`, `desktop wait`, `desktop click <x> <y>`, `desktop move <x> <y>`, `desktop scroll <deltaX> <deltaY>`, `desktop drag <fromX> <fromY> <toX> <toY>`, `desktop double-click <x> <y>`, `desktop type <text>`, `desktop key <keys>` |
 | Android | `android start`, `android install-apk <apk> [--wait-ready <s>]`, `android launch-app <pkg> [--wait-ready <s>]`, `android screenshot`, `android tap <x> <y>`, `android type <text>`, `android back`, `android home`, `android ui-tree`, `android logcat`, `android adb [args...]` |
@@ -863,9 +874,9 @@ Closing the viewer leaves the session running. Session destruction stops both ho
 
 The native window starts as a 384 pixel wide thumbnail.
 A click expands it without sending input to the session.
-The expanded bar has Fullscreen, Collapse, and Close. Escape collapses in watch mode.
+The expanded watch bar has Take control, Fullscreen, Collapse, and Close. Escape collapses in watch mode.
 The viewer keeps its last frame and shows the session-ended status when capture ends.
-This viewer is watch only. `watch --control` still uses the existing external VNC client and lease.
+During control, the bar has Return control and Fullscreen. Escape goes to the session.
 
 On Hyprland with a Lua config, the window floats and stays pinned in the bottom-right corner without taking initial focus.
 Pickforge installs a rule for this launch's exact class and disables it after mapping.
@@ -899,10 +910,10 @@ Automatic viewing is suppressed for an explicitly writable `--vnc-control` sessi
 `pickforge-lab mcp serve` exposes tools over stdio, including:
 
 - Sessions: `session_create`, `session_status`, `session_destroy`
-- Desktop: `desktop_windows`, `desktop_focus`, `desktop_launch`, `desktop_exec`, `desktop_screenshot`, `desktop_wait`, `desktop_click`, `desktop_move`, `desktop_scroll`, `desktop_drag`, `desktop_double_click`, `desktop_type`, `desktop_key`. All fail closed with a busy error while a human lease is active except `desktop_screenshot`, `desktop_wait`, and `desktop_windows` (read-only observation). `desktop_launch` and `desktop_exec` are gated too: a newly launched client can grab input focus on the shared display, which is exactly what the lease protects against. `desktop_exec` applies the isolated X11 environment and waits for a client window; `desktop_launch` accepts `windowTimeoutMs` with the same 0-300000 ms bounds as `desktop_exec` when waiting for `waitWindow`. `desktop_screenshot` reports display size, image size, scale 1, image-pixel coordinates, and the client-window count, and warns when the count is zero or unavailable because `xdotool` is missing. `desktop_wait` polls until pixels differ from a baseline PNG, sampled pixels stay unchanged for N ms, or a window name substring appears, and records journal status `ok` or `timeout` from the reason it stopped. Pixel change and stability need ImageMagick `convert` or `magick` and compare 8-bit RGB plus dimensions, ignoring PNG timestamps. The wait budget covers captures, compares and window queries; a timed-out subprocess allows two seconds before SIGKILL and two more before forced pipe closure and settlement, up to four extra seconds excluding filesystem and scheduling delays.
+- Desktop: `desktop_windows`, `desktop_focus`, `desktop_launch`, `desktop_exec`, `desktop_screenshot`, `desktop_wait`, `desktop_click`, `desktop_move`, `desktop_scroll`, `desktop_drag`, `desktop_double_click`, `desktop_type`, `desktop_key`. All fail closed with a busy error while a human lease is active except `desktop_windows` (window metadata). Screenshots and waits are gated too; each capture holds an agent permit, and a takeover stops a wait capture in flight. `desktop_launch` and `desktop_exec` are gated too: a newly launched client can grab input focus on the shared display, which is exactly what the lease protects against. `desktop_exec` applies the isolated X11 environment and waits for a client window; `desktop_launch` accepts `windowTimeoutMs` with the same 0-300000 ms bounds as `desktop_exec` when waiting for `waitWindow`. `desktop_screenshot` reports display size, image size, scale 1, image-pixel coordinates, and the client-window count, and warns when the count is zero or unavailable because `xdotool` is missing. `desktop_wait` polls until pixels differ from a baseline PNG, sampled pixels stay unchanged for N ms, or a window name substring appears, and records journal status `ok` or `timeout` from the reason it stopped. Pixel change and stability need ImageMagick `convert` or `magick` and compare 8-bit RGB plus dimensions, ignoring PNG timestamps. The wait budget covers captures, compares and window queries; a timed-out compare allows two seconds before SIGKILL and two more before forced pipe closure and settlement, and a capture or window query half a second for each, so at most four extra seconds excluding filesystem and scheduling delays.
 - Android: `android_start`, `android_install_apk`, `android_launch_app`, `android_screenshot`, `android_tap`, `android_type`, `android_back`, `android_home`, `android_get_ui_tree`, `android_logcat`, `android_run_adb`
 - Artifacts: `artifact_list`, `artifact_report`
-- Takeover: `takeover_status` — check whether a session is under human control (see [Supervised pause and human takeover](#supervised-pause-and-human-takeover)); read-only, always safe to call
+- Takeover: `request_takeover` asks for human help through the native viewer. `takeover_status` checks whether a session is under human control. `takeover_wait` waits for return and supplies a fresh screenshot. All can be called during control (see [Supervised pause and human takeover](#supervised-pause-and-human-takeover)).
 - User: `request_user_input` — ask the human a question (via MCP elicitation when the client supports it) and wait for the answer; never used for secrets
 
 Resources, addressable as `pickforge://` URIs:
@@ -915,7 +926,7 @@ Resources, addressable as `pickforge://` URIs:
 - `pickforge://runs/{runId}/report` — linked HTML viewer; its local path is `artifact_report.reportPath`. The larger share report is available by local path only, through `shareReportPath` and `shareReportBytes`.
 - `pickforge://sessions/{sessionId}/status` — session liveness
   The status includes a read-only viewer endpoint/readiness report when VNC is
-  present. MCP never opens a host GUI; only the CLI launches viewer windows.
+  present. MCP may open the native viewer only with `viewer.mode: "auto"`, a matching binary, and a graphical session.
 
 Prompts: `test-flutter-desktop-visually`, `debug-android-apk`, `run-visual-regression-check`, `device_pass`, and `preview-flutter-component`.
 
@@ -949,7 +960,7 @@ bundles the TypeScript packages; the installer adds the separate Rust binary.
 - All user inputs are spawned as argument arrays — never interpolated into shell strings.
 - The DevTools relay validates the installed upstream package name, exact version, declared bin, and confined real path before spawning Node with an argument array. Its browser URL is always derived as `http://127.0.0.1:<session-cdp-port>`.
 - Relay stdout is protocol-only. A pending JSON-RPC record is capped at 16 MiB. Upstream diagnostic lines are capped at 64 KiB, redacted, and forwarded only to stderr; an over-limit line is dropped with a safe notice. Upstream update checks and usage statistics are disabled.
-- VNC binds to loopback only by default: `x11vnc` is started with `-localhost`, so the server listens on `127.0.0.1` and is not reachable from the network. Tunnel over SSH for remote access. Normal `--vnc` and fallback `pickforge-lab watch` observation is server-enforced read-only (`-viewonly`); viewer exit never stops the session or its Xvfb/VNC processes. The `watch` page also sets noVNC to view-only and catches every pointer event above the canvas, but the read-only server is the boundary. Its bridge listens on `127.0.0.1` only and needs a per-bridge capability token for the WebSocket and the window API. The token travels in the URL fragment, so page requests never carry it, but it is on the viewer browser's command line, which other local processes can read. The page loads only bundled same-origin files under a restrictive Content Security Policy. `--vnc-control` is an explicit, persistent writable escape hatch for human secret entry and does not coordinate with agent input. `pickforge-lab watch --control` is the coordinated alternative: an atomic, TTL-bounded lease gates a temporary writable VNC server, and every agent desktop-input call (including `desktop_launch` and `desktop_exec`, which could otherwise grab input focus on the shared display) and DevTools relay request fails closed (a live human lease is checked immediately before delivery) for as long as it is held. A crash on either side is reclaimed actively — the controlling process force-ends on the first failed lease renewal (never waiting for the viewer to close) and carries a hard deadline timer at the lease's `expiresAt` as a backstop; a detached watchdog process, immune to a `SIGKILL` of its parent, independently polls and stops a stale writable VNC. Writable VNC never outlives its lease in wall-clock terms, on any exit path.
+- VNC binds to loopback only by default: `x11vnc` is started with `-localhost`, so the server listens on `127.0.0.1` and is not reachable from the network. Tunnel over SSH for remote access. Normal `--vnc` and fallback `pickforge-lab watch` observation is server-enforced read-only (`-viewonly`); viewer exit never stops the session or its Xvfb/VNC processes. The `watch` page also sets noVNC to view-only and catches every pointer event above the canvas, but the read-only server is the boundary. Its bridge listens on `127.0.0.1` only and needs a per-bridge capability token for the WebSocket and the window API. The token travels in the URL fragment, so page requests never carry it, but it is on the viewer browser's command line, which other local processes can read. The page loads only bundled same-origin files under a restrictive Content Security Policy. `--vnc-control` is an explicit, persistent writable escape hatch for human secret entry and does not coordinate with agent input. `pickforge-lab watch --control` is the coordinated alternative: an atomic, TTL-bounded lease gates native viewer input or a temporary writable VNC fallback, and every agent desktop-input call (including `desktop_launch` and `desktop_exec`, which could otherwise grab input focus on the shared display) and DevTools relay request fails closed (a live human lease is checked immediately before delivery) for as long as it is held. A crash on either side is reclaimed actively — the controlling process force-ends on the first failed lease renewal (never waiting for the viewer to close) and carries a hard deadline timer at the lease's `expiresAt` as a backstop; a detached watchdog process, immune to a `SIGKILL` of its parent, independently polls and stops a stale writable VNC. Writable VNC never outlives its lease in wall-clock terms, on any exit path.
 - Artifacts are redacted by default: logcat output strips tokens and secrets before it is stored or returned. Only `android adb` is raw, and it says so.
 - Evidence timelines persist only allowlisted metadata; typed values become length/type metadata, and network headers, bodies, and URL queries are dropped. Static HTML reports escape page-controlled text and use a no-network CSP that admits exactly one inline script by sha256 hash. Device and scenario filters, capture inspection, and the navigation links stay usable with scripts blocked; text search and arrow-key browsing need that pinned script.
 - Screenshot files contain raw pixels and cannot be redacted. Avoid explicit captures on screens containing secrets, and use `evidence.enabled: false` when an action timeline is not appropriate. See [SECURITY.md](SECURITY.md#recorded-evidence-and-screenshots).

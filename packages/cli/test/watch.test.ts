@@ -164,6 +164,30 @@ describe("watch command in process", () => {
     expect((await listSessions())[0]?.desktop?.vncPid).toBeUndefined();
   });
 
+  it("chooses native control before writable VNC or a bridge", async () => {
+    fakes.installViewer();
+    process.env.DISPLAY = ":45678";
+    const id = await createDesktop(syntheticDisplay());
+    startNativeViewerHost.mockResolvedValue({ pid: 999_999, startTicks: 1, viewerPid: 999_998, viewerStartTicks: 1, launchId: LAUNCH_ID });
+    const result = await watchDesktopSession({ session: id, projectDir: root, control: true });
+    expect(result.data).toMatchObject({ viewer: "native", opened: true });
+    expect(startNativeViewerHost).toHaveBeenCalledWith(expect.objectContaining({ sessionId: id, control: true }));
+    expect(ensureViewerBridge).not.toHaveBeenCalled();
+    expect((await listSessions())[0]?.desktop?.vncPid).toBeUndefined();
+  });
+
+  it("reports failed native control startup without opening a fallback viewer", async () => {
+    const id = await createDesktop(syntheticDisplay());
+    fakes.installViewer();
+    startNativeViewerHost.mockRejectedValue(new Error("Native viewer host exited during startup"));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(await runWatch({ session: id, projectDir: root, control: true })).toBe(1);
+      expect(error).toHaveBeenCalled();
+      expect(ensureViewerBridge).not.toHaveBeenCalled();
+    } finally { error.mockRestore(); }
+  });
+
   it("keeps the browser fallback for a mismatched native viewer", async () => {
     fakes.installViewer({ version: "0.0.0" });
     await installVnc();

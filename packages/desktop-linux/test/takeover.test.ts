@@ -29,8 +29,14 @@ vi.mock("@pickforge/lab-core", async (importOriginal) => {
   };
 });
 
+vi.mock("../src/stuck-input.js", () => ({ releaseStuckInput: vi.fn(async () => {}) }));
+import { releaseStuckInput } from "../src/stuck-input.js";
+
 import {
   HumanLeaseHeldError,
+  acquireAgentPermit,
+  releaseAgentPermit,
+  releaseHumanLease,
   createSession,
   getSession,
   isPidAlive,
@@ -50,6 +56,8 @@ import {
   startHumanTakeover,
 } from "../src/takeover.js";
 import { startVnc } from "../src/vnc.js";
+import * as screenshotModule from "../src/screenshot.js";
+import { encodePng } from "./png-fixture.js";
 import { freeLoopbackPort, releaseLoopbackPorts } from "./test-resources.js";
 
 let root: string;
@@ -635,5 +643,78 @@ describe("runTakeoverWatchdogLoop (real separate-process)", () => {
     child.kill("SIGTERM");
 
     await endHumanTakeover(handle, { registryEnv: env, env, reason: "return" });
+  });
+});
+
+
+describe("viewer takeover transport", () => {
+  it("drains existing permits and starts no VNC server", async () => {
+    const id = await createDesktop();
+    const permit = await acquireAgentPermit(id, env);
+    let granted = false;
+    const pending = startHumanTakeover(id, { transport: "viewer", registryEnv: env, env })
+      .then((handle) => { granted = true; return handle; });
+    await expect.poll(async () => (await readHumanLease(id, env))?.inputTransport).toBe("viewer");
+    expect(granted).toBe(false);
+    expect(await readArgvLog()).toEqual([]);
+    await releaseAgentPermit(permit);
+    const handle = await pending;
+    expect(handle.transport).toBe("viewer");
+    expect(await renewHumanTakeover(handle, env)).toMatchObject({ inputTransport: "viewer" });
+    await endHumanTakeover(handle, { registryEnv: env, env, reason: "return" });
+    expect(releaseStuckInput).toHaveBeenCalledWith(":42", env);
+    expect(await readHumanLease(id, env)).toBeUndefined();
+    expect(await readArgvLog()).toEqual([]);
+  });
+
+  it.each(["return", "timeout", "cancelled"] as const)("preserves an existing read-only VNC on %s", async (reason) => {
+    const vnc = await startVnc({ display: ":42", port: await freeLoopbackPort(), logDir: path.join(root, "readonly"), env, viewOnly: true });
+    const desktop = { vncPid: vnc.pid, vncStartTimeTicks: vnc.startTimeTicks, vncPort: vnc.port, vncViewOnly: true };
+    const id = await createDesktop(desktop);
+    const handle = await startHumanTakeover(id, { transport: "viewer", registryEnv: env, env });
+    expect(await readArgvLog()).toEqual([expect.arrayContaining(["-viewonly"])]);
+    await endHumanTakeover(handle, { registryEnv: env, env, reason });
+    expect(isPidAlive(vnc.pid)).toBe(true);
+    expect((await getSession(id, env))?.desktop).toMatchObject(desktop);
+    expect(await readArgvLog()).toHaveLength(1);
+  });
+
+  it("captures the resume shot after releasing input and before releasing the lease", async () => {
+    const id = await createDesktop();
+    const handle = await startHumanTakeover(id, { transport: "viewer", registryEnv: env, env });
+    const capture = vi.spyOn(screenshotModule, "screenshot").mockImplementation(async (opts) => {
+      expect(releaseStuckInput).toHaveBeenCalledWith(":42", env);
+      expect(await readHumanLease(id, env)).toMatchObject({ leaseId: handle.leaseId });
+      fs.writeFileSync(opts.outPath, encodePng(1, 1, Buffer.from([0, 0, 0])));
+      return { path: opts.outPath, tool: "import", windowCount: 0, warnings: [], imageSize: { width: 1, height: 1 } };
+    });
+    try {
+      const result = await endHumanTakeover(handle, { registryEnv: env, env, reason: "return" });
+      expect(capture).toHaveBeenCalledOnce();
+      expect(result.screenshotPath).toMatch(/^screenshots\//);
+      expect(await readHumanLease(id, env)).toBeUndefined();
+    } finally {
+      capture.mockRestore();
+    }
+  });
+
+  it("does not release another viewer's input through an old handle", async () => {
+    const id = await createDesktop();
+    const first = await startHumanTakeover(id, { transport: "viewer", registryEnv: env, env });
+    await releaseHumanLease(id, first.leaseId, env);
+    const current = await startHumanTakeover(id, { transport: "viewer", registryEnv: env, env });
+    await endHumanTakeover(first, { registryEnv: env, env, reason: "return" });
+    expect(releaseStuckInput).not.toHaveBeenCalled();
+    expect(await readHumanLease(id, env)).toMatchObject({ leaseId: current.leaseId });
+    await endHumanTakeover(current, { registryEnv: env, env, reason: "return" });
+  });
+
+  it("keeps the lease closed when stuck-input cleanup fails", async () => {
+    const id = await createDesktop();
+    const handle = await startHumanTakeover(id, { transport: "viewer", registryEnv: env, env });
+    vi.mocked(releaseStuckInput).mockRejectedValueOnce(new Error("release failed"));
+    await expect(endHumanTakeover(handle, { registryEnv: env, env, reason: "return" })).rejects.toThrow("release failed");
+    expect(await readHumanLease(id, env)).toMatchObject({ leaseId: handle.leaseId });
+    expect(await readArgvLog()).toEqual([]);
   });
 });

@@ -218,7 +218,9 @@ export async function sessionStatusEntry(
 ): Promise<LocalSessionStatusEntry> {
   const entry = await localSessionStatusEntry(record, statusRuntime(ctx));
   if (entry.viewer !== undefined) {
-    entry.viewer.hostGuiLaunchSupported = false;
+    const config = await loadConfig(ctx.projectDir, ctx.env);
+    entry.viewer.hostGuiLaunchSupported = config.viewer?.mode === "auto" &&
+      ctx.viewerLauncher !== undefined && await ctx.viewerLauncher.available(ctx.env);
   }
   return entry;
 }

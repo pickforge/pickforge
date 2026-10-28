@@ -129,6 +129,32 @@ process-start identity still matches. Session VNC creation and desktop/browser
 destruction share one per-session mutation lock, preventing teardown races from
 orphaning a late x11vnc process.
 
+The native viewer input transport holds the existing human lease and drains
+agent permits without starting writable x11vnc. Existing read-only VNC stays
+read-only. Return releases held keys and mouse buttons on the session's explicit
+`DISPLAY` before the resume screenshot. Stale viewer recovery first stops the
+owner process group by its recorded process identity, then releases input.
+Recovery keeps the lease when it cannot verify that the owner group stopped.
+The host sends a grant every heartbeat, valid for twice the heartbeat interval.
+A lost lease triggers revoke. The host allows at most one second for an input
+release acknowledgement, then kills an unresponsive viewer.
+
+The private host socket accepts attention, cancellation, and lifecycle subscriptions.
+No socket operation can grant control or inject input. Only viewer stdio or an
+explicit CLI control startup can acquire a lease. Messages have at most 500
+characters and no control characters. They never enter logs or evidence.
+Notifications use an argv array. Expansion and notification never take focus.
+MCP opens a missing viewer only with `viewer.mode: "auto"`, a matching native
+binary, and a graphical session. Without these, it returns a CLI command.
+
+MCP and CLI desktop screenshots and waits fail closed during a live human
+lease, like input. Each screenshot and wait capture holds an agent permit, so a
+takeover drains it. A takeover also stops a wait capture in flight, which then
+fails with busy. The internal capture primitive remains available for the resume shot.
+`request_takeover` and `takeover_wait` capture only after the lease is gone, through the same guarded
+observation path. Timeout or cancellation does not end human control or capture
+its pixels; the screenshot field stays null while control remains active.
+
 Do not strip `-localhost` to put VNC on a shared network. An unauthenticated,
 all-interface VNC server is a remote-takeover risk.
 
