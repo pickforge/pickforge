@@ -168,7 +168,12 @@ async function pruneMarkers(root: DirHandle, id: string, roots: string[]): Promi
     markers.push([name, stat]);
   }
   if (await sessionEntryExists(id, roots)) return;
-  for (const [name, stat] of markers) await root.unlinkOwnedFile(name, stat);
+  for (const [name, stat] of markers) {
+    // A concurrent prune may have removed it first; a replaced entry still fails.
+    await root.unlinkOwnedFile(name, stat).catch(async (error: unknown) => {
+      if (await root.lstatChild(name) !== undefined) throw error;
+    });
+  }
 }
 
 /**

@@ -384,6 +384,25 @@ describe("session marker horizon", () => {
     expect(exist(files)).toEqual([true, true]);
   });
 
+  it("accepts a marker that a concurrent prune removed first, and refuses a replaced one", async () => {
+    const files = orphanMarkers("desk-0badc0de");
+    const unlink = DirHandle.prototype.unlinkOwnedFile;
+    const spy = vi.spyOn(DirHandle.prototype, "unlinkOwnedFile").mockImplementation(async function (this: DirHandle, name, stat) {
+      fs.rmSync(path.join(sessionsDir(env), name));
+      return unlink.call(this, name, stat);
+    });
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(exist(files)).toEqual([false, false]);
+    const replaced = orphanMarkers("desk-0badc0de");
+    spy.mockImplementation(async function (this: DirHandle, name, stat) {
+      fs.rmSync(path.join(sessionsDir(env), name));
+      fs.writeFileSync(path.join(sessionsDir(env), name), "");
+      return unlink.call(this, name, stat);
+    });
+    await expect(pruneSessionLogs(0, env)).rejects.toThrow("replaced");
+    expect(exist(replaced)).toEqual([true, true]);
+  });
+
   it("stays closed and reserved when prune stops between the two markers", async () => {
     const files = orphanMarkers("desk-0badc0de");
     const unlink = DirHandle.prototype.unlinkOwnedFile;
