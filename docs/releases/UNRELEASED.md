@@ -211,7 +211,6 @@ session teardown are also more reliable.
 - A read-only `watch` or MCP launch from another CLI version replaces the
   native viewer host, even when that host holds live human control. The human
   loses control without warning. (#371)
-- Browser sessions show Chrome's unsupported command-line flag bar. (#348)
 - The native viewer does not start when the session's `host.sock` path is
   longer than 107 bytes, which happens with a `PICKFORGE_HOME` longer than 67
   bytes. `watch` then reports that the viewer host did not report
