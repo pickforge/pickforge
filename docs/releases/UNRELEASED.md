@@ -1,30 +1,46 @@
-# Pickforge <version>
+# Pickforge 0.7.0
 
-<One paragraph on what this release is for.>
+Pickforge 0.7.0 gives agents a browser that you can watch and take over.
+Browser sessions can keep logins in named profiles. On graphical Linux hosts,
+a small native viewer shows a session as a live picture in picture. You can
+take control in the viewer, and an agent can ask you for help, for example
+with a login. Evidence reports now show where the agent pointed, and one
+shareable HTML file can hold a whole run. Desktop typing, process cleanup and
+session teardown are also more reliable.
 
 ## Changes
 
-- Viewer takeover now has a lease transport that leaves read-only VNC unchanged.
-  Return releases held input; stale recovery stops the verified owner group first.
-  MCP and CLI desktop screenshots and waits fail with busy during human control.
-  MCP `takeover_wait` waits for return, then supplies a fresh screenshot.
-  Its default timeout is 10 minutes, with a one-hour limit and request cancellation.
-  Timeout and cancellation keep the lease; screenshots stay null while it is active.
-  The native viewer now takes and returns control through its host.
-  Grants renew each heartbeat. Lost grants revoke input and require an ack within one second.
-  MCP `request_takeover` expands the viewer and sends a notification without taking focus.
-  Messages stay out of logs and evidence. Cancellation clears attention without ending live control.
-  MCP opens a missing viewer only in auto mode with a matching binary and graphical session.
-  Otherwise it returns the exact watch command. `watch --control` prefers the native viewer. (#341)
-
-- `watch` and automatic session viewing prefer the matching native `pickforge-viewer` binary on graphical Linux hosts.
-  The native path reads the verified lab display without VNC, a bridge, or Chromium.
-  It opens a thumbnail with expand, fullscreen, collapse, and close controls.
-  Hyprland Lua placement keeps it pinned without initial focus.
-  Session destruction stops the detached host and viewer by process identity.
-  Linux x86_64 release assets and the installer include the viewer.
-  npm-only installs and mismatched binaries keep the noVNC fallback.
-  The external VNC client remains the control fallback. (#340)
+- `watch` and automatic session viewing prefer the matching native
+  `pickforge-viewer` binary on graphical Linux hosts. The native path reads the
+  verified lab display without VNC, a bridge, or Chromium. It opens a
+  thumbnail with expand, fullscreen, collapse, and close controls. Hyprland Lua
+  placement keeps it pinned without initial focus. Session destruction stops
+  the detached host and viewer by process identity. Linux x86_64 release assets
+  and the installer include the viewer. npm-only installs and mismatched
+  binaries keep the noVNC fallback. The external VNC client remains the control
+  fallback. (#340)
+- The native viewer can hand the session to a human. Its Take control button
+  pauses agent activity, and Return control or closing the window gives it
+  back. `pickforge-lab watch --control` starts the native viewer with control.
+  While a human already holds control, it fails and leaves the open viewer
+  running. During control, agent desktop input, launch, exec, screenshots,
+  waits and the DevTools relay fail with a busy error, and a takeover also
+  stops a wait capture in flight. Returning control releases held keys and
+  buttons. The grant renews with each heartbeat. When it is lost, the viewer
+  revokes input and must confirm within one second. Viewer control uses the
+  existing lease and does not start writable VNC or change a read-only VNC
+  server. Recovery of a stale viewer owner stops its verified process group
+  first. (#341)
+- MCP `request_takeover` asks the human for help with a short message. It
+  expands the viewer, shows the message and sends a desktop notification
+  without taking focus. Messages stay out of logs and evidence. MCP
+  `takeover_wait` waits until control returns. Both return a fresh screenshot
+  after the return. The default timeout is 10 minutes, with a one-hour limit,
+  and a request can be cancelled. Timeout and cancellation leave live control
+  unchanged, and the screenshot stays null while control is active. MCP opens
+  a missing viewer only with `viewer.mode: "auto"`, a matching native binary
+  and a graphical session. Otherwise it returns the `watch` command for the
+  user. (#341)
 - Browser sessions accept `--profile <name>` or MCP `session_create`'s `profile`
   argument to keep logins under `~/.pickforge/lab/profiles/<name>`. Private
   directories survive teardown and crash recovery. One session can hold a
@@ -34,7 +50,6 @@
   profile stay ephemeral. Keep banking, payment, and main email accounts out
   of agent profiles. Chrome's Linux basic store relies on file permissions
   for cookie protection when no keyring is available. (#339)
-
 - The noVNC fallback opens a small live view in a browser instead of
   an external VNC client. A loopback bridge serves a bundled noVNC page that
   shows the whole session scaled into a 384 pixel wide thumbnail. A click
@@ -83,7 +98,6 @@
   256 MiB total; excluded files are listed. Large runs produce large files.
   CLI and MCP artifact reports expose its path and byte size. The MCP report
   resource still serves the linked viewer. (#186)
-
 - The MCP prompt `preview-flutter-component` walks an agent through rendering
   one Flutter widget without the full app, auth, routing or backend. Give it
   the widget and, optionally, states and viewports. It uses the Flutter Widget
@@ -106,28 +120,96 @@
   `scripts/lab/chrome-egress-check.mjs` release check now closes Chrome and
   cleans up correctly, exits 0 on a successful capture and observes for 120
   seconds. (#139)
-
 - Desktop typing is more reliable on a busy machine. Pickforge now reads and
   plans the keyboard map before it briefly freezes the display, so CPU
   contention no longer uses up the 250 ms freeze limit. If the limit still
   expires, preparation makes up to three attempts within its 3 second budget.
   When preparation fails, no text is sent. (#222)
 
+## Fixes
+
+- Desktop sessions start Xvfb with `-noreset`. A client that is still
+  connecting no longer fails with "Can't open display" when another client
+  disconnects. (#201)
+- An app that exits at once under containment is no longer reported as
+  launched on a busy host. (#203)
+- Input tools record `not-attempted` when text preparation fails, the agent
+  permit is refused, or a human holds control before input starts. Before,
+  some of these failures were recorded as attempted. (#267, #284, #295)
+- A peer that loses the race for a human lease reports that the lease is
+  held, not stale. (#298)
+- Teardown closes agent input before it releases a display, so a delayed input
+  call for a destroyed session cannot reach a display that a new session
+  reuses. A pruned session id is not reused while its takeover record
+  remains. (#213, #170)
+- Process cleanup sends SIGKILL only to proven members of a session's cgroup
+  instead of writing `cgroup.kill`. A scope that cannot be inspected still
+  gets the pre-kill guard. An unreadable process or a zombie leader with live
+  threads no longer counts as gone, and the viewer stop signals such a
+  zombie. (#194, #258, #324, #329)
+- Apps in desktop sessions no longer connect to an inherited accessibility
+  bus. (#269)
+- Session retention removes orphan lease staging and `stopped.json` temp
+  files, which blocked pruning of a retained session. (#313, #315)
+- Android-only teardown runs under the per-session lock, like desktop and
+  browser teardown. (#321)
+- The noVNC viewer bridge no longer fails its readiness check on a busy
+  host. (#301)
+- The `pickforge` binary reads `pubspec.yaml` with a safe-Rust YAML parser
+  with size and depth budgets. (#332)
+- Dependencies with published advisories moved to fixed versions, including
+  the MCP SDK, which is now 2.3.1. (#343)
+
 ## Validation
 
-- <What was actually run, and where its evidence lives. Nothing aspirational.>
+- Local gates on the release commit `b45cba6`: frozen install, typecheck,
+  lint, `cargo fmt --check`, clippy with `-D warnings` for the Linux and
+  Windows targets, the Rust workspace tests on Xvfb (260 passed), and
+  `cargo build --release` with `pickforge 0.7.0` and `pickforge-viewer 0.7.0`
+  version checks. The TypeScript suite ran with coverage and with the desktop,
+  browser and native viewer requirements on: 3,343 passed, 4 skipped, 90.26%
+  of lines covered. The build passed.
+- The opt-in live Flutter test passed with Flutter 3.41.6.
+- A device pass ran on Omarchy (Arch Linux) x86_64 with Flutter 3.41.6 and
+  the CLI packed from `b45cba6`, in an isolated home. `pickforge doctor` and
+  `pickforge init` passed, and `flutter run -d linux` ran through
+  `pickforge-lab desktop exec` in a managed Xvfb session. Two clicks raised the
+  counter from 0 to 2. A label change in `lib/main.dart` hot reloaded with the
+  counter kept at 2, and one more click raised it to 3. `pickforge evidence
+  record` recorded the run, and an independent image review of the four
+  screenshots returned PASS. Hot reload used SIGUSR1 to `flutter run`, not a
+  Dart MCP reload call.
+- In the same pass, the 0.7.0 native viewer showed a live picture in picture
+  of a session on a separate Xvfb display, and a click appeared in it at once.
+- Takeover was checked on the merged `4c6e18e`, before the version change, on
+  a Hyprland host with fcitx5. The viewer opened without focus,
+  `request_takeover` expanded it, and Take control, typing with accents and
+  Return control worked.
 
 ## Known limits
 
 - Each finalized Lab run stores about 1.33 times its screenshot bytes again in
-  `report-share.html`. Rendering near the 256 MiB cap needs roughly 1 GB of memory.
+  `report-share.html`. Rendering near the 256 MiB cap needs roughly 1 GB of
+  memory.
 - If rewriting the share report fails when an outcome is recorded on an already
   finalized run, the previous reports stay in place and the error is returned;
   `actions.jsonl` stays authoritative.
-
-- <What this release does not do, and what is not proven yet.>
+- The native viewer ships for Linux x86_64 only. npm-only installs and a
+  viewer binary from another version use the noVNC fallback. Hyprland with a
+  Lua config is also the only placement adapter for the native viewer.
+- A repository config can set `viewer.mode: "auto"` and so let MCP open the
+  viewer. A later release will read that setting from the global config only.
+  (#370)
+- A read-only `watch` or MCP launch from another CLI version replaces the
+  native viewer host, even when that host holds live human control. The human
+  loses control without warning. (#371)
+- Browser sessions show Chrome's unsupported command-line flag bar. (#348)
+- The native viewer does not start when the session's `host.sock` path is
+  longer than 107 bytes, which happens with a `PICKFORGE_HOME` longer than 67
+  bytes. `watch` then reports that the viewer host did not report
+  readiness. (#376)
 - Hyprland with a Lua config is the only window placement adapter. Elsewhere
-  the `watch` window is an ordinary window. Pickforge disables its Hyprland
+  the noVNC `watch` window is an ordinary window. Pickforge disables its Hyprland
   runtime rule after launch, but Hyprland keeps a disabled rule registered
   until the config reloads. The viewer token is on the browser's command
   line, which other processes on the same host can read. The window does not
