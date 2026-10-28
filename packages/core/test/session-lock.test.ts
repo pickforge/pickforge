@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSession } from "../src/session.js";
-import { withSessionVncLock } from "../src/session-lock.js";
+import { SESSION_VNC_LOCK_TIMEOUT_MS, withSessionVncLock } from "../src/session-lock.js";
 
 let home: string;
 let env: { PICKFORGE_HOME: string };
@@ -22,16 +22,12 @@ function lockPath(): string {
 }
 
 function holdLock(): { held: Promise<void>; release: () => void } {
-  let release: (() => void) | undefined;
-  const held = withSessionVncLock(
-    sessionId,
-    env,
-    () =>
-      new Promise<void>((resolve) => {
-        release = resolve;
-      }),
-  );
-  return { held, release: () => release?.() };
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const held = withSessionVncLock(sessionId, env, () => gate);
+  return { held, release };
 }
 
 describe("session VNC lock", () => {
@@ -68,8 +64,26 @@ describe("session VNC lock", () => {
       withSessionVncLock(sessionId, env, operation, {
         signal: AbortSignal.abort(),
       }),
-    ).rejects.toThrow(/Cancelled while waiting for the VNC lock/);
+    ).rejects.toThrow(`Cancelled while waiting for the lock of session ${sessionId}`);
     expect(operation).not.toHaveBeenCalled();
     expect(await withSessionVncLock(sessionId, env, async () => "free")).toBe("free");
+  });
+
+  it("names the session lock, not VNC, when the wait times out", async () => {
+    const holder = holdLock();
+    const now = vi.spyOn(Date, "now");
+    try {
+      await vi.waitFor(() => expect(fs.existsSync(lockPath())).toBe(true));
+      // Each clock read jumps a full wait, so the first poll is past the deadline.
+      let clock = Date.now();
+      now.mockImplementation(() => (clock += SESSION_VNC_LOCK_TIMEOUT_MS));
+      await expect(withSessionVncLock(sessionId, env, async () => {})).rejects.toThrow(
+        `Timed out waiting for the lock of session ${sessionId}`,
+      );
+    } finally {
+      now.mockRestore();
+      holder.release();
+      await holder.held;
+    }
   });
 });
