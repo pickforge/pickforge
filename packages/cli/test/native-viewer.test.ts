@@ -265,11 +265,13 @@ describe.skipIf(!available)("native viewer host", () => {
   it("refuses dead readiness whose socket was replaced", async () => {
     const previous = await start();
     await stopNativeViewerHost(sessionId, env);
-    await withViewerDir(sessionId, env, false, (directory) => writeViewerPrivateFile(directory, "host.json", JSON.stringify(previous)));
     fs.rmSync(previous.socket, { force: true });
     const server = net.createServer();
     await new Promise<void>((resolve) => server.listen(previous.socket, resolve));
     try {
+      // ext4 gives the replacement the freed inode number, so record one it cannot have (#404).
+      const stale = { ...previous, socketIno: fs.lstatSync(previous.socket).ino + 1 };
+      await withViewerDir(sessionId, env, false, (directory) => writeViewerPrivateFile(directory, "host.json", JSON.stringify(stale)));
       await expect(stopNativeViewerHost(sessionId, env)).rejects.toThrow("Unsafe stale viewer socket");
       expect(fs.existsSync(previous.socket)).toBe(true);
     } finally { await new Promise((resolve) => server.close(resolve)); }
