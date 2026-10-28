@@ -6,6 +6,7 @@ import { setRunCaptureGeometry } from "@pickforge/lab-core";
 import {
   click,
   DEFAULT_DESKTOP_WAIT_TIMEOUT_MS,
+  DesktopInputTargetError,
   DesktopTextPreparationError,
   desktopWait,
   desktopWindows,
@@ -434,12 +435,12 @@ async function focusEvidence(display: string, ctx: ServerContext): Promise<Evide
 
 /**
  * True when the input failed before anything was sent: a text preparation
- * failure, or an agent permit acquisition or recheck failure.
- * withAgentPermit throws these typed errors before it runs the input.
+ * failure, an unverified session display, or an agent permit acquisition or
+ * recheck failure. These typed errors are thrown before the input runs.
  */
 function noInputSent(error: unknown): boolean {
-  return error instanceof DesktopTextPreparationError || error instanceof HumanControlActiveError ||
-    error instanceof AgentPermitUnavailableError;
+  return error instanceof DesktopTextPreparationError || error instanceof DesktopInputTargetError ||
+    error instanceof HumanControlActiveError || error instanceof AgentPermitUnavailableError;
 }
 
 async function trackInput(

@@ -3,7 +3,7 @@ import { parseDisplayNumber } from "./display.js";
 import { performance } from "node:perf_hooks";
 import { prepareText, typingEnvironment } from "./x11-prebind.js";
 import { DesktopTextPreparationError, remaining } from "./x11-wire.js";
-import { validateTypingTarget } from "./x11-target.js";
+import { DesktopInputTargetError, validateTypingTarget, verifyOwnedDisplayTarget } from "./x11-target.js";
 
 const TYPE_DELAY_MS = 50;
 const SCROLL_STEP_DELAY_MS = 25;
@@ -277,12 +277,23 @@ export function buildKeyArgs(key: string): string[] {
   return ["key", "--", key];
 }
 
+/**
+ * Runs xdotool only when the display verifies as the session's owned Xvfb,
+ * with the check typing uses (pickforge/pickforge#219). xdotool connects by
+ * display number, so a server that replaces the owned Xvfb between the check
+ * and that connection, a few milliseconds, can still receive the input.
+ */
 async function runXdotool(
+  sessionId: string,
   display: string,
+  env: EnvLike,
   args: string[],
   timeoutMs: number,
 ): Promise<void> {
   parseDisplayNumber(display);
+  if (await verifyOwnedDisplayTarget(sessionId, display, env) === undefined) {
+    throw new DesktopInputTargetError();
+  }
   await runCommand("xdotool", args, {
     env: { DISPLAY: display },
     timeoutMs,
@@ -295,13 +306,16 @@ async function runXdotool(
  * a short-lived agent permit, rechecks for a live human lease, delivers the
  * input only if none is found, and releases the permit in `finally` —
  * fail-closed, per pickforge/pickforge#21. No permit fitness (or a lease
- * appearing before the recheck) means no input delivery.
+ * appearing before the recheck) means no input delivery. Inside the permit,
+ * the display must still verify as the session's owned Xvfb.
  */
 
 export async function click(opts: ClickOptions): Promise<void> {
   await withAgentPermit(opts.sessionId, opts.env ?? process.env, () =>
     runXdotool(
+      opts.sessionId,
       opts.display,
+      opts.env ?? process.env,
       buildClickArgs({ x: opts.x, y: opts.y, button: opts.button }),
       INPUT_TIMEOUT_MS,
     ),
@@ -311,7 +325,9 @@ export async function click(opts: ClickOptions): Promise<void> {
 export async function move(opts: MoveOptions): Promise<void> {
   await withAgentPermit(opts.sessionId, opts.env ?? process.env, () =>
     runXdotool(
+      opts.sessionId,
       opts.display,
+      opts.env ?? process.env,
       buildMoveArgs({ x: opts.x, y: opts.y }),
       INPUT_TIMEOUT_MS,
     ),
@@ -321,7 +337,9 @@ export async function move(opts: MoveOptions): Promise<void> {
 export async function scroll(opts: ScrollOptions): Promise<void> {
   await withAgentPermit(opts.sessionId, opts.env ?? process.env, () =>
     runXdotool(
+      opts.sessionId,
       opts.display,
+      opts.env ?? process.env,
       buildScrollArgs({
         deltaX: opts.deltaX,
         deltaY: opts.deltaY,
@@ -336,7 +354,9 @@ export async function scroll(opts: ScrollOptions): Promise<void> {
 export async function drag(opts: DragOptions): Promise<void> {
   await withAgentPermit(opts.sessionId, opts.env ?? process.env, () =>
     runXdotool(
+      opts.sessionId,
       opts.display,
+      opts.env ?? process.env,
       buildDragArgs({
         fromX: opts.fromX,
         fromY: opts.fromY,
@@ -353,7 +373,9 @@ export async function drag(opts: DragOptions): Promise<void> {
 export async function doubleClick(opts: DoubleClickOptions): Promise<void> {
   await withAgentPermit(opts.sessionId, opts.env ?? process.env, () =>
     runXdotool(
+      opts.sessionId,
       opts.display,
+      opts.env ?? process.env,
       buildDoubleClickArgs({
         x: opts.x,
         y: opts.y,
@@ -408,6 +430,6 @@ export async function typeText(opts: TypeTextOptions): Promise<void> {
 
 export async function pressKey(opts: PressKeyOptions): Promise<void> {
   await withAgentPermit(opts.sessionId, opts.env ?? process.env, () =>
-    runXdotool(opts.display, buildKeyArgs(opts.key), INPUT_TIMEOUT_MS),
+    runXdotool(opts.sessionId, opts.display, opts.env ?? process.env, buildKeyArgs(opts.key), INPUT_TIMEOUT_MS),
   );
 }
