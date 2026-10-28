@@ -668,7 +668,7 @@ describe("session VNC lock cancellation", () => {
     });
     setTimeout(() => controller.abort(), 50);
     await expect(teardown).rejects.toThrow(
-      `Cancelled while waiting for the VNC lock of session ${sessionId}`,
+      `Cancelled while waiting for the lock of session ${sessionId}`,
     );
     expect(Date.now() - started).toBeLessThan(2_000);
     expect(finalize).not.toHaveBeenCalled();
