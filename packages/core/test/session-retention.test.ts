@@ -426,8 +426,10 @@ describe("session marker horizon", () => {
     expect(exist(files)).toEqual([false, false]);
     const replaced = orphanMarkers("desk-0badc0de");
     spy.mockImplementation(async function (this: DirHandle, name, stat) {
-      fs.rmSync(path.join(sessionsDir(env), name));
-      fs.writeFileSync(path.join(sessionsDir(env), name), "");
+      // Created before the swap, so ext4 cannot hand back the old inode.
+      const file = path.join(sessionsDir(env), name);
+      fs.writeFileSync(`${file}.new`, "");
+      fs.renameSync(`${file}.new`, file);
       return unlink.call(this, name, stat);
     });
     await expect(pruneSessionLogs(0, env)).rejects.toThrow("replaced");
