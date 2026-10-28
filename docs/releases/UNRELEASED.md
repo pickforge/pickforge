@@ -150,6 +150,14 @@ npm or GitHub releases. (#398)
   dismiss sheets. Coordinates are device pixels from 0 to 16383, and the
   optional duration is 0 to 10000 ms. The same start and end with a duration
   is a long press. Evidence records both endpoints. (#231)
+- `pickforge evidence record` writes schema v4. Each state records its capture
+  time, app build, emulator and system image versions, and the requested and
+  observed display mode, fold state, posture, rotation, density, font scale,
+  dark mode and locale. A value that was not observed reads `unknown`. Evidence
+  also holds UI trees, log excerpts and Lighthouse reports from Android,
+  DevTools and AT-SPI origins, up to 4 MiB each, redacted and stored as plain
+  text. An unavailable source is recorded with its reason. Schema v1 to v3
+  inputs and recorded runs stay valid. (#352)
 
 ## Fixes
 

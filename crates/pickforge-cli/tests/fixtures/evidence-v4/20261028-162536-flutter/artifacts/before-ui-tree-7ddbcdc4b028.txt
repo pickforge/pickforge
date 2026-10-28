@@ -1,0 +1,1 @@
+<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation="1"><node index="0" text="Sign in" content-desc="" clickable="true" password="[REDACTED]" bounds="[0,0][120,40]" /></hierarchy>

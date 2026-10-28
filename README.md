@@ -463,7 +463,12 @@ retention.
 
 Rust `evidence.json` runs appear with `source: "rust"` in artifact listings and
 `pickforge://runs`; lab runs use `source: "lab"`. Reports summarize Rust evidence
-and point to its existing `report.md`. No HTML or per-file MCP resources are
+and point to its existing `report.md`. Schema v4 runs also list each state's
+capture time, app build, emulator and system image versions, and requested and
+observed device state. Unknown values read `unknown`. UI tree, log and report
+artifacts list their origin, capture time and stored path, or why the source was
+unavailable. Their content is redacted, stored as `.txt` and never inlined or
+rendered as HTML. No HTML or per-file MCP resources are
 added for Rust runs. Reading and orphan recovery never migrate or modify them.
 
 A finalized evidence run directory (see [Run storage](#run-storage) for where

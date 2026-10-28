@@ -29,7 +29,7 @@ description: >-
    ```sh
    pickforge evidence record --project-dir "$PWD" --input - <<'JSON'
    {
-     "schemaVersion": 3,
+     "schemaVersion": 4,
      "scenario": "Counter increments and keeps state after hot reload",
      "outcome": "passed",
      "before": {"summary":"Counter was zero with the old theme.","observations":[{"label":"Counter","value":"0"}],"artifacts":[]},
@@ -47,12 +47,42 @@ description: >-
    JSON
    ```
 
-   Pickforge accepts schema versions 1 through 3 and always records a v3
-   document. Each state can include up to eight screenshot artifacts, with 16
-   total across `before`, `steps`, and `after`, in this shape:
+   Pickforge accepts schema versions 1 through 4 and always records a v4
+   document. Each state can include up to eight artifacts, with 16 total across
+   `before`, `steps`, and `after`. A screenshot has this shape:
    `{"kind":"screenshot","label":"Clicked frame","source":"/absolute/path.png"}`.
    Pickforge only validates and records this envelope; it never invokes MCP,
    Flutter, Dart, Git, network tools, or screenshot capture.
+
+7. Record what you saw and the state you saw it in. Each state can take a
+   `capture` object. Omit a value you did not observe; Pickforge records it as
+   `unknown`. Never guess a value:
+
+   ```json
+   "capture": {
+     "capturedAt": "2026-10-28T16:00:00Z",
+     "appBuild": "1.4.0+42",
+     "emulatorVersion": "35.2.10",
+     "systemImage": "system-images;android-35;google_apis;x86_64",
+     "requested": {"foldState": "flat", "darkMode": true},
+     "observed": {"displayMode": "inner", "foldState": "flat", "posture": "open",
+       "rotation": 90, "density": 420, "fontScale": 1.3, "darkMode": true, "locale": "en-US"}
+   }
+   ```
+
+   `requested` lists only the settings you changed. Leave out what you do not
+   know; it is recorded as `unknown`. Rotation is in degrees and density is
+   in dpi.
+
+8. A UI tree, a log excerpt or a report is a text artifact. Write it to a
+   file first, then name its kind, origin and capture time:
+   `{"kind":"log","origin":"android-logcat","label":"Logcat","source":"/absolute/logcat.txt","capturedAt":"2026-10-28T16:00:01Z"}`.
+   Origins are `android-ui-tree`, `devtools-accessibility` and `atspi-tree` for
+   kind `tree`, `android-logcat` and `devtools-console` for kind `log`, and
+   `lighthouse` for kind `report`. Each file must be UTF-8 and at most 4 MiB.
+   Pickforge redacts secrets and stores it as plain text that no viewer runs.
+   When a source is not available, record the reason instead of a source:
+   `{"kind":"tree","origin":"atspi-tree","label":"Desktop tree","unavailable":"no AT-SPI bus"}`.
 
 ## Dart MCP connection
 
