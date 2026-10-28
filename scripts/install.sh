@@ -197,7 +197,7 @@ verify_checksum() {
   actual="$(sha256_file "${file}")" || return 1
   expected="$(printf '%s' "${expected}" | tr 'A-F' 'a-f')"
   if [ "${actual}" != "${expected}" ]; then
-    echo "error: checksum verification failed for the Rust pickforge binary" >&2
+    echo "error: checksum verification failed for ${file}" >&2
     return 1
   fi
 }
@@ -224,6 +224,27 @@ install_rust_binary() {
   rm -rf "${temp_dir}"
   trap - EXIT HUP INT TERM
   echo "pickforge ${version} installed at ${bin_dir}/pickforge."
+}
+
+install_viewer_binary() {
+  [ "${rust_target}" = "linux-x86_64" ] || return 0
+  asset="pickforge-viewer-linux-x86_64"
+  temp_dir="$(mktemp -d "${bin_dir}/.pickforge-viewer-install.XXXXXX")"
+  trap 'rm -rf "${temp_dir}"' EXIT HUP INT TERM
+  echo "Installing pickforge-viewer ${version} for ${rust_target}..."
+  download_file "${release_base_url}/${asset}" "${temp_dir}/${asset}"
+  download_file "${release_base_url}/${asset}.sha256" "${temp_dir}/${asset}.sha256"
+  verify_checksum "${temp_dir}/${asset}" "${temp_dir}/${asset}.sha256"
+  chmod 0755 "${temp_dir}/${asset}"
+  viewer_version="$("${temp_dir}/${asset}" --version 2>/dev/null || true)"
+  if [ "${viewer_version}" != "pickforge-viewer ${version}" ]; then
+    echo "error: downloaded viewer reported \"${viewer_version}\"; expected \"pickforge-viewer ${version}\"" >&2
+    return 1
+  fi
+  mv "${temp_dir}/${asset}" "${bin_dir}/pickforge-viewer"
+  rm -rf "${temp_dir}"
+  trap - EXIT HUP INT TERM
+  echo "pickforge-viewer ${version} installed at ${bin_dir}/pickforge-viewer."
 }
 
 print_path_note() {
@@ -264,6 +285,7 @@ main() {
 
   verify_typescript_install
   install_rust_binary
+  install_viewer_binary
   print_path_note
   print_next_steps
 }

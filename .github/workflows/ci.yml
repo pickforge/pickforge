@@ -48,6 +48,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      PICKFORGE_REQUIRE_XVFB: ${{ matrix.os == 'ubuntu-latest' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -56,6 +58,10 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Install Rust display test dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb xdotool
 
       - run: cargo fmt --check
 
@@ -95,6 +101,17 @@ jobs:
             zenity \
             xvfb
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ts-viewer-tests
+
+      - name: Build the native viewer for live TypeScript tests
+        run: |
+          cargo build --release --locked -p pickforge-viewer
+          echo "$GITHUB_WORKSPACE/target/release" >> "$GITHUB_PATH"
+
       - name: Ensure a headed browser is available
         run: |
           if command -v google-chrome-stable >/dev/null \
@@ -122,6 +139,7 @@ jobs:
           PICKFORGE_REQUIRE_DESKTOP_WINDOWS: "1"
           PICKFORGE_REQUIRE_DESKTOP_WAIT: "1"
           PICKFORGE_REQUIRE_BROWSER: "1"
+          PICKFORGE_REQUIRE_VIEWER: "1"
           PICKFORGE_CHROME_NO_SANDBOX: "1"
 
       - run: bun run test:coverage
@@ -130,6 +148,7 @@ jobs:
           PICKFORGE_REQUIRE_DESKTOP_WINDOWS: "1"
           PICKFORGE_REQUIRE_DESKTOP_WAIT: "1"
           PICKFORGE_REQUIRE_BROWSER: "1"
+          PICKFORGE_REQUIRE_VIEWER: "1"
           PICKFORGE_CHROME_NO_SANDBOX: "1"
 
       - name: Summarize coverage

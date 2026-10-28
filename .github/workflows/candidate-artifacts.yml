@@ -105,6 +105,10 @@ jobs:
       - name: Build Rust binary
         run: cargo build --release --locked --target "${{ matrix.rust-target }}" -p pickforge-cli
 
+      - name: Build Linux native viewer
+        if: runner.os == 'Linux'
+        run: cargo build --release --locked --target x86_64-unknown-linux-gnu -p pickforge-viewer
+
       - name: Prepare release assets
         shell: bash
         run: |
@@ -124,6 +128,15 @@ jobs:
           else
             (cd release-assets && shasum -a 256 "$asset" > "$asset.sha256")
           fi
+
+      - name: Prepare Linux viewer asset
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          asset=pickforge-viewer-linux-x86_64
+          cp target/x86_64-unknown-linux-gnu/release/pickforge-viewer "release-assets/$asset"
+          strip "release-assets/$asset"
+          (cd release-assets && sha256sum "$asset" > "$asset.sha256")
 
       - uses: actions/upload-artifact@v4
         with:

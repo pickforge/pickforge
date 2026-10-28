@@ -135,6 +135,16 @@ verify_asset() {
   printf 'asset sha256: %s\n' "${actual}" | tee -a "${EVIDENCE}/facts.txt"
 }
 
+verify_viewer_asset() {
+  [ "${ASSET}" = "pickforge-linux-x86_64" ] || return 0
+  viewer_asset="${PICKFORGE_SMOKE_ASSET_DIR}/pickforge-viewer-linux-x86_64"
+  [ -f "${viewer_asset}" ] && [ -f "${viewer_asset}.sha256" ] || fail "candidate viewer asset or checksum is missing"
+  expected="$(awk 'NR==1{print $1}' "${viewer_asset}.sha256" | tr 'A-F' 'a-f')"
+  actual="$(sha256_file "${viewer_asset}")"
+  [ "${expected}" = "${actual}" ] || fail "viewer asset checksum mismatch"
+  printf 'viewer asset sha256: %s\n' "${actual}" | tee -a "${EVIDENCE}/facts.txt"
+}
+
 # The npm tarball crosses an artifact upload/download before it gets here, and
 # publish only checks it much later. Verify it where it is actually installed,
 # so the bytes this smoke exercises are provably the packed candidate.
@@ -182,6 +192,10 @@ install_asset_only() {
   mkdir -p "${PREFIX}/bin"
   cp "${PICKFORGE_SMOKE_ASSET_DIR}/${ASSET}" "${PREFIX}/bin/pickforge"
   chmod 0755 "${PREFIX}/bin/pickforge"
+  if [ "${ASSET}" = "pickforge-linux-x86_64" ]; then
+    cp "${PICKFORGE_SMOKE_ASSET_DIR}/pickforge-viewer-linux-x86_64" "${PREFIX}/bin/pickforge-viewer"
+    chmod 0755 "${PREFIX}/bin/pickforge-viewer"
+  fi
 }
 
 assert_versions() {
@@ -191,6 +205,12 @@ assert_versions() {
   [ "${actual}" = "pickforge ${expected}" ] \
     || fail "pickforge reported \"${actual}\", expected \"pickforge ${expected}\""
   printf 'pickforge: %s\n' "${actual}" | tee -a "${EVIDENCE}/facts.txt"
+  if [ "${ASSET}" = "pickforge-linux-x86_64" ]; then
+    actual="$("${PREFIX}/bin/pickforge-viewer" --version)"
+    [ "${actual}" = "pickforge-viewer ${expected}" ] || fail "viewer version mismatch"
+    capture viewer-self-test "${PREFIX}/bin/pickforge-viewer" --self-test || fail "viewer self-test failed"
+    printf 'pickforge-viewer: %s\n' "${actual}" | tee -a "${EVIDENCE}/facts.txt"
+  fi
   [ -n "${PICKFORGE_SMOKE_TARBALL:-}" ] || return 0
   actual="$("${PREFIX}/bin/pickforge-lab" --version)"
   [ "${actual}" = "${expected}" ] \
@@ -395,6 +415,7 @@ main() {
 
   record_facts
   verify_asset
+  verify_viewer_asset
   capture_real_home "${WORK}/real-home-before.txt"
   if [ -n "${PICKFORGE_SMOKE_TARBALL:-}" ]; then
     verify_tarball
