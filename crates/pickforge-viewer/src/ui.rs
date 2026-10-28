@@ -279,6 +279,24 @@ impl Text {
         glyphs
     }
 
+    /// `text` with each run of characters that the embedded font cannot
+    /// draw replaced by one ellipsis.
+    pub fn displayable(&self, text: &str) -> String {
+        let charmap = self.font.charmap();
+        let mut out = String::with_capacity(text.len());
+        let mut missing = false;
+        for c in text.chars() {
+            if charmap.map(c) != 0 {
+                out.push(c);
+                missing = false;
+            } else if !missing {
+                out.push_str(ELLIPSIS);
+                missing = true;
+            }
+        }
+        out
+    }
+
     /// Advance width of `text` in pixels, with [`TRACKING`].
     pub fn width(&mut self, text: &str, px: f32) -> f32 {
         let glyphs = self.layout(text, px);
@@ -988,6 +1006,18 @@ mod tests {
             assert!(lines.len() <= 3);
             assert!(lines.last().unwrap().ends_with('\u{2026}'));
         }
+    }
+
+    #[test]
+    fn displayable_marks_text_the_font_cannot_draw() {
+        let text = Text::new();
+        let latin = "desk-1 \u{b7} A\u{e7}\u{e3}o \u{41f}\u{440}\u{438}\u{432}\u{435}\u{442}";
+        assert_eq!(text.displayable(latin), latin);
+        assert_eq!(
+            text.displayable("desk-1 \u{b7} \u{65e5}\u{672c}"),
+            "desk-1 \u{b7} \u{2026}"
+        );
+        assert_eq!(text.displayable("app-\u{65e5}\u{672c}-x"), "app-\u{2026}-x");
     }
 
     #[test]

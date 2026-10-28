@@ -211,19 +211,18 @@ fn parse_placement(value: Option<&str>) -> Result<Placement, ArgError> {
     }
 }
 
+/// The label without control, format or bidi characters, which can hide or
+/// reorder the visible text. The host strips them too.
 fn parse_label(value: &str) -> Result<String, ArgError> {
-    let count = value.chars().count();
-    if count == 0 || count > MAX_LABEL_CHARS || value.trim().is_empty() {
-        return Err(err(format!(
-            "--label must be 1 to {MAX_LABEL_CHARS} characters"
-        )));
+    let label: String = value
+        .chars()
+        .filter(|&c| !c.is_control() && !is_format(c))
+        .take(MAX_LABEL_CHARS)
+        .collect();
+    if label.trim().is_empty() {
+        return Err(err("--label needs visible text"));
     }
-    if value.chars().any(|c| c.is_control() || is_format(c)) {
-        return Err(err(
-            "--label must not contain control, format or bidi characters",
-        ));
-    }
-    Ok(value.to_string())
+    Ok(label)
 }
 
 /// Unicode format characters (category Cf), bidi controls and the line
@@ -330,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_and_validates_the_label() {
+    fn parses_and_cleans_the_label() {
         let parsed = |label: &str| match run(&with(&["--label", label])) {
             Ok(Invocation::Run(config)) => Ok(config.label.unwrap()),
             Ok(other) => panic!("{other:?}"),
@@ -346,23 +345,27 @@ mod tests {
         );
         let longest = "é".repeat(MAX_LABEL_CHARS);
         assert_eq!(parsed(&longest).unwrap(), longest);
-        for bad in [
-            String::new(),
-            "   ".into(),
-            "é".repeat(MAX_LABEL_CHARS + 1),
-            "a\nb".into(),
-            "a\tb".into(),
-            "a\u{1b}[31mb".into(),
-            "a\u{7f}b".into(),
-            "a\u{202e}b".into(),
-            "a\u{2066}b".into(),
-            "a\u{200b}b".into(),
-            "a\u{feff}b".into(),
-            "a\u{2028}b".into(),
-            "a\u{e0041}b".into(),
-        ] {
+        for bad in [String::new(), "   ".into(), "\u{202e}\u{200b}".into()] {
             assert!(parsed(&bad).is_err(), "{bad:?}");
         }
+        for (raw, clean) in [
+            ("a\nb", "ab"),
+            ("a\tb", "ab"),
+            ("a\u{1b}[31mb", "a[31mb"),
+            ("a\u{7f}b", "ab"),
+            ("a\u{202e}b", "ab"),
+            ("a\u{2066}b", "ab"),
+            ("a\u{200b}b", "ab"),
+            ("a\u{feff}b", "ab"),
+            ("a\u{2028}b", "ab"),
+            ("a\u{e0041}b", "ab"),
+        ] {
+            assert_eq!(parsed(raw).unwrap(), clean, "{raw:?}");
+        }
+        assert_eq!(
+            parsed(&"é".repeat(MAX_LABEL_CHARS + 1)).unwrap(),
+            "é".repeat(MAX_LABEL_CHARS)
+        );
         assert!(
             run(&with(&["--label", "a", "--label", "b"])).is_err(),
             "duplicate label"

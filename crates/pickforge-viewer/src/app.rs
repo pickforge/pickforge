@@ -425,13 +425,24 @@ impl App {
         });
         let top = self.bar.as_ref().map_or(0, |b| b.rect.h).min(h);
         let content = Rect::new(0, top as i32, w, h - top);
-        self.layout_banner(content);
         self.label_pill = match &self.config.label {
             Some(label) if self.mode == Mode::Thumbnail => {
-                ui::session_label(content, label, self.metrics, &mut self.text)
+                let shown = self.text.displayable(label);
+                ui::session_label(content, &shown, self.metrics, &mut self.text)
             }
             _ => None,
         };
+        // A thumbnail that asks for help still shows which session it is.
+        let banner_area = match &self.label_pill {
+            Some((pill, _)) => Rect::new(
+                content.x,
+                pill.bottom(),
+                content.w,
+                (content.bottom() - pill.bottom()).max(0) as u32,
+            ),
+            None => content,
+        };
+        self.layout_banner(banner_area);
         let image = geometry::fit(self.session.0, self.session.1, content);
         if image != self.image || self.scaler.is_none() {
             self.image = image;
@@ -1028,7 +1039,6 @@ impl App {
         let clip = Rect::new(0, y0, w, (y1 - y0) as u32);
         let image = self.image;
         let status = self.status_text();
-        let label_pill = self.label_pill.take();
         let mut canvas = Canvas::new(&mut self.canvas, w, h, clip);
         canvas.fill(clip, palette::SURFACE);
         canvas.blit(image, &self.scaled, image.w as usize);
@@ -1043,7 +1053,7 @@ impl App {
             let rect = ui::status_rect(area, label, self.metrics, &mut self.text);
             ui::draw_status(&mut canvas, rect, label, self.metrics, &mut self.text);
         }
-        if let Some((rect, label)) = &label_pill {
+        if let Some((rect, label)) = &self.label_pill {
             ui::draw_status(&mut canvas, *rect, label, self.metrics, &mut self.text);
         }
         if let Some(banner) = &self.banner {
@@ -1064,7 +1074,6 @@ impl App {
                 self.pressed,
             );
         }
-        self.label_pill = label_pill;
     }
 }
 
