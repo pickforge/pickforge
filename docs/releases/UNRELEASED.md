@@ -162,6 +162,8 @@ npm or GitHub releases. (#398)
   files, which blocked pruning of a retained session. (#313, #315)
 - Android-only teardown runs under the per-session lock, like desktop and
   browser teardown. (#321)
+- Session lock timeout and cancel errors name the session lock, not VNC, so
+  they no longer mislead during Android or other teardown. (#326)
 - The noVNC viewer bridge no longer fails its readiness check on a busy
   host. (#301)
 - The `pickforge` binary reads `pubspec.yaml` with a safe-Rust YAML parser
@@ -171,12 +173,12 @@ npm or GitHub releases. (#398)
 
 ## Validation
 
-- Local gates on `99c28a1`, the 0.7.1 version commit: frozen install,
+- Local gates on `183140d`, the 0.7.1 branch with main merged: frozen install,
   typecheck, lint, `cargo fmt --check`, clippy with `-D warnings` for the
   Linux and Windows targets, the Rust workspace tests on Xvfb (260 passed), and
   `cargo build --release` with `pickforge 0.7.1` and `pickforge-viewer 0.7.1`
   version checks. The TypeScript suite ran with coverage and with the desktop,
-  browser and native viewer requirements on: 3,343 passed, 4 skipped, 90.25%
+  browser and native viewer requirements on: 3,345 passed, 4 skipped, 90.27%
   of lines covered. The build passed.
 - The opt-in live Flutter test passed with Flutter 3.41.6.
 - A device pass ran on Omarchy (Arch Linux) x86_64 with Flutter 3.41.6 and
@@ -214,7 +216,6 @@ npm or GitHub releases. (#398)
 - A read-only `watch` or MCP launch from another CLI version replaces the
   native viewer host, even when that host holds live human control. The human
   loses control without warning. (#371)
-- Browser sessions show Chrome's unsupported command-line flag bar. (#348)
 - The native viewer does not start when the session's `host.sock` path is
   longer than 107 bytes, which happens with a `PICKFORGE_HOME` longer than 67
   bytes. `watch` then reports that the viewer host did not report
