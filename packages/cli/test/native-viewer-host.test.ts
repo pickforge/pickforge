@@ -68,6 +68,10 @@ describe.skipIf(!available)("native host source behavior", () => {
     await requestNativeViewerHost(host, { op: "collapse" });
     fakes.cueViewer({ event: "futureEvent", ignored: true });
     fakes.cueViewer({ event: "mode", mode: "fullscreen" });
+    await expect.poll(async () => {
+      const response = await requestNativeViewerHost(host, { op: "status" });
+      return response.ok ? response.mode : undefined;
+    }).toBe("fullscreen");
     await updateSession(sessionId, { status: "stopped" });
     await until(() => fakes.calls().some((entry) => entry.cmd === "sessionEnded"));
     expect(await requestNativeViewerHost(host, { op: "status" })).toMatchObject({ mode: "fullscreen", sessionEnded: true });
