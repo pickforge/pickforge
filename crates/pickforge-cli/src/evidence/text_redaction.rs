@@ -300,14 +300,13 @@ struct Rewrite {
 }
 
 /// Rewrite JSON token by token until its outer container closes. JSON that is `broken` is read
-/// leniently: other text is copied, or replaced under a secret key, and a closer that does not
-/// match closes back to the container it matches. A string or word before a colon names a key,
+/// leniently: other text is copied, or replaced under a secret key, and so is a closer that does
+/// not match its container, which stays open. A string or word before a colon names a key,
 /// even when the comma before it is missing. Its structure is a guess, so inside a secret
 /// container its keys are replaced too.
 fn rewrite_json(json: &str, secret: bool, (lighthouse, broken): (bool, bool)) -> Rewrite {
     let bytes = json.as_bytes();
     let mut frames: Vec<Frame> = Vec::new();
-    let mut objects = 0;
     let mut stored = String::with_capacity(json.len());
     let mut index = 0;
     while index < bytes.len() {
@@ -327,7 +326,9 @@ fn rewrite_json(json: &str, secret: bool, (lighthouse, broken): (bool, bool)) ->
                 let mismatched =
                     matches!(byte, b'}' | b']') && frames.last().map(Frame::closer) != Some(byte);
                 (!mismatched || !inherited).then(|| {
-                    track_structure(byte, inherited, &mut frames, &mut objects);
+                    if !mismatched {
+                        track_structure(byte, inherited, &mut frames);
+                    }
                     stored.push(char::from(byte));
                     index + 1
                 })
@@ -482,11 +483,9 @@ fn push_number(json: &str, start: usize, inherited: bool, stored: &mut String) -
     end
 }
 
-/// `objects` counts the open objects, so a closer that matches no container costs O(1).
-fn track_structure(byte: u8, inherited: bool, frames: &mut Vec<Frame>, objects: &mut usize) {
+fn track_structure(byte: u8, inherited: bool, frames: &mut Vec<Frame>) {
     match byte {
         b'{' => {
-            *objects += 1;
             let audit_map = matches!(
                 frames.last(),
                 Some(Frame::Object {
@@ -504,31 +503,15 @@ fn track_structure(byte: u8, inherited: bool, frames: &mut Vec<Frame>, objects: 
             secret: inherited,
             key: Key::Plain,
         }),
-        b'}' | b']' => close_container(byte, frames, objects),
+        b'}' | b']' => {
+            frames.pop();
+        }
         b',' => match frames.last_mut() {
             Some(Frame::Object { key, .. }) => *key = Key::Expected,
             Some(Frame::Array { key, .. }) => *key = Key::Plain,
             None => {}
         },
         _ => {}
-    }
-}
-
-/// Close back to the container this closer matches. A closer that matches none is text.
-fn close_container(closer: u8, frames: &mut Vec<Frame>, objects: &mut usize) {
-    let open = if closer == b'}' {
-        *objects
-    } else {
-        frames.len() - *objects
-    };
-    if open == 0 {
-        return;
-    }
-    while let Some(frame) = frames.pop() {
-        *objects -= usize::from(matches!(frame, Frame::Object { .. }));
-        if frame.closer() == closer {
-            break;
-        }
     }
 }
 
@@ -955,6 +938,13 @@ mod tests {
         let stray = r#"{"a":1] , "pass\u0077ord": "hunter13"} [INFO]"#;
         let stored = redact_text_artifact(stray, ArtifactOrigin::AndroidLogcat);
         assert_eq!(stored, r#"{"a":1] , "pass\u0077ord": "[REDACTED]"} [INFO]"#);
+        let skipping = r#"{"a":[1}, "pass\u0077ord": "hunter23"} [INFO]"#;
+        let stored = redact_text_artifact(skipping, ArtifactOrigin::AndroidLogcat);
+        assert!(
+            stored.starts_with(r#"{"a":[1}, "pass\u0077ord": "[REDACTED]""#),
+            "{stored}"
+        );
+        assert!(!stored.contains("hunter23"), "{stored}");
         let json = r#"{"password\ud800":"hunter9","n":1}"#;
         assert_eq!(
             redact_text_artifact(json, ArtifactOrigin::DevtoolsConsole),
