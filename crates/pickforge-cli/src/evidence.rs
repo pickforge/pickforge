@@ -884,14 +884,18 @@ fn sanitize_artifacts(artifacts: &mut [ArtifactInput]) {
 fn redact_secrets(value: &str) -> String {
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     let patterns = PATTERNS.get_or_init(|| vec![
+        // Each value may be quoted with escaped quotes inside a JSON string. An
+        // unquoted value stops at a backslash, so that JSON string stays valid.
         // Any scheme word (Bearer, Basic, Digest, ...) belongs to the credential.
-        Regex::new(r#"(?i)(\bauthorization\b\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|(?:[a-z][a-z0-9-]*\s+)?[^\s,;\"'<>]+)"#).unwrap(),
+        Regex::new(r#"(?i)(\bauthorization\b[ \t]*[:=][ \t]*)(?:\\"(?:[^"\\]|\\[^"])*\\"|\"[^\"]*\"|'[^']*'|(?:[a-z][a-z0-9-]*[ \t]+)?[^\s,;\"'<>\\]+)"#).unwrap(),
         // An unquoted cookie stops at quotes and angle brackets, so the rest of a
         // one-line XML tree or a JSON string survives.
-        Regex::new(r#"(?i)(\b(?:set-cookie|cookie)\b\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\r\n\"'<>]+)"#).unwrap(),
-        // Prefixed keys such as access_token, refresh_token and client_secret count too.
-        Regex::new(r#"(?i)(\b[\w.-]*(?:api[_-]?key|token|secret|password|passwd)\b\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;\"']+)"#).unwrap(),
-        Regex::new(r#"(?i)(\bbearer\s+)[^\s,;\"'<>]+"#).unwrap(),
+        Regex::new(r#"(?i)(\b(?:set-cookie|cookie)\b[ \t]*[:=][ \t]*)(?:\\"(?:[^"\\]|\\[^"])*\\"|\"[^\"]*\"|'[^']*'|[^\r\n\"'<>\\]+)"#).unwrap(),
+        // Prefixed keys such as access_token and suffixed keys such as SECRET_KEY or
+        // passwordHash count too. A suffix starts with a separator or a capital, so
+        // max_tokens and tokenizer stay readable.
+        Regex::new(r#"(?i)(\b[\w.-]*(?:api[_-]?key|token|secret|password|passwd)(?:[_.-][\w.-]*|(?-i:[A-Z])[\w.-]*)?[ \t]*[=:][ \t]*)(?:\\"(?:[^"\\]|\\[^"])*\\"|\"[^\"]*\"|'[^']*'|[^\s,;\"'<>\\]+)"#).unwrap(),
+        Regex::new(r#"(?i)(\bbearer[ \t]+)[^\s,;\"'<>\\]+"#).unwrap(),
         // A JSON key that contains a secret word, with a value that may hold escaped quotes.
         Regex::new(r#"(?i)(\"[^\"\r\n]*(?:api[_-]?key|token|secret|password|passwd|authorization|cookie)[^\"\r\n]*\"\s*:\s*\")(?:[^\"\\]|\\.)*(\")"#).unwrap(),
         Regex::new(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b").unwrap(),
@@ -902,15 +906,9 @@ fn redact_secrets(value: &str) -> String {
         output = if index == 4 {
             pattern.replace_all(&output, "$1[REDACTED]$2").into_owned()
         } else if index < 4 {
-            // A quoted value keeps its quotes, so a redacted XML attribute such as
-            // `password="..."` in a stored UI tree stays well formed.
             pattern
                 .replace_all(&output, |captures: &regex::Captures<'_>| {
-                    let quote = match captures[0][captures[1].len()..].chars().next() {
-                        Some(quote @ ('"' | '\'')) => quote.to_string(),
-                        _ => String::new(),
-                    };
-                    format!("{}{quote}[REDACTED]{quote}", &captures[1])
+                    redact_value(captures)
                 })
                 .into_owned()
         } else {
@@ -918,6 +916,27 @@ fn redact_secrets(value: &str) -> String {
         };
     }
     output
+}
+
+/// A quoted value keeps its quotes, so a redacted XML attribute such as
+/// `password="..."` in a stored UI tree stays well formed. A boolean is a flag,
+/// not a credential: every uiautomator node carries `password="false"`.
+fn redact_value(captures: &regex::Captures<'_>) -> String {
+    let rest = &captures[0][captures[1].len()..];
+    let quote = if rest.starts_with("\\\"") {
+        "\\\""
+    } else if rest.starts_with('"') {
+        "\""
+    } else if rest.starts_with('\'') {
+        "'"
+    } else {
+        ""
+    };
+    let bare = &rest[quote.len()..rest.len() - quote.len()];
+    if bare.eq_ignore_ascii_case("true") || bare.eq_ignore_ascii_case("false") {
+        return captures[0].to_owned();
+    }
+    format!("{}{quote}[REDACTED]{quote}", &captures[1])
 }
 
 fn build_run(
@@ -1620,7 +1639,8 @@ mod tests {
 
     #[test]
     fn quoted_values_keep_their_quotes_so_markup_stays_well_formed() {
-        let tree = r#"<node text="Sign in" password="false" token='abc' /><node api_key=plain />"#;
+        let tree =
+            r#"<node text="Sign in" password="hunter2" token='abc' /><node api_key=plain />"#;
         assert_eq!(
             redact_secrets(tree),
             r#"<node text="Sign in" password="[REDACTED]" token='[REDACTED]' /><node api_key=[REDACTED] />"#
@@ -1665,6 +1685,39 @@ mod tests {
         let json_line = stored.lines().nth(2).unwrap().trim();
         let value: serde_json::Value = serde_json::from_str(json_line).unwrap();
         assert_eq!(value["n"], 1);
+    }
+
+    #[test]
+    fn redaction_keeps_json_strings_xml_and_flags_intact() {
+        let console = r#"{"log":"login password=\"hunter2\" token=\"abc\" Authorization: Bearer xyz\"q ok","n":1}"#;
+        let stored = redact_secrets(console);
+        for secret in ["hunter2", "abc", "xyz"] {
+            assert!(!stored.contains(secret), "{secret} in {stored}");
+        }
+        let value: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(value["n"], 1);
+        assert!(value["log"].as_str().unwrap().ends_with(" ok"), "{stored}");
+
+        let tree = r#"<hierarchy><node text="" password="false" bounds="[0,0][1,1]"/><node>token=abc</node><node>keep</node></hierarchy>"#;
+        assert_eq!(
+            redact_secrets(tree),
+            r#"<hierarchy><node text="" password="false" bounds="[0,0][1,1]"/><node>token=[REDACTED]</node><node>keep</node></hierarchy>"#
+        );
+
+        let log = "SECRET_KEY=s1 aws_secret_access_key=s2 secretKey=s3 passwordHash=s4 token_value=s5 tokenizer=bpe\n";
+        let stored = redact_secrets(log);
+        for secret in ["s1", "s2", "s3", "s4", "s5"] {
+            assert!(
+                !stored.contains(&format!("={secret}")),
+                "{secret} in {stored}"
+            );
+        }
+        assert!(stored.contains("tokenizer=bpe"), "{stored}");
+
+        assert_eq!(
+            redact_secrets("Authorization: Bearer\nnext line"),
+            "Authorization: [REDACTED]\nnext line"
+        );
     }
 
     #[test]

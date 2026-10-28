@@ -141,7 +141,7 @@ fn stores_trees_logs_and_reports_as_redacted_inert_text() {
     let tree = write(
         dir,
         "tree.xml",
-        r#"<?xml version="1.0"?><hierarchy><node text="Sign in" password="false" bounds="[0,0][96,96]"/></hierarchy>"#,
+        r#"<?xml version="1.0"?><hierarchy><node text="Sign in" password="false" bounds="[0,0][96,96]"/><node text="api_key=treesecret1" bounds="[0,96][96,192]"/></hierarchy>"#,
     );
     let logcat = write(
         dir,
@@ -180,9 +180,11 @@ fn stores_trees_logs_and_reports_as_redacted_inert_text() {
     assert_eq!(before[0]["mediaType"], "text/plain; charset=utf-8");
     let stored_tree =
         std::fs::read_to_string(run.join(before[0]["path"].as_str().unwrap())).unwrap();
-    // The tree keeps its structure after redaction, so a rule check can still parse it.
+    // The tree keeps its structure and its password flags after redaction, so a
+    // rule check can still parse it.
+    assert!(!stored_tree.contains("treesecret1"), "{stored_tree}");
     assert!(
-        stored_tree.contains(r#"password="[REDACTED]" bounds="[0,0][96,96]"/>"#),
+        stored_tree.contains(r#"password="false" bounds="[0,0][96,96]"/><node text="api_key=[REDACTED]" bounds="[0,96][96,192]"/>"#),
         "{stored_tree}"
     );
 
