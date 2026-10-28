@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process";
+import { holdHumanLease, defaultSpawnWatchdog, type SpawnWatchdogFn } from "./takeover-hold.js";
+export type { SpawnWatchdogFn, TakeoverWatchdogHandle } from "./takeover-hold.js";
 import { randomBytes } from "node:crypto";
 import { getSession, resolveDesktopCapableSession, type DesktopSessionInfo } from "@pickforge/lab-core";
 import {
@@ -8,7 +9,6 @@ import {
   endHumanTakeover,
   ensureSessionVnc,
   openVncViewer,
-  renewHumanTakeover,
   startHumanTakeover,
   type HumanTakeoverHandle,
   type NativeViewerHostIdentity,
@@ -43,88 +43,6 @@ export interface WatchOptions extends BaseCliOptions {
 
 const TAKEOVER_SIGNALS = ["SIGINT", "SIGTERM"] as const;
 
-export interface TakeoverWatchdogHandle {
-  /** Best-effort, idempotent: stop the watchdog now (clean end). */
-  kill(): void;
-}
-
-export type SpawnWatchdogFn = (handle: HumanTakeoverHandle) => TakeoverWatchdogHandle;
-
-/**
- * Spawn the crash-recovery watchdog (pickforge/pickforge#21 P0-A) as a
- * **detached** sibling process — its own process group, `stdio: "ignore"`,
- * `unref()`'d — so a `SIGKILL` of *this* process (a crash of
- * `watch --control` itself) does not kill it too. It re-invokes the same
- * entry point currently running (`process.argv[1]`) with the hidden
- * `internal takeover-watchdog` command, which polls the lease independently
- * and actively reclaims a stale writable VNC on its own; see
- * `runTakeoverWatchdogLoop` for why a detached process was chosen over
- * OS-level parent-death coupling. If there is no known entry point to
- * re-invoke (unexpected outside a real CLI process), spawning is skipped —
- * the immediate-end-on-renew-failure and hard-deadline-timer mechanisms in
- * *this* process still hold the invariant; only the crash-of-this-process
- * backstop is unavailable in that case.
- */
-function defaultSpawnWatchdog(handle: HumanTakeoverHandle): TakeoverWatchdogHandle {
-  const cliEntry = process.argv[1];
-  if (cliEntry === undefined) {
-    return { kill(): void {} };
-  }
-  const child = spawn(
-    process.execPath,
-    [
-      cliEntry,
-      "internal",
-      "takeover-watchdog",
-      "--session",
-      handle.sessionId,
-      "--lease",
-      handle.leaseId,
-      "--interval",
-      String(handle.heartbeatMs),
-    ],
-    { detached: true, stdio: "ignore" },
-  );
-  child.unref();
-  let killed = false;
-  return {
-    kill(): void {
-      if (killed) return;
-      killed = true;
-      try {
-        child.kill("SIGTERM");
-      } catch {
-        // Already gone.
-      }
-    },
-  };
-}
-
-/**
- * Hold a human lease for the duration of the viewer wait, heartbeating it
- * every `heartbeatMs`. Three mechanisms together keep writable VNC from
- * outliving the lease in wall-clock terms (pickforge/pickforge#21 P0-A),
- * never only "the next time something happens to touch the session":
- *
- * 1. The first failed renewal ends the takeover *immediately* — it does not
- *    wait for the viewer to close, since a renewal failure means the lease
- *    is already gone (see `renewHumanTakeover`/#21 P0-B).
- * 2. A hard deadline timer, rescheduled to the fresh `expiresAt` on every
- *    successful renewal, force-ends the takeover if wall-clock time ever
- *    passes the lease's expiry regardless of what the heartbeat interval
- *    itself observed — belt-and-suspenders against e.g. a stalled interval
- *    callback.
- * 3. A detached watchdog process (`defaultSpawnWatchdog`) covers the case
- *    where *this* process itself crashes and neither of the above can run
- *    at all.
- *
- * A terminal-wide SIGINT (the common interactive-cancel path) reaches the
- * viewer child too, since `openVncViewer` spawns it in our process group —
- * the signal handler here exists so *our* process does not exit before
- * running cleanup, not to itself interrupt the viewer.
- * `runControlledViewer` always ends the takeover (VNC reverted, lease
- * released, watchdog stopped) before returning or throwing.
- */
 async function runControlledViewer(
   handle: HumanTakeoverHandle,
   port: number,
@@ -152,34 +70,10 @@ async function runControlledViewer(
     return ending;
   };
 
-  let deadlineTimer: NodeJS.Timeout | undefined;
-  const scheduleDeadline = (expiresAt: string): void => {
-    if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
-    const delayMs = Math.max(0, Date.parse(expiresAt) - Date.now());
-    deadlineTimer = setTimeout(() => {
-      leaseLost = true;
-      void endOnce("timeout");
-    }, delayMs);
-    deadlineTimer.unref();
-  };
-  scheduleDeadline(handle.expiresAt);
-
-  const heartbeat = setInterval(() => {
-    void renewHumanTakeover(handle, registryEnv).then((renewed) => {
-      if (renewed === undefined) {
-        leaseLost = true;
-        clearInterval(heartbeat);
-        // P0-A item 1: end immediately on the first failed renewal — never
-        // wait for the viewer to close.
-        void endOnce("timeout");
-      } else {
-        scheduleDeadline(renewed.expiresAt);
-      }
-    });
-  }, handle.heartbeatMs);
-  heartbeat.unref();
-
-  const watchdog = spawnWatchdog(handle);
+  const held = holdHumanLease(handle, {
+    registryEnv, spawnWatchdog,
+    onLost: () => { leaseLost = true; void endOnce("timeout"); },
+  });
 
   try {
     const viewer = await openVncViewer({ port, waitForExit: true });
@@ -194,9 +88,7 @@ async function runControlledViewer(
     await endOnce(leaseLost ? "timeout" : "cancelled").catch(() => {});
     throw error;
   } finally {
-    clearInterval(heartbeat);
-    if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
-    watchdog.kill();
+    held.stop();
     for (const signal of TAKEOVER_SIGNALS) {
       process.off(signal, onSignal);
     }
@@ -376,12 +268,13 @@ async function waitForNativeViewer(sessionId: string, host: NativeViewerHostIden
   } finally { process.off("SIGINT", stop); process.off("SIGTERM", stop); }
 }
 
-async function tryNativeViewer(sessionId: string, binary: string): Promise<NativeViewerHostIdentity | undefined> {
+async function tryNativeViewer(sessionId: string, binary: string, control = false): Promise<NativeViewerHostIdentity | undefined> {
   try {
     const cliEntry = process.argv[1];
     if (cliEntry === undefined) throw new Error("CLI entry point unavailable");
-    return await startNativeViewerHost({ sessionId, cliEntry, binary, version: nativeViewerVersion });
+    return await startNativeViewerHost({ sessionId, cliEntry, binary, version: nativeViewerVersion, control });
   } catch (error) {
+    if (control) throw error;
     console.error(`Native viewer unavailable: ${error instanceof Error ? error.message : String(error)}`);
     return findNativeViewerHost(sessionId);
   }
@@ -393,16 +286,11 @@ export async function watchDesktopSession(
   const record = await resolveDesktopCapableSession(opts.session, {
     projectDir: resolveProjectDir(opts),
   });
-  if (opts.control === true) {
-    if (opts.waitForViewerExit === false) {
-      throw new Error(
-        "--control requires waiting for the viewer to exit, to know when to end human control",
-      );
-    }
-    return watchWithControl(record.id, process.env, opts._spawnWatchdog ?? defaultSpawnWatchdog);
+  if (opts.control === true && opts.waitForViewerExit === false) {
+    throw new Error("--control requires waiting for the viewer to exit, to know when to end human control");
   }
   const binary = await detectNativeViewer();
-  const host = binary === null ? undefined : await tryNativeViewer(record.id, binary);
+  const host = binary === null ? undefined : await tryNativeViewer(record.id, binary, opts.control === true);
   if (host !== undefined) {
     const data = { sessionId: record.id, opened: true, viewer: "native", launchId: host.launchId,
       hostPid: host.pid, viewerPid: host.viewerPid };
@@ -410,6 +298,9 @@ export async function watchDesktopSession(
       await waitForNativeViewer(record.id, host);
     }
     return { data, lines: [`native viewer ${opts.waitForViewerExit === false ? "opened" : "closed"} for session ${record.id}`] };
+  }
+  if (opts.control === true) {
+    return watchWithControl(record.id, process.env, opts._spawnWatchdog ?? defaultSpawnWatchdog);
   }
   return watchWithBrowser(record, opts.waitForViewerExit !== false);
 }

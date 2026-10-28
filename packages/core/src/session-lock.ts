@@ -97,7 +97,7 @@ export interface SessionVncLockOptions {
 
 function throwIfLockWaitCancelled(id: string, signal: AbortSignal | undefined): void {
   if (signal?.aborted === true) {
-    throw new Error(`Cancelled while waiting for the VNC lock of session ${id}`);
+    throw new Error(`Cancelled while waiting for the lock of session ${id}`);
   }
 }
 
@@ -157,7 +157,7 @@ async function acquireSessionVncLock(
         continue;
       }
       if (Date.now() >= deadline) {
-        throw new Error(`Timed out waiting to ensure VNC for session ${id}`);
+        throw new Error(`Timed out waiting for the lock of session ${id}`);
       }
       await waitForVncLockPoll(id, signal);
     }

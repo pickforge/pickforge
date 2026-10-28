@@ -16,6 +16,7 @@ fn app() -> App {
         Arc::new(Mutex::new(Shared::new(100, 100))),
         Control::new().unwrap(),
         Arc::new(AtomicBool::new(false)),
+        None,
     )
 }
 

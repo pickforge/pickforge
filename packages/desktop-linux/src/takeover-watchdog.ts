@@ -62,8 +62,9 @@ export async function runTakeoverWatchdogLoop(
       return;
     }
     if (isHumanLeaseStale(lease)) {
-      await recoverStaleHumanLease(opts.sessionId, registryEnv);
-      return;
+      // Keep retrying when verified owner cleanup is temporarily unavailable.
+      const recovered = await recoverStaleHumanLease(opts.sessionId, registryEnv).catch(() => undefined);
+      if (recovered?.recovered === true) return;
     }
     if (opts._shouldStop?.() === true) return;
     await delay(pollIntervalMs);

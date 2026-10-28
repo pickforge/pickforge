@@ -84,6 +84,38 @@ description: >-
    When a source is not available, record the reason instead of a source:
    `{"kind":"tree","origin":"atspi-tree","label":"Desktop tree","unavailable":"no AT-SPI bus"}`.
 
+## Dart MCP connection
+
+Runtime tools need a Dart Tooling Daemon (DTD) connection. Start the app in
+the Pickforge session from a shell that keeps its stdin, and print the URI.
+Flutter starts only if the session environment loads:
+
+```sh
+recipe="$(pickforge-lab desktop env --session <id>)" && eval "$recipe" &&
+  flutter run -d linux --print-dtd
+```
+
+Pass the URI after `The Dart Tooling Daemon is available at:` to
+`connect_dart_tooling_daemon`. One server holds one DTD connection. A second
+call while connected fails with "already connected".
+
+- Hot reload and hot restart keep the connection. This applies to `r` and `R`
+  in `flutter run` and to the `hot_reload` and `hot_restart` tools.
+- A full rebuild gives a new DTD URI. When you quit `flutter run` with `q`,
+  runtime tools fail with "not connected". Start `flutter run` again, then call
+  `connect_dart_tooling_daemon` with the new URI. The server does not need a
+  restart.
+- If `flutter run` is killed or its terminal closes, the old app can keep
+  running. The server then stays connected to that old app: it reads the old
+  widget tree, `hot_reload` fails, and a new connect call fails with "already
+  connected". Stop the old app, or restart the Dart MCP server, then connect to
+  the new URI. `pickforge-lab session destroy` also stops the old app.
+
+When the server is not connected, do not guess runtime state. Use Pickforge
+observation instead: `pickforge-lab desktop screenshot` for desktop, and
+`pickforge-lab android screenshot`, `android ui-tree`, `android logcat`, or
+`android adb` for Android. Record that the Dart MCP runtime was unavailable.
+
 If an MCP tool, resource, runtime, or hot-reload capability is unavailable, name
 that exact capability and run `pickforge doctor`; never fabricate evidence.
 Official Dart and Flutter skills are complementary to this workflow, but are not

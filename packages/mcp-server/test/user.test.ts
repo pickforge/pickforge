@@ -142,15 +142,15 @@ describe("request_user_input with an elicitation-capable client", () => {
     expect(report.errors[0]).toContain("dismissed");
   });
 
-  it("blocks text questions that ask for secrets, with VNC guidance", async () => {
+  it("blocks text questions that ask for secrets, with takeover guidance", async () => {
     const result = await lab.client.callTool({
       name: "request_user_input",
       arguments: { question: "What is your GitHub API key?" },
     });
     const report = parseToolJson(result);
     expect(report.ok).toBe(false);
-    expect(report.errors[0]).toMatch(/vnc/i);
-    expect(report.errors[0]).toContain('"confirm"');
+    expect(report.errors[0]).toContain("request_takeover");
+    expect(report.errors[0]).toContain("takeover_wait");
     expect(lab.requests).toHaveLength(0);
   });
 
@@ -204,6 +204,6 @@ describe("request_user_input without elicitation support", () => {
     });
     const report = parseToolJson(result);
     expect(report.ok).toBe(false);
-    expect(report.errors[0]).toMatch(/vnc/i);
+    expect(report.errors[0]).toContain("request_takeover");
   });
 });

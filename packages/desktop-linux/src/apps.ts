@@ -15,6 +15,7 @@ import {
   type ContainmentScope,
   type EnvLike,
   type ProcessIdentity,
+  type RunCommandOptions,
   type RunCommandResult,
 } from "@pickforge/lab-core";
 import { parseDisplayNumber } from "./display.js";
@@ -23,6 +24,9 @@ import type { DesktopRuntimeLayout } from "./runtime.js";
 import { sleep } from "./util.js";
 
 const XDOTOOL_TIMEOUT_MS = 5_000;
+
+/** Lets a caller cancel a query and shorten its kill grace. */
+export type CommandStop = Pick<RunCommandOptions, "signal" | "killGraceMs">;
 const WINDOW_POLL_INTERVAL_MS = 100;
 const DEFAULT_WAIT_TIMEOUT_MS = 10_000;
 export const DEFAULT_EXEC_WINDOW_TIMEOUT_MS = 30_000;
@@ -336,11 +340,13 @@ async function runXdotoolQuery(
   args: string[],
   env: EnvLike | undefined,
   timeoutMs: number = XDOTOOL_TIMEOUT_MS,
+  stop: CommandStop = {},
 ): Promise<RunCommandResult> {
   try {
     return await runCommand("xdotool", args, {
       env: { ...env, DISPLAY: display },
       timeoutMs,
+      ...stop,
     });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -356,6 +362,7 @@ export async function listWindows(
   display: string,
   env?: EnvLike,
   timeoutMs?: number,
+  stop: CommandStop = {},
 ): Promise<WindowInfo[]> {
   parseDisplayNumber(display);
   // Legacy inventory has per-query bounds. Only explicit observation callers share a deadline.
@@ -367,6 +374,7 @@ export async function listWindows(
     ["search", "--onlyvisible", "--name", "."],
     env,
     Math.min(XDOTOOL_TIMEOUT_MS, searchBudget),
+    stop,
   );
   if (search.timedOut) throw new ObservationTimeoutError(`xdotool search timed out on ${display}`);
   if (!search.ok) {
@@ -389,6 +397,7 @@ export async function listWindows(
       ["getwindowname", id],
       env,
       Math.min(XDOTOOL_TIMEOUT_MS, left),
+      stop,
     );
     if (deadline !== undefined) assertObservedTitle(nameResult, display);
     windows.push({

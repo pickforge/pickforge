@@ -518,3 +518,36 @@ describe("real separate-process concurrency", () => {
     20_000,
   );
 });
+
+
+describe("human lease transport metadata", () => {
+  it("keeps legacy leases valid and persists viewer identity through renewals", async () => {
+    const id = "desk-34247649";
+    const legacy = await acquireHumanLease(id, env);
+    expect((await readHumanLease(id, env))?.inputTransport).toBeUndefined();
+    const patch = { inputTransport: "viewer" as const, viewerPid: 1234, viewerStartTicks: 5678 };
+    expect(await renewHumanLease(id, legacy.leaseId, env, patch)).toMatchObject(patch);
+    await renewHumanLease(id, legacy.leaseId, env);
+    expect(await readHumanLease(id, env)).toMatchObject(patch);
+    await renewHumanLease(id, legacy.leaseId, env, { inputTransport: "x11vnc" });
+    expect((await readHumanLease(id, env))?.inputTransport).toBe("x11vnc");
+  });
+
+  it.each([
+    { inputTransport: "network" }, { inputTransport: null },
+    { viewerPid: 0 }, { viewerPid: -1 }, { viewerPid: 1.5 }, { viewerPid: "123" },
+    { viewerStartTicks: -1 }, { viewerStartTicks: 0.5 }, { viewerStartTicks: "123" },
+  ])("rejects invalid stored transport metadata %j", async (fields) => {
+    const id = "desk-34247649";
+    const lease = await acquireHumanLease(id, env);
+    await writeRawLease(id, { ...lease, ...fields } as HumanLease);
+    expect(await readHumanLease(id, env)).toBeUndefined();
+  });
+
+  it("validates transport patches before changing the lease", async () => {
+    const id = "desk-34247649";
+    const lease = await acquireHumanLease(id, env);
+    await expect(renewHumanLease(id, lease.leaseId, env, { viewerPid: NaN })).rejects.toThrow(/transport metadata/);
+    expect(await readHumanLease(id, env)).toEqual(lease);
+  });
+});

@@ -138,7 +138,7 @@ describe("desktop input tools fail closed under human control", () => {
     await releaseHumanLease(id, lease.leaseId, env);
   });
 
-  it("leaves desktop_screenshot ungated (read-only, no input delivered)", async () => {
+  it("rejects screenshot and wait while the human lease is live", async () => {
     dirs = makeLabDirs();
     const env = { PICKFORGE_HOME: dirs.home };
     lab = await connectLab({ projectDir: dirs.projectDir, env });
@@ -148,9 +148,7 @@ describe("desktop input tools fail closed under human control", () => {
     const result = parseToolJson(
       await lab.client.callTool({ name: "desktop_screenshot", arguments: { session: id } }),
     );
-    // Not gated: it fails only because there is no real display/screenshot
-    // tool in this test environment, never because of the human lease.
-    expect(result.errors.join("\n")).not.toContain("human control is active");
+    expect(result.errors.join("\n")).toContain("human control is active");
 
     const waited = parseToolJson(
       await lab.client.callTool({
@@ -158,6 +156,6 @@ describe("desktop input tools fail closed under human control", () => {
         arguments: { session: id, window: "None", timeoutMs: 0 },
       }),
     );
-    expect(waited.errors.join("\n")).not.toContain("human control is active");
+    expect(waited.errors.join("\n")).toContain("human control is active");
   });
 });

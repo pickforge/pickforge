@@ -6,17 +6,21 @@ import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createSession, updateSession, processIdentityMatches, withSessionVncLock } from "@pickforge/lab-core";
+import {
+  createSession, updateSession, processIdentityMatches, withSessionVncLock, readHumanLease, sessionDataDir,
+  HumanLeaseHeldError, releaseHumanLease,
+} from "@pickforge/lab-core";
 import {
   startXvfb, stopXvfb, findOnPath, startNativeViewerHost, findNativeViewerHost,
   stopNativeViewerHost, requestNativeViewerHost, sessionViewerDir, readViewerLaunchRecord,
   stopSessionViewer, destroyDesktopSession, prepareViewerLaunch, removeViewerLaunch, withViewerDir, writeViewerPrivateFile, validNativeViewerHost,
+  startHumanTakeover,
   type XvfbHandle, type NativeViewerHostIdentity,
 } from "@pickforge/lab-desktop-linux";
 import { ensureCliBuilt } from "./build-once.js";
 import { createViewerFakes, monitor, type ViewerFakes } from "./viewer-fakes.js";
 import { unusedTestDisplay } from "../../desktop-linux/test/test-resources.js";
-import { detectNativeViewer, nativeViewerVersion } from "../src/viewer/native.js";
+import { detectNativeViewer, nativeViewerVersion, nativeViewerLauncher } from "../src/viewer/native.js";
 import { readViewerLines } from "../src/viewer/native-host.js";
 
 const cliEntry = fileURLToPath(new URL("../dist/pickforge-lab.js", import.meta.url));
@@ -41,7 +45,7 @@ beforeEach(async () => {
   // Only the fake uses this nonexistent explicit host display; it never opens a window.
   env.DISPLAY = unusedTestDisplay();
   sessionId = (await createSession({ type: "desktop", status: "running", projectDir: root,
-    desktop: { display: display.display, xvfbPid: display.pid, xvfbStartTimeTicks: display.startTimeTicks, width: 640, height: 480 } }, env)).id;
+    desktop: { display: display.display, xvfbPid: display.pid, xvfbStartTimeTicks: display.startTimeTicks, width: 640, height: 480, homePolicy: "private" } }, env)).id;
 });
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -104,6 +108,51 @@ describe.skipIf(!available)("native viewer host", () => {
     await eventually(() => !processIdentityMatches({ pid: found.viewerPid, startTicks: found.viewerStartTicks }));
   }, 20_000);
 
+  it("holds viewer control from CLI startup and cleans up under the teardown lock", async () => {
+    const binary = fakes.installViewer({ version: nativeViewerVersion });
+    host = await startNativeViewerHost({ sessionId, cliEntry, binary, version: nativeViewerVersion, env, control: true });
+    await expect.poll(() => readHumanLease(sessionId, env), { timeout: 5_000 }).toMatchObject({ inputTransport: "viewer" });
+    await eventually(() => fakes.calls().some((entry) => entry.cmd === "control" && entry.state === "granted"));
+    await stopNativeViewerHost(sessionId, env);
+    expect(await readHumanLease(sessionId, env)).toBeUndefined();
+    expect(processIdentityMatches({ pid: host.viewerPid, startTicks: host.viewerStartTicks })).toBe(false);
+  }, 20_000);
+
+  it("recovers a stale lease before taking control at CLI startup", async () => {
+    await startHumanTakeover(sessionId, { transport: "viewer", registryEnv: env, env });
+    const stale = { ...await readHumanLease(sessionId, env), ownerPid: 999_999, ownerStartTicks: undefined,
+      expiresAt: new Date(0).toISOString() };
+    fs.writeFileSync(path.join(sessionDataDir(sessionId, env), "human.lease.json"), JSON.stringify(stale));
+    const binary = fakes.installViewer({ version: nativeViewerVersion });
+    host = await startNativeViewerHost({ sessionId, cliEntry, binary, version: nativeViewerVersion, env, control: true });
+    await expect.poll(() => readHumanLease(sessionId, env), { timeout: 5_000 })
+      .toMatchObject({ inputTransport: "viewer", ownerPid: host.pid });
+    await stopNativeViewerHost(sessionId, env);
+    expect(await readHumanLease(sessionId, env)).toBeUndefined();
+  }, 20_000);
+
+  it("refuses control while a live lease is held and keeps the open viewer", async () => {
+    const previous = await start();
+    const takeover = await startHumanTakeover(sessionId, { transport: "viewer", registryEnv: env, env });
+    const binary = fakes.installViewer({ version: nativeViewerVersion });
+    await expect(startNativeViewerHost({ sessionId, cliEntry, binary, version: nativeViewerVersion, env, control: true }))
+      .rejects.toBeInstanceOf(HumanLeaseHeldError);
+    expect(processIdentityMatches({ pid: previous.pid, startTicks: previous.startTicks })).toBe(true);
+    expect(await readHumanLease(sessionId, env)).toMatchObject({ leaseId: takeover.leaseId, ownerPid: process.pid });
+    await releaseHumanLease(sessionId, takeover.leaseId, env);
+  }, 20_000);
+
+  it("refuses a second control start while the first host holds control", async () => {
+    const binary = fakes.installViewer({ version: nativeViewerVersion });
+    const first = host = await startNativeViewerHost({ sessionId, cliEntry, binary, version: nativeViewerVersion, env, control: true });
+    await expect.poll(() => readHumanLease(sessionId, env), { timeout: 5_000 }).toMatchObject({ ownerPid: first.pid });
+    const lease = await readHumanLease(sessionId, env);
+    await expect(startNativeViewerHost({ sessionId, cliEntry, binary, version: nativeViewerVersion, env, control: true }))
+      .rejects.toBeInstanceOf(HumanLeaseHeldError);
+    expect(processIdentityMatches({ pid: first.pid, startTicks: first.startTicks })).toBe(true);
+    expect(await readHumanLease(sessionId, env)).toMatchObject({ leaseId: lease?.leaseId, ownerPid: first.pid });
+  }, 20_000);
+
   it("replaces a live host from a different CLI version", async () => {
     const binary = fakes.installViewer({ version: "0.0.0" });
     const previous = await startNativeViewerHost({ sessionId, cliEntry, binary, version: "0.0.0", env });
@@ -115,9 +164,10 @@ describe.skipIf(!available)("native viewer host", () => {
 
   it("rejects unknown, prototype, input, grant and takeover socket operations", async () => {
     await start();
-    for (const op of ["unknown", "__proto__", "constructor", "takeControl", "control", "key", "pointer", "requestTakeover", "subscribe"]) {
+    for (const op of ["unknown", "__proto__", "constructor", "takeControl", "control", "key", "pointer"]) {
       expect(await rawRequest({ op })).toEqual({ ok: false, error: "unknown-operation" });
     }
+    expect(await rawRequest({ op: "requestTakeover" })).toEqual({ ok: false, error: "invalid-request" });
     expect(await rawRequest({ op: "status", cmd: "control" })).toEqual({ ok: false, error: "invalid-request" });
     expect(await rawRequest({ op: 7 })).toEqual({ ok: false, error: "invalid-request" });
     expect(fakes.calls().some((entry) => entry.cmd === "control")).toBe(false);
@@ -242,12 +292,18 @@ describe.skipIf(!available)("native viewer host", () => {
 it("detects only a graphical, version-matched native viewer", async () => {
   env.DISPLAY = ":45678";
   env.PATH = fakes.binDir;
+  const launcher = nativeViewerLauncher(cliEntry);
+  expect(await launcher.available(env)).toBe(false);
+  expect(await launcher.launch(sessionId, env)).toBeUndefined();
   expect(await detectNativeViewer(env)).toBeNull();
   const binary = fakes.installViewer({ version: nativeViewerVersion });
   expect(await detectNativeViewer(env)).toBe(binary);
+  expect(await launcher.available(env)).toBe(true);
   expect(await detectNativeViewer({ ...env, DISPLAY: undefined })).toBeNull();
+  expect(await launcher.launch(sessionId, { ...env, DISPLAY: undefined })).toBeUndefined();
   fakes.installViewer({ version: "0.0.0" });
   expect(await detectNativeViewer(env)).toBeNull();
+  expect(await launcher.launch(sessionId, env)).toBeUndefined();
 });
 
 it("bounds stdio frames and ignores unknown event fields", () => {

@@ -14,6 +14,7 @@ import {
   runDesktopEnv,
   runDesktopLaunch,
   runDesktopScreenshot,
+  runDesktopWait,
   runDesktopType,
   runDesktopKey,
 } from "../src/commands/desktop.js";
@@ -119,14 +120,14 @@ describe("desktop input commands fail closed under human control", () => {
     expect(fs.readFileSync(path.join(outside, "keep"), "utf8")).toBe("unchanged");
   });
 
-  it("does not gate desktop screenshot (read-only)", async () => {
+  it("rejects desktop screenshot and wait while human control is active", async () => {
     const id = await createDesktop();
     const lease = await acquireHumanLease(id, env);
 
     await runDesktopScreenshot({ session: id, projectDir: root, json: true });
-    // Fails only for lack of a real display/screenshot tool in this
-    // environment, never because of the human lease.
-    expect(lastReport().errors.join("\n")).not.toContain("human control is active");
+    expect(lastReport().errors.join("\n")).toContain("human control is active");
+    expect(await runDesktopWait({ session: id, projectDir: root, json: true, window: "None", timeout: "0" })).toBe(1);
+    expect(lastReport().errors.join("\n")).toContain("human control is active");
 
     await releaseHumanLease(id, lease.leaseId, env);
   });

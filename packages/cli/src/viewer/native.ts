@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 import { runCommand, type EnvLike } from "@pickforge/lab-core";
-import { findOnPath } from "@pickforge/lab-desktop-linux";
+import type { ViewerLauncher } from "@pickforge/lab-mcp-server";
+import { findOnPath, startNativeViewerHost } from "@pickforge/lab-desktop-linux";
 import { hasGraphicalSession } from "./launch.js";
 
 const require = createRequire(import.meta.url);
@@ -20,4 +21,16 @@ export async function detectNativeViewer(env: EnvLike = process.env): Promise<st
   } catch { /* Use the existing browser fallback. */ }
   console.error("Native viewer version check failed; using the browser viewer");
   return null;
+}
+
+/** The MCP package owns policy; the CLI supplies binary detection and its sibling entry. */
+export function nativeViewerLauncher(cliEntry: string): ViewerLauncher {
+  return {
+    available: async (env) => await detectNativeViewer(env) !== null,
+    launch: async (sessionId, env) => {
+      const binary = await detectNativeViewer(env);
+      if (binary === null) return undefined;
+      return startNativeViewerHost({ sessionId, env, binary, version: nativeViewerVersion, cliEntry });
+    },
+  };
 }

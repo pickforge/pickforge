@@ -213,3 +213,5 @@ export {
 export * from "./viewer-host-protocol.js";
 export * from "./viewer-host.js";
 export { stopNativeViewerProcesses, type NativeViewerLaunchRecord } from "./viewer-state.js";
+
+export { releaseStuckInput } from "./stuck-input.js";

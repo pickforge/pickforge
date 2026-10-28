@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { DirHandle, ObservationTimeoutError, runCommand, type EnvLike } from "@pickforge/lab-core";
-import { listWindows } from "./apps.js";
+import { listWindows, type CommandStop } from "./apps.js";
 import { parseDisplayNumber } from "./display.js";
 import { readPngImageSize, type PngImageSize } from "./png.js";
 import { findOnPath } from "./util.js";
@@ -19,7 +19,7 @@ export interface ScreenshotStep {
   requiresDisplayEnv?: true;
 }
 
-export interface ScreenshotOptions {
+export interface ScreenshotOptions extends CommandStop {
   display: string;
   outPath: string;
   tool?: ScreenshotTool;
@@ -190,10 +190,10 @@ async function assertPngFile(
 
 async function runScreenshotSteps(
   steps: ScreenshotStep[],
-  display: string,
-  env: EnvLike | undefined,
+  opts: ScreenshotOptions,
   overallDeadline: number | undefined,
 ): Promise<void> {
+  const { display, env } = opts;
   for (const step of steps) {
     const timeoutMs =
       overallDeadline === undefined
@@ -205,6 +205,8 @@ async function runScreenshotSteps(
     const result = await runCommand(step.cmd, step.args, {
       env: { ...env, DISPLAY: display },
       timeoutMs,
+      signal: opts.signal,
+      killGraceMs: opts.killGraceMs,
     });
     if (result.timedOut) throw new ObservationTimeoutError(`Screenshot command timed out: ${step.cmd}`);
     if (!result.ok) {
@@ -236,7 +238,7 @@ async function captureWithOwnedDump(
   opts: ScreenshotOptions, tool: ScreenshotTool, deadline: number | undefined,
 ): Promise<void> {
   if (tool !== "xwd") {
-    return runScreenshotSteps(buildScreenshotCommand(tool, opts.display, opts.outPath), opts.display, opts.env, deadline);
+    return runScreenshotSteps(buildScreenshotCommand(tool, opts.display, opts.outPath), opts, deadline);
   }
   const parent = await DirHandle.open(path.dirname(opts.outPath), { followFinal: true });
   const name = `capture-${crypto.randomBytes(12).toString("hex")}.xwd`;
@@ -246,7 +248,7 @@ async function captureWithOwnedDump(
       const owned = await file.stat();
       const dumpPath = parent.resolve(name).replace("/proc/self/", `/proc/${process.pid}/`);
       try {
-        await runScreenshotSteps(buildScreenshotCommand(tool, opts.display, opts.outPath, dumpPath), opts.display, opts.env, deadline);
+        await runScreenshotSteps(buildScreenshotCommand(tool, opts.display, opts.outPath, dumpPath), opts, deadline);
       } finally {
         await parent.unlinkOwnedFile(name, owned);
       }

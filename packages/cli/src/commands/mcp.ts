@@ -4,7 +4,7 @@ import {
   type StdioServerHandle,
 } from "@modelcontextprotocol/server/stdio";
 import { redactSecrets } from "@pickforge/lab-core";
-import { createMcpServer } from "@pickforge/lab-mcp-server";
+import { createMcpServer, type CreateMcpServerOptions } from "@pickforge/lab-mcp-server";
 
 const MAX_ERROR_CHARS = 2_048;
 const MAX_ERROR_REPORTS = 8;
@@ -57,7 +57,7 @@ class ObservedStdioServerTransport extends StdioServerTransport {
   }
 }
 
-export async function runMcpServe(): Promise<number> {
+export async function runMcpServe(options: CreateMcpServerOptions = {}): Promise<number> {
   return new Promise<number>((resolve, reject) => {
     const reportError = createMcpErrorReporter();
     let handle: StdioServerHandle | undefined;
@@ -82,7 +82,7 @@ export async function runMcpServe(): Promise<number> {
     for (const signal of SHUTDOWN_SIGNALS) process.on(signal, finish);
 
     try {
-      handle = serveStdio(() => createMcpServer(), {
+      handle = serveStdio(() => createMcpServer(options), {
         legacy: "serve",
         transport,
         onerror: reportError,

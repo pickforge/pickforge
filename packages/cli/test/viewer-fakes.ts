@@ -1,5 +1,8 @@
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
+
+const { version: cliVersion } = createRequire(import.meta.url)("../package.json") as { version: string };
 
 /**
  * Fake `hyprctl` and browser executables for the viewer tests. Both append
@@ -32,6 +35,7 @@ export interface FakeBrowserBehavior {
 }
 
 export interface FakeViewerBehavior {
+  noControlAck?: boolean;
   version?: string;
   readyPid?: number;
   readyVersion?: string;
@@ -123,7 +127,7 @@ const fs = require("node:fs");
 const [callsLog, stateFile, clientsFile, behaviorFile, viewerFile, cuesFile] = __PATHS__;
 const args = process.argv.slice(2);
 const behavior = JSON.parse(fs.readFileSync(viewerFile, "utf8"));
-const version = behavior.version ?? "0.6.0";
+const version = behavior.version ?? ${JSON.stringify(cliVersion)};
 if (args.includes("--version")) { console.log("pickforge-viewer " + version); process.exit(0); }
 if (behavior.ignoreSignals) process.on("SIGTERM", () => {});
 fs.appendFileSync(callsLog, JSON.stringify({ tool: "viewer", args, pid: process.pid, display: process.env.DISPLAY, wayland: process.env.WAYLAND_DISPLAY }) + "\\n");
@@ -134,6 +138,7 @@ if (!behavior.noReady) emit({ event: "ready", version: behavior.readyVersion ?? 
 require("node:readline").createInterface({ input: process.stdin }).on("line", (line) => {
   const command = JSON.parse(line);
   fs.appendFileSync(callsLog, JSON.stringify({ tool: "viewer-command", ...command }) + "\\n");
+  if (command.cmd === "control" && !behavior.noControlAck) emit({ event: "controlAck", leaseId: command.leaseId, state: command.state });
   if (command.cmd === "setMode") emit({ event: "mode", mode: command.mode });
   if (command.cmd === "shutdown" && !behavior.ignoreShutdown) process.exit(0);
 }).on("close", () => { if (!behavior.ignoreShutdown) process.exit(0); });
@@ -166,6 +171,7 @@ export function createViewerFakes(root: string): ViewerFakes {
     fs.chmodSync(file, 0o755);
     return file;
   };
+  install("notify-send", "process.exit(0);");
   return {
     binDir,
     callsLog,

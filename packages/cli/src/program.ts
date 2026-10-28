@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+import { nativeViewerLauncher } from "./viewer/native.js";
 import { createRequire } from "node:module";
 import { Command, Option } from "commander";
 import type { PickforgeProfile, SessionType } from "@pickforge/lab-core";
@@ -294,6 +296,7 @@ function registerWatchAndBrowserCommands(program: Command): void {
     .requiredOption("--session <id>", "session id")
     .requiredOption("--binary <path>", "native viewer binary")
     .requiredOption("--viewer-version <version>", "expected viewer version")
+    .option("--control", "take control when the viewer is ready")
     .action(async (opts) => { process.exitCode = await runViewerHost(opts); });
 
   internal
@@ -857,7 +860,9 @@ function registerMcpCommands(program: Command): void {
     .command("serve")
     .description("Serve Pickforge tools over MCP (stdio)")
     .action(async () => {
-      process.exitCode = await runMcpServe();
+      process.exitCode = await runMcpServe({ viewerLauncher: nativeViewerLauncher(
+        fileURLToPath(new URL("./pickforge-lab.js", import.meta.url)),
+      ) });
     });
 }
 
@@ -884,7 +889,7 @@ or on enables it (case-insensitive; surrounding whitespace ignored). Any other
 value or unset disables it. Enabled reports send redacted error messages and
 stack traces (which may include command output), plus OS, Node.js, and app
 versions to Sentry. No product analytics, breadcrumbs, or performance tracing.
-In 0.6.0, PICKLAB_TELEMETRY is still a fallback only when PICKFORGE_TELEMETRY is unset,
+In 0.7.0, PICKLAB_TELEMETRY is still a fallback only when PICKFORGE_TELEMETRY is unset,
 with the same values and one deprecation warning per process.
 `);
 

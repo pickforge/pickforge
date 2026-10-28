@@ -17,6 +17,9 @@ const cliVersion = (
 ).version;
 
 const NETWORK_TIMEOUT = 300_000;
+// Cleanup removes an npm cache and several installs, which can take over 10 s
+// on a loaded runner.
+const CLEANUP_TIMEOUT = 120_000;
 
 interface ExecResult {
   code: number | null;
@@ -147,7 +150,7 @@ beforeAll(async () => {
 
 afterAll(() => {
   fs.rmSync(suiteDir, { recursive: true, force: true });
-});
+}, CLEANUP_TIMEOUT);
 
 describe("install.sh", () => {
   it("passes a POSIX sh syntax check", async () => {

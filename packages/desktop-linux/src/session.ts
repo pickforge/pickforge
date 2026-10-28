@@ -13,6 +13,7 @@ import {
   getSession,
   isHumanLeaseStale,
   isPidAlive,
+  isProcessGroupAlive,
   processIdentityMatches,
   reapDeadRunningSessions,
   readHumanLease,
@@ -32,10 +33,12 @@ import {
   type DesktopSessionInfo,
   type DesktopHomePolicy,
   type EnvLike,
+  type HumanLease,
   type LocalSessionTeardownFinalizer,
   type SessionRecord,
   type SessionVncLockOptions,
 } from "@pickforge/lab-core";
+import { releaseStuckInput } from "./stuck-input.js";
 import { createIsolatedDesktopEnvironment } from "./environment.js";
 import {
   XvfbStartError,
@@ -544,11 +547,36 @@ export async function stopOwnedSessionVnc(
   }
 }
 
+async function stopRecordedViewer(lease: HumanLease): Promise<boolean> {
+  if (lease.viewerPid === undefined || lease.viewerStartTicks === undefined) return false;
+  const identity = { pid: lease.viewerPid, startTicks: lease.viewerStartTicks };
+  for (const signal of ["SIGTERM", "SIGKILL"] as const) {
+    if (!processIdentityMatches(identity)) return true;
+    try { process.kill(identity.pid, signal); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+    const deadline = Date.now() + 1_000;
+    while (processIdentityMatches(identity) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  if (processIdentityMatches(identity)) throw new Error("Cannot recover viewer takeover: recorded viewer survived");
+  return true;
+}
+
+async function stopStaleViewerOwner(lease: HumanLease): Promise<void> {
+  const result = lease.ownerStartTicks === undefined ? undefined :
+    await stopProcessGroupVerified({ pid: lease.ownerPid, startTicks: lease.ownerStartTicks });
+  const groupStopped = result?.outcome === "terminated" || result?.outcome === "already-dead";
+  // A viewer may outlive its host or belong to a host that is not a group leader.
+  const viewerStopped = await stopRecordedViewer(lease);
+  if (viewerStopped || groupStopped) return;
+  if (!isPidAlive(lease.ownerPid) && !isProcessGroupAlive(lease.ownerPid)) return;
+  throw new Error(`Cannot recover viewer takeover: owner process group ${result?.outcome ?? "has no process identity"}`);
+}
+
 /**
- * Recover a session left with a writable VNC server by a takeover whose
- * owner process is gone (crash) or whose heartbeat lapsed (stale TTL): stop
- * the recorded writable VNC, clear its record, record a `takeover_recovered`
- * evidence entry, and release the stale lease. A *live* lease is left
+ * Recover a takeover whose owner died or heartbeat expired. Viewer recovery
+ * stops the verified owner group and releases held input. VNC recovery stops
+ * the recorded writable server and clears its record. Both record recovery
+ * evidence and release the stale lease. A live lease is left
  * untouched — this only reclaims genuinely stale state. Exported for
  * `@pickforge/lab-desktop-linux`'s `takeover.ts` (a sibling module,
  * imported one-directionally from here to avoid a cycle since `takeover.ts`
@@ -578,7 +606,14 @@ export async function recoverStaleTakeoverLocked(
   }
 
   const desktop = record.desktop;
-  if (desktop !== undefined && desktop.vncPid !== undefined && desktop.vncViewOnly !== true) {
+  if (snapshot.lease?.inputTransport === "viewer") {
+    await stopStaleViewerOwner(snapshot.lease);
+    if (desktop?.xvfbPid !== undefined && desktop.xvfbStartTimeTicks !== undefined &&
+        processIdentityMatches({ pid: desktop.xvfbPid, startTicks: desktop.xvfbStartTimeTicks })) {
+      // Input cleanup cannot keep a stopped viewer's stale lease active.
+      await releaseStuckInput(desktop.display, registryEnv).catch(() => {});
+    }
+  } else if (desktop !== undefined && desktop.vncPid !== undefined && desktop.vncViewOnly !== true) {
     await stopOwnedSessionVnc(id, desktop).catch(() => {});
     await updateSession(
       id,

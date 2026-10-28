@@ -1,6 +1,6 @@
 # pickforge-viewer
 
-`pickforge-viewer` shows one Pickforge lab session in a small native window on Linux. It reads the session's own Xvfb display through MIT-SHM and DAMAGE, so it needs no VNC server, bridge or browser. This part is watch only and sends no input to the session.
+`pickforge-viewer` shows one Pickforge lab session in a small native window on Linux. It reads the session's own Xvfb display through MIT-SHM and DAMAGE, so it needs no VNC server, bridge or browser. After the host grants control, it sends the human's pointer and keyboard input to the session through XTEST.
 
 A viewer host starts the binary and talks to it over stdio. `PROTOCOL.md` is the contract. `pickforge-viewer --version` prints the version, and `pickforge-viewer --self-test` runs checks that need no display.
 
