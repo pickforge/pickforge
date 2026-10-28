@@ -7,7 +7,7 @@ import {
   HumanLeaseHeldError, readProcessIdentity, sessionDataDir, type DirHandle, type EnvLike, type ProcessIdentity,
 } from "@pickforge/lab-core";
 import { withSessionVncLock, recoverStaleTakeoverLocked, SESSION_VNC_LOCK_TIMEOUT_MS } from "./session.js";
-import { verifyOwnedDisplayTarget } from "./x11-target.js";
+import { verifyOwnedDisplayTarget, type OwnedDisplayIdentity } from "./x11-target.js";
 import {
   withViewerDir, readViewerPrivateFile, sessionViewerDir, readViewerLaunchRecord,
   stopNativeViewerProcesses,
@@ -49,12 +49,14 @@ async function assertHostSocket(host: NativeViewerHostIdentity): Promise<void> {
   if (stats.ino !== host.socketIno || stats.dev !== host.socketDev) throw new Error("Unsafe viewer socket");
 }
 
-export async function requestNativeViewerHost(host: NativeViewerHostIdentity, request: ViewerHostRequest): Promise<ViewerHostResponse> {
+export async function requestNativeViewerHost(
+  host: NativeViewerHostIdentity, request: ViewerHostRequest, timeoutMs = 2_000,
+): Promise<ViewerHostResponse> {
   await assertHostSocket(host);
   return new Promise((resolve, reject) => {
     const socket = net.connect(host.socket);
     let pending = Buffer.alloc(0);
-    const timer = setTimeout(() => socket.destroy(new Error("Viewer host request timed out")), 2_000);
+    const timer = setTimeout(() => socket.destroy(new Error("Viewer host request timed out")), timeoutMs);
     socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
     socket.on("data", (chunk: Buffer) => {
       pending = Buffer.concat([pending, chunk]);
@@ -134,17 +136,46 @@ export async function followNativeViewerRequest(host: NativeViewerHostIdentity, 
   });
 }
 
+async function readNativeViewerHost(sessionId: string, env: EnvLike): Promise<NativeViewerHostIdentity | undefined> {
+  return withViewerDir(sessionId, env, false, async (directory) => {
+    const json = await readViewerPrivateFile(directory, "host.json");
+    if (json === undefined) return undefined;
+    const host: unknown = JSON.parse(json);
+    return validNativeViewerHost(host, sessionId, env) ? host : undefined;
+  });
+}
+
 export async function findNativeViewerHost(sessionId: string, env: EnvLike = process.env): Promise<NativeViewerHostIdentity | undefined> {
   try {
-    return await withViewerDir(sessionId, env, false, async (directory) => {
-      const json = await readViewerPrivateFile(directory, "host.json");
-      if (json === undefined) return undefined;
-      const host: unknown = JSON.parse(json);
-      if (!validNativeViewerHost(host, sessionId, env)) return undefined;
-      await requestNativeViewerHost(host, { op: "status" });
-      return host;
-    });
+    const host = await readNativeViewerHost(sessionId, env);
+    if (host !== undefined) await requestNativeViewerHost(host, { op: "status" });
+    return host;
   } catch { return undefined; }
+}
+
+/** The longest a completed click waits for its viewer pulse. */
+export const VIEWER_PULSE_TIMEOUT_MS = 300;
+
+/**
+ * Asks the session's native viewer to show a click at a point on the Xvfb that
+ * verified for that click. Best effort: no viewer, a dead host, a timeout or
+ * any error is ignored, and the wait is bounded.
+ */
+export async function pulseNativeViewer(
+  sessionId: string, target: OwnedDisplayIdentity, point: { x: number; y: number }, env: EnvLike = process.env,
+): Promise<void> {
+  const send = async (): Promise<void> => {
+    const host = await readNativeViewerHost(sessionId, env);
+    if (host === undefined) return;
+    await requestNativeViewerHost(host, {
+      op: "pulse", x: point.x, y: point.y, xvfbPid: target.pid, xvfbStartTicks: target.startTicks,
+    }, VIEWER_PULSE_TIMEOUT_MS);
+  };
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<void>((resolve) => { timer = setTimeout(resolve, VIEWER_PULSE_TIMEOUT_MS); });
+  try {
+    await Promise.race([send().catch(() => {}), timeout]);
+  } finally { clearTimeout(timer); }
 }
 
 /** Remove readiness whose host and viewer are both gone, refusing a replaced socket. */

@@ -8,6 +8,7 @@ pub mod keymap;
 pub mod keysyms;
 pub mod procstat;
 pub mod protocol;
+pub mod pulse;
 pub mod scale;
 pub mod selftest;
 

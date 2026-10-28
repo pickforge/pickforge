@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSession, updateSession, processIdentityMatches, readProcessIdentity, acquireHumanLease, readHumanLease, releaseHumanLease } from "@pickforge/lab-core";
 import {
   startXvfb, stopXvfb, findOnPath, findNativeViewerHost, requestNativeViewerHost,
-  withSessionVncLock, followNativeViewerRequest, type NativeViewerHostIdentity, type XvfbHandle,
+  withSessionVncLock, followNativeViewerRequest, pulseNativeViewer, type NativeViewerHostIdentity, type XvfbHandle,
 } from "@pickforge/lab-desktop-linux";
 import { runNativeViewerHost, type NativeHostOptions } from "../src/viewer/native-host.js";
 import { createViewerFakes, monitor, type ViewerFakes, type FakeViewerBehavior } from "./viewer-fakes.js";
@@ -349,5 +349,35 @@ describe.skipIf(!available)("native host request socket", () => {
     expect(fakes.calls().some((entry) => entry.cmd === "setMode" && entry.mode === "thumbnail")).toBe(false);
     await requestNativeViewerHost(host, { op: "shutdown" });
     await running;
+  });
+});
+
+describe.skipIf(!available)("native host click pulse", () => {
+  const pulses = (): unknown[] => fakes.calls().filter((entry) => entry.cmd === "pulse").map(({ cmd, x, y }) => ({ cmd, x, y }));
+
+  it("forwards a pulse for the verified Xvfb and refuses any other", async () => {
+    const host = await start();
+    const target = { display: display.display, pid: display.pid, startTicks: display.startTimeTicks };
+    await pulseNativeViewer(sessionId, target, { x: 12, y: 34 });
+    await until(() => pulses().length === 1);
+    expect(pulses()).toEqual([{ cmd: "pulse", x: 12, y: 34 }]);
+    const pulse = { op: "pulse", x: 1, y: 2, xvfbPid: display.pid, xvfbStartTicks: display.startTimeTicks };
+    expect(await rawRequest(host, { ...pulse, xvfbStartTicks: display.startTimeTicks + 1 })).toEqual({ ok: false, error: "operation-failed" });
+    expect(await rawRequest(host, { ...pulse, xvfbPid: process.pid })).toEqual({ ok: false, error: "operation-failed" });
+    for (const bad of [{ x: -1 }, { y: 1.5 }, { x: 32_768 }, { y: "2" }, { xvfbPid: 0 }, { button: 1 }]) {
+      expect(await rawRequest(host, { ...pulse, ...bad })).toEqual({ ok: false, error: "invalid-request" });
+    }
+    await sleep(50);
+    expect(pulses()).toHaveLength(1);
+    expect(await readHumanLease(sessionId)).toBeUndefined();
+    expect(controlCommands()).toEqual([]);
+    await requestNativeViewerHost(host, { op: "shutdown" });
+    await running;
+  });
+
+  it("returns quickly without a viewer", async () => {
+    const started = Date.now();
+    await pulseNativeViewer(sessionId, { display: display.display, pid: display.pid, startTicks: display.startTimeTicks }, { x: 1, y: 1 });
+    expect(Date.now() - started).toBeLessThan(300);
   });
 });

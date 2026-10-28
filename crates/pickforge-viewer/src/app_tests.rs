@@ -1,4 +1,5 @@
 use super::*;
+use crate::pulse;
 
 fn app() -> App {
     App::new(
@@ -122,4 +123,53 @@ fn thumbnail_keeps_the_session_label_above_an_attention_banner() {
     let banner = app.banner.clone().expect("banner");
     assert_eq!(shown, "desk-1a2b3c \u{b7} my-app");
     assert!(banner.rect.y >= pill.bottom(), "{banner:?} {pill:?}");
+}
+
+#[test]
+fn pulse_damages_only_its_rows_and_draws_inside_the_image() {
+    let mut app = app();
+    app.size = PhysicalSize::new(100, 132);
+    app.relayout();
+    app.image = Rect::new(0, 32, 100, 100);
+    app.canvas = vec![palette::SURFACE; 100 * 132];
+    app.scaled = vec![0x0010_2030; 100 * 100];
+    app.damage = None;
+    let start = Instant::now();
+    app.start_pulse(50, 50, start);
+    let (y0, y1) = app.damage.take().expect("pulse damage");
+    assert!(
+        (32..=62).contains(&y0) && y1 >= 103 && y1 - y0 <= 46,
+        "{y0}..{y1}"
+    );
+
+    app.compose(0, 132, None);
+    // The ring starts at a 4 pixel radius around the pixel center (50.5, 82.5).
+    let ember = app.canvas[82 * 100 + 53];
+    assert!((ember >> 16) & 0xff > 0xc0, "{ember:06x}");
+    assert_eq!(app.canvas[82 * 100 + 50], 0x0010_2030);
+    assert_eq!(app.canvas[40 * 100 + 10], 0x0010_2030);
+
+    // Frames are paced, and the end clears the ring with one last damage.
+    assert_eq!(app.tick_pulse(start), Some(start + pulse::FRAME));
+    app.damage = None;
+    assert_eq!(
+        app.tick_pulse(start + pulse::FRAME / 2),
+        Some(start + pulse::FRAME)
+    );
+    assert_eq!(app.damage, None);
+    assert_eq!(app.tick_pulse(start + pulse::DURATION), None);
+    assert_eq!(app.damage, Some((y0, y1)));
+    assert!(app.pulse.is_none());
+}
+
+#[test]
+fn pulse_ignores_points_outside_the_session_and_ended_sessions() {
+    let mut app = app();
+    app.size = PhysicalSize::new(100, 100);
+    app.image = Rect::new(0, 0, 100, 100);
+    app.start_pulse(100, 5, Instant::now());
+    assert!(app.pulse.is_none() && app.damage.is_none());
+    app.ended = true;
+    app.start_pulse(5, 5, Instant::now());
+    assert!(app.pulse.is_none() && app.damage.is_none());
 }

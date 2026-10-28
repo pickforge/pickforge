@@ -61,6 +61,19 @@ interface HostOperation {
   serial: boolean;
 }
 
+function sessionPoint(value: unknown): boolean {
+  return Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= 32_767;
+}
+
+function positive(value: unknown): boolean {
+  return Number.isSafeInteger(value) && (value as number) > 0;
+}
+
+function validPulse(request: Record<string, unknown>): boolean {
+  const keys = Object.keys(request).every((key) => ["op", "x", "y", "xvfbPid", "xvfbStartTicks"].includes(key));
+  return keys && [request.x, request.y].every(sessionPoint) && [request.xvfbPid, request.xvfbStartTicks].every(positive);
+}
+
 function watchOperation(run: () => Promise<void>, serial = false): HostOperation {
   return { valid: (request) => Object.keys(request).every((key) => key === "op"), run, serial };
 }
@@ -92,6 +105,7 @@ class NativeHost {
     private readonly version: string,
     private readonly env: NodeJS.ProcessEnv,
     private readonly options: NativeHostOptions,
+    private readonly xvfb: { pid: number; startTicks: number },
   ) {
     this.requests = new NativeRequests({ env, send: (command) => this.send(command),
       mode: (mode) => this.setMode(mode), currentMode: () => this.mode, controlling: () => this.control.active });
@@ -191,6 +205,14 @@ class NativeHost {
         valid: (r: Record<string, unknown>) => Object.keys(r).every((key) => ["op", "requestId"].includes(key)) &&
           (r.requestId === undefined || typeof r.requestId === "string" && this.requests.has(r.requestId)),
         run: async () => {}, serial: false,
+      },
+      pulse: {
+        valid: validPulse,
+        // A pulse for another Xvfb than the one this viewer shows is refused.
+        run: async (r: Record<string, unknown>) => {
+          if (r.xvfbPid !== this.xvfb.pid || r.xvfbStartTicks !== this.xvfb.startTicks) throw new Error("Pulse display differs");
+          if (this.receivedReady && !this.ended && !this.stopped) this.send({ cmd: "pulse", x: r.x as number, y: r.y as number });
+        }, serial: false,
       },
     });
     readViewerLines(socket, (request) => {
@@ -362,7 +384,7 @@ export async function runNativeViewerHost(options: NativeHostOptions): Promise<n
       kind: "native", sessionId: options.session, launchId, createdAt: new Date().toISOString(), binary: options.binary,
       hostPid: hostIdentity.pid, hostStartTicks: hostIdentity.startTicks,
       viewerPid: viewerIdentity.pid, viewerStartTicks: viewerIdentity.startTicks, ...viewerIdentity, ...sizes, hyprland,
-    }, options.viewerVersion, env, options).run();
+    }, options.viewerVersion, env, options, { pid: target.pid, startTicks: target.startTicks }).run();
   } finally {
     if (hyprland !== undefined) {
       await disableViewerRule(hyprland, ruleName);

@@ -3,7 +3,10 @@ import { parseDisplayNumber } from "./display.js";
 import { performance } from "node:perf_hooks";
 import { prepareText, typingEnvironment } from "./x11-prebind.js";
 import { DesktopTextPreparationError, remaining } from "./x11-wire.js";
-import { DesktopInputTargetError, validateTypingTarget, verifyOwnedDisplayTarget } from "./x11-target.js";
+import {
+  DesktopInputTargetError, validateTypingTarget, verifyOwnedDisplayTarget, type OwnedDisplayIdentity,
+} from "./x11-target.js";
+import { pulseNativeViewer } from "./viewer-host.js";
 
 const TYPE_DELAY_MS = 50;
 const SCROLL_STEP_DELAY_MS = 25;
@@ -289,9 +292,10 @@ async function runXdotool(
   env: EnvLike,
   args: string[],
   timeoutMs: number,
-): Promise<void> {
+): Promise<OwnedDisplayIdentity> {
   parseDisplayNumber(display);
-  if (await verifyOwnedDisplayTarget(sessionId, display, env) === undefined) {
+  const target = await verifyOwnedDisplayTarget(sessionId, display, env);
+  if (target === undefined) {
     throw new DesktopInputTargetError();
   }
   await runCommand("xdotool", args, {
@@ -299,6 +303,7 @@ async function runXdotool(
     timeoutMs,
     check: true,
   });
+  return target;
 }
 
 /**
@@ -308,18 +313,25 @@ async function runXdotool(
  * fail-closed, per pickforge/pickforge#21. No permit fitness (or a lease
  * appearing before the recheck) means no input delivery. Inside the permit,
  * the display must still verify as the session's owned Xvfb.
+ *
+ * A completed click or double click then asks the session's native viewer for
+ * a pulse at the point, on the Xvfb that verified. That happens after the
+ * permit is released and never changes the result. A drag gets none: its
+ * release is not a click, and the viewer already shows the cursor move.
  */
 
 export async function click(opts: ClickOptions): Promise<void> {
-  await withAgentPermit(opts.sessionId, opts.env ?? process.env, () =>
+  const env = opts.env ?? process.env;
+  const target = await withAgentPermit(opts.sessionId, env, () =>
     runXdotool(
       opts.sessionId,
       opts.display,
-      opts.env ?? process.env,
+      env,
       buildClickArgs({ x: opts.x, y: opts.y, button: opts.button }),
       INPUT_TIMEOUT_MS,
     ),
   );
+  await pulseNativeViewer(opts.sessionId, target, opts, env);
 }
 
 export async function move(opts: MoveOptions): Promise<void> {
@@ -371,11 +383,12 @@ export async function drag(opts: DragOptions): Promise<void> {
 }
 
 export async function doubleClick(opts: DoubleClickOptions): Promise<void> {
-  await withAgentPermit(opts.sessionId, opts.env ?? process.env, () =>
+  const env = opts.env ?? process.env;
+  const target = await withAgentPermit(opts.sessionId, env, () =>
     runXdotool(
       opts.sessionId,
       opts.display,
-      opts.env ?? process.env,
+      env,
       buildDoubleClickArgs({
         x: opts.x,
         y: opts.y,
@@ -385,6 +398,7 @@ export async function doubleClick(opts: DoubleClickOptions): Promise<void> {
       INPUT_TIMEOUT_MS + MAX_DOUBLE_CLICK_INTERVAL_MS,
     ),
   );
+  await pulseNativeViewer(opts.sessionId, target, opts, env);
 }
 
 /** Marks every failure before the xdotool dispatch as a preparation failure: no text was sent. */
