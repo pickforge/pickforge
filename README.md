@@ -892,7 +892,7 @@ The expanded watch bar has Take control, Fullscreen, Collapse, and Close. Escape
 The viewer keeps its last frame and shows the session-ended status when capture ends.
 During control, the bar has Return control and Fullscreen. Escape goes to the session.
 
-On Hyprland with a Lua config, the window floats and stays pinned in the bottom-right corner without taking initial focus.
+On Hyprland with a Lua or hyprlang config, the window floats and stays pinned in the bottom-right corner without taking initial focus.
 Pickforge installs a rule for this launch's exact class and disables it after mapping.
 Expand and collapse use `hyprctl` to resize and place the window.
 Other compositors place an ordinary resizable window.
