@@ -2,7 +2,10 @@
 //! See `PROTOCOL.md` for the host contract.
 
 pub mod args;
+pub mod control;
 pub mod geometry;
+pub mod keymap;
+pub mod keysyms;
 pub mod procstat;
 pub mod protocol;
 pub mod scale;
@@ -12,6 +15,8 @@ pub mod selftest;
 mod app;
 #[cfg(target_os = "linux")]
 pub mod capture;
+#[cfg(target_os = "linux")]
+pub mod input;
 #[cfg(target_os = "linux")]
 mod ui;
 

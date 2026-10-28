@@ -29,6 +29,9 @@ pub mod palette {
     pub const HOVER: u8 = 15;
     /// Pressed fill opacity.
     pub const PRESSED: u8 = 31;
+    /// `--color-ember`, the one highlight: Take control in the banner and
+    /// the control state.
+    pub const EMBER: u32 = 0x00ff_7a1a;
 }
 
 /// Bar height in logical pixels.
@@ -316,7 +319,7 @@ impl Text {
 pub fn font_check() -> Result<(), String> {
     let font = load_font()?;
     let mut scale = ScaleContext::new();
-    for c in ['C', 'S', 'F', '\u{d7}'] {
+    for c in ['C', 'S', 'F', '\u{d7}', '\u{2026}', '\u{e7}'] {
         let glyph = rasterize(&mut scale, font, font.charmap().map(c), 24.0);
         if glyph.width == 0 || glyph.coverage.iter().all(|&v| v == 0) {
             return Err(format!("embedded font has no glyph for {c:?}"));
@@ -330,6 +333,19 @@ pub enum Button {
     Fullscreen,
     Collapse,
     Close,
+    TakeControl,
+    ReturnControl,
+    /// Take control in the attention banner.
+    BannerTake,
+}
+
+/// Which buttons the bar shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BarKind {
+    /// Fullscreen, Collapse and Close, with Take control when offered.
+    Watch { take: bool },
+    /// Return control and Fullscreen only.
+    Control,
 }
 
 /// Where the bar and its buttons sit, in physical pixels.
@@ -338,6 +354,7 @@ pub struct Bar {
     pub rect: Rect,
     pub buttons: Vec<(Button, Rect)>,
     pub fullscreen: bool,
+    pub kind: BarKind,
 }
 
 /// Sizes in physical pixels for one scale factor.
@@ -365,41 +382,74 @@ impl Metrics {
     }
 }
 
-fn fullscreen_label(fullscreen: bool) -> &'static str {
-    if fullscreen {
-        "Exit fullscreen"
-    } else {
-        "Fullscreen"
+fn label(button: Button, fullscreen: bool) -> &'static str {
+    match button {
+        Button::Fullscreen if fullscreen => "Exit fullscreen",
+        Button::Fullscreen => "Fullscreen",
+        Button::Collapse => "Collapse",
+        Button::Close => "",
+        Button::TakeControl | Button::BannerTake => "Take control",
+        Button::ReturnControl => "Return control",
     }
 }
 
+fn label_width(text: &mut Text, metrics: Metrics, button: Button, fullscreen: bool) -> u32 {
+    let pad = metrics.px(12.0);
+    (text.width(label(button, fullscreen), metrics.font_px()) + 2.0 * pad).ceil() as u32
+}
+
 impl Bar {
-    pub fn layout(width: u32, metrics: Metrics, fullscreen: bool, text: &mut Text) -> Bar {
+    pub fn layout(
+        width: u32,
+        metrics: Metrics,
+        fullscreen: bool,
+        kind: BarKind,
+        text: &mut Text,
+    ) -> Bar {
         let rect = Rect::new(0, 0, width, metrics.bar_height());
         let button_h = metrics.round(24.0);
         let gap = metrics.round(4.0) as i32;
         let top = ((rect.h - button_h) / 2) as i32;
-        let pad = metrics.px(12.0);
-        let font = metrics.font_px();
-        let mut right = width as i32 - gap;
+        let (left, right): (Option<Button>, &[Button]) = match kind {
+            BarKind::Watch { take } => (
+                take.then_some(Button::TakeControl),
+                &[Button::Close, Button::Collapse, Button::Fullscreen],
+            ),
+            BarKind::Control => (Some(Button::ReturnControl), &[Button::Fullscreen]),
+        };
+        let left = left.map(|button| {
+            let w = label_width(text, metrics, button, fullscreen);
+            (button, Rect::new(gap, top, w, button_h))
+        });
+        let mut x = width as i32 - gap;
         let mut buttons = Vec::new();
-        for button in [Button::Close, Button::Collapse, Button::Fullscreen] {
+        for &button in right {
             let w = match button {
                 Button::Close => button_h,
-                Button::Collapse => (text.width("Collapse", font) + 2.0 * pad).ceil() as u32,
-                Button::Fullscreen => {
-                    (text.width(fullscreen_label(fullscreen), font) + 2.0 * pad).ceil() as u32
-                }
+                _ => label_width(text, metrics, button, fullscreen),
             };
-            right -= w as i32;
-            buttons.push((button, Rect::new(right, top, w, button_h)));
-            right -= gap;
+            x -= w as i32;
+            buttons.push((button, Rect::new(x, top, w, button_h)));
+            x -= gap;
         }
         buttons.reverse();
+        // A narrow bar keeps Return control and Close; the left button
+        // or Fullscreen gives way.
+        if let Some((button, r)) = left {
+            let clear = buttons
+                .first()
+                .is_none_or(|(_, first)| r.right() + gap <= first.x);
+            if clear {
+                buttons.insert(0, (button, r));
+            } else if button == Button::ReturnControl {
+                buttons = vec![(button, r)];
+            }
+        }
         Bar {
             rect,
             buttons,
             fullscreen,
+            kind,
         }
     }
 
@@ -420,32 +470,30 @@ impl Bar {
     ) {
         canvas.fill(self.rect, palette::SURFACE_1);
         let line = metrics.round(1.0);
-        canvas.blend_fill(
-            Rect::new(0, self.rect.bottom() - line as i32, self.rect.w, line),
-            palette::WHITE,
-            palette::HAIRLINE,
-        );
+        let bottom = Rect::new(0, self.rect.bottom() - line as i32, self.rect.w, line);
+        if self.kind == BarKind::Control {
+            canvas.fill(bottom, palette::EMBER);
+        } else {
+            canvas.blend_fill(bottom, palette::WHITE, palette::HAIRLINE);
+        }
         let font = metrics.font_px();
         for &(button, r) in &self.buttons {
-            let color = draw_button_background(canvas, metrics, button, r, hover, pressed);
+            let color = if button == Button::ReturnControl {
+                draw_ember_outline(canvas, metrics, button, r, hover, pressed)
+            } else {
+                draw_button_background(canvas, metrics, button, r, hover, pressed)
+            };
             let cx = r.x as f32 + r.w as f32 / 2.0;
             let cy = r.y as f32 + r.h as f32 / 2.0;
-            match button {
-                Button::Close => {
-                    let arm = metrics.px(4.5);
-                    let stroke = metrics.px(1.5);
-                    canvas.line((cx - arm, cy - arm), (cx + arm, cy + arm), stroke, color);
-                    canvas.line((cx - arm, cy + arm), (cx + arm, cy - arm), stroke, color);
-                }
-                Button::Collapse | Button::Fullscreen => {
-                    let label = if button == Button::Collapse {
-                        "Collapse"
-                    } else {
-                        fullscreen_label(self.fullscreen)
-                    };
-                    let w = text.width(label, font);
-                    text.draw(canvas, label, (cx - w / 2.0).round(), cy, font, color);
-                }
+            if button == Button::Close {
+                let arm = metrics.px(4.5);
+                let stroke = metrics.px(1.5);
+                canvas.line((cx - arm, cy - arm), (cx + arm, cy + arm), stroke, color);
+                canvas.line((cx - arm, cy + arm), (cx + arm, cy - arm), stroke, color);
+            } else {
+                let label = label(button, self.fullscreen);
+                let w = text.width(label, font);
+                text.draw(canvas, label, (cx - w / 2.0).round(), cy, font, color);
             }
         }
     }
@@ -479,6 +527,226 @@ fn draw_button_background(
         palette::TEXT
     } else {
         blend(palette::TEXT, palette::SURFACE_1, 40)
+    }
+}
+
+/// Return control: an ember outline and ember text, brighter on hover.
+fn draw_ember_outline(
+    canvas: &mut Canvas,
+    metrics: Metrics,
+    button: Button,
+    r: Rect,
+    hover: Option<Button>,
+    pressed: Option<Button>,
+) -> u32 {
+    let radius = metrics.px(6.0);
+    let active = hover == Some(button) || pressed == Some(button);
+    if active {
+        canvas.rounded(r, radius, palette::EMBER, 40);
+    }
+    canvas.rounded_outline(r, radius, metrics.px(1.0), palette::EMBER, 200);
+    palette::EMBER
+}
+
+/// The most message lines the banner shows. The last one ends with an
+/// ellipsis when the message is longer.
+pub const BANNER_LINES: usize = 3;
+const ELLIPSIS: &str = "\u{2026}";
+
+/// Wraps `message` into at most `max_lines` lines no wider than `max_w`
+/// by `measure`. Words wider than a line break between characters.
+pub fn wrap(
+    message: &str,
+    max_w: f32,
+    max_lines: usize,
+    mut measure: impl FnMut(&str) -> f32,
+) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    let mut truncated = false;
+    'words: for word in message.split_whitespace() {
+        let mut rest = word;
+        while !rest.is_empty() {
+            let joined = if line.is_empty() {
+                rest.to_owned()
+            } else {
+                format!("{line} {rest}")
+            };
+            if measure(&joined) <= max_w {
+                line = joined;
+                break;
+            }
+            if !line.is_empty() {
+                if lines.len() + 1 == max_lines {
+                    truncated = true;
+                    break 'words;
+                }
+                lines.push(std::mem::take(&mut line));
+                continue;
+            }
+            // One word wider than the line: take what fits, at least one
+            // character.
+            let mut end = rest.chars().next().map_or(0, char::len_utf8);
+            for (i, c) in rest.char_indices().skip(1) {
+                if measure(&rest[..i + c.len_utf8()]) > max_w {
+                    break;
+                }
+                end = i + c.len_utf8();
+            }
+            line = rest[..end].to_owned();
+            rest = &rest[end..];
+            if !rest.is_empty() {
+                if lines.len() + 1 == max_lines {
+                    truncated = true;
+                    break 'words;
+                }
+                lines.push(std::mem::take(&mut line));
+            }
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    if truncated {
+        if let Some(last) = lines.last_mut() {
+            while !last.is_empty() && measure(&format!("{last}{ELLIPSIS}")) > max_w {
+                last.pop();
+            }
+            let trimmed = last.trim_end().len();
+            last.truncate(trimmed);
+            last.push_str(ELLIPSIS);
+        }
+    }
+    lines
+}
+
+/// The attention banner: the host's message and, when control can be
+/// taken, a highlighted Take control button.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Banner {
+    pub rect: Rect,
+    pub lines: Vec<String>,
+    /// Where each line's cap height is centered.
+    pub line_y: Vec<f32>,
+    pub text_x: f32,
+    pub button: Option<Rect>,
+}
+
+impl Banner {
+    /// Lays the banner out at the top of `area`, inside it.
+    pub fn layout(
+        area: Rect,
+        message: &str,
+        metrics: Metrics,
+        with_button: bool,
+        text: &mut Text,
+    ) -> Option<Banner> {
+        let margin = metrics.round(8.0) as i32;
+        let pad = metrics.round(10.0) as i32;
+        let gap = metrics.round(10.0) as i32;
+        let line_h = metrics.round(18.0) as i32;
+        let font = metrics.font_px();
+        let outer = Rect::new(
+            area.x + margin,
+            area.y + margin,
+            area.w.saturating_sub(2 * margin as u32),
+            area.h.saturating_sub(2 * margin as u32),
+        );
+        let inner_w = outer.w as i32 - 2 * pad;
+        if inner_w <= 0 || outer.h as i32 <= 2 * pad + line_h {
+            return None;
+        }
+        let button_w = label_width(text, metrics, Button::BannerTake, false) as i32;
+        let button_h = metrics.round(24.0) as i32;
+        let beside = with_button && inner_w - button_w - gap >= metrics.round(140.0) as i32;
+        let text_w = if beside {
+            inner_w - button_w - gap
+        } else {
+            inner_w
+        };
+        let below = if with_button && !beside {
+            gap + button_h
+        } else {
+            0
+        };
+        // Fewer lines when the area is short, so the banner stays inside.
+        let room = (outer.h as i32 - 2 * pad - below) / line_h;
+        let max_lines = room.clamp(1, BANNER_LINES as i32) as usize;
+        let lines = wrap(message, text_w as f32, max_lines, |s| text.width(s, font));
+        let text_h = lines.len().max(1) as i32 * line_h;
+        let body = if beside { text_h.max(button_h) } else { text_h };
+        let h = (2 * pad + body + below).min(outer.h as i32);
+        let rect = Rect::new(outer.x, outer.y, outer.w, h as u32);
+        let text_top = rect.y + pad + (body - text_h) / 2;
+        let line_y = (0..lines.len())
+            .map(|i| text_top as f32 + (i as i32 * line_h) as f32 + line_h as f32 / 2.0)
+            .collect();
+        let button = with_button.then(|| {
+            let (x, y) = if beside {
+                (
+                    rect.right() - pad - button_w,
+                    rect.y + pad + (body - button_h) / 2,
+                )
+            } else {
+                (rect.right() - pad - button_w, rect.y + pad + text_h + gap)
+            };
+            Rect::new(x.max(rect.x + pad), y, button_w as u32, button_h as u32)
+        });
+        Some(Banner {
+            rect,
+            lines,
+            line_y,
+            text_x: (rect.x + pad) as f32,
+            button,
+        })
+    }
+
+    pub fn hit(&self, px: f64, py: f64) -> Option<Button> {
+        self.button
+            .filter(|r| r.contains(px, py))
+            .map(|_| Button::BannerTake)
+    }
+
+    pub fn draw(
+        &self,
+        canvas: &mut Canvas,
+        metrics: Metrics,
+        text: &mut Text,
+        hover: Option<Button>,
+        pressed: Option<Button>,
+    ) {
+        let radius = metrics.px(8.0);
+        let clip = canvas.clip;
+        canvas.clip = clip.intersect(&self.rect);
+        canvas.rounded(self.rect, radius, palette::SURFACE_1, 244);
+        canvas.rounded_outline(self.rect, radius, metrics.px(1.0), palette::EMBER, 160);
+        let font = metrics.font_px();
+        for (line, &y) in self.lines.iter().zip(&self.line_y) {
+            text.draw(canvas, line, self.text_x, y, font, palette::TEXT);
+        }
+        if let Some(r) = self.button {
+            let button = Button::BannerTake;
+            let r_radius = metrics.px(6.0);
+            canvas.rounded(r, r_radius, palette::EMBER, 255);
+            if pressed == Some(button) && hover == Some(button) {
+                canvas.rounded(r, r_radius, palette::SURFACE, 48);
+            } else if hover == Some(button) {
+                canvas.rounded(r, r_radius, palette::WHITE, 40);
+            }
+            let label = label(button, false);
+            let w = text.width(label, font);
+            let cx = r.x as f32 + r.w as f32 / 2.0;
+            let cy = r.y as f32 + r.h as f32 / 2.0;
+            text.draw(
+                canvas,
+                label,
+                (cx - w / 2.0).round(),
+                cy,
+                font,
+                palette::SURFACE,
+            );
+        }
+        canvas.clip = clip;
     }
 }
 
@@ -544,7 +812,13 @@ mod tests {
         for scale in [1.0, 1.25, 2.0] {
             let metrics = Metrics { scale };
             let width = (640.0 * scale) as u32;
-            let bar = Bar::layout(width, metrics, false, &mut text);
+            let bar = Bar::layout(
+                width,
+                metrics,
+                false,
+                BarKind::Watch { take: false },
+                &mut text,
+            );
             assert_eq!(bar.buttons.len(), 3);
             let mut last = 0;
             for (_, r) in &bar.buttons {
@@ -560,6 +834,149 @@ mod tests {
             );
             assert_eq!(bar.hit(1.0, 1.0), None);
         }
+    }
+
+    fn assert_in_order(buttons: &[(Button, Rect)], width: u32) {
+        let mut last = 0;
+        for (_, r) in buttons {
+            assert!(r.x >= last && r.right() <= width as i32, "{buttons:?}");
+            last = r.right();
+        }
+    }
+
+    #[test]
+    fn control_bars_show_the_right_buttons() {
+        let mut text = Text::new();
+        let names = |bar: &Bar| bar.buttons.iter().map(|(b, _)| *b).collect::<Vec<_>>();
+        for scale in [1.0, 2.0] {
+            let metrics = Metrics { scale };
+            let width = (640.0 * scale) as u32;
+            let watch = Bar::layout(
+                width,
+                metrics,
+                false,
+                BarKind::Watch { take: true },
+                &mut text,
+            );
+            assert_eq!(
+                names(&watch),
+                vec![
+                    Button::TakeControl,
+                    Button::Fullscreen,
+                    Button::Collapse,
+                    Button::Close
+                ]
+            );
+            assert_in_order(&watch.buttons, width);
+            let control = Bar::layout(width, metrics, true, BarKind::Control, &mut text);
+            assert_eq!(
+                names(&control),
+                vec![Button::ReturnControl, Button::Fullscreen]
+            );
+            assert_in_order(&control.buttons, width);
+            // A narrow bar keeps Return control and drops Take control.
+            let narrow = (200.0 * scale) as u32;
+            let control = Bar::layout(narrow, metrics, true, BarKind::Control, &mut text);
+            assert_eq!(names(&control), vec![Button::ReturnControl]);
+            let watch = Bar::layout(
+                narrow,
+                metrics,
+                false,
+                BarKind::Watch { take: true },
+                &mut text,
+            );
+            assert!(!names(&watch).contains(&Button::TakeControl));
+            assert!(names(&watch).contains(&Button::Close));
+        }
+    }
+
+    #[test]
+    fn wrap_breaks_words_and_truncates() {
+        let measure = |s: &str| s.chars().count() as f32;
+        assert_eq!(
+            wrap("one two three", 7.0, 3, measure),
+            vec!["one two", "three"]
+        );
+        assert_eq!(wrap("  ", 7.0, 3, measure), Vec::<String>::new());
+        assert_eq!(
+            wrap("abcdefghij", 4.0, 3, measure),
+            vec!["abcd", "efgh", "ij"]
+        );
+        assert_eq!(
+            wrap("abcdefghijklmnop", 4.0, 3, measure),
+            vec!["abcd", "efgh", "ijk\u{2026}"]
+        );
+        let lines = wrap("aa bb cc dd ee ff", 5.0, 2, measure);
+        assert_eq!(lines, vec!["aa bb", "cc d\u{2026}"]);
+        let long = "palavra ".repeat(200);
+        for width in [1.0, 3.0, 20.0] {
+            let lines = wrap(&long, width, 3, measure);
+            assert!(lines.len() <= 3);
+            assert!(lines.last().unwrap().ends_with('\u{2026}'));
+        }
+    }
+
+    #[test]
+    fn banner_stays_inside_its_area() {
+        let mut text = Text::new();
+        let long = "Por favor entre com a sua senha do banco e confirme o código ".repeat(8);
+        let message: String = long.chars().take(500).collect();
+        for scale in [1.0, 1.25, 2.0] {
+            let metrics = Metrics { scale };
+            let font = metrics.font_px();
+            for (w, h, button) in [
+                (640, 480, true),
+                (384, 288, false),
+                (220, 160, true),
+                (640, 60, true),
+            ] {
+                let area = Rect::new(
+                    0,
+                    metrics.bar_height() as i32,
+                    (w as f64 * scale) as u32,
+                    (h as f64 * scale) as u32,
+                );
+                let Some(banner) = Banner::layout(area, &message, metrics, button, &mut text)
+                else {
+                    assert!(h < 100, "{w}x{h}");
+                    continue;
+                };
+                assert_eq!(banner.rect.intersect(&area), banner.rect, "{w}x{h}@{scale}");
+                assert!(!banner.lines.is_empty() && banner.lines.len() <= BANNER_LINES);
+                assert!(banner.lines.last().unwrap().ends_with('\u{2026}'));
+                let last_line = *banner.line_y.last().unwrap();
+                let right = match banner.button {
+                    Some(b) if b.y as f32 <= last_line => b.x,
+                    _ => banner.rect.right(),
+                };
+                for line in &banner.lines {
+                    let end = banner.text_x + text.width(line, font);
+                    assert!(
+                        end <= right as f32 + 0.5 || !button,
+                        "{line:?} at {w}x{h}@{scale}"
+                    );
+                    assert!(end <= banner.rect.right() as f32);
+                }
+                if let Some(b) = banner.button {
+                    assert_eq!(b.intersect(&banner.rect), b, "{w}x{h}@{scale}");
+                    assert_eq!(
+                        banner.hit(b.x as f64 + 1.0, b.y as f64 + 1.0),
+                        Some(Button::BannerTake)
+                    );
+                }
+                assert_eq!(banner.button.is_some(), button);
+            }
+        }
+        let area = Rect::new(0, 32, 640, 448);
+        let short = Banner::layout(
+            area,
+            "Sign in, please",
+            Metrics { scale: 1.0 },
+            true,
+            &mut text,
+        )
+        .unwrap();
+        assert_eq!(short.lines, vec!["Sign in, please"]);
     }
 
     #[test]
