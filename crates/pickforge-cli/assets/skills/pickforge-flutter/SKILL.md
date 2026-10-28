@@ -57,11 +57,12 @@ description: >-
 ## Dart MCP connection
 
 Runtime tools need a Dart Tooling Daemon (DTD) connection. Start the app in
-the Pickforge session from a shell that keeps its stdin, and print the URI:
+the Pickforge session from a shell that keeps its stdin, and print the URI.
+Flutter starts only if the session environment loads:
 
 ```sh
-eval "$(pickforge-lab desktop env --session <id>)"
-flutter run -d linux --print-dtd
+recipe="$(pickforge-lab desktop env --session <id>)" && eval "$recipe" &&
+  flutter run -d linux --print-dtd
 ```
 
 Pass the URI after `The Dart Tooling Daemon is available at:` to
