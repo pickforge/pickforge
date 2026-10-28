@@ -59,8 +59,9 @@ function object(value: unknown): JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as JsonObject : {};
 }
+/** Terminal controls in a tampered document must not reach the report. */
 function text(value: unknown): string {
-  return typeof value === "string" ? redactSecrets(value) : "";
+  return typeof value === "string" ? redactSecrets(value).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ") : "";
 }
 function array(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
@@ -322,7 +323,7 @@ function captureLines(capture: RustEvidenceCapture): string[] {
 }
 function artifactLine(artifact: RustEvidenceArtifact): string {
   const head = `- ${phaseName(artifact)}: ${artifact.label} (${artifact.kind} from ${artifact.origin})`;
-  if (artifact.status === "unavailable") return `${head}: unavailable, ${artifact.reason ?? ""}`;
+  if (artifact.status === "unavailable") return `${head}: unavailable at ${artifact.capturedAt}, ${artifact.reason ?? ""}`;
   if (artifact.status === "missing") return `${head}: missing ${artifact.path ?? ""}`.trimEnd();
   const size = artifact.bytes === undefined ? "" : `, ${artifact.bytes} bytes`;
   return `${head}: ${artifact.path}, ${artifact.format}${size}, captured at ${artifact.capturedAt}`;

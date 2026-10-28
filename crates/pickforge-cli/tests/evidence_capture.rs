@@ -159,6 +159,7 @@ fn stores_trees_logs_and_reports_as_redacted_inert_text() {
             "capturedAt": "2026-10-28T11:00:00Z"},
         {"kind": "log", "origin": "android-logcat", "label": "Logcat", "source": logcat},
         {"kind": "tree", "origin": "atspi-tree", "label": "Desktop tree",
+            "capturedAt": "2026-10-28T11:00:02Z",
             "unavailable": "AT-SPI capture is not supported yet; token=reasonsecret"}
     ]);
     input["after"]["artifacts"] = json!([
@@ -196,7 +197,7 @@ fn stores_trees_logs_and_reports_as_redacted_inert_text() {
 
     assert_eq!(
         before[2],
-        json!({"kind": "tree", "origin": "atspi-tree", "label": "Desktop tree", "capturedAt": "unknown",
+        json!({"kind": "tree", "origin": "atspi-tree", "label": "Desktop tree", "capturedAt": "2026-10-28T11:00:02Z",
             "status": "unavailable", "reason": "AT-SPI capture is not supported yet; token=[REDACTED]"})
     );
 
@@ -224,7 +225,7 @@ fn stores_trees_logs_and_reports_as_redacted_inert_text() {
         "{report}"
     );
     assert!(
-        report.contains("- Desktop tree (tree from atspi-tree): unavailable, AT-SPI capture is not supported yet; token=\\[REDACTED\\]"),
+        report.contains("- Desktop tree (tree from atspi-tree): unavailable at 2026-10-28T11:00:02Z, AT-SPI capture is not supported yet; token=\\[REDACTED\\]"),
         "{report}"
     );
 }
@@ -336,10 +337,13 @@ fn oversize_and_non_utf8_text_fail_without_leaving_a_partial_run() {
     let limit = usize::try_from(MAX_TEXT_ARTIFACT_BYTES).unwrap();
     let at_limit = write(temp.path(), "at-limit.txt", "a".repeat(limit));
     let oversize = write(temp.path(), "oversize.txt", "a".repeat(limit + 1));
+    // Exactly at the limit when read, but each redacted line grows from 8 to 17 bytes.
+    let grows = write(temp.path(), "grows.txt", "token=a\n".repeat(limit / 8));
     let binary = write(temp.path(), "binary.txt", [0xff, 0xfe, 0x00, 0x41]);
     let missing = temp.path().join("missing.txt");
     for (source, message) in [
         (&oversize, "text artifact exceeds 4 MiB"),
+        (&grows, "exceeds 4 MiB after redaction"),
         (&binary, "not valid UTF-8"),
         (&missing, "unsafe artifact"),
     ] {

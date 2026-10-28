@@ -233,7 +233,7 @@ pub(super) fn render_capture(out: &mut String, capture: &Capture) {
     .iter()
     .any(|value| value.as_str() != UNKNOWN)
         || !requested.is_empty()
-        || observed.iter().any(|pair| !pair.ends_with(UNKNOWN));
+        || has_known_value(&capture.observed);
     if !known {
         return;
     }
@@ -253,6 +253,22 @@ pub(super) fn render_capture(out: &mut String, capture: &Capture) {
     };
     out.push_str(&format!("- **Requested:** {requested}\n"));
     out.push_str(&format!("- **Observed:** {}\n", observed.join(", ")));
+}
+
+fn has_known_value(state: &DeviceState) -> bool {
+    [
+        &state.display_mode,
+        &state.fold_state,
+        &state.posture,
+        &state.rotation,
+        &state.density,
+        &state.font_scale,
+        &state.dark_mode,
+        &state.locale,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| value.as_str() != Some(UNKNOWN))
 }
 
 fn state_pairs(state: &DeviceState) -> Vec<String> {

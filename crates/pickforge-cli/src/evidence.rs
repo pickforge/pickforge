@@ -884,10 +884,14 @@ fn sanitize_artifacts(artifacts: &mut [ArtifactInput]) {
 fn redact_secrets(value: &str) -> String {
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     let patterns = PATTERNS.get_or_init(|| vec![
-        Regex::new(r#"(?i)(\bauthorization\b\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|(?:bearer\s+)?[^\s,;\"']+)"#).unwrap(),
-        Regex::new(r#"(?i)(\b(?:set-cookie|cookie)\b\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\r\n]+)"#).unwrap(),
+        // Any scheme word (Bearer, Basic, Digest, ...) belongs to the credential.
+        Regex::new(r#"(?i)(\bauthorization\b\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|(?:[a-z][a-z0-9-]*\s+)?[^\s,;\"'<>]+)"#).unwrap(),
+        // An unquoted cookie stops at quotes and angle brackets, so the rest of a
+        // one-line XML tree or a JSON string survives.
+        Regex::new(r#"(?i)(\b(?:set-cookie|cookie)\b\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\r\n\"'<>]+)"#).unwrap(),
         Regex::new(r#"(?i)(\b(?:api[_-]?key|token|secret|password|passwd)\b\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;\"']+)"#).unwrap(),
-        Regex::new(r#"(?i)(\"(?:api[_-]?key|token|secret|password|passwd|authorization|cookie|set-cookie)\"\s*:\s*\")[^\"]*(\")"#).unwrap(),
+        // JSON strings can hold escaped quotes, so the value runs to the first unescaped quote.
+        Regex::new(r#"(?i)(\"(?:api[_-]?key|token|secret|password|passwd|authorization|cookie|set-cookie)\"\s*:\s*\")(?:[^\"\\]|\\.)*(\")"#).unwrap(),
         Regex::new(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b").unwrap(),
         Regex::new(r"\b(?:gh[pousr]_[A-Za-z0-9]{8,}|sk-[A-Za-z0-9_-]{8,}|AKIA[A-Z0-9]{16})\b").unwrap(),
     ]);
@@ -1126,6 +1130,13 @@ impl ArtifactStore<'_> {
             reason: "text artifact is not valid UTF-8".into(),
         })?;
         let stored = redact_secrets(&text);
+        // Redaction can lengthen the text, so the limit also holds for the stored bytes.
+        if stored.len() as u64 > MAX_TEXT_ARTIFACT_BYTES {
+            return Err(EvidenceError::Artifact {
+                path: source.into(),
+                reason: "text artifact exceeds 4 MiB after redaction".into(),
+            });
+        }
         let format = text_format(&stored, origin);
         let bytes = stored.into_bytes();
         let hash = project::sha256_hex(&bytes);
@@ -1494,10 +1505,11 @@ fn render_artifacts<'a>(out: &mut String, artifacts: impl Iterator<Item = &'a Ar
                 text.sha256,
             )),
             Artifact::Unavailable(missing) => out.push_str(&format!(
-                "- {} ({} from {}): unavailable, {}\n",
+                "- {} ({} from {}): unavailable at {}, {}\n",
                 normalize_markdown(&missing.label),
                 missing.kind.name(),
                 missing.origin.name(),
+                normalize_markdown(&missing.captured_at),
                 normalize_markdown(&missing.reason),
             )),
         }
@@ -1611,6 +1623,24 @@ mod tests {
             redact_secrets(tree),
             r#"<node text="Sign in" password="[REDACTED]" token='[REDACTED]' /><node api_key=[REDACTED] />"#
         );
+    }
+
+    #[test]
+    fn redaction_removes_whole_credentials_and_keeps_structured_text_parseable() {
+        assert_eq!(
+            redact_secrets("Authorization: Basic dXNlcjpwYXNz"),
+            "Authorization: [REDACTED]"
+        );
+        let tree = r#"<hierarchy><node text="Cookie: sid=abc" bounds="[0,0][1,1]"/><node text="Next"/></hierarchy>"#;
+        assert_eq!(
+            redact_secrets(tree),
+            r#"<hierarchy><node text="Cookie: [REDACTED]" bounds="[0,0][1,1]"/><node text="Next"/></hierarchy>"#
+        );
+        let stored = redact_secrets(r#"{"token":"prefix\"topsecret","next":1}"#);
+        assert!(!stored.contains("topsecret"), "{stored}");
+        let value: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(value["token"], "[REDACTED]");
+        assert_eq!(value["next"], 1);
     }
 
     #[test]

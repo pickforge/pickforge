@@ -70,9 +70,9 @@ description: >-
    }
    ```
 
-   `requested` lists only the settings you changed. Use `"none"` for an
-   emulator or system image that does not apply. Rotation is in degrees and
-   density is in dpi.
+   `requested` lists only the settings you changed. Leave out what you do not
+   know; it is recorded as `unknown`. Rotation is in degrees and density is
+   in dpi.
 
 8. A UI tree, a log excerpt or a report is a text artifact. Write it to a
    file first, then name its kind, origin and capture time:

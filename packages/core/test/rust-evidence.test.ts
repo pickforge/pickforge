@@ -155,7 +155,7 @@ it("shows captures and text artifacts from a real schema v4 run without reading 
   expect(report).toContain("- before: captured at 2026-10-28T15:59:00Z; app build 1.4.0+42; emulator 35.2.10;");
   expect(report).toContain("  requested: foldState folded, darkMode true");
   expect(report).toContain("- after: Lighthouse (report from lighthouse): artifacts/after-lighthouse-2dc745debb1a.txt, html, 124 bytes");
-  expect(report).toContain("- after: Desktop tree (tree from atspi-tree): unavailable, AT-SPI capture lands with #359");
+  expect(report).toContain("- after: Desktop tree (tree from atspi-tree): unavailable at unknown, AT-SPI capture lands with #359");
   // The imported HTML stays in its file; neither the summary nor the report carries it.
   expect(JSON.stringify(run)).not.toContain("<script");
   expect(report).not.toContain("<script");
@@ -170,6 +170,7 @@ it("marks listed text artifacts missing when a partial run lacks their files and
   const doc = JSON.parse(fs.readFileSync(path.join(dir, "evidence.json"), "utf8"));
   doc.before.artifacts[0].path = "../evidence.json";
   doc.after.artifacts[2].reason = `token=${plantedSecret}`;
+  doc.after.artifacts[2].label = "Desk\u001b]0;pwned\u0007top";
   doc.after.capture.appBuild = `password=${plantedSecret}`;
   doc.after.capture.observed = { rotation: 90, nested: { a: 1 }, "bad key": 1, fontScale: Number.MAX_VALUE };
   fs.writeFileSync(path.join(dir, "evidence.json"), JSON.stringify(doc));
@@ -178,5 +179,8 @@ it("marks listed text artifacts missing when a partial run lacks their files and
   expect(run!.artifacts.slice(0, 2).map(item => item.status)).toEqual(["missing", "missing"]);
   expect(run!.captures[1]!.observed).toEqual({ rotation: 90, fontScale: Number.MAX_VALUE });
   expect(JSON.stringify(run)).not.toContain(plantedSecret);
-  expect(renderRustEvidenceReport(run!).join("\n")).toContain("- before: UI tree (tree from android-ui-tree): missing ../evidence.json");
+  const report = renderRustEvidenceReport(run!).join("\n");
+  expect(report).toContain("- before: UI tree (tree from android-ui-tree): missing ../evidence.json");
+  expect(report).toContain("Desk ]0;pwned top");
+  expect(report).not.toMatch(/[\u0000-\u0009\u000b-\u001f]/);
 });
