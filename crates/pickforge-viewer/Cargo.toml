@@ -23,7 +23,7 @@ fontdue = "0.9"
 libc = "0.2"
 softbuffer = { version = "0.4", default-features = false, features = ["wayland", "wayland-dlopen", "x11", "x11-dlopen"] }
 winit = { version = "0.30", default-features = false, features = ["rwh_06", "wayland", "wayland-dlopen", "x11"] }
-x11rb = { version = "0.13", features = ["shm", "damage", "xfixes", "xinput"] }
+x11rb = { version = "0.13", features = ["shm", "damage", "xfixes", "xinput", "xkb", "xtest"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 image = { version = "0.25.10", default-features = false, features = ["png"] }
