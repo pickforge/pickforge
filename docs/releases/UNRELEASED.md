@@ -189,9 +189,9 @@ npm or GitHub releases. (#398)
   a Hyprland host with fcitx5. The viewer opened without focus,
   `request_takeover` expanded it, and Take control, typing with accents and
   Return control worked.
-- The `v0.7.0` tag run passed the Lab gates and both candidate smokes before
-  its Rust gates failed. The fixed Rust gates passed in a release workflow dry
-  run on the 0.7.1 branch.
+- The `v0.7.0` tag run passed the Lab gates and both candidate smokes,
+  although its Rust gates failed. The fixed Rust gates passed in a release
+  workflow dry run on the 0.7.1 branch.
 
 ## Known limits
 
