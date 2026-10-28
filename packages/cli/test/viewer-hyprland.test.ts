@@ -5,12 +5,18 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { BrowserViewerLaunchRecord as ViewerLaunchRecord } from "@pickforge/lab-desktop-linux";
 import {
   applyHyprlandWindowMode,
+  buildOpacityRuleKeywords,
+  buildPlacementDispatches,
   buildPlacementLua,
+  buildRuleDisableKeyword,
   buildRuleDisableLua,
   buildOpacityRuleLua,
+  buildRuleInstallKeywords,
   buildRuleInstallLua,
   detectHyprland,
+  disableViewerOpacityRule,
   disableViewerRule,
+  hyprlangValue,
   installViewerRule,
   luaInt,
   luaString,
@@ -48,8 +54,8 @@ function env(overrides: Record<string, string | undefined> = {}): NodeJS.Process
   };
 }
 
-function ctx(): { hyprctl: string; instance: string; xdgRuntimeDir: string } {
-  return { hyprctl, instance: "abc_123", xdgRuntimeDir: path.join(root, "runtime") };
+function ctx(provider?: "hyprlang"): { hyprctl: string; instance: string; xdgRuntimeDir: string; provider?: "hyprlang" } {
+  return { hyprctl, instance: "abc_123", xdgRuntimeDir: path.join(root, "runtime"), provider };
 }
 
 function launch(overrides: Partial<ViewerLaunchRecord> = {}): ViewerLaunchRecord {
@@ -77,6 +83,14 @@ function setClients(clients: unknown[]): void {
 
 function client(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return { address: "0xabc123", class: APP_CLASS, pid: 4242, floating: true, monitor: 0, ...overrides };
+}
+
+/** The `keyword` and `dispatch` requests, without the `--instance` prefix. */
+function requests(): string[][] {
+  return fakes
+    .calls()
+    .map((call) => (call.args as string[]).slice(2))
+    .filter((args) => args[0] === "keyword" || args[0] === "dispatch");
 }
 
 function evals(): string[] {
@@ -135,6 +149,50 @@ describe("class pattern and Lua literals", () => {
   });
 });
 
+describe("hyprlang requests", () => {
+  it("builds the launch rule disabled first and enabled last, with the Lua rule's fields", () => {
+    const key = (field: string): string => `windowrule[pickforge-viewer-x]:${field}`;
+    expect(buildRuleInstallKeywords("pickforge-viewer-x", "^a\\.b$", { width: 384, height: 240 }, { right: 0, bottom: 30 })).toEqual([
+      [key("enable"), "false"],
+      [key("match:class"), "^a\\.b$"],
+      [key("float"), "on"],
+      [key("pin"), "on"],
+      [key("no_initial_focus"), "on"],
+      [key("size"), "384 240"],
+      [key("move"), "(monitor_w-384-24) (monitor_h-240-54)"],
+      [key("enable"), "true"],
+    ]);
+    expect(
+      buildRuleInstallKeywords("pickforge-viewer-x", "^x$", { width: 384, height: 240 }, { name: "DP-1", right: 6, bottom: 32 }),
+    ).toContainEqual([key("monitor"), "DP-1"]);
+    expect(buildOpacityRuleKeywords("pickforge-viewer-x", "^x$")).toEqual([
+      ["windowrule[pickforge-viewer-x-opacity]:enable", "false"],
+      ["windowrule[pickforge-viewer-x-opacity]:match:class", "^x$"],
+      ["windowrule[pickforge-viewer-x-opacity]:opacity", "1 override 1 override"],
+      ["windowrule[pickforge-viewer-x-opacity]:enable", "true"],
+    ]);
+    expect(buildRuleDisableKeyword("pickforge-viewer-x")).toEqual([key("enable"), "false"]);
+  });
+
+  it("refuses rule names and values that hyprlang would misread", () => {
+    expect(hyprlangValue("^x$")).toBe("^x$");
+    expect(() => hyprlangValue("a#b")).toThrow(/control characters or #/);
+    expect(() => hyprlangValue("a\nb")).toThrow(/control characters or #/);
+    expect(() => buildRuleDisableKeyword("a] b")).toThrow(/invalid Hyprland rule name/);
+    expect(() => buildRuleInstallKeywords("x", "^x$", { width: 1.5, height: 1 })).toThrow(/non-integer/);
+  });
+
+  it("resizes and then moves exactly one client address", () => {
+    expect(buildPlacementDispatches("0xabc123", { x: 1, y: 2, width: 3, height: 4 })).toEqual([
+      ["resizewindowpixel", "exact 3 4,address:0xabc123"],
+      ["movewindowpixel", "exact 1 2,address:0xabc123"],
+    ]);
+    expect(() => buildPlacementDispatches("0x1,class:.*", { x: 1, y: 2, width: 3, height: 4 })).toThrow(
+      /invalid Hyprland client address/,
+    );
+  });
+});
+
 describe("placement geometry", () => {
   it("uses logical size, honors rotation and reserved areas", () => {
     expect(monitorWorkArea(monitor({ width: 2880, height: 1920, scale: 1.5, x: 100, y: 50 }) as never)).toEqual({
@@ -178,7 +236,7 @@ describe("placement geometry", () => {
 describe("detectHyprland", () => {
   it("applies only with a signature, a runtime dir, hyprctl and the Lua provider", async () => {
     fakes.setState({ status: { configProvider: "lua" } });
-    expect(await detectHyprland(env())).toEqual(ctx());
+    expect(await detectHyprland(env())).toStrictEqual({ hyprctl, instance: "abc_123", xdgRuntimeDir: path.join(root, "runtime") });
     expect(await detectHyprland(env({ HYPRLAND_INSTANCE_SIGNATURE: undefined }))).toBeUndefined();
     expect(await detectHyprland(env({ HYPRLAND_INSTANCE_SIGNATURE: "a/b" }))).toBeUndefined();
     expect(await detectHyprland(env({ XDG_RUNTIME_DIR: undefined }))).toBeUndefined();
@@ -192,8 +250,21 @@ describe("detectHyprland", () => {
     });
   });
 
-  it("ships an ordinary window for a hyprlang config or a broken hyprctl", async () => {
+  it("applies to a hyprlang config, and to 0.53 and 0.54, which lack the status request", async () => {
     fakes.setState({ status: { configProvider: "hyprlang" } });
+    expect(await detectHyprland(env())).toEqual(ctx("hyprlang"));
+    fakes.setState({ version: { version: "0.54.3" } });
+    expect(await detectHyprland(env())).toEqual(ctx("hyprlang"));
+    fakes.setState({ version: { version: "0.53.0" } });
+    expect(await detectHyprland(env())).toEqual(ctx("hyprlang"));
+  });
+
+  it("ships an ordinary window for another provider, an older Hyprland or a broken hyprctl", async () => {
+    fakes.setState({ status: { configProvider: "error" }, version: { version: "0.54.0" } });
+    expect(await detectHyprland(env())).toBeUndefined();
+    fakes.setState({ version: { version: "0.52.2" } });
+    expect(await detectHyprland(env())).toBeUndefined();
+    fakes.setState({});
     expect(await detectHyprland(env())).toBeUndefined();
     fs.writeFileSync(hyprctl, "#!/bin/sh\necho not-json\n");
     expect(await detectHyprland(env())).toBeUndefined();
@@ -221,6 +292,42 @@ describe("rule lifecycle helpers", () => {
   it("reports a refused eval as false", async () => {
     fakes.setState({ monitors: [], evalFailOn: "window_rule" });
     expect(await installViewerRule(ctx(), "pickforge-viewer-x", "^x$", { width: 1, height: 1 })).toBe(false);
+  });
+
+  it("installs and disables the hyprlang rules through keywords only", async () => {
+    fakes.setState({ monitors: [monitor({ name: "HDMI-A-1", reserved: [0, 0, 6, 32] })] });
+    const size = { width: 384, height: 240 };
+    expect(await installViewerRule(ctx("hyprlang"), "pickforge-viewer-x", "^x$", size)).toBe(true);
+    expect(await disableViewerRule(ctx("hyprlang"), "pickforge-viewer-x")).toBe(true);
+    expect(await disableViewerOpacityRule(ctx("hyprlang"), "pickforge-viewer-x")).toBe(true);
+    expect(evals()).toEqual([]);
+    expect(requests()).toEqual([
+      ...buildRuleInstallKeywords("pickforge-viewer-x", "^x$", size, { name: "HDMI-A-1", right: 6, bottom: 32 }),
+      ...buildOpacityRuleKeywords("pickforge-viewer-x", "^x$"),
+      buildRuleDisableKeyword("pickforge-viewer-x"),
+      buildRuleDisableKeyword("pickforge-viewer-x-opacity"),
+    ].map((keyword) => ["keyword", ...keyword]));
+  });
+
+  it("disables a hyprlang rule that Hyprland refused part of", async () => {
+    fakes.setState({ monitors: [], requestFailOn: "pickforge-viewer-x]:size" });
+    expect(await installViewerRule(ctx("hyprlang"), "pickforge-viewer-x", "^x$", { width: 1, height: 1 })).toBe(false);
+    const sent = requests();
+    expect(sent.at(-2)?.[1]).toBe("windowrule[pickforge-viewer-x]:size");
+    expect(sent.at(-1)).toEqual(["keyword", ...buildRuleDisableKeyword("pickforge-viewer-x")]);
+    expect(sent.some((args) => args[1] === "windowrule[pickforge-viewer-x]:enable" && args[2] === "true")).toBe(false);
+  });
+
+  it("keeps a hyprlang launch rule when only the opacity rule is refused", async () => {
+    fakes.setState({ monitors: [], requestFailOn: "-opacity]:opacity" });
+    expect(await installViewerRule(ctx("hyprlang"), "pickforge-viewer-x", "^x$", { width: 1, height: 1 })).toBe(true);
+    expect(requests().at(-1)).toEqual(["keyword", ...buildRuleDisableKeyword("pickforge-viewer-x-opacity")]);
+  });
+
+  it("refuses a hyprlang rule for a class hyprlang would misread, without a request", async () => {
+    fakes.setState({ monitors: [] });
+    expect(await installViewerRule(ctx("hyprlang"), "pickforge-viewer-x", "^x#$", { width: 1, height: 1 })).toBe(false);
+    expect(requests()).toEqual([]);
   });
 
   it("waits for the window, and stops early when told to", async () => {
@@ -251,6 +358,30 @@ describe("applyHyprlandWindowMode", () => {
     const call = fakes.calls().at(-1);
     expect(call).toMatchObject({ xdg: path.join(root, "runtime"), sig: "abc_123" });
     expect((call?.args as string[] | undefined)?.slice(0, 2)).toEqual(["--instance", "abc_123"]);
+  });
+
+  it("uses the hyprlang dispatchers on the verified client for both modes", async () => {
+    setClients([client({ address: "0x1", class: "other", pid: 4242 }), client()]);
+    const hyprlang = launch();
+    hyprlang.hyprland = { ...hyprlang.hyprland!, provider: "hyprlang" };
+    const placed: unknown[] = [];
+    expect(await applyHyprlandWindowMode(hyprlang, "expanded", (size) => placed.push(size))).toBe(true);
+    expect(await applyHyprlandWindowMode(hyprlang, "thumbnail")).toBe(true);
+    expect(evals()).toEqual([]);
+    expect(requests()).toEqual([
+      ...buildPlacementDispatches("0xabc123", { x: 64, y: 40, width: 1152, height: 720 }),
+      ...buildPlacementDispatches("0xabc123", { x: 872, y: 536, width: 384, height: 240 }),
+    ].map((dispatch) => ["dispatch", ...dispatch]));
+    expect(placed).toEqual([{ x: 64, y: 40, width: 1152, height: 720 }]);
+  });
+
+  it("reports a refused hyprlang dispatch as false and skips the move", async () => {
+    setClients([client()]);
+    fakes.setState({ monitors: [monitor()], requestFailOn: "resizewindowpixel" });
+    const hyprlang = launch();
+    hyprlang.hyprland = { ...hyprlang.hyprland!, provider: "hyprlang" };
+    expect(await applyHyprlandWindowMode(hyprlang, "expanded")).toBe(false);
+    expect(requests().map((args) => args[1])).toEqual(["resizewindowpixel"]);
   });
 
   it("matches the X11 class too", async () => {

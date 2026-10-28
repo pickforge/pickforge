@@ -44,6 +44,8 @@ export interface ViewerHyprlandLaunch {
   instance: string;
   /** `XDG_RUNTIME_DIR` that holds that instance's socket. */
   xdgRuntimeDir: string;
+  /** Set for a hyprlang config; absent for the Lua config provider. */
+  provider?: "hyprlang";
   /** Name of the runtime window rule, disabled once the window has mapped. */
   ruleName: string;
   /** Anchored regex that matches only this launch's window class. */
@@ -294,6 +296,9 @@ function validHyprland(
     return false;
   }
   if (!absolutePath(hyprland.xdgRuntimeDir)) {
+    return false;
+  }
+  if (hyprland.provider !== undefined && hyprland.provider !== "hyprlang") {
     return false;
   }
   if (hyprland.ruleName !== `pickforge-viewer-${launchId}`) {
