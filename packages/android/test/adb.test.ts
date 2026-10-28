@@ -12,6 +12,7 @@ import {
   runAdb,
   screenshot,
   stopEmulator,
+  swipe,
   tap,
   typeText,
   waitForBoot,
@@ -232,6 +233,28 @@ describe("input ops against a fake adb", () => {
     expect(fs.readFileSync(callLog, "utf8").trim()).toBe(
       `-s ${SERIAL} shell input tap 12 34`,
     );
+  });
+
+  it("swipes through adb shell input and reports a failed swipe", async () => {
+    const callLog = path.join(tmpRoot, "swipe-calls.log");
+    const bin = fakeAdbDir(`echo "$*" >> '${callLog}'`);
+    await swipe({
+      serial: SERIAL,
+      fromX: 10,
+      fromY: 600,
+      toX: 10,
+      toY: 100,
+      durationMs: 250,
+      sdk: null,
+      env: { PATH: bin },
+    });
+    expect(fs.readFileSync(callLog, "utf8").trim()).toBe(
+      `-s ${SERIAL} shell input swipe 10 600 10 100 250`,
+    );
+    const failing = fakeAdbDir("echo boom >&2; exit 3");
+    await expect(
+      swipe({ serial: SERIAL, fromX: 1, fromY: 2, toX: 3, toY: 4, sdk: null, env: { PATH: failing } }),
+    ).rejects.toThrow(/swipe from \(1, 2\) to \(3, 4\)/);
   });
 
   it("types text containing a percent-s pair through split invocations", async () => {

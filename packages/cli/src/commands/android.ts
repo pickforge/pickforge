@@ -10,6 +10,7 @@ import {
   maybeWaitForGuestReady,
   runAdb,
   screenshot,
+  swipe,
   tap,
   typeText,
 } from "@pickforge/lab-android";
@@ -174,6 +175,33 @@ export async function runAndroidTap(
     return {
       data: { ...targetData(target), x: parsedX, y: parsedY },
       lines: [`tapped (${parsedX}, ${parsedY}) on ${target.serial}`],
+    };
+  });
+}
+
+export async function runAndroidSwipe(
+  coordinates: { x1: string; y1: string; x2: string; y2: string },
+  durationMs: string | undefined,
+  opts: AndroidTargetOptions,
+): Promise<number> {
+  return runReported(opts, async () => {
+    const gesture = {
+      fromX: parseIntArg(coordinates.x1, "x1"),
+      fromY: parseIntArg(coordinates.y1, "y1"),
+      toX: parseIntArg(coordinates.x2, "x2"),
+      toY: parseIntArg(coordinates.y2, "y2"),
+      ...(durationMs === undefined
+        ? {}
+        : { durationMs: parseIntArg(durationMs, "durationMs") }),
+    };
+    const target = await resolveAndroidTarget(opts);
+    await swipe({ serial: target.serial, ...gesture });
+    return {
+      data: { ...targetData(target), ...gesture },
+      lines: [
+        `swiped (${gesture.fromX}, ${gesture.fromY}) to ` +
+          `(${gesture.toX}, ${gesture.toY}) on ${target.serial}`,
+      ],
     };
   });
 }

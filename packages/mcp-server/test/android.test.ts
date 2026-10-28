@@ -142,6 +142,64 @@ describe("android tools (fake adb)", () => {
     ).toEqual([]);
   });
 
+  it("swipes with argv arrays and records both endpoints in evidence", async () => {
+    const report = parseToolJson(
+      await lab.client.callTool({
+        name: "android_swipe",
+        arguments: { fromX: 160, fromY: 500, toX: 150, toY: 120, durationMs: 400 },
+      }),
+    );
+    expect(report).toMatchObject({
+      ok: true,
+      serial: FAKE_SERIAL,
+      sessionId,
+      fromX: 160,
+      fromY: 500,
+      toX: 150,
+      toY: 120,
+      durationMs: 400,
+    });
+    await lab.client.callTool({
+      name: "android_swipe",
+      arguments: { fromX: 1, fromY: 2, toX: 3, toY: 4 },
+    });
+    expect(adbLogLines(adbLog)).toEqual([
+      `-s ${FAKE_SERIAL} shell input swipe 160 500 150 120 400`,
+      `-s ${FAKE_SERIAL} shell input swipe 1 2 3 4`,
+    ]);
+    const [manifest] = await listRuns(dirs.projectDir);
+    const records = await readActions(
+      path.join(dirs.projectDir, ".picklab", "runs", manifest!.runId),
+    );
+    expect(records[0]).toMatchObject({
+      source: "mcp",
+      tool: "android_swipe",
+      sessionId,
+      status: "ok",
+      target: { fromX: 160, fromY: 500, x: 150, y: 120 },
+    });
+    expect(records[1]).toMatchObject({
+      target: { fromX: 1, fromY: 2, x: 3, y: 4 },
+    });
+  });
+
+  it("rejects swipe coordinates and durations out of bounds before adb", async () => {
+    for (const args of [
+      { fromX: -1, fromY: 0, toX: 0, toY: 0 },
+      { fromX: 0, fromY: 0, toX: 16_384, toY: 0 },
+      { fromX: 0, fromY: 0.5, toX: 0, toY: 0 },
+      { fromX: 0, fromY: 0, toX: 0, toY: 0, durationMs: 10_001 },
+      { fromX: 0, fromY: 0, toX: 0, toY: 0, durationMs: -5 },
+    ]) {
+      const result = await lab.client.callTool({
+        name: "android_swipe",
+        arguments: args,
+      });
+      expect((result as { isError?: boolean }).isError).toBe(true);
+    }
+    expect(adbLogLines(adbLog)).toEqual([]);
+  });
+
   it("does not create evidence when capture is disabled", async () => {
     await saveProjectConfig(dirs.projectDir, {
       evidence: { enabled: false },
