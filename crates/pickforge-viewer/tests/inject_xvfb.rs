@@ -36,6 +36,18 @@ impl Clock for FakeClock {
     }
 }
 
+/// A clock that moves forward by one second on every reading.
+#[derive(Clone)]
+struct TickingClock(Rc<Cell<Instant>>);
+
+impl Clock for TickingClock {
+    fn now(&self) -> Instant {
+        let now = self.0.get();
+        self.0.set(now + Duration::from_secs(1));
+        now
+    }
+}
+
 fn injector(display: u32) -> (Injector<FakeClock>, FakeClock) {
     let clock = FakeClock(Rc::new(Cell::new(Instant::now())));
     let conn = connect_display(display).unwrap();
@@ -276,4 +288,31 @@ fn refuses_text_beyond_spare_keycodes_before_sending() {
     ));
     assert_eq!(injector.bindings_made(), 0);
     assert!(listener.take_quiet().is_empty());
+}
+
+#[test]
+fn grant_expiring_mid_scroll_stops_the_burst() {
+    if !xvfb_ready("grant_expiring_mid_scroll") {
+        return;
+    }
+    let xvfb = Xvfb::start(SCREEN);
+    let mut listener = Listener::new(xvfb.display);
+    let clock = TickingClock(Rc::new(Cell::new(Instant::now())));
+    let conn = connect_display(xvfb.display).unwrap();
+    let mut injector = Injector::with_clock(conn, clock.clone()).unwrap();
+    injector
+        .grant("lease-1", clock.now() + Duration::from_secs(5))
+        .unwrap();
+
+    not_granted(injector.scroll_lines(0.0, 20.0));
+    assert_eq!(listener.settled_state(), (Vec::new(), 0));
+    let presses = listener
+        .take_quiet()
+        .into_iter()
+        .filter(|e| matches!(e, Event::ButtonPress(p) if p.detail == 4))
+        .count();
+    assert!(
+        (1..20).contains(&presses),
+        "the burst stops when the grant ends: {presses} presses"
+    );
 }

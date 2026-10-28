@@ -92,7 +92,9 @@ Error codes in the `error` event: `display-refused`, `xvfb-mismatch`,
 ## Control
 
 - No socket and no other channel can grant control or inject input. Only the
-  host's `control` command grants it, and only after a `takeRequested`.
+  host's `control` command grants it. The host grants control after a
+  `takeRequested`, or at startup of `pickforge-lab watch --control`, where
+  the user asked for control explicitly. The viewer does not check this.
 - The viewer sends input through XTEST on its own connection to the session
   display, and only while a grant is live and the window is expanded or
   fullscreen. Without XTEST or XKB the viewer stays watch only and offers no
