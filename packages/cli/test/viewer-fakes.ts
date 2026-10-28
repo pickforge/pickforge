@@ -12,9 +12,12 @@ const { version: cliVersion } = createRequire(import.meta.url)("../package.json"
 
 export interface FakeHyprlandState {
   status?: unknown;
+  version?: unknown;
   monitors?: unknown;
   /** Substring of a Lua chunk that makes `eval` fail like Hyprland does. */
   evalFailOn?: string;
+  /** Substring of a `keyword` or `dispatch` request that Hyprland refuses. */
+  requestFailOn?: string;
 }
 
 export interface FakeBrowserBehavior {
@@ -81,6 +84,12 @@ if (rest[0] === "eval") {
     process.exit(7);
   }
   process.stdout.write("ok\\n");
+  process.exit(0);
+}
+if (rest[0] === "keyword" || rest[0] === "dispatch") {
+  // Hyprland answers a refused request with its error text and exit status 0.
+  const request = rest.join(" ");
+  process.stdout.write(state.requestFailOn !== undefined && request.includes(state.requestFailOn) ? "error: refused\\n" : "ok\\n");
   process.exit(0);
 }
 process.exit(2);
