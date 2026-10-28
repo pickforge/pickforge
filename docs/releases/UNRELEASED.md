@@ -125,6 +125,10 @@ session teardown are also more reliable.
   contention no longer uses up the 250 ms freeze limit. If the limit still
   expires, preparation makes up to three attempts within its 3 second budget.
   When preparation fails, no text is sent. (#222)
+- Browser lab sessions no longer show Chrome's "unsupported command-line flag"
+  bar for `--gaia-url`. Chrome now starts with a bare `--test-type`, which
+  skips its startup info bars. Sign-in polling stays on the loopback sink.
+  `--test-type` also skips component extensions with background pages. (#348)
 
 ## Fixes
 

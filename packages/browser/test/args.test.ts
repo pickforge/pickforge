@@ -38,6 +38,17 @@ describe("buildChromeArgs", () => {
     expect(args.some((arg) => /^(--headless|--proxy-server|--host-resolver-rules)/.test(arg))).toBe(false);
   });
 
+  it("keeps the Gaia sink and hides Chrome's unsupported-flag bar", () => {
+    const args = buildChromeArgs({ profileDir: "/tmp/p" });
+    expect(args).toContain("--gaia-url=https://127.0.0.1:0");
+    // A bare --test-type suppresses the startup info bars. The "webdriver"
+    // value would also let payment apps skip user interaction.
+    expect(args).toContain("--test-type");
+    expect(args.some((arg) => arg.startsWith("--test-type="))).toBe(false);
+    // --enable-automation would replace the bar with an automation bar.
+    expect(args).not.toContain("--enable-automation");
+  });
+
   it("adds a window size only when both dimensions are given", () => {
     expect(buildChromeArgs({ profileDir: "/p", width: 800, height: 600 })).toContain(
       "--window-size=800,600",
