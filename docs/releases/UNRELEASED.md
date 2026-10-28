@@ -4,6 +4,14 @@
 
 ## Changes
 
+- Viewer takeover now has a lease transport that leaves read-only VNC unchanged.
+  Return releases held input; stale recovery stops the verified owner group first.
+  MCP and CLI desktop screenshots and waits fail with busy during human control.
+  MCP `takeover_wait` waits for return, then supplies a fresh screenshot.
+  Its default timeout is 10 minutes, with a one-hour limit and request cancellation.
+  Timeout and cancellation keep the lease; screenshots stay null while it is active.
+  Native viewer controls and agent-requested takeover follow in a later increment. (#341)
+
 - `watch` and automatic session viewing prefer the matching native `pickforge-viewer` binary on graphical Linux hosts.
   The native path reads the verified lab display without VNC, a bridge, or Chromium.
   It opens a thumbnail with expand, fullscreen, collapse, and close controls.

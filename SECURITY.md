@@ -129,6 +129,20 @@ process-start identity still matches. Session VNC creation and desktop/browser
 destruction share one per-session mutation lock, preventing teardown races from
 orphaning a late x11vnc process.
 
+The native viewer input transport holds the existing human lease and drains
+agent permits without starting writable x11vnc. Existing read-only VNC stays
+read-only. Return releases held keys and mouse buttons on the session's explicit
+`DISPLAY` before the resume screenshot. Stale viewer recovery first stops the
+owner process group by its recorded process identity, then releases input.
+Recovery keeps the lease when it cannot verify that the owner group stopped.
+
+MCP and CLI desktop screenshots and waits fail closed during a live human
+lease, like input. Waits recheck before each sample without holding an input
+permit. The internal capture primitive remains available for the resume shot.
+`takeover_wait` captures only after the lease is gone, through the same guarded
+observation path. Timeout or cancellation does not end human control or capture
+its pixels; the screenshot field stays null while control remains active.
+
 Do not strip `-localhost` to put VNC on a shared network. An unauthenticated,
 all-interface VNC server is a remote-takeover risk.
 

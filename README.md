@@ -594,12 +594,22 @@ plain `watch`. Unlike `--vnc-control`'s persistent writable
 session, control here is leased: while a human holds it, every desktop input
 tool (`desktop_click`/`move`/`scroll`/`drag`/`double_click`/`type`/`key`),
 `desktop_launch`/`desktop_exec` (a newly launched client could otherwise grab
-input focus), and every DevTools relay request fail closed with a stable busy
-error —
+input focus), `desktop_screenshot`, `desktop_wait`, and every DevTools relay
+request fail closed with a stable busy error.
 `takeover_status` (MCP) / `pickforge-lab takeover status` (CLI) let an agent check
 before retrying, and `request_user_input` is the recommended way to ask a
-human to run it. `desktop_screenshot` is the only desktop tool left ungated
-(read-only).
+human to run it. `takeover_wait` waits for control to return and captures a fresh
+screenshot through the normal observation path. It returns `outcome`
+(`returned`, `timeout`, or `cancelled`), `heldMs` (time spent waiting), and
+`screenshot`. The timeout defaults to 10 minutes and accepts up to one hour.
+Timeout and cancellation leave the lease unchanged. `screenshot` is `null`
+while human control remains active; no human-controlled pixels are captured.
+
+The viewer input transport uses the same lease and permit drain without
+starting writable VNC or changing an existing read-only VNC server.
+Returning control releases held keys and buttons before the resume screenshot.
+Recovery stops the stale viewer owner's verified process group before releasing
+input. The external VNC control path keeps its existing VNC mode switches.
 
 The lease is a 30-second TTL, heartbeat-renewed-every-5-seconds record in the
 session's state directory. Closing the viewer, an interrupted terminal, or a
@@ -877,10 +887,10 @@ Automatic viewing is suppressed for an explicitly writable `--vnc-control` sessi
 `pickforge-lab mcp serve` exposes tools over stdio, including:
 
 - Sessions: `session_create`, `session_status`, `session_destroy`
-- Desktop: `desktop_windows`, `desktop_focus`, `desktop_launch`, `desktop_exec`, `desktop_screenshot`, `desktop_wait`, `desktop_click`, `desktop_move`, `desktop_scroll`, `desktop_drag`, `desktop_double_click`, `desktop_type`, `desktop_key`. All fail closed with a busy error while a human lease is active except `desktop_screenshot`, `desktop_wait`, and `desktop_windows` (read-only observation). `desktop_launch` and `desktop_exec` are gated too: a newly launched client can grab input focus on the shared display, which is exactly what the lease protects against. `desktop_exec` applies the isolated X11 environment and waits for a client window; `desktop_launch` accepts `windowTimeoutMs` with the same 0-300000 ms bounds as `desktop_exec` when waiting for `waitWindow`. `desktop_screenshot` reports display size, image size, scale 1, image-pixel coordinates, and the client-window count, and warns when the count is zero or unavailable because `xdotool` is missing. `desktop_wait` polls until pixels differ from a baseline PNG, sampled pixels stay unchanged for N ms, or a window name substring appears, and records journal status `ok` or `timeout` from the reason it stopped. Pixel change and stability need ImageMagick `convert` or `magick` and compare 8-bit RGB plus dimensions, ignoring PNG timestamps. The wait budget covers captures, compares and window queries; a timed-out subprocess allows two seconds before SIGKILL and two more before forced pipe closure and settlement, up to four extra seconds excluding filesystem and scheduling delays.
+- Desktop: `desktop_windows`, `desktop_focus`, `desktop_launch`, `desktop_exec`, `desktop_screenshot`, `desktop_wait`, `desktop_click`, `desktop_move`, `desktop_scroll`, `desktop_drag`, `desktop_double_click`, `desktop_type`, `desktop_key`. All fail closed with a busy error while a human lease is active except `desktop_windows` (window metadata). Screenshots and waits are gated too; waits recheck before each sample without holding an input permit. `desktop_launch` and `desktop_exec` are gated too: a newly launched client can grab input focus on the shared display, which is exactly what the lease protects against. `desktop_exec` applies the isolated X11 environment and waits for a client window; `desktop_launch` accepts `windowTimeoutMs` with the same 0-300000 ms bounds as `desktop_exec` when waiting for `waitWindow`. `desktop_screenshot` reports display size, image size, scale 1, image-pixel coordinates, and the client-window count, and warns when the count is zero or unavailable because `xdotool` is missing. `desktop_wait` polls until pixels differ from a baseline PNG, sampled pixels stay unchanged for N ms, or a window name substring appears, and records journal status `ok` or `timeout` from the reason it stopped. Pixel change and stability need ImageMagick `convert` or `magick` and compare 8-bit RGB plus dimensions, ignoring PNG timestamps. The wait budget covers captures, compares and window queries; a timed-out subprocess allows two seconds before SIGKILL and two more before forced pipe closure and settlement, up to four extra seconds excluding filesystem and scheduling delays.
 - Android: `android_start`, `android_install_apk`, `android_launch_app`, `android_screenshot`, `android_tap`, `android_type`, `android_back`, `android_home`, `android_get_ui_tree`, `android_logcat`, `android_run_adb`
 - Artifacts: `artifact_list`, `artifact_report`
-- Takeover: `takeover_status` — check whether a session is under human control (see [Supervised pause and human takeover](#supervised-pause-and-human-takeover)); read-only, always safe to call
+- Takeover: `takeover_status` checks whether a session is under human control. `takeover_wait` waits for return and supplies a fresh screenshot. Both can be called during control (see [Supervised pause and human takeover](#supervised-pause-and-human-takeover)).
 - User: `request_user_input` — ask the human a question (via MCP elicitation when the client supports it) and wait for the answer; never used for secrets
 
 Resources, addressable as `pickforge://` URIs:

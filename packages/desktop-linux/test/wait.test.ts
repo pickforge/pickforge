@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { screenshot } from "../src/screenshot.js";
 import { listWindows } from "../src/apps.js";
-import { ObservationTimeoutError } from "@pickforge/lab-core";
+import { acquireHumanLease, checkHumanLeaseBusy, createSession, HumanControlActiveError, ObservationTimeoutError } from "@pickforge/lab-core";
 import { boundDesktopWaitTimeoutMs, boundStableMs, desktopWait } from "../src/wait.js";
 import { encodePng } from "./png-fixture.js";
 
@@ -261,4 +261,25 @@ it("captures a valid PNG with image size and without inventing display size", as
   });
   expect(result.imageSize).toEqual({ width: 2, height: 1 });
   expect(result.windowCount).toBeUndefined();
+});
+
+
+it.each(["changed", "stable", "window"] as const)("stops a running %s wait when a human acquires the lease", async (type) => {
+  const baseline = path.join(tmp, "baseline.png");
+  fs.writeFileSync(baseline, encodePng(1, 1, rgb(2, 3, 4)));
+  const bin = writeCapture(`for a in "$@"; do out="$a"; done\n/bin/cp "${baseline}" "$out"`);
+  writeBin("bin/xdotool", "exit 1");
+  const env = { ...toolEnv(bin), PICKFORGE_HOME: path.join(tmp, "home") };
+  const { id } = await createSession({ type: "desktop", status: "running", projectDir: tmp }, env);
+  let checks = 0;
+  const busyCheck = async () => {
+    checks++;
+    if (checks === 3) await acquireHumanLease(id, env, { drainTimeoutMs: 50 });
+    const lease = await checkHumanLeaseBusy(id, env);
+    if (lease !== undefined) throw new HumanControlActiveError(lease);
+  };
+  const mode = type === "changed" ? { type, baselinePath: baseline } :
+    type === "stable" ? { type, stableMs: 60_000 } : { type, name: "Absent" };
+  await expect(desktopWait({ display: ":219", mode, timeoutMs: 5_000, env, busyCheck })).rejects.toThrow(HumanControlActiveError);
+  expect(checks).toBe(3);
 });

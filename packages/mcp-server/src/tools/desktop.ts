@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { AgentPermitUnavailableError, HumanControlActiveError, isEvidenceTruncated, withAgentPermit } from "@pickforge/lab-core";
+import { AgentPermitUnavailableError, HumanControlActiveError, checkHumanLeaseBusy, isEvidenceTruncated, withAgentPermit } from "@pickforge/lab-core";
 import type { EvidenceInputState, RunHandle, SessionType } from "@pickforge/lab-core";
 import { setRunCaptureGeometry } from "@pickforge/lab-core";
 import {
@@ -271,7 +271,12 @@ function registerExecTool(server: McpServer, ctx: ServerContext): void {
   );
 }
 
-async function captureDesktopScreenshot(opts: {
+export async function assertNoHumanLease(ctx: ServerContext, id: string): Promise<void> {
+  const lease = await checkHumanLeaseBusy(id, ctx.env);
+  if (lease !== undefined) throw new HumanControlActiveError(lease);
+}
+
+export async function captureDesktopScreenshot(opts: {
   ctx: ServerContext;
   id: string;
   display: string;
@@ -283,12 +288,14 @@ async function captureDesktopScreenshot(opts: {
   runSlug?: string;
   onCaptured?: (path: string) => void;
 }): Promise<{ data: Record<string, unknown>; extraContent: Awaited<ReturnType<typeof imageContent>>["content"] }> {
+  await assertNoHumanLease(opts.ctx, opts.id);
   let tool: string | undefined;
   let windowCount: number | undefined;
   let warnings: string[] = [];
   let imageSize: ScreenshotMetadata["imageSize"] | undefined;
   let liveDisplay: ScreenshotMetadata["displaySize"] | undefined;
   const capture = async (outPath: string): Promise<void> => {
+    await assertNoHumanLease(opts.ctx, opts.id);
     const result = await screenshot({
       display: opts.display,
       outPath,
@@ -356,7 +363,7 @@ function registerScreenshotTool(server: McpServer, ctx: ServerContext): void {
       description:
         "Capture the desktop display as PNG. By default the image joins the " +
         "session's active evidence run, or creates a one-shot run when evidence " +
-        "is disabled or no session is selected. Small images return inline.",
+        "is disabled or no session is selected. Small images return inline. Fails with busy during human control.",
       inputSchema: {
         ...sessionArg,
         out: z
@@ -953,7 +960,7 @@ function registerWaitTool(server: McpServer, ctx: ServerContext): void {
       description:
         "Wait until the screen pixels differ from a baseline PNG, sampled " +
         "pixels stay unchanged for stableMs, or a window name substring appears. " +
-        "Stability is sampled, not every frame. Observation only; not an input action.",
+        "Stability is sampled, not every frame. Fails with busy during human control.",
       inputSchema: {
         ...sessionArg,
         baseline: z
@@ -994,6 +1001,7 @@ function registerWaitTool(server: McpServer, ctx: ServerContext): void {
             const waited = await desktopWait({
               display,
               mode,
+              busyCheck: () => assertNoHumanLease(ctx, id),
               readBaseline: (file, deadline) => resolveWaitBaseline(ctx, file, deadline),
               timeoutMs: args.timeoutMs,
               env: ctx.env,

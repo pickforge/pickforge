@@ -1,6 +1,6 @@
 import path from "node:path";
 import {
-  AgentPermitUnavailableError, HumanControlActiveError, appendAction, beginEvidenceRun, isEvidenceEnabled, loadConfig, ObservationTimeoutError,
+  AgentPermitUnavailableError, HumanControlActiveError, checkHumanLeaseBusy, appendAction, beginEvidenceRun, isEvidenceEnabled, loadConfig, ObservationTimeoutError,
   sanitizeActionTarget, sanitizeErrorText, setRunCaptureGeometry, withAgentPermit,
   type EvidenceAction, type RunHandle, type SessionType,
 } from "@pickforge/lab-core";
@@ -51,6 +51,11 @@ import {
 } from "./shared.js";
 
 const MAX_EXEC_WINDOW_TIMEOUT_MS = 300_000;
+
+async function assertNoHumanLease(id: string): Promise<void> {
+  const lease = await checkHumanLeaseBusy(id);
+  if (lease !== undefined) throw new HumanControlActiveError(lease);
+}
 
 export interface DesktopCommandOptions extends BaseCliOptions {
   session?: string;
@@ -354,6 +359,7 @@ export async function runDesktopScreenshot(
 ): Promise<number> {
   return runReported(opts, async () => {
     const { id, display, type } = await resolveDesktop(opts);
+    await assertNoHumanLease(id);
     const target = await resolveScreenshotTarget(opts, "desktop", id);
     let tool: string | undefined;
     let windowCount: number | undefined;
@@ -361,6 +367,7 @@ export async function runDesktopScreenshot(
     let imageSize: ScreenshotMetadata["imageSize"] | undefined;
     let liveDisplay: ScreenshotMetadata["displaySize"] | undefined;
     const data = await captureToTarget(target, async (outPath) => {
+      await assertNoHumanLease(id);
       const result = await screenshot({ display, outPath });
       tool = result.tool;
       windowCount = result.windowCount;
@@ -449,7 +456,7 @@ export async function runDesktopWait(opts: DesktopWaitOptions): Promise<number> 
       status: "ok",
     };
     try {
-      const waited = await desktopWait({ display, mode, timeoutMs });
+      const waited = await desktopWait({ display, mode, timeoutMs, busyCheck: () => assertNoHumanLease(id) });
       action.status = waited.reason === "timeout" ? "timeout" : "ok";
       const data: Record<string, unknown> = {
         sessionId: id,

@@ -246,19 +246,19 @@ it.each(["after", "both"])("does not claim %s linkage on a genuine journal appen
   expect(JSON.stringify(result)).not.toContain(cases[4]![1].text);
 });
 
-it.each(cases)("%s retains takeover refusal even when a before image exists", async (tool, args) => {
+it.each(cases)("%s refuses before capture during human control", async (tool, args) => {
   const lease = await acquireHumanLease(session, env);
   try {
     const result = await call(tool, { ...args, capture: "both" });
     expect(result.ok).toBe(false);
     expect(result.inputState).toBe("not-attempted");
-    expect(result.errors[0]).toMatch(/^input failed; input not-attempted\. Input is never retried automatically/);
-    expect(state.order).toEqual(["before"]);
+    expect(result.errors[0]).toMatch(/^before capture failed; input not-attempted\. Input is never retried automatically/);
+    expect(state.order).toEqual([]);
     const { actions, manifest } = await evidence();
     expect(actions[0]!.status).toBe("error");
     expect(actions[0]!.inputState).toBe("not-attempted");
-    expect(actions[0]!.artifacts).toHaveLength(1);
-    await expect(recordEvidenceOutcome(dirs.projectDir, manifest.runId, { scenario: "Refused", status: "pass", inspectedScreenshots: actions[0]!.artifacts! }, env)).rejects.toThrow(/successful interaction/);
+    expect(actions[0]!.artifacts ?? []).toHaveLength(0);
+    await expect(recordEvidenceOutcome(dirs.projectDir, manifest.runId, { scenario: "Refused", status: "pass", inspectedScreenshots: [] }, env)).rejects.toThrow(/successful interaction|screenshot/i);
   } finally { await releaseHumanLease(session, lease.leaseId, env); }
 });
 
@@ -299,7 +299,7 @@ it.each(cases)("%s reports a storage refusal as not-attempted in results and evi
     const result = await call(tool, { ...args, capture });
     expect(result.ok).toBe(false);
     expect(result.inputState).toBe("not-attempted");
-    expect(state.order).toEqual(capture === "both" ? ["before"] : []);
+    expect(state.order).toEqual([]);
     const { actions } = await evidence();
     expect(actions.at(-1)).toMatchObject({ tool, status: "error", inputState: "not-attempted" });
     expect(JSON.stringify({ result, actions })).not.toContain(cases[4]![1].text);

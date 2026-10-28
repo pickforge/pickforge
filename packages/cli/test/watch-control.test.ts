@@ -39,7 +39,9 @@ let root: string;
 let watchdogKill: Mock<() => void>;
 let spawnWatchdog: SpawnWatchdogFn;
 
-function fakeHandle(overrides: Partial<HumanTakeoverHandle> = {}): HumanTakeoverHandle {
+type VncHandle = Extract<HumanTakeoverHandle, { transport?: "x11vnc" }>;
+
+function fakeHandle(overrides: Partial<VncHandle> = {}): VncHandle {
   return {
     sessionId: "desk-aaaaaa11",
     leaseId: "lease-1",

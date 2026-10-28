@@ -71,6 +71,7 @@ const EXPECTED_TOOLS = [
   "session_destroy",
   "session_status",
   "takeover_status",
+  "takeover_wait",
 ] as const;
 
 interface RpcFrame {

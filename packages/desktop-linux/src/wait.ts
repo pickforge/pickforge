@@ -29,6 +29,8 @@ export interface DesktopWaitOptions {
   mode: DesktopWaitMode;
   timeoutMs?: number;
   env?: EnvLike;
+  /** Recheck before every sample without holding an agent permit. */
+  busyCheck?: () => Promise<void>;
   /** Invoked inside the observation deadline and evidence action, only when budget remains. */
   readBaseline?: (path: string, deadline: number) => Promise<Buffer>;
 }
@@ -134,6 +136,7 @@ async function waitForChange(
     if (remainingMs(deadline) <= 0) return timeoutResult(samples);
     try {
       await scratch.verify("sample.png");
+      await opts.busyCheck?.();
       const digest = await samplePixels(opts.display, samplePath, deadline, opts.env);
       await scratch.verify("sample.png");
       samples += 1;
@@ -164,6 +167,7 @@ async function waitForStable(
     if (remainingMs(deadline) <= 0) return timeoutResult(samples);
     try {
       await scratch.verify("sample.png");
+      await opts.busyCheck?.();
       const digest = await samplePixels(opts.display, samplePath, deadline, opts.env);
       await scratch.verify("sample.png");
       const now = Date.now();
@@ -197,6 +201,7 @@ async function waitForNamedWindow(
     if (remaining <= 0) return timeoutResult(samples);
     let lastSeen: WindowInfo[];
     try {
+      await opts.busyCheck?.();
       lastSeen = await listWindows(
         opts.display,
         opts.env,
@@ -230,6 +235,7 @@ async function waitForNamedWindow(
 export async function desktopWait(opts: DesktopWaitOptions): Promise<DesktopWaitResult> {
   parseDisplayNumber(opts.display);
   const timeoutMs = boundDesktopWaitTimeoutMs(opts.timeoutMs);
+  await opts.busyCheck?.();
   const startedAt = Date.now();
   const deadline = startedAt + timeoutMs;
   if (timeoutMs === 0) return { ...await timeoutResult(0), elapsedMs: Date.now() - startedAt };

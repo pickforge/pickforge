@@ -10,6 +10,7 @@ import {
   desktopHomePolicy,
   loadConfig,
   recordTakeoverEvidence,
+  readHumanLease,
   releaseHumanLease,
   renewHumanLease,
   updateSession,
@@ -19,6 +20,7 @@ import {
   type HumanLease,
   type SessionRecord,
 } from "@pickforge/lab-core";
+import { releaseStuckInput } from "./stuck-input.js";
 import { screenshot } from "./screenshot.js";
 import {
   recoverStaleTakeoverLocked,
@@ -29,23 +31,17 @@ import {
 import type { VncHandle } from "./vnc.js";
 
 /**
- * Desktop-linux orchestration for supervised pause / human takeover
- * (pickforge/pickforge#21): switches x11vnc between read-only and writable
- * scoped to the human lease's lifetime, and recovers a session left with a
- * writable VNC server after a crashed takeover. Lease/permit bookkeeping
- * itself lives in `@pickforge/lab-core` (`takeover.ts`), which this
- * module wraps with VNC-mode and evidence side effects.
+ * Human takeover orchestration for viewer input or leased writable VNC.
+ * Lease and permit storage lives in core. This module manages input cleanup,
+ * VNC mode changes, recovery and evidence.
  */
 
 export type TakeoverEndReason = "return" | "timeout" | "cancelled";
 
-export interface HumanTakeoverHandle {
+interface TakeoverHandle {
   sessionId: string;
   leaseId: string;
   display: string;
-  vncPid: number;
-  vncPort: number;
-  vncStartTimeTicks: number;
   ttlMs: number;
   heartbeatMs: number;
   /** The lease's current expiry, as of the last successful renewal. */
@@ -53,7 +49,24 @@ export interface HumanTakeoverHandle {
   projectDir: string;
 }
 
+interface VncTakeoverHandle extends TakeoverHandle {
+  transport?: "x11vnc";
+  vncPid: number;
+  vncPort: number;
+  vncStartTimeTicks: number;
+}
+
+interface ViewerTakeoverHandle extends TakeoverHandle {
+  transport: "viewer";
+  vncPid?: never;
+  vncPort?: never;
+  vncStartTimeTicks?: never;
+}
+
+export type HumanTakeoverHandle = VncTakeoverHandle | ViewerTakeoverHandle;
+
 export interface StartHumanTakeoverOptions {
+  transport?: "x11vnc" | "viewer";
   registryEnv?: EnvLike;
   env?: EnvLike;
   ttlMs?: number;
@@ -108,12 +121,23 @@ export async function recoverStaleHumanLease(
   });
 }
 
+function viewerHandle(sessionId: string, display: string, projectDir: string, lease: HumanLease): ViewerTakeoverHandle {
+  return {
+    transport: "viewer", sessionId, display, projectDir,
+    leaseId: lease.leaseId, ttlMs: lease.ttlMs,
+    heartbeatMs: lease.heartbeatMs, expiresAt: lease.expiresAt,
+  };
+}
+
 /**
  * Acquire human control of a desktop-capable session: acquire the lease
- * (self-healing a stale predecessor once), switch its VNC server to
- * writable, and record the transition. Throws `HumanLeaseHeldError` if
+ * (self-healing a stale predecessor once), select viewer or writable VNC
+ * input, and record the transition. Throws `HumanLeaseHeldError` if
  * another live human lease already holds the session.
  */
+export function startHumanTakeover(id: string, opts: StartHumanTakeoverOptions & { transport: "viewer" }): Promise<ViewerTakeoverHandle>;
+export function startHumanTakeover(id: string, opts?: StartHumanTakeoverOptions & { transport?: "x11vnc" }): Promise<VncTakeoverHandle>;
+export function startHumanTakeover(id: string, opts: StartHumanTakeoverOptions): Promise<HumanTakeoverHandle>;
 export async function startHumanTakeover(
   id: string,
   opts: StartHumanTakeoverOptions = {},
@@ -128,6 +152,7 @@ export async function startHumanTakeover(
         ttlMs: opts.ttlMs,
         heartbeatMs: opts.heartbeatMs,
         drainTimeoutMs: opts.drainTimeoutMs,
+        inputTransport: opts.transport,
       });
     } catch (error) {
       if (!(error instanceof StaleHumanLeaseError)) throw error;
@@ -136,7 +161,13 @@ export async function startHumanTakeover(
         ttlMs: opts.ttlMs,
         heartbeatMs: opts.heartbeatMs,
         drainTimeoutMs: opts.drainTimeoutMs,
+        inputTransport: opts.transport,
       });
+    }
+
+    if (opts.transport === "viewer") {
+      await recordTakeoverEvidence(record.projectDir, id, "takeover_start", { env: registryEnv });
+      return viewerHandle(id, desktop.display, record.projectDir, lease);
     }
 
     let vnc: VncHandle;
@@ -243,11 +274,11 @@ export interface EndHumanTakeoverResult {
 }
 
 /**
- * Revert a session's VNC to read-only, capture a fresh screenshot into
+ * Release viewer input or revert VNC to read-only, capture a fresh screenshot into
  * evidence as the agent's resume state, record the transition, and release
  * the lease. Safe to call on any exit path (normal return, cancellation, or
- * a failed heartbeat); every step is best-effort past the VNC revert so a
- * failure recording evidence never leaves writable VNC or the lease behind.
+ * a failed heartbeat). Viewer input cleanup must succeed before release.
+ * Evidence remains best-effort so recording failures cannot retain control.
  */
 export async function endHumanTakeover(
   handle: HumanTakeoverHandle,
@@ -258,7 +289,11 @@ export async function endHumanTakeover(
     const record = await getSession(handle.sessionId, registryEnv);
     const desktop = record?.desktop;
 
-    if (desktop !== undefined && desktop.vncPid === handle.vncPid) {
+    if (handle.transport === "viewer") {
+      const lease = await readHumanLease(handle.sessionId, registryEnv);
+      if (lease?.leaseId !== handle.leaseId) return { reason: opts.reason };
+      await releaseStuckInput(handle.display, opts.env);
+    } else if (desktop !== undefined && desktop.vncPid === handle.vncPid) {
       await stopOwnedSessionVnc(handle.sessionId, desktop).catch(() => {});
       try {
         const readOnly = await startSessionVnc(handle.sessionId, registryEnv, {
