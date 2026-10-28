@@ -2,6 +2,7 @@
 //! See `PROTOCOL.md` for the host contract.
 
 pub mod args;
+pub mod control;
 pub mod geometry;
 pub mod keymap;
 pub mod keysyms;

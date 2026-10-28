@@ -763,6 +763,20 @@ impl<C: Clock> Injector<C> {
     }
 }
 
+impl<C: Clock> crate::control::Sink for Injector<C> {
+    fn grant(&mut self, lease_id: &str, until: Instant) -> Result<(), String> {
+        Injector::grant(self, lease_id, until).map_err(|e| e.to_string())
+    }
+
+    fn revoke(&mut self) -> Result<(), String> {
+        Injector::revoke(self).map_err(|e| e.to_string())
+    }
+
+    fn release_all(&mut self) -> Result<(), String> {
+        Injector::release_all(self).map_err(|e| e.to_string())
+    }
+}
+
 impl<C: Clock> Drop for Injector<C> {
     fn drop(&mut self) {
         let _ = self.release_all();

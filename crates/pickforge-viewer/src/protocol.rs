@@ -53,7 +53,50 @@ pub enum Event {
         code: String,
         message: String,
     },
+    TakeRequested,
+    ReturnRequested {
+        reason: ReturnReason,
+    },
+    ControlAck {
+        #[serde(rename = "leaseId")]
+        lease_id: String,
+        state: AckState,
+    },
 }
+
+/// Why the viewer gave control back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReturnReason {
+    Button,
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AckState {
+    Granted,
+    Revoked,
+}
+
+/// Why the host ended control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevokeReason {
+    Returned,
+    LeaseLost,
+    SessionEnded,
+    Stopping,
+    Unavailable,
+    /// A reason this version does not know. It still revokes.
+    Other,
+}
+
+/// The longest attention message, in characters.
+pub const MAX_ATTENTION_CHARS: usize = 500;
+/// The longest lease id, in bytes.
+pub const MAX_LEASE_ID: usize = 128;
+/// The longest grant the viewer accepts. A longer one is shortened.
+pub const MAX_GRANT_MS: u64 = 120_000;
 
 /// The modes the host may set. Fullscreen belongs to the viewer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +133,18 @@ pub enum Command {
     Status(StatusCode),
     SessionEnded,
     Shutdown,
+    Attention {
+        message: String,
+    },
+    ClearAttention,
+    Grant {
+        lease_id: String,
+        grant_ms: u64,
+    },
+    Revoke {
+        lease_id: String,
+        reason: RevokeReason,
+    },
     /// A command this version does not know. It is logged and ignored.
     Unknown(String),
 }
@@ -165,8 +220,61 @@ pub fn parse_command(line: &[u8]) -> Result<Command, ParseError> {
         }),
         "sessionEnded" => Command::SessionEnded,
         "shutdown" => Command::Shutdown,
+        "attention" => Command::Attention {
+            message: attention_message(object.get("message"))?,
+        },
+        "clearAttention" => Command::ClearAttention,
+        "control" => control(object)?,
         other => Command::Unknown(truncate(other, 64)),
     })
+}
+
+fn attention_message(value: Option<&Value>) -> Result<String, ParseError> {
+    let message = value
+        .and_then(Value::as_str)
+        .ok_or(ParseError::BadField("message"))?;
+    if message.chars().count() > MAX_ATTENTION_CHARS || message.chars().any(char::is_control) {
+        return Err(ParseError::BadField("message"));
+    }
+    Ok(message.to_owned())
+}
+
+fn lease_id(value: Option<&Value>) -> Option<String> {
+    let id = value?.as_str()?;
+    (id.len() <= MAX_LEASE_ID && !id.chars().any(char::is_control)).then(|| id.to_owned())
+}
+
+/// A grant needs a valid lease id and duration. A revoke always revokes,
+/// even with a missing or unknown field, so it fails closed.
+fn control(object: &serde_json::Map<String, Value>) -> Result<Command, ParseError> {
+    match object.get("state").and_then(Value::as_str) {
+        Some("granted") => {
+            let lease_id = lease_id(object.get("leaseId"))
+                .filter(|id| !id.is_empty())
+                .ok_or(ParseError::BadField("leaseId"))?;
+            let grant_ms = object
+                .get("grantMs")
+                .and_then(Value::as_u64)
+                .filter(|&ms| ms > 0)
+                .ok_or(ParseError::BadField("grantMs"))?;
+            Ok(Command::Grant {
+                lease_id,
+                grant_ms: grant_ms.min(MAX_GRANT_MS),
+            })
+        }
+        Some("revoked") => Ok(Command::Revoke {
+            lease_id: lease_id(object.get("leaseId")).unwrap_or_default(),
+            reason: match object.get("reason").and_then(Value::as_str) {
+                Some("returned") => RevokeReason::Returned,
+                Some("lease-lost") => RevokeReason::LeaseLost,
+                Some("session-ended") => RevokeReason::SessionEnded,
+                Some("stopping") => RevokeReason::Stopping,
+                Some("unavailable") => RevokeReason::Unavailable,
+                _ => RevokeReason::Other,
+            },
+        }),
+        _ => Err(ParseError::BadField("state")),
+    }
 }
 
 fn truncate(text: &str, max_chars: usize) -> String {
@@ -369,8 +477,8 @@ mod tests {
             Ok(Command::Shutdown)
         );
         assert_eq!(
-            parse_command(br#"{"cmd":"attention","message":"help"}"#),
-            Ok(Command::Unknown("attention".into()))
+            parse_command(br#"{"cmd":"later","message":"help"}"#),
+            Ok(Command::Unknown("later".into()))
         );
     }
 
@@ -407,6 +515,152 @@ mod tests {
         assert_eq!(
             parse_command(b"{\"cmd\":\"\xff\"}"),
             Err(ParseError::NotJson)
+        );
+    }
+
+    #[test]
+    fn encodes_control_events() {
+        let cases = [
+            (Event::TakeRequested, r#"{"event":"takeRequested"}"#),
+            (
+                Event::ReturnRequested {
+                    reason: ReturnReason::Button,
+                },
+                r#"{"event":"returnRequested","reason":"button"}"#,
+            ),
+            (
+                Event::ReturnRequested {
+                    reason: ReturnReason::Closed,
+                },
+                r#"{"event":"returnRequested","reason":"closed"}"#,
+            ),
+            (
+                Event::ControlAck {
+                    lease_id: "L1".into(),
+                    state: AckState::Granted,
+                },
+                r#"{"event":"controlAck","leaseId":"L1","state":"granted"}"#,
+            ),
+            (
+                Event::ControlAck {
+                    lease_id: String::new(),
+                    state: AckState::Revoked,
+                },
+                r#"{"event":"controlAck","leaseId":"","state":"revoked"}"#,
+            ),
+        ];
+        for (event, json) in cases {
+            assert_eq!(encode_event(&event), format!("{json}\n"));
+        }
+    }
+
+    #[test]
+    fn parses_control_commands() {
+        assert_eq!(
+            parse_command(
+                r#"{"cmd":"attention","message":"Entre com a sua senha, é rápido"}"#.as_bytes()
+            ),
+            Ok(Command::Attention {
+                message: "Entre com a sua senha, é rápido".into()
+            })
+        );
+        let longest = format!(r#"{{"cmd":"attention","message":"{}"}}"#, "é".repeat(500));
+        assert!(matches!(
+            parse_command(longest.as_bytes()),
+            Ok(Command::Attention { .. })
+        ));
+        assert_eq!(
+            parse_command(br#"{"cmd":"clearAttention"}"#),
+            Ok(Command::ClearAttention)
+        );
+        assert_eq!(
+            parse_command(br#"{"cmd":"control","state":"granted","leaseId":"L1","grantMs":10000}"#),
+            Ok(Command::Grant {
+                lease_id: "L1".into(),
+                grant_ms: 10_000
+            })
+        );
+        assert_eq!(
+            parse_command(
+                br#"{"cmd":"control","state":"granted","leaseId":"L1","grantMs":9999999}"#
+            ),
+            Ok(Command::Grant {
+                lease_id: "L1".into(),
+                grant_ms: MAX_GRANT_MS
+            })
+        );
+        let reasons = [
+            ("returned", RevokeReason::Returned),
+            ("lease-lost", RevokeReason::LeaseLost),
+            ("session-ended", RevokeReason::SessionEnded),
+            ("stopping", RevokeReason::Stopping),
+            ("unavailable", RevokeReason::Unavailable),
+            ("later", RevokeReason::Other),
+        ];
+        for (name, reason) in reasons {
+            let line = format!(
+                r#"{{"cmd":"control","state":"revoked","leaseId":"L1","reason":"{name}"}}"#
+            );
+            assert_eq!(
+                parse_command(line.as_bytes()),
+                Ok(Command::Revoke {
+                    lease_id: "L1".into(),
+                    reason
+                })
+            );
+        }
+        // A revoke with bad fields still revokes.
+        assert_eq!(
+            parse_command(br#"{"cmd":"control","state":"revoked","leaseId":7}"#),
+            Ok(Command::Revoke {
+                lease_id: String::new(),
+                reason: RevokeReason::Other
+            })
+        );
+        assert_eq!(
+            parse_command(
+                br#"{"cmd":"control","state":"revoked","leaseId":"","reason":"unavailable"}"#
+            ),
+            Ok(Command::Revoke {
+                lease_id: String::new(),
+                reason: RevokeReason::Unavailable
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_bad_control_commands() {
+        let too_long = format!(r#"{{"cmd":"attention","message":"{}"}}"#, "a".repeat(501));
+        let bad = [
+            too_long.as_str(),
+            r#"{"cmd":"attention"}"#,
+            r#"{"cmd":"attention","message":5}"#,
+            r#"{"cmd":"attention","message":"two\nlines"}"#,
+            r#"{"cmd":"attention","message":"bell\u0007"}"#,
+            r#"{"cmd":"control","state":"granted","grantMs":1000}"#,
+            r#"{"cmd":"control","state":"granted","leaseId":"","grantMs":1000}"#,
+            r#"{"cmd":"control","state":"granted","leaseId":"L1"}"#,
+            r#"{"cmd":"control","state":"granted","leaseId":"L1","grantMs":0}"#,
+            r#"{"cmd":"control","state":"granted","leaseId":"L1","grantMs":-5}"#,
+            r#"{"cmd":"control","state":"granted","leaseId":"L1","grantMs":1.5}"#,
+            r#"{"cmd":"control","state":"granted","leaseId":"L1","grantMs":"1000"}"#,
+            r#"{"cmd":"control","state":"granted","leaseId":"a\tb","grantMs":1000}"#,
+            r#"{"cmd":"control","state":"held","leaseId":"L1"}"#,
+            r#"{"cmd":"control"}"#,
+        ];
+        for line in bad {
+            assert!(
+                matches!(parse_command(line.as_bytes()), Err(ParseError::BadField(_))),
+                "{line}"
+            );
+        }
+        let long_id = format!(
+            r#"{{"cmd":"control","state":"granted","leaseId":"{}","grantMs":1000}}"#,
+            "x".repeat(MAX_LEASE_ID + 1)
+        );
+        assert_eq!(
+            parse_command(long_id.as_bytes()),
+            Err(ParseError::BadField("leaseId"))
         );
     }
 
