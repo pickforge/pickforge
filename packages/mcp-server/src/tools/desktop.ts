@@ -62,7 +62,7 @@ const sessionArg = {
     .describe("Desktop session id (default: the single running session)"),
 };
 
-const captureDescription = " Optional capture: after or both (before and after) saves explicit PNGs on this action's evidence run. Default off; requires enabled evidence. Never capture sensitive screens; pixels are not redacted.";
+const captureDescription = " Optional capture: after or both (before and after) saves explicit PNGs on this action's evidence run. Default off; requires enabled evidence. Never capture sensitive screens; pixels are not redacted. The after PNG can precede the app's redraw; before retrying, call desktop_wait with baseline set to the before PNG path.";
 const captureArg = {
   capture: z.enum(["after", "both"]).optional().describe(captureDescription.trim()),
 };

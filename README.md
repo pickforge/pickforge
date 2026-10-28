@@ -552,7 +552,11 @@ bounded metadata-only error record. A storage failure instead reports
 Neither result claims the images were linked.
 An attempted input may have partially executed or been refused by its existing
 permit check; it is never retried automatically. Captures and input are not an
-exclusive transaction. The viewer links the pair to the same step. Capturing
+exclusive transaction. The after capture is taken as soon as input completes,
+so it can show the screen before the app has redrawn. An unchanged after
+capture does not mean the input failed. Before you retry, call `desktop_wait`
+with `baseline` set to the before capture's `path`; it returns when the screen
+differs from it. The viewer links the pair to the same step. Capturing
 does not mark images inspected or establish a pass: list the images you actually
 inspect in `evidence_outcome.inspectedScreenshots` under the existing pass rule.
 
