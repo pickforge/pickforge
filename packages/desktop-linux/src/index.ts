@@ -205,6 +205,11 @@ export {
   type ViewerBrowserKind,
   type ViewerHyprlandLaunch,
   type ViewerLaunchRecord,
+  type BrowserViewerLaunchRecord,
   type ViewerVncUnavailableReason,
   type ViewerWindowSize,
 } from "./viewer-state.js";
+
+export * from "./viewer-host-protocol.js";
+export * from "./viewer-host.js";
+export { stopNativeViewerProcesses, type NativeViewerLaunchRecord } from "./viewer-state.js";

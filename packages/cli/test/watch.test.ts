@@ -5,9 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { ensureViewerBridge, prepareViewerLaunch, writeViewerLaunchRecord, removeViewerLaunch } =
+const { ensureViewerBridge, prepareViewerLaunch, writeViewerLaunchRecord, removeViewerLaunch, startNativeViewerHost } =
   vi.hoisted(() => ({
     ensureViewerBridge: vi.fn(),
+    startNativeViewerHost: vi.fn(),
     prepareViewerLaunch: vi.fn(),
     writeViewerLaunchRecord: vi.fn(),
     removeViewerLaunch: vi.fn(),
@@ -16,6 +17,7 @@ const { ensureViewerBridge, prepareViewerLaunch, writeViewerLaunchRecord, remove
 vi.mock("../src/viewer/bridge-daemon.js", () => ({ ensureViewerBridge }));
 vi.mock("@pickforge/lab-desktop-linux", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@pickforge/lab-desktop-linux")>()),
+  startNativeViewerHost,
   prepareViewerLaunch,
   writeViewerLaunchRecord,
   removeViewerLaunch,
@@ -148,6 +150,31 @@ async function installVnc(): Promise<void> {
 }
 
 describe("watch command in process", () => {
+  it("chooses native before starting VNC or a bridge for automatic watch", async () => {
+    fakes.installViewer();
+    process.env.DISPLAY = ":45678";
+    const id = await createDesktop(syntheticDisplay());
+    startNativeViewerHost.mockResolvedValue({ pid: 100, startTicks: 200, viewerPid: 300, viewerStartTicks: 400, launchId: LAUNCH_ID });
+    const result = await watchDesktopSession({ session: id, projectDir: root, waitForViewerExit: false });
+    expect(result.data).toMatchObject({ viewer: "native", opened: true, hostPid: 100, viewerPid: 300 });
+    expect(startNativeViewerHost).toHaveBeenCalledWith(expect.objectContaining({ sessionId: id }));
+    expect(ensureViewerBridge).not.toHaveBeenCalled();
+    expect((await listSessions())[0]?.desktop?.vncPid).toBeUndefined();
+  });
+
+  it("keeps the browser fallback for a mismatched native viewer", async () => {
+    fakes.installViewer({ version: "0.0.0" });
+    await installVnc();
+    fakes.installBrowser("chromium");
+    fakes.setBrowser({ exitAfterMs: 20 });
+    process.env.DISPLAY = ":45678";
+    const id = await createDesktop(syntheticDisplay());
+    const result = await watchDesktopSession({ session: id, projectDir: root });
+    expect(result.data).toMatchObject({ browser: "chromium", opened: true });
+    expect(startNativeViewerHost).not.toHaveBeenCalled();
+    expect(ensureViewerBridge).toHaveBeenCalledWith(id);
+  });
+
   it("reports an actionable JSON error when no session exists", async () => {
     const output = vi.spyOn(console, "log").mockImplementation(() => {});
     const code = await runWatch({ json: true, projectDir: root });

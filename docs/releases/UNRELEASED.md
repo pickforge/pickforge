@@ -4,7 +4,15 @@
 
 ## Changes
 
-- `pickforge-lab watch` now opens a small live view in a browser instead of
+- `watch` and automatic session viewing prefer the matching native `pickforge-viewer` binary on graphical Linux hosts.
+  The native path reads the verified lab display without VNC, a bridge, or Chromium.
+  It opens a thumbnail with expand, fullscreen, collapse, and close controls.
+  Hyprland Lua placement keeps it pinned without initial focus.
+  Session destruction stops the detached host and viewer by process identity.
+  Linux x86_64 release assets and the installer include the viewer.
+  npm-only installs and mismatched binaries keep the noVNC fallback.
+  `watch --control` still uses the external VNC client. (#340)
+- The noVNC fallback opens a small live view in a browser instead of
   an external VNC client. A loopback bridge serves a bundled noVNC page that
   shows the whole session scaled into a 384 pixel wide thumbnail. A click
   expands it to the session size; Collapse or Escape shrinks it again. The

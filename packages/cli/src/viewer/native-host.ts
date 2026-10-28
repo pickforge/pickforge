@@ -1,0 +1,287 @@
+import fs from "node:fs";
+import path from "node:path";
+import net from "node:net";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { once } from "node:events";
+import { setTimeout as sleep } from "node:timers/promises";
+import { getSession, readProcessIdentity, processIdentityMatches } from "@pickforge/lab-core";
+import {
+  prepareViewerLaunch, writeViewerLaunchRecord, verifyOwnedDisplayTarget,
+  withViewerDir, writeViewerPrivateFile, sessionViewerDir, withSessionVncLock,
+  VIEWER_MESSAGE_MAX_BYTES,
+  type NativeViewerCommand, type NativeViewerHostIdentity, type NativeViewerLaunchRecord,
+  type NativeViewerMode, type ViewerHostResponse, type ViewerWindowSize,
+} from "@pickforge/lab-desktop-linux";
+import { viewerWindowSizes, viewerWindowClass } from "./launch.js";
+import {
+  detectHyprland, hyprlandRuleName, viewerClassPattern, installViewerRule,
+  disableViewerRule, waitForViewerWindow, applyHyprlandWindowMode,
+} from "./hyprland.js";
+
+/** One bounded JSON object per line. Unknown discriminants are ignored by the caller. */
+export function readViewerLines(stream: NodeJS.ReadableStream, onMessage: (message: Record<string, unknown>) => void, onError: () => void): void {
+  let pending = Buffer.alloc(0);
+  let failed = false;
+  stream.on("data", (value: Buffer | string) => {
+    if (failed) return;
+    pending = Buffer.concat([pending, Buffer.from(value)]);
+    while (pending.includes(10)) {
+      const end = pending.indexOf(10);
+      if (end > VIEWER_MESSAGE_MAX_BYTES) { failed = true; onError(); return; }
+      const line = pending.subarray(0, end);
+      pending = pending.subarray(end + 1);
+      try {
+        const message: unknown = JSON.parse(line.toString("utf8"));
+        if (typeof message !== "object" || message === null || Array.isArray(message)) throw new Error("Invalid message");
+        onMessage(message as Record<string, unknown>);
+      } catch { failed = true; onError(); return; }
+    }
+    if (pending.length > VIEWER_MESSAGE_MAX_BYTES) { failed = true; onError(); }
+  });
+}
+
+function validReady(message: Record<string, unknown>, record: NativeViewerLaunchRecord, version: string): boolean {
+  return message.version === version && message.pid === record.viewerPid &&
+    ["wayland", "x11"].includes(String(message.backend)) && typeof message.scale === "number" &&
+    Number.isFinite(message.scale) && message.scale > 0 &&
+    processIdentityMatches({ pid: record.viewerPid, startTicks: record.viewerStartTicks });
+}
+
+interface HostOperation {
+  valid(request: Record<string, unknown>): boolean;
+  run(request: Record<string, unknown>): Promise<void>;
+  serial: boolean;
+}
+
+function watchOperation(run: () => Promise<void>, serial = false): HostOperation {
+  return { valid: (request) => Object.keys(request).every((key) => key === "op"), run, serial };
+}
+
+class NativeHost {
+  private exited = false;
+  private stopped = false;
+  private ended = false;
+  private mode: NativeViewerMode | "fullscreen" = "thumbnail";
+  private receivedReady = false;
+  private timer?: NodeJS.Timeout;
+  private readonly sessionMonitor = new AbortController();
+  private server?: net.Server;
+  private readonly sockets = new Set<net.Socket>();
+  private host?: NativeViewerHostIdentity;
+  private stopping?: Promise<void>;
+  private actions = Promise.resolve();
+  private readyResolve!: () => void;
+  private readyReject!: (error: Error) => void;
+  private readonly ready = new Promise<void>((resolve, reject) => { this.readyResolve = resolve; this.readyReject = reject; });
+  private readonly exit: Promise<void>;
+  private readonly onSignal = (): void => { void this.stop(); };
+
+  constructor(
+    private readonly child: ChildProcessWithoutNullStreams,
+    private readonly record: NativeViewerLaunchRecord,
+    private readonly version: string,
+    private readonly env: NodeJS.ProcessEnv,
+  ) {
+    this.exit = new Promise<void>((resolve) => child.once("exit", () => { this.exited = true; resolve(); }));
+    child.stderr.resume(); // Logs never enter socket responses or persisted state.
+    child.stdin.on("error", () => {});
+    process.on("SIGTERM", this.onSignal);
+    process.on("SIGINT", this.onSignal);
+  }
+
+  private send(command: NativeViewerCommand): void {
+    if (!this.exited && !this.child.stdin.destroyed) this.child.stdin.write(`${JSON.stringify(command)}\n`);
+  }
+
+  private enqueue(operation: () => Promise<void>): void {
+    this.actions = this.actions.then(operation).catch(() => { console.error("Native viewer operation failed"); });
+  }
+
+  private async setMode(next: NativeViewerMode): Promise<void> {
+    let size: ViewerWindowSize = this.record[next === "thumbnail" ? "thumbnail" : "expanded"];
+    if (this.record.hyprland !== undefined && !await applyHyprlandWindowMode(this.record, next, (placed) => { size = placed; })) {
+      throw new Error("Native viewer window could not be placed");
+    }
+    this.send({ cmd: "setMode", mode: next, width: size.width, height: size.height });
+    this.mode = next;
+  }
+
+  private event(message: Record<string, unknown>): void {
+    switch (message.event) {
+      case "ready":
+        if (!validReady(message, this.record, this.version)) this.readyReject(new Error("Native viewer readiness identity or version differs"));
+        else { this.receivedReady = true; this.readyResolve(); }
+        break;
+      case "expandRequested": this.requestMode("expanded"); break;
+      case "collapseRequested": this.requestMode("thumbnail"); break;
+      case "mode":
+        if (["thumbnail", "expanded", "fullscreen"].includes(String(message.mode))) this.mode = message.mode as typeof this.mode;
+        break;
+      case "sessionEnded": this.ended = true; break;
+      case "closed": void this.stop(); break;
+      case "error": this.readyReject(new Error("Native viewer reported an error")); void this.stop(); break;
+      default: console.error("Unknown native viewer event ignored");
+    }
+  }
+
+  private requestMode(mode: NativeViewerMode): void {
+    if (this.receivedReady && this.record.hyprland !== undefined) this.enqueue(() => this.setMode(mode));
+  }
+
+  private connection(socket: net.Socket): void {
+    this.sockets.add(socket);
+    socket.on("error", () => {});
+    socket.once("close", () => this.sockets.delete(socket));
+    socket.setTimeout(2_000, () => socket.destroy());
+    let handled = false;
+    const reply = (response: ViewerHostResponse): void => { if (!socket.destroyed) socket.end(`${JSON.stringify(response)}\n`); };
+    // No input, grant or lease operations. Future requests extend this table.
+    const operations: Record<string, HostOperation> = Object.assign(Object.create(null), {
+      status: watchOperation(async () => {}),
+      expand: watchOperation(() => this.setMode("expanded"), true),
+      collapse: watchOperation(() => this.setMode("thumbnail"), true),
+      shutdown: watchOperation(async () => {}),
+    });
+    readViewerLines(socket, (request) => {
+      if (handled) return;
+      handled = true;
+      if (typeof request.op !== "string") {
+        reply({ ok: false, error: "invalid-request" }); return;
+      }
+      const operation = operations[request.op];
+      if (operation === undefined) { reply({ ok: false, error: "unknown-operation" }); return; }
+      if (!operation.valid(request)) { reply({ ok: false, error: "invalid-request" }); return; }
+      const op = request.op;
+      const run = async (): Promise<void> => {
+        try {
+          await operation.run(request);
+          reply({ ok: true, host: this.host!, mode: this.mode, sessionEnded: this.ended });
+          if (op === "shutdown") setImmediate(() => { void this.stop(); });
+        } catch { reply({ ok: false, error: "operation-failed" }); }
+      };
+      // Status and shutdown stay responsive while a compositor move is pending.
+      if (operation.serial) this.enqueue(run);
+      else void run();
+    }, () => reply({ ok: false, error: "invalid-request" }));
+  }
+
+  private async listen(): Promise<void> {
+    await withViewerDir(this.record.sessionId, this.env, false, async (directory) => {
+      const server = net.createServer((socket) => this.connection(socket));
+      this.server = server;
+      server.listen(directory.resolve("host.sock"));
+      await once(server, "listening");
+      server.on("error", () => { void this.stop(); });
+      await fs.promises.chmod(directory.resolve("host.sock"), 0o600);
+      const socket = await directory.lstatChild("host.sock");
+      if (socket === undefined || !socket.isSocket()) throw new Error("Viewer socket unavailable");
+      this.host = {
+        sessionId: this.record.sessionId, launchId: this.record.launchId, version: this.version,
+        pid: this.record.hostPid, startTicks: this.record.hostStartTicks,
+        viewerPid: this.record.viewerPid, viewerStartTicks: this.record.viewerStartTicks,
+        socket: path.join(sessionViewerDir(this.record.sessionId, this.env), "host.sock"),
+        socketIno: socket.ino, socketDev: socket.dev,
+      };
+      await writeViewerPrivateFile(directory, "host.json", `${JSON.stringify(this.host)}\n`);
+    });
+  }
+
+  private monitorSession(): void {
+    let polling = false;
+    this.timer = setInterval(() => {
+      if (polling || this.ended || this.stopped) return;
+      polling = true;
+      const read = (): ReturnType<typeof getSession> => getSession(this.record.sessionId, this.env);
+      void withSessionVncLock(this.record.sessionId, this.env, read, { signal: this.sessionMonitor.signal }).catch(read).then((current) => {
+        if (!this.stopped && current?.status !== "running") { this.ended = true; this.send({ cmd: "sessionEnded" }); }
+      }).catch(() => {}).finally(() => { polling = false; });
+    }, 500);
+    this.timer.unref();
+  }
+
+  private stop(): Promise<void> {
+    return this.stopping ??= (async () => {
+      this.stopped = true;
+      this.sessionMonitor.abort();
+      if (this.timer !== undefined) clearInterval(this.timer);
+      this.send({ cmd: "sessionEnded" });
+      this.send({ cmd: "shutdown" });
+      await Promise.race([this.exit, sleep(300)]);
+      for (const signal of ["SIGTERM", "SIGKILL"] as const) {
+        if (this.exited) break;
+        // The owned child and exit listener prevent PID reuse during signaling.
+        this.child.kill(signal);
+        await Promise.race([this.exit, sleep(700)]);
+      }
+      for (const socket of this.sockets) socket.destroy();
+      if (this.server?.listening) await new Promise<void>((resolve) => this.server!.close(() => resolve()));
+    })();
+  }
+
+  async run(): Promise<number> {
+    try {
+      await writeViewerLaunchRecord(this.record, this.env);
+      readViewerLines(this.child.stdout, (message) => this.event(message), () => {
+        this.readyReject(new Error("Invalid native viewer protocol frame")); void this.stop();
+      });
+      void this.exit.then(() => this.readyReject(new Error("Native viewer exited before readiness")));
+      await this.ready;
+      const hyprland = this.record.hyprland;
+      if (hyprland !== undefined) {
+        await waitForViewerWindow(hyprland, hyprland.classPattern, this.record.viewerPid, { stopped: () => this.exited || this.stopped });
+        await disableViewerRule(hyprland, hyprland.ruleName);
+      }
+      if (this.exited || this.stopped) throw new Error("Native viewer stopped during startup");
+      await this.listen();
+      this.monitorSession();
+      await this.exit;
+      return this.child.exitCode === 0 || this.stopped ? 0 : 1;
+    } finally {
+      await this.stop();
+      process.off("SIGTERM", this.onSignal);
+      process.off("SIGINT", this.onSignal);
+    }
+  }
+}
+
+export async function runNativeViewerHost(options: {
+  session: string; binary: string; viewerVersion: string;
+}): Promise<number> {
+  const env = process.env;
+  const session = await getSession(options.session, env);
+  const desktop = session?.desktop;
+  const target = desktop === undefined ? undefined : await verifyOwnedDisplayTarget(options.session, desktop.display, env);
+  if (session?.status !== "running" || desktop === undefined || target === undefined || !path.isAbsolute(options.binary)) {
+    throw new Error("Native viewer requires a verified running desktop");
+  }
+  const hostIdentity = readProcessIdentity(process.pid);
+  if (hostIdentity === undefined) throw new Error("Viewer host identity unavailable");
+  const { launchId } = await prepareViewerLaunch(options.session, env);
+  const sizes = viewerWindowSizes(desktop);
+  sizes.expanded.height += 32;
+  let hyprland: NativeViewerLaunchRecord["hyprland"];
+  const ctx = await detectHyprland(env);
+  const ruleName = hyprlandRuleName(launchId);
+  const classPattern = viewerClassPattern(launchId, "native");
+  if (ctx !== undefined) {
+    if (await installViewerRule(ctx, ruleName, classPattern, sizes.thumbnail)) hyprland = { ...ctx, ruleName, classPattern };
+    else await disableViewerRule(ctx, ruleName);
+  }
+  try {
+    const child = spawn(options.binary, [
+      "--display", target.display, "--xvfb-pid", String(target.pid), "--xvfb-start-ticks", String(target.startTicks),
+      "--width", String(sizes.expanded.width), "--height", String(sizes.expanded.height - 32),
+      "--class", viewerWindowClass(launchId), "--thumbnail-width", "384", "--placement", hyprland === undefined ? "self" : "host",
+    ], { env, shell: false, detached: false, stdio: ["pipe", "pipe", "pipe"] });
+    await once(child, "spawn");
+    const viewerIdentity = readProcessIdentity(child.pid!);
+    if (viewerIdentity === undefined) { child.kill("SIGKILL"); throw new Error("Viewer identity unavailable"); }
+    return await new NativeHost(child, {
+      kind: "native", sessionId: options.session, launchId, createdAt: new Date().toISOString(), binary: options.binary,
+      hostPid: hostIdentity.pid, hostStartTicks: hostIdentity.startTicks,
+      viewerPid: viewerIdentity.pid, viewerStartTicks: viewerIdentity.startTicks, ...viewerIdentity, ...sizes, hyprland,
+    }, options.viewerVersion, env).run();
+  } finally {
+    if (hyprland !== undefined) await disableViewerRule(hyprland, ruleName);
+  }
+}

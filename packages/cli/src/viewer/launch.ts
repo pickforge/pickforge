@@ -17,7 +17,7 @@ import {
   writeViewerLaunchRecord,
   type ViewerBrowserKind,
   type ViewerHyprlandLaunch,
-  type ViewerLaunchRecord,
+  type BrowserViewerLaunchRecord as ViewerLaunchRecord,
   type ViewerWindowSize,
 } from "@pickforge/lab-desktop-linux";
 import { buildViewerUrl } from "./contract.js";

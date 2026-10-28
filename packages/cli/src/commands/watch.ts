@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { getSession, resolveDesktopCapableSession, type DesktopSessionInfo } from "@pickforge/lab-core";
 import {
+  startNativeViewerHost,
+  stopNativeViewerHost,
   endHumanTakeover,
   ensureSessionVnc,
   openVncViewer,
@@ -12,6 +14,9 @@ import {
   withSessionVncLock,
 } from "@pickforge/lab-desktop-linux";
 import { ensureViewerBridge, type EnsuredViewerBridge } from "../viewer/bridge-daemon.js";
+import { detectNativeViewer, nativeViewerVersion } from "../viewer/native.js";
+import { setTimeout as sleep } from "node:timers/promises";
+import { processIdentityMatches } from "@pickforge/lab-core";
 import { buildViewerUrl } from "../viewer/contract.js";
 import {
   detectViewerBrowser,
@@ -368,6 +373,28 @@ export async function watchDesktopSession(
       );
     }
     return watchWithControl(record.id, process.env, opts._spawnWatchdog ?? defaultSpawnWatchdog);
+  }
+  const binary = await detectNativeViewer();
+  if (binary !== null) {
+    const cliEntry = process.argv[1];
+    if (cliEntry === undefined) throw new Error("CLI entry point unavailable");
+    const host = await startNativeViewerHost({ sessionId: record.id, cliEntry, binary, version: nativeViewerVersion });
+    const data = { sessionId: record.id, opened: true, viewer: "native", launchId: host.launchId,
+      hostPid: host.pid, viewerPid: host.viewerPid };
+    if (opts.waitForViewerExit !== false) {
+      let interrupted = false;
+      let stopping: Promise<void> | undefined;
+      let stopFailure: unknown;
+      const stop = (): void => { interrupted = true; stopping ??= stopNativeViewerHost(record.id).catch((error: unknown) => { stopFailure = error; }); };
+      process.on("SIGINT", stop);
+      process.on("SIGTERM", stop);
+      try {
+        while (!interrupted && processIdentityMatches({ pid: host.pid, startTicks: host.startTicks })) await sleep(100);
+        await stopping;
+        if (stopFailure !== undefined) throw stopFailure;
+      } finally { process.off("SIGINT", stop); process.off("SIGTERM", stop); }
+    }
+    return { data, lines: [`native viewer ${opts.waitForViewerExit === false ? "opened" : "closed"} for session ${record.id}`] };
   }
   return watchWithBrowser(record, opts.waitForViewerExit !== false);
 }

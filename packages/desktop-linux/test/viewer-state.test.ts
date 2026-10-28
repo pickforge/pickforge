@@ -26,7 +26,7 @@ import {
   withViewerDir,
   readViewerPrivateFile,
   writeViewerPrivateFile,
-  type ViewerLaunchRecord,
+  type BrowserViewerLaunchRecord as ViewerLaunchRecord,
 } from "../src/viewer-state.js";
 import { withSessionVncLock, teardownDesktopSession } from "../src/session.js";
 import { teardownBrowserSession } from "../../browser/src/session.js";

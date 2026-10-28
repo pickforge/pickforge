@@ -70,7 +70,8 @@ export function hyprlandRuleName(launchId: string): string {
  * ignores `--class`; under X11 (XWayland) the class is the `--class` value.
  * The launch id is lowercase hex, so it needs no regex escaping.
  */
-export function viewerClassPattern(launchId: string): string {
+export function viewerClassPattern(launchId: string, kind?: "native"): string {
+  if (kind === "native") return `^pickforge-viewer-${launchId}$`;
   return `^(chrome-127\\.0\\.0\\.1__viewer_${launchId}-Default|pickforge-viewer-${launchId})$`;
 }
 
@@ -379,6 +380,7 @@ async function readMonitor(ctx: HyprlandContext, id: number): Promise<HyprlandMo
 export async function applyHyprlandWindowMode(
   launch: ViewerLaunchRecord,
   mode: ViewerWindowMode,
+  onPlaced?: (size: ViewerWindowSize) => void,
 ): Promise<boolean> {
   const ctx = launch.hyprland;
   if (ctx === undefined) return false;
@@ -388,7 +390,9 @@ export async function applyHyprlandWindowMode(
     const monitor = await readMonitor(ctx, client.monitor);
     if (monitor === undefined) return false;
     const rect = placeViewerWindow(launch, mode, monitorWorkArea(monitor));
-    return await hyprctlEval(ctx, buildPlacementLua(client.address, rect));
+    const applied = await hyprctlEval(ctx, buildPlacementLua(client.address, rect));
+    if (applied) onPlaced?.(rect);
+    return applied;
   } catch {
     return false;
   }

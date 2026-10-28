@@ -31,6 +31,16 @@ export interface FakeBrowserBehavior {
   forkChild?: boolean;
 }
 
+export interface FakeViewerBehavior {
+  version?: string;
+  readyPid?: number;
+  readyVersion?: string;
+  noReady?: boolean;
+  ignoreSignals?: boolean;
+  ignoreShutdown?: boolean;
+  exitAfterMs?: number;
+}
+
 export interface ViewerFakes {
   binDir: string;
   callsLog: string;
@@ -39,6 +49,8 @@ export interface ViewerFakes {
   calls(): Array<Record<string, unknown>>;
   setState(state: FakeHyprlandState): void;
   setBrowser(behavior: FakeBrowserBehavior): void;
+  installViewer(behavior?: FakeViewerBehavior): string;
+  cueViewer(event: Record<string, unknown>): void;
   installHyprctl(): string;
   installBrowser(name: string): string;
 }
@@ -106,6 +118,33 @@ if (behavior.exitAfterMs !== undefined) {
 }
 `;
 
+const VIEWER_SOURCE = `
+const fs = require("node:fs");
+const [callsLog, stateFile, clientsFile, behaviorFile, viewerFile, cuesFile] = __PATHS__;
+const args = process.argv.slice(2);
+const behavior = JSON.parse(fs.readFileSync(viewerFile, "utf8"));
+const version = behavior.version ?? "0.6.0";
+if (args.includes("--version")) { console.log("pickforge-viewer " + version); process.exit(0); }
+if (behavior.ignoreSignals) process.on("SIGTERM", () => {});
+fs.appendFileSync(callsLog, JSON.stringify({ tool: "viewer", args, pid: process.pid, display: process.env.DISPLAY, wayland: process.env.WAYLAND_DISPLAY }) + "\\n");
+const emit = (event) => process.stdout.write(JSON.stringify(event) + "\\n");
+const cls = args[args.indexOf("--class") + 1];
+fs.writeFileSync(clientsFile, JSON.stringify([{ address: "0xabc001", class: cls, pid: process.pid, floating: true, monitor: 0 }]));
+if (!behavior.noReady) emit({ event: "ready", version: behavior.readyVersion ?? version, pid: behavior.readyPid ?? process.pid, backend: "x11", scale: 1 });
+require("node:readline").createInterface({ input: process.stdin }).on("line", (line) => {
+  const command = JSON.parse(line);
+  fs.appendFileSync(callsLog, JSON.stringify({ tool: "viewer-command", ...command }) + "\\n");
+  if (command.cmd === "setMode") emit({ event: "mode", mode: command.mode });
+  if (command.cmd === "shutdown" && !behavior.ignoreShutdown) process.exit(0);
+}).on("close", () => { if (!behavior.ignoreShutdown) process.exit(0); });
+let seen = 0;
+setInterval(() => {
+  const cues = fs.readFileSync(cuesFile, "utf8").split("\\n").filter(Boolean);
+  while (seen < cues.length) emit(JSON.parse(cues[seen++]));
+}, 25);
+if (behavior.exitAfterMs !== undefined) setTimeout(() => process.exit(0), behavior.exitAfterMs);
+`;
+
 export function createViewerFakes(root: string): ViewerFakes {
   const binDir = path.join(root, "bin");
   fs.mkdirSync(binDir, { recursive: true });
@@ -113,7 +152,11 @@ export function createViewerFakes(root: string): ViewerFakes {
   const stateFile = path.join(root, "hypr-state.json");
   const clientsFile = path.join(root, "hypr-clients.json");
   const behaviorFile = path.join(root, "browser.json");
-  const paths = JSON.stringify([callsLog, stateFile, clientsFile, behaviorFile]);
+  const viewerFile = path.join(root, "viewer.json");
+  const cuesFile = path.join(root, "viewer-cues.jsonl");
+  fs.writeFileSync(viewerFile, "{}");
+  fs.writeFileSync(cuesFile, "");
+  const paths = JSON.stringify([callsLog, stateFile, clientsFile, behaviorFile, viewerFile, cuesFile]);
   fs.writeFileSync(callsLog, "");
   fs.writeFileSync(stateFile, "{}");
   fs.writeFileSync(behaviorFile, "{}");
@@ -136,6 +179,11 @@ export function createViewerFakes(root: string): ViewerFakes {
         .map((line) => JSON.parse(line) as Record<string, unknown>),
     setState: (state) => fs.writeFileSync(stateFile, JSON.stringify(state)),
     setBrowser: (behavior) => fs.writeFileSync(behaviorFile, JSON.stringify(behavior)),
+    installViewer: (behavior = {}) => {
+      fs.writeFileSync(viewerFile, JSON.stringify(behavior));
+      return install("pickforge-viewer", VIEWER_SOURCE);
+    },
+    cueViewer: (event) => fs.appendFileSync(cuesFile, `${JSON.stringify(event)}\n`),
     installHyprctl: () => install("hyprctl", HYPRCTL_SOURCE),
     installBrowser: (name) => install(name, BROWSER_SOURCE),
   };
