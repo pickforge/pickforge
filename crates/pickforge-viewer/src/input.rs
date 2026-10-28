@@ -39,6 +39,8 @@ pub const MAX_BINDINGS: usize = 64;
 pub const MAX_TEXT_CHARS: usize = 4096;
 /// Longest a drop waits for the server to apply its releases.
 const CLOSE_SYNC: Duration = Duration::from_secs(1);
+/// The Control, Mod1 (Alt) and Mod4 (Super) state bits.
+const SHORTCUT_MASK: u8 = 0x04 | 0x08 | 0x40;
 
 #[derive(Debug)]
 pub enum InjectError {
@@ -747,7 +749,7 @@ impl<C: Clock> Injector<C> {
             .ok_or(InjectError::Unmappable)?;
         let held = self.down_keycodes()?;
         let releasable = self.releasable_mask(&held);
-        let plan = reconcile(
+        let mut plan = reconcile(
             key_type,
             found.level,
             state as u8,
@@ -755,6 +757,9 @@ impl<C: Clock> Injector<C> {
             releasable,
         )
         .ok_or(InjectError::Unmappable)?;
+        // Text is never a shortcut: a held Control, Alt or Super that the
+        // level does not use is released for the character.
+        plan.release |= state as u8 & releasable & SHORTCUT_MASK & !key_type.mask;
         let changes = self.modifier_changes(plan.press, plan.release, &held);
         for &(code, pressed) in &changes {
             self.send_key(code, pressed)?;

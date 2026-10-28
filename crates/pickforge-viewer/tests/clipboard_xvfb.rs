@@ -11,6 +11,7 @@ use pickforge_viewer::capture::connect_display;
 use pickforge_viewer::clipboard::{read_x11, Refusal, Secret, MAX_PASTE_BYTES};
 use pickforge_viewer::input::MAX_TEXT_CHARS;
 use selection::{Owner, Serve};
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::ConnectionExt as _;
@@ -18,8 +19,12 @@ use x11rb::protocol::xproto::ConnectionExt as _;
 const TIMEOUT: Duration = Duration::from_millis(500);
 
 fn read(display: u32) -> Result<Secret, Refusal> {
+    read_unless(display, false)
+}
+
+fn read_unless(display: u32, stopped: bool) -> Result<Secret, Refusal> {
     let conn = connect_display(display).unwrap();
-    let result = read_x11(&conn, 0, TIMEOUT);
+    let result = read_x11(&conn, 0, TIMEOUT, &AtomicBool::new(stopped));
     // The reader leaves no window of its own behind.
     let root = conn.setup().roots[0].root;
     let windows = conn.query_tree(root).unwrap().reply().unwrap().children;
@@ -106,4 +111,19 @@ fn gives_up_on_an_owner_that_never_answers() {
     let took = start.elapsed();
     assert!(took >= TIMEOUT && took < TIMEOUT + Duration::from_millis(500));
     assert_eq!(owner.requests(), 1);
+}
+
+#[test]
+fn a_stopped_paste_asks_for_no_content() {
+    if !xvfb_ready("clipboard_stopped") {
+        return;
+    }
+    let display = Xvfb::start("64x64x24");
+    let owner = Owner::start(display.display, Serve::Text(b"marker".to_vec()));
+    assert_eq!(
+        read_unless(display.display, true).unwrap_err(),
+        Refusal::Unavailable
+    );
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(owner.requests(), 0);
 }

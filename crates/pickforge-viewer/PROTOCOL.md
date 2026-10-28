@@ -129,12 +129,16 @@ Error codes in the `error` event: `display-refused`, `xvfb-mismatch`,
 - Paste: only a click on Paste reads the host clipboard, once. There is no
   shortcut. The viewer asks for UTF-8 text only and waits at most 1 s. It
   types nothing for an empty clipboard, another format, or text over 4096
-  characters. It drops one trailing line break, types tabs and other line
-  breaks as Tab and Return, and refuses text with other control characters.
-  It types 32 characters per step and checks control before each step, so a
-  revoke, an expired grant, Return control, collapse, close, stdin end of
-  file or session end stops it within one step. A click while a paste runs
-  does nothing. Paste sends no event, and the text never crosses stdio.
+  characters. It drops one trailing line break (`\n`, `\r\n` or `\r`), types
+  tabs and other line breaks as Tab and Return, and refuses text with other
+  control characters. A held Control, Alt or Super is released for each
+  character, so text never triggers a shortcut. It types 32 characters per
+  step and checks control before each step, so a revoke, an expired grant,
+  Return control, collapse, close, stdin end of file or session end stops it
+  within one step; a read still running then asks for no content. A click
+  while a paste runs does nothing, and while a read that never answered
+  still runs, a click shows "Paste unavailable". Paste sends no event, and
+  the text never crosses stdio.
 - Attention banner: at the top of the image, below the bar. The message wraps
   to at most three lines and ends with an ellipsis when it is longer. The
   thumbnail shows the message without the button, because a thumbnail click

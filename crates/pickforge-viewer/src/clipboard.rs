@@ -4,7 +4,8 @@
 //! process: no log line, error, event or panic holds it, and its buffers
 //! are zeroed when dropped. Only UTF-8 text is read; other formats count as
 //! nothing to paste. A read is bounded in size and time, so a slow or huge
-//! clipboard cannot block typing or fill memory.
+//! clipboard cannot block typing or fill memory. A read whose paste was
+//! stopped, for example because control ended, asks for no content.
 //!
 //! The X11 reader connects to the caller's `DISPLAY` with normal
 //! authorization. The session display is never read or written here.
@@ -15,6 +16,7 @@ use std::fmt;
 use std::fs::File;
 use std::io::Read;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _, CreateWindowAux, WindowClass};
@@ -29,8 +31,8 @@ pub const MAX_PASTE_BYTES: usize = 4 * MAX_TEXT_CHARS + 2;
 /// Longest one read may take, from the click to the last byte.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// The Wayland MIME types that are UTF-8 text.
-const UTF8_TYPES: [&str; 2] = ["text/plain;charset=utf-8", "UTF8_STRING"];
+/// The Wayland MIME types read as text. Their bytes must still be UTF-8.
+const TEXT_TYPES: [&str; 3] = ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain"];
 
 /// Why a paste types nothing. It never holds clipboard content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,14 +72,14 @@ impl fmt::Debug for Secret {
     }
 }
 
-/// Prepares clipboard text for typing. One trailing line break is dropped,
-/// so a copied line does not submit a form, and `\r\n` becomes one line
-/// break. Other control characters than line breaks and tabs refuse the
+/// Prepares clipboard text for typing. One trailing line break (`\n`,
+/// `\r\n` or `\r`) is dropped, so a copied line does not submit a form,
+/// and `\r\n` becomes one line break. Other control characters than line breaks and tabs refuse the
 /// whole text.
 pub fn prepare(raw: &str) -> Result<Secret, Refusal> {
     let body = raw
         .strip_suffix("\r\n")
-        .or_else(|| raw.strip_suffix('\n'))
+        .or_else(|| raw.strip_suffix(['\n', '\r']))
         .unwrap_or(raw);
     // Never more bytes than `body`, so the buffer is not reallocated and
     // leaves no copy behind.
@@ -162,30 +164,41 @@ pub fn read_bounded(
     Ok(buf)
 }
 
-/// Reads the clipboard of the host window system the viewer runs on.
-pub fn read(backend: Backend) -> Result<Secret, Refusal> {
+/// Reads the clipboard of the host window system the viewer runs on. Once
+/// `stopped` is set, the read asks for no more content.
+pub fn read(backend: Backend, stopped: &AtomicBool) -> Result<Secret, Refusal> {
     match backend {
-        Backend::Wayland => read_wayland(READ_TIMEOUT),
+        Backend::Wayland => read_wayland(READ_TIMEOUT, stopped),
         Backend::X11 => {
             let (conn, screen) = x11rb::connect(None).map_err(unavailable)?;
-            read_x11(&conn, screen, READ_TIMEOUT)
+            read_x11(&conn, screen, READ_TIMEOUT, stopped)
         }
     }
 }
 
+/// Refuses to go on once the paste that asked for the read has stopped.
+fn still_wanted(stopped: &AtomicBool) -> Result<(), Refusal> {
+    if stopped.load(Ordering::SeqCst) {
+        return Err(Refusal::Unavailable);
+    }
+    Ok(())
+}
+
 /// Reads the Wayland clipboard through the data-control protocol.
-pub fn read_wayland(timeout: Duration) -> Result<Secret, Refusal> {
+pub fn read_wayland(timeout: Duration, stopped: &AtomicBool) -> Result<Secret, Refusal> {
     use wl_clipboard_rs::paste::{get_contents, ClipboardType, MimeType, Seat};
     let deadline = Instant::now() + timeout;
+    still_wanted(stopped)?;
     let (pipe, mime) = get_contents(
         ClipboardType::Regular,
         Seat::Unspecified,
-        MimeType::TextWithPriority(UTF8_TYPES[0]),
+        MimeType::TextWithPriority(TEXT_TYPES[0]),
     )
     .map_err(|e| wayland_refusal(&e))?;
-    if !UTF8_TYPES.contains(&mime.as_str()) {
+    if !TEXT_TYPES.contains(&mime.as_str()) {
         return Err(Refusal::Empty);
     }
+    still_wanted(stopped)?;
     let bytes = read_bounded(pipe.as_fd(), deadline, MAX_PASTE_BYTES)?;
     finish(&bytes)
 }
@@ -246,6 +259,7 @@ pub fn read_x11(
     conn: &RustConnection,
     screen: usize,
     timeout: Duration,
+    stopped: &AtomicBool,
 ) -> Result<Secret, Refusal> {
     let deadline = Instant::now() + timeout;
     let atoms = Atoms::intern(conn)?;
@@ -270,7 +284,7 @@ pub fn read_x11(
         &CreateWindowAux::new(),
     )
     .map_err(unavailable)?;
-    let result = convert(conn, window, &atoms, deadline);
+    let result = convert(conn, window, &atoms, deadline, stopped);
     let _ = conn.destroy_window(window);
     let _ = conn.flush();
     result
@@ -281,7 +295,9 @@ fn convert(
     window: u32,
     atoms: &Atoms,
     deadline: Instant,
+    stopped: &AtomicBool,
 ) -> Result<Secret, Refusal> {
+    still_wanted(stopped)?;
     conn.convert_selection(
         window,
         atoms.clipboard,
@@ -292,6 +308,7 @@ fn convert(
     .map_err(unavailable)?;
     conn.flush().map_err(unavailable)?;
     wait_notify(conn, window, deadline)?;
+    still_wanted(stopped)?;
     let long_length = (MAX_PASTE_BYTES / 4 + 1) as u32;
     // Read without deleting: deleting an INCR property would start the
     // transfer.
@@ -348,6 +365,8 @@ mod tests {
     fn prepare_drops_one_trailing_line_break_and_keeps_inner_ones() {
         assert_eq!(text("hunter2\n").unwrap(), "hunter2");
         assert_eq!(text("hunter2\r\n").unwrap(), "hunter2");
+        assert_eq!(text("123456\r").unwrap(), "123456");
+        assert_eq!(text("a\r\r").unwrap(), "a\r");
         assert_eq!(text("a\n\n").unwrap(), "a\n");
         assert_eq!(text("a\r\nb\tc\n").unwrap(), "a\nb\tc");
         assert_eq!(text("Olá ß €").unwrap(), "Olá ß €");

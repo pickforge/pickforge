@@ -149,6 +149,20 @@ fn held_modifiers_are_reconciled_and_lock_keys_dropped() {
     injector.type_text("a").unwrap();
     let presses = listener.key_presses(1);
     assert_eq!(listener.decode(&presses), "a");
+
+    // Text is never a shortcut, even with Control held.
+    let control = read_keyboard(&listener.conn)
+        .unwrap()
+        .find_keysym(0, named::CONTROL_L)
+        .unwrap()
+        .code;
+    listener.take_quiet();
+    injector.key(named::CONTROL_L, true).unwrap();
+    injector.type_text("a").unwrap();
+    let presses = listener.key_presses(2);
+    assert_eq!(listener.decode(&presses), "a", "not Control+A");
+    assert_eq!(listener.down_keys(), vec![control], "Control is held again");
+    injector.key(named::CONTROL_L, false).unwrap();
 }
 
 #[test]

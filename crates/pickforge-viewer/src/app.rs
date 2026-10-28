@@ -276,6 +276,11 @@ struct App {
     paste: Option<Paste>,
     /// Clipboard reads started, so a late answer cannot match a new read.
     paste_reads: u64,
+    /// Set when the paste of the latest read stops, so that read asks for
+    /// no more content.
+    paste_stop: Arc<AtomicBool>,
+    /// The latest read's thread. A read that never answered keeps it.
+    paste_worker: Option<thread::JoinHandle<()>>,
 
     status: Option<StatusCode>,
     ended: bool,
@@ -338,6 +343,8 @@ impl App {
             keys: HashMap::new(),
             paste: None,
             paste_reads: 0,
+            paste_stop: Arc::new(AtomicBool::new(true)),
+            paste_worker: None,
             status: Some(StatusCode::Connecting),
             ended: false,
             have_frame: false,
@@ -567,7 +574,7 @@ impl App {
             self.control.stop();
             self.controller.end_session();
             self.keys.clear();
-            self.paste = None;
+            self.stop_paste();
             self.relayout();
         }
         self.set_status(Some(StatusCode::SessionEnded));
@@ -582,7 +589,7 @@ impl App {
         }
         let changed = self.mode != mode;
         if mode == Mode::Thumbnail && self.controller.controlling() {
-            self.paste = None;
+            self.stop_paste();
             self.controller.release_held();
             self.keys.clear();
         }
@@ -642,7 +649,7 @@ impl App {
 
     /// Closing while controlling returns control first.
     fn close(&mut self) {
-        self.paste = None;
+        self.stop_paste();
         for event in self.controller.close() {
             emit(&event);
         }
@@ -651,7 +658,7 @@ impl App {
 
     /// Ends control without asking the host and exits.
     fn quit(&mut self) {
-        self.paste = None;
+        self.stop_paste();
         self.controller.stop();
         self.exit = Some(0);
     }
@@ -681,7 +688,7 @@ impl App {
     fn control_changed(&mut self) {
         let lease = self.paste.as_ref().map(Paste::lease);
         if lease.is_some() && lease != self.controller.lease_id() {
-            self.paste = None;
+            self.stop_paste();
         }
         if !self.controller.controlling() {
             self.keys.clear();
@@ -693,28 +700,57 @@ impl App {
         self.relayout();
     }
 
+    /// Applies a grant that expired since the last loop turn.
+    fn sync_control(&mut self) {
+        if self.controller.tick(Instant::now()) {
+            self.control_changed();
+        }
+    }
+
+    /// The lease a clipboard read may start under: control is live now, in
+    /// an expanded window, and no paste runs.
+    fn paste_lease(&mut self) -> Option<String> {
+        self.sync_control();
+        if self.paste.is_some() || !self.controller.forwarding(self.mode) {
+            return None;
+        }
+        self.controller.lease_id().map(str::to_owned)
+    }
+
     /// The user clicked Paste. A worker thread reads the host clipboard, so
     /// the event loop never waits for it. A click while a paste runs does
-    /// nothing.
+    /// nothing. A read that never answered keeps its thread, and no second
+    /// read starts while it lives.
     fn start_paste(&mut self) {
-        if self.paste.is_some() || !self.controller.forwarding(self.mode) {
+        let Some(lease) = self.paste_lease() else {
             return;
+        };
+        if self.paste_worker.as_ref().is_some_and(|w| !w.is_finished()) {
+            return self.show_note(Note::PasteUnavailable);
         }
-        let (Some(lease), Some(proxy)) = (self.controller.lease_id(), self.proxy.clone()) else {
+        let Some(proxy) = self.proxy.clone() else {
             return;
         };
         self.paste_reads += 1;
         let id = self.paste_reads;
         self.paste = Some(Paste::Reading {
             id,
-            lease: lease.to_owned(),
+            lease,
             until: Instant::now() + PASTE_READ_LIMIT,
         });
+        let stop = Arc::new(AtomicBool::new(false));
+        self.paste_stop = Arc::clone(&stop);
         let backend = self.backend;
-        thread::spawn(move || {
-            let result = clipboard::read(backend);
+        self.paste_worker = Some(thread::spawn(move || {
+            let result = clipboard::read(backend, &stop);
             let _ = proxy.send_event(UserEvent::Clipboard { id, result });
-        });
+        }));
+    }
+
+    /// Ends the paste. A read that still runs asks for no more content.
+    fn stop_paste(&mut self) {
+        self.paste = None;
+        self.paste_stop.store(true, Ordering::SeqCst);
     }
 
     /// True while the paste under `lease` may type.
@@ -726,13 +762,14 @@ impl App {
     /// lacks, and starts typing. Nothing is typed when the read was
     /// refused, the binding failed, or control changed during the read.
     fn on_clipboard(&mut self, id: u64, result: Result<Secret, Refusal>) {
+        self.sync_control();
         let lease = match &self.paste {
             Some(Paste::Reading {
                 id: want, lease, ..
             }) if *want == id => lease.clone(),
             _ => return,
         };
-        self.paste = None;
+        self.stop_paste();
         if !self.paste_allowed(&lease) {
             return;
         }
@@ -787,13 +824,9 @@ impl App {
 
     /// Ends a paste that the injector refused. The error never holds text.
     fn paste_failed(&mut self, error: InjectError) {
-        self.paste = None;
+        self.stop_paste();
         match error {
-            InjectError::NotGranted => {
-                if self.controller.tick(Instant::now()) {
-                    self.control_changed();
-                }
-            }
+            InjectError::NotGranted => self.sync_control(),
             e => {
                 log(&format!("paste stopped: {e}"));
                 self.show_note(Note::PasteUnavailable);
@@ -815,7 +848,7 @@ impl App {
         if now < *until {
             return Some(*until);
         }
-        self.paste = None;
+        self.stop_paste();
         self.show_note(Note::PasteUnavailable);
         None
     }

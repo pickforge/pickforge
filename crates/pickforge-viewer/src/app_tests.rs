@@ -386,6 +386,56 @@ fn refused_reads_show_a_note_and_type_nothing() {
 }
 
 #[test]
+fn paste_reads_only_under_a_live_grant_and_one_read_at_a_time() {
+    use crate::test_common::{xvfb_ready, Xvfb};
+    if !xvfb_ready("paste_live_grant") {
+        return;
+    }
+    let display = Xvfb::start("640x480x24");
+    let mut app = controlling(display.display);
+    assert_eq!(app.paste_lease().as_deref(), Some("L1"));
+
+    // A read that never answered keeps its thread, and no second read starts.
+    app.paste_worker = Some(thread::spawn(|| thread::sleep(Duration::from_millis(500))));
+    app.start_paste();
+    assert!(app.paste.is_none());
+    assert_eq!(app.status_text(), Some("Paste unavailable"));
+
+    // A grant that expired before the loop turn is applied first.
+    app.on_command(Command::Grant {
+        lease_id: "L1".into(),
+        grant_ms: 1,
+    });
+    thread::sleep(Duration::from_millis(20));
+    assert!(app.controller.controlling(), "expiry not applied yet");
+    assert_eq!(app.paste_lease(), None);
+    assert!(!app.controller.controlling());
+}
+
+#[test]
+fn stopping_a_paste_stops_its_read() {
+    use crate::protocol::RevokeReason;
+    use crate::test_common::{xvfb_ready, Xvfb};
+    if !xvfb_ready("paste_stop_read") {
+        return;
+    }
+    let display = Xvfb::start("640x480x24");
+    let mut app = controlling(display.display);
+    let stop = Arc::new(AtomicBool::new(false));
+    app.paste_stop = Arc::clone(&stop);
+    reading(&mut app, 1, "L1");
+    app.on_command(Command::Revoke {
+        lease_id: "L1".into(),
+        reason: RevokeReason::LeaseLost,
+    });
+    assert!(app.paste.is_none());
+    assert!(
+        stop.load(Ordering::SeqCst),
+        "the read asks for no more content"
+    );
+}
+
+#[test]
 fn paste_needs_control_in_an_expanded_window() {
     let mut app = app();
     app.start_paste();
