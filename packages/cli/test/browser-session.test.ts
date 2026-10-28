@@ -147,6 +147,42 @@ function parseToolPayload<T>(
 }
 
 describe.skipIf(!hasXvfb)("built CLI browser lifecycle", () => {
+  it("creates, lists, refuses held deletion, and deletes a named profile with explicit consent", async () => {
+    const create = () => runCli(["session", "create", "--type", "browser", "--profile", "ops", "--json"]);
+    const first = parseJson(create()).sessions[0];
+    expect(first.profileDir).toBe(path.join(env.PICKFORGE_HOME, "profiles", "ops"));
+    expect(parseJson(runCli(["profile", "list", "--json"])).profiles[0]).toMatchObject({
+      name: "ops", holdingSession: first.id, sizeBytes: expect.any(Number), lastUsedAt: expect.any(String),
+    });
+    expect(runCli(["profile", "list"]).stdout).toContain(first.id);
+    const second = create();
+    expect(second.code).toBe(1);
+    expect(parseJson(second).errors.join()).toContain(first.id);
+    const heldDelete = runCli(["profile", "delete", "ops", "--yes", "--json"]);
+    expect(heldDelete.code).toBe(1);
+    expect(parseJson(heldDelete).errors.join()).toContain(first.id);
+    expect(runCli(["session", "destroy", first.id, "--json"]).code).toBe(0);
+    expect(fs.existsSync(first.profileDir)).toBe(true);
+    expect(parseJson(runCli(["profile", "list", "--json"])).profiles[0].holdingSession).toBeNull();
+    const noConsent = runCli(["profile", "delete", "ops", "--json"]);
+    expect(noConsent.code).toBe(1);
+    expect(parseJson(noConsent).errors.join()).toContain("--yes");
+    expect(fs.existsSync(first.profileDir)).toBe(true);
+    const deleted = runCli(["profile", "delete", "ops", "--yes", "--json"]);
+    expect(deleted.code).toBe(0);
+    expect(parseJson(deleted).deleted).toBe("ops");
+    expect(fs.existsSync(first.profileDir)).toBe(false);
+  }, 60_000);
+
+  it("rejects invalid names and profiles on other session types", () => {
+    const invalid = runCli(["session", "create", "--type", "browser", "--profile", "../ops", "--json"]);
+    expect(invalid.code).toBe(1);
+    expect(parseJson(invalid).errors.join()).toContain("Invalid browser profile name");
+    const desktop = runCli(["session", "create", "--type", "desktop", "--profile", "ops", "--json"]);
+    expect(desktop.code).toBe(1);
+    expect(parseJson(desktop).errors.join()).toContain("--profile requires --type browser");
+  });
+
   it(
     "creates, reports, lists, and destroys a browser session from the bundled CLI",
     async () => {

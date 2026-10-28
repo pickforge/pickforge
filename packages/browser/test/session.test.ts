@@ -1238,3 +1238,84 @@ describe("browser record inspection (no live processes)", () => {
     expect((await getSession(rec.id, registryEnv))?.status).toBe("error");
   });
 });
+
+describe.skipIf(!hasXvfb)("named browser profile lifecycle", () => {
+  it("keeps profile data on teardown, refuses concurrent use, and reuses the profile", async () => {
+    const opts = { projectDir, registryEnv, env: spawnEnvFor("ready"), profile: "ops" };
+    const first = await createBrowserSession(opts);
+    try {
+      expect(first.profileDir).toBe(path.join(home, "profiles", "ops"));
+      expect((await getSession(first.id, registryEnv))?.browser).toMatchObject({
+        profileMode: "named", profileName: "ops", profileDir: first.profileDir,
+      });
+      const argv = JSON.parse(fs.readFileSync(path.join(first.profileDir, "fake-chrome-argv.json"), "utf8"));
+      expect(argv).toContain(`--user-data-dir=${first.profileDir}`);
+      fs.writeFileSync(path.join(first.profileDir, "Cookies"), "persist");
+      await expect(createBrowserSession(opts)).rejects.toThrow(first.id);
+    } finally {
+      await destroyBrowserSession(first.id, registryEnv);
+    }
+    expect(fs.readFileSync(path.join(first.profileDir, "Cookies"), "utf8")).toBe("persist");
+    const second = await createBrowserSession(opts);
+    try {
+      expect(second.profileDir).toBe(first.profileDir);
+      expect(fs.readFileSync(path.join(second.profileDir, "Cookies"), "utf8")).toBe("persist");
+    } finally {
+      await destroyBrowserSession(second.id, registryEnv);
+    }
+  }, TEST_TIMEOUT_MS);
+
+  it("keeps the profile after failed startup and releases its hold", async () => {
+    const opts = { projectDir, registryEnv, profile: "ops" };
+    await expect(createBrowserSession({ ...opts, env: spawnEnvFor("crash") })).rejects.toThrow("Chrome exited");
+    expect(fs.statSync(path.join(home, "profiles", "ops")).isDirectory()).toBe(true);
+    const session = await createBrowserSession({ ...opts, env: spawnEnvFor("ready") });
+    await destroyBrowserSession(session.id, registryEnv);
+  }, TEST_TIMEOUT_MS);
+
+  it("reaps a crashed browser, keeps its profile and recovers singleton entries", async () => {
+    const opts = { projectDir, registryEnv, env: spawnEnvFor("ready"), profile: "ops" };
+    const first = await createBrowserSession(opts);
+    fs.writeFileSync(path.join(first.profileDir, "Cookies"), "persist after crash");
+    process.kill(-first.browserPid, "SIGKILL");
+    await vi.waitFor(() => expect(isPidAlive(first.browserPid)).toBe(false));
+    expect((await reapBrowserSessions()).map((record) => record.id)).toContain(first.id);
+    expect(fs.readFileSync(path.join(first.profileDir, "Cookies"), "utf8")).toBe("persist after crash");
+    fs.symlinkSync(`${os.hostname()}-2147483647`, path.join(first.profileDir, "SingletonLock"));
+    fs.symlinkSync("/tmp/missing-pickforge-singleton", path.join(first.profileDir, "SingletonSocket"));
+    fs.symlinkSync("stale-cookie", path.join(first.profileDir, "SingletonCookie"));
+    const second = await createBrowserSession(opts);
+    try {
+      expect(fs.existsSync(path.join(second.profileDir, "SingletonLock"))).toBe(false);
+      expect(fs.readFileSync(path.join(second.profileDir, "Cookies"), "utf8")).toBe("persist after crash");
+    } finally {
+      await destroyBrowserSession(second.id, registryEnv);
+    }
+  }, TEST_TIMEOUT_MS);
+});
+
+describe.skipIf(!hasXvfb)("abandoned named profile startup", () => {
+  it("recovers a creator crash during startup even while the partial browser is live", async () => {
+    const opts = { projectDir, registryEnv, env: spawnEnvFor("ready"), profile: "ops" };
+    const first = await createBrowserSession(opts);
+    try {
+      fs.writeFileSync(path.join(first.profileDir, "Cookies"), "keep partial startup");
+      // Model the last durable state before the creating CLI died.
+      await updateSession(first.id, { status: "starting" }, registryEnv);
+      const lock = path.join(home, "profiles", ".ops.lock");
+      const owner = JSON.parse(fs.readFileSync(lock, "utf8"));
+      owner.process = { pid: 2_147_483_647, startTicks: 1 };
+      fs.writeFileSync(lock, JSON.stringify(owner));
+      const recovered = await createBrowserSession(opts);
+      try {
+        expect(await getSession(first.id, registryEnv)).toBeUndefined();
+        expect(isPidAlive(first.browserPid)).toBe(false);
+        expect(fs.readFileSync(path.join(recovered.profileDir, "Cookies"), "utf8")).toBe("keep partial startup");
+      } finally {
+        await destroyBrowserSession(recovered.id, registryEnv);
+      }
+    } finally {
+      if (await getSession(first.id, registryEnv)) await destroyBrowserSession(first.id, registryEnv);
+    }
+  }, TEST_TIMEOUT_MS);
+});

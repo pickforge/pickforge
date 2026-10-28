@@ -44,6 +44,37 @@ describe.skipIf(!hasXvfb)("MCP browser lifecycle", () => {
     removeLabDirs(dirs);
   });
 
+  it("creates and lists a named profile, preserves it on destroy, and exposes no delete tool", async () => {
+    const tools = (await lab.client.listTools()).tools;
+    expect(tools.find((tool) => tool.name === "profile_list")?.annotations?.readOnlyHint).toBe(true);
+    expect(tools.some((tool) => tool.name === "profile_delete")).toBe(false);
+    expect(tools.find((tool) => tool.name === "session_create")?.inputSchema.properties).toHaveProperty("profile");
+    const created = parseToolJson(await lab.client.callTool({
+      name: "session_create", arguments: { type: "browser", profile: "ops" },
+    }));
+    expect(created.ok).toBe(true);
+    const session = created.sessions[0];
+    expect(session.profileDir).toBe(path.join(dirs.home, "profiles", "ops"));
+    const profiles = parseToolJson(await lab.client.callTool({ name: "profile_list", arguments: {} })).profiles;
+    expect(profiles[0]).toMatchObject({ name: "ops", holdingSession: session.id });
+    const refused = parseToolJson(await lab.client.callTool({
+      name: "session_create", arguments: { type: "browser", profile: "ops" },
+    }));
+    expect(refused.ok).toBe(false);
+    expect(refused.errors.join()).toContain(session.id);
+    await lab.client.callTool({ name: "session_destroy", arguments: { sessionId: session.id } });
+    expect(fs.existsSync(session.profileDir)).toBe(true);
+    expect(parseToolJson(await lab.client.callTool({ name: "profile_list", arguments: {} })).profiles[0].holdingSession).toBeNull();
+    const wrongType = parseToolJson(await lab.client.callTool({
+      name: "session_create", arguments: { type: "desktop", profile: "ops" },
+    }));
+    expect(wrongType.ok).toBe(false);
+    expect(wrongType.errors.join()).toContain("profile requires type browser");
+    const invalid = await lab.client.callTool({ name: "session_create", arguments: { type: "browser", profile: "../ops" } });
+    expect(invalid.isError).toBe(true);
+    await lab.client.callTool({ name: "session_destroy", arguments: { all: true } });
+  }, TEST_TIMEOUT_MS);
+
   it(
     "creates, reports, lists, destroys, and destroys all browser sessions",
     async () => {

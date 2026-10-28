@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   getSession,
   isPidAlive,
@@ -65,6 +65,26 @@ async function fetchJson(url: string): Promise<unknown> {
   }
 }
 
+async function browserCdp(session: BrowserSessionHandle, method: string, params = {}): Promise<any> {
+  const version = await fetchJson(`http://127.0.0.1:${session.cdpPort}/json/version`) as { webSocketDebuggerUrl: string };
+  const socket = new WebSocket(version.webSocketDebuggerUrl);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { socket.close(); reject(new Error(`CDP ${method} timed out`)); }, 5_000);
+    const finish = (error?: Error, result?: unknown) => {
+      clearTimeout(timer);
+      socket.close();
+      if (error) reject(error); else resolve(result);
+    };
+    socket.addEventListener("error", () => finish(new Error(`CDP ${method} failed`)), { once: true });
+    socket.addEventListener("open", () => socket.send(JSON.stringify({ id: 1, method, params })), { once: true });
+    socket.addEventListener("message", (event) => {
+      const message = JSON.parse(String(event.data));
+      if (message.id !== 1) return;
+      finish(message.error ? new Error(message.error.message) : undefined, message.result);
+    });
+  });
+}
+
 // The "no silent skip" guard: in CI (PICKFORGE_REQUIRE_BROWSER=1) the browser and
 // Xvfb prerequisites must actually be present, so this suite cannot pass by
 // silently skipping. Always runs.
@@ -103,6 +123,40 @@ describe.skipIf(!ready)("real headed Chrome under Xvfb", () => {
     }
     fs.rmSync(warmTmp, { recursive: true, force: true });
   }, WARM_UP_HOOK_TIMEOUT_MS);
+
+  it("persists a real Chrome login cookie across teardown and recovers after a crash", { timeout: 120_000 }, async () => {
+    const opts = { projectDir, registryEnv, env: spawnEnv, profile: "ops" };
+    const sessions: BrowserSessionHandle[] = [];
+    try {
+      const first = await createBrowserSession(opts);
+      sessions.push(first);
+      await browserCdp(first, "Storage.setCookies", { cookies: [{
+        name: "pickforge_test", value: "persisted", domain: "example.test", path: "/",
+        expires: Math.floor(Date.now() / 1000) + 3600,
+      }] });
+      await browserCdp(first, "Browser.close");
+      await vi.waitFor(() => expect(isPidAlive(first.browserPid)).toBe(false), { timeout: 5_000 });
+      await destroyBrowserSession(first.id, registryEnv);
+      expect(fs.existsSync(first.profileDir)).toBe(true);
+      const second = await createBrowserSession(opts);
+      sessions.push(second);
+      expect((await browserCdp(second, "Storage.getCookies")).cookies).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: "pickforge_test", value: "persisted" }),
+      ]));
+      await expect(createBrowserSession(opts)).rejects.toThrow(second.id);
+      process.kill(-second.browserPid, "SIGKILL");
+      await vi.waitFor(() => expect(isPidAlive(second.browserPid)).toBe(false));
+      expect(fs.lstatSync(path.join(second.profileDir, "SingletonLock")).isSymbolicLink()).toBe(true);
+      const third = await createBrowserSession(opts);
+      sessions.push(third);
+      expect(third.profileDir).toBe(first.profileDir);
+      expect((await browserCdp(third, "Storage.getCookies")).cookies).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: "pickforge_test", value: "persisted" }),
+      ]));
+    } finally {
+      for (const session of sessions) await destroyBrowserSession(session.id, registryEnv).catch(() => {});
+    }
+  });
 
   it(
     "starts from a deeply nested home without exceeding Chrome socket limits",

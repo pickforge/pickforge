@@ -45,6 +45,7 @@ import { watchDesktopSession } from "./watch.js";
 
 export interface SessionCreateOptions extends BaseCliOptions {
   type: LocalSessionRecipe;
+  profile?: string;
   width?: string;
   height?: string;
   vnc?: boolean;
@@ -81,6 +82,7 @@ function createRuntime(opts: SessionCreateOptions): LocalSessionCreateRuntime {
       create: () =>
         createBrowserSession({
           projectDir,
+          profile: opts.profile,
           width:
             opts.width === undefined
               ? undefined
@@ -150,6 +152,9 @@ export async function runSessionCreate(
 ): Promise<number> {
   // oxlint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
   return runReported(opts, async () => {
+    if (opts.profile !== undefined && opts.type !== "browser") {
+      throw new Error("--profile requires --type browser");
+    }
     const projectDir = resolveProjectDir(opts);
     const config = await loadConfig(projectDir);
     const viewerMode = config.viewer?.mode ?? "manual";
