@@ -180,9 +180,9 @@ npm or GitHub releases. (#398)
   browser teardown. (#321)
 - Session lock timeout and cancel errors name the session lock, not VNC, so
   they no longer mislead during Android or other teardown. (#326)
-- The native viewer waits until the X server applies its key and button
-  releases before it closes its input connection. A closed viewer no longer
-  leaves a key such as Ctrl held on the session display. (#407)
+- When the native viewer closes, it waits up to 1 second for the X server to
+  apply its key and button releases. A closed viewer no longer leaves a key
+  such as Ctrl held on the session display. (#407)
 - The noVNC viewer bridge no longer fails its readiness check on a busy
   host. (#301)
 - The `pickforge` binary reads `pubspec.yaml` with a safe-Rust YAML parser
@@ -192,12 +192,12 @@ npm or GitHub releases. (#398)
 
 ## Validation
 
-- Local gates on `5f031e1`, the 0.7.1 branch with main merged: frozen install,
+- Local gates on `31ba587`, the 0.7.1 branch with main merged: frozen install,
   typecheck, lint, `cargo fmt --check`, clippy with `-D warnings` for the
-  Linux and Windows targets, the Rust workspace tests on Xvfb (260 passed), and
+  Linux and Windows targets, the Rust workspace tests on Xvfb (262 passed), and
   `cargo build --release` with `pickforge 0.7.1` and `pickforge-viewer 0.7.1`
   version checks. The TypeScript suite ran with coverage and with the desktop,
-  browser and native viewer requirements on: 3,345 passed, 4 skipped, 90.25%
+  browser and native viewer requirements on: 3,367 passed, 4 skipped, 90.30%
   of lines covered. The build passed.
 - The opt-in live Flutter test passed with Flutter 3.41.6.
 - A device pass ran on Omarchy (Arch Linux) x86_64 with Flutter 3.41.6 and
