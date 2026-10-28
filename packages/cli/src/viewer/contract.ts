@@ -60,7 +60,7 @@ export const VIEWER_CLOSE_CODES = {
   shuttingDown: 4004,
 } as const;
 
-/** Longest viewer label in characters. The native viewer rejects longer ones. */
+/** Longest viewer label in characters. The native viewer cuts longer ones. */
 export const VIEWER_LABEL_MAX_CHARS = 256;
 const PROJECT_NAME_MAX_CHARS = 128;
 /** Control, format, bidi and line or paragraph separator characters. */
