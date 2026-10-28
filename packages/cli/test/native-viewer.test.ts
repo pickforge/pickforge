@@ -142,6 +142,11 @@ describe.skipIf(!available)("native viewer host", () => {
     expect(chunks.some((chunk) => chunk.includes("enabled=false"))).toBe(true);
     expect(chunks.filter((chunk) => chunk.includes("window.resize")).length).toBe(2);
     expect(chunks.some((chunk) => chunk.includes("focuswindow"))).toBe(false);
+    // The opacity rule outlives placement and ends with the host.
+    expect(chunks.some((chunk) => chunk.includes("-opacity") && chunk.includes("enabled=false"))).toBe(false);
+    await stopNativeViewerHost(sessionId, env);
+    await eventually(() => fakes.calls().some((entry) => entry.tool === "hyprctl" &&
+      String(entry.args).includes("-opacity") && String(entry.args).includes("enabled=false")));
   }, 20_000);
 
   it("propagates session end while leaving the last-frame viewer open", async () => {

@@ -142,7 +142,9 @@ function sequence(): string[] {
     const args = call.args as string[];
     if (args[2] === "eval") {
       const lua = args[3] as string;
-      if (lua.includes("enabled=false")) return "disable";
+      const opacity = lua.includes("-opacity\"") ? "-opacity" : "";
+      if (lua.includes("enabled=false")) return `disable${opacity}`;
+      if (opacity !== "") return "opacity";
       return lua.includes("hl.dsp.window.move") ? "place" : "install";
     }
     return `query:${args[3]}`;
@@ -298,18 +300,19 @@ describe("launchViewerWindow", () => {
 
     expect(result.adapter).toBe("hyprland");
     const order = steps();
-    expect(order.slice(0, 5)).toEqual([
+    expect(order.slice(0, 6)).toEqual([
       "query:status",
       "query:monitors",
       "install",
+      "opacity",
       "record",
       "record+pid",
     ]);
     expectStartedAfter(["install", "record"]);
     // Polls until the window maps, then the disable. The rule placed it, so nothing moves it.
     expect(order.at(-1)).toBe("disable");
-    expect(order.slice(5, -1).length).toBeGreaterThan(0);
-    expect(order.slice(5, -1).every((step) => step === "query:clients")).toBe(true);
+    expect(order.slice(6, -1).length).toBeGreaterThan(0);
+    expect(order.slice(6, -1).every((step) => step === "query:clients")).toBe(true);
     expect(order.filter((step) => step === "disable")).toHaveLength(1);
     const install = fakes.calls().find((call) => (call.args as string[])[2] === "eval");
     expect((install?.args as string[] | undefined)?.[3]).toContain("(monitor_h-216-64)");
@@ -361,7 +364,7 @@ describe("launchViewerWindow", () => {
       launchViewerWindow(options({ env: hyprEnv(), browser: { kind: "chromium", name: "chromium", binary: missing } })),
     ).rejects.toThrow(/ENOENT/);
 
-    expect(sequence()).toEqual(["query:status", "query:monitors", "install", "record", "disable"]);
+    expect(sequence()).toEqual(["query:status", "query:monitors", "install", "opacity", "record", "disable", "disable-opacity"]);
     expect(removeViewerLaunch).toHaveBeenCalledWith("desk-aaaaaa11", LAUNCH_ID, undefined);
   });
 
@@ -372,7 +375,7 @@ describe("launchViewerWindow", () => {
 
     await expect(launchViewerWindow(options({ env: hyprEnv() }))).rejects.toThrow(/disk full/);
 
-    expect(sequence()).toEqual(["query:status", "query:monitors", "install", "disable"]);
+    expect(sequence()).toEqual(["query:status", "query:monitors", "install", "opacity", "disable", "disable-opacity"]);
     expect(fakes.calls().some((call) => call.tool === "browser")).toBe(false);
   });
 

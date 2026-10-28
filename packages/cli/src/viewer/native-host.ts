@@ -15,7 +15,7 @@ import {
 import { viewerWindowSizes, viewerWindowClass } from "./launch.js";
 import {
   detectHyprland, hyprlandRuleName, viewerClassPattern, installViewerRule,
-  disableViewerRule, waitForViewerWindow, applyHyprlandWindowMode,
+  disableViewerRule, disableViewerOpacityRule, waitForViewerWindow, applyHyprlandWindowMode,
 } from "./hyprland.js";
 
 /** One bounded JSON object per line. Unknown discriminants are ignored by the caller. */
@@ -285,6 +285,9 @@ export async function runNativeViewerHost(options: {
       viewerPid: viewerIdentity.pid, viewerStartTicks: viewerIdentity.startTicks, ...viewerIdentity, ...sizes, hyprland,
     }, options.viewerVersion, env).run();
   } finally {
-    if (hyprland !== undefined) await disableViewerRule(hyprland, ruleName);
+    if (hyprland !== undefined) {
+      await disableViewerRule(hyprland, ruleName);
+      await disableViewerOpacityRule(hyprland, ruleName);
+    }
   }
 }
