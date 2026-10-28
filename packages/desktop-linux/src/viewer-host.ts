@@ -6,7 +6,7 @@ import {
   getSession, startDaemon, stopOwnedDaemonGroup, processIdentityMatches,
   readProcessIdentity, sessionDataDir, type DirHandle, type EnvLike, type ProcessIdentity,
 } from "@pickforge/lab-core";
-import { withSessionVncLock, SESSION_VNC_LOCK_TIMEOUT_MS } from "./session.js";
+import { withSessionVncLock, recoverStaleTakeoverLocked, SESSION_VNC_LOCK_TIMEOUT_MS } from "./session.js";
 import { verifyOwnedDisplayTarget } from "./x11-target.js";
 import {
   withViewerDir, readViewerPrivateFile, sessionViewerDir, readViewerLaunchRecord,
@@ -217,6 +217,16 @@ async function requireViewerDisplay(sessionId: string, env: EnvLike): Promise<vo
   }
 }
 
+/**
+ * A `--control` host takes the lease before it publishes readiness, while the
+ * caller still holds the session lock. Recovering a stale lease needs that
+ * lock, so it happens here first.
+ */
+async function recoverStaleLeaseLocked(sessionId: string, env: EnvLike): Promise<void> {
+  const record = await getSession(sessionId, env);
+  if (record !== undefined) await recoverStaleTakeoverLocked(sessionId, record, env);
+}
+
 /** Start one detached host per session, using the caller's graphical environment. */
 export async function startNativeViewerHost(options: {
   sessionId: string; cliEntry: string; binary: string; version: string;
@@ -226,6 +236,7 @@ export async function startNativeViewerHost(options: {
   sessionViewerDir(options.sessionId, env);
   return withSessionVncLock(options.sessionId, env, async () => {
     await requireViewerDisplay(options.sessionId, env);
+    if (options.control === true) await recoverStaleLeaseLocked(options.sessionId, env);
     const previous = await findNativeViewerHost(options.sessionId, env);
     if (options.control !== true) {
       if (previous?.version === options.version) return previous;

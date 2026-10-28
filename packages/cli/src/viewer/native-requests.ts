@@ -93,6 +93,9 @@ export class NativeRequests {
 
   returned(reason: ControlRevokeReason): void {
     this.emit({ event: "controlReturned", reason, outcome: "returned" });
+    // While the viewer closes, only a human return ends requests as returned.
+    // A crash, stop or session end leaves them to close() as viewer_closed.
+    if (this.closing && reason !== "returned") return;
     for (const [requestId, request] of this.requests) {
       if (!request.taken || request.state !== undefined && "outcome" in request.state) continue;
       clearTimeout(request.timer);

@@ -34,6 +34,16 @@ describe("native attention request regressions", () => {
     expect(requests.state(id)).toMatchObject({ outcome: "returned" });
   });
 
+  it.each(["stopping", "session-ended"] as const)("completes a taken request as viewer_closed after %s while closing", async (reason) => {
+    const { requests } = fixture();
+    const id = await requests.request("Help", 5_000);
+    requests.taken();
+    requests.beginClose();
+    requests.returned(reason);
+    requests.close();
+    expect(requests.state(id)).toMatchObject({ outcome: "viewer_closed" });
+  });
+
   it.each(["expanded", "fullscreen"] as const)("preserves an existing %s window on cancel and timeout", async (mode) => {
     vi.useFakeTimers();
     const { requests, place } = fixture(mode);
