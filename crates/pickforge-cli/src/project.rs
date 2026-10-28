@@ -101,6 +101,14 @@ fn sanitize_slug(name: &str) -> String {
     slug.chars().take(PROJECT_ID_SLUG_LENGTH).collect()
 }
 
+/// Lowercase hex of the SHA-256 digest of `bytes`.
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ProjectIdentityError {
     #[error("project path is not valid UTF-8 and cannot match the TypeScript project-id contract")]
@@ -115,8 +123,7 @@ pub fn derive_project_id(canonical_path: &Path) -> Result<String, ProjectIdentit
     let canonical = canonical_path
         .to_str()
         .ok_or(ProjectIdentityError::NonUtf8Path)?;
-    let digest = Sha256::digest(canonical.as_bytes());
-    let hash: String = format!("{digest:x}")
+    let hash: String = sha256_hex(canonical.as_bytes())
         .chars()
         .take(PROJECT_ID_HASH_LENGTH)
         .collect();

@@ -15,7 +15,7 @@ import {
 import { viewerWindowSizes, viewerWindowClass } from "./launch.js";
 import {
   detectHyprland, hyprlandRuleName, viewerClassPattern, installViewerRule,
-  disableViewerRule, waitForViewerWindow, applyHyprlandWindowMode,
+  disableViewerRule, disableViewerOpacityRule, waitForViewerWindow, applyHyprlandWindowMode,
 } from "./hyprland.js";
 
 /** One bounded JSON object per line. Unknown discriminants are ignored by the caller. */
@@ -101,11 +101,11 @@ class NativeHost {
   }
 
   private async setMode(next: NativeViewerMode): Promise<void> {
-    let size: ViewerWindowSize = this.record[next === "thumbnail" ? "thumbnail" : "expanded"];
+    let size: ViewerWindowSize | undefined;
     if (this.record.hyprland !== undefined && !await applyHyprlandWindowMode(this.record, next, (placed) => { size = placed; })) {
       throw new Error("Native viewer window could not be placed");
     }
-    this.send({ cmd: "setMode", mode: next, width: size.width, height: size.height });
+    this.send({ cmd: "setMode", mode: next, ...(size === undefined ? {} : { width: size.width, height: size.height }) });
     this.mode = next;
   }
 
@@ -207,7 +207,7 @@ class NativeHost {
       this.stopped = true;
       this.sessionMonitor.abort();
       if (this.timer !== undefined) clearInterval(this.timer);
-      this.send({ cmd: "sessionEnded" });
+      this.send({ cmd: "status", code: "stopping" });
       this.send({ cmd: "shutdown" });
       await Promise.race([this.exit, sleep(300)]);
       for (const signal of ["SIGTERM", "SIGKILL"] as const) {
@@ -285,6 +285,9 @@ export async function runNativeViewerHost(options: {
       viewerPid: viewerIdentity.pid, viewerStartTicks: viewerIdentity.startTicks, ...viewerIdentity, ...sizes, hyprland,
     }, options.viewerVersion, env).run();
   } finally {
-    if (hyprland !== undefined) await disableViewerRule(hyprland, ruleName);
+    if (hyprland !== undefined) {
+      await disableViewerRule(hyprland, ruleName);
+      await disableViewerOpacityRule(hyprland, ruleName);
+    }
   }
 }

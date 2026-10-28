@@ -307,6 +307,22 @@ export function buildRuleDisableLua(ruleName: string): string {
   return `hl.window_rule({name=${luaString(ruleName)}, enabled=false})`;
 }
 
+function opacityRuleName(ruleName: string): string {
+  return `${ruleName}-opacity`;
+}
+
+/**
+ * Lua for a rule that keeps the viewer fully opaque when the config dims
+ * other windows. Hyprland re-evaluates opacity while the window lives, so this
+ * rule stays enabled after the launch rule is disabled.
+ */
+export function buildOpacityRuleLua(ruleName: string, classPattern: string): string {
+  return (
+    `hl.window_rule({name=${luaString(opacityRuleName(ruleName))}, match={class=${luaString(classPattern)}}, ` +
+    `opacity="1 override 1 override"})`
+  );
+}
+
 async function focusedMonitor(ctx: HyprlandContext): Promise<RuleMonitor> {
   try {
     const monitors = await hyprctlJson(ctx, "monitors");
@@ -330,12 +346,20 @@ export async function installViewerRule(
   size: ViewerWindowSize,
 ): Promise<boolean> {
   const monitor = await focusedMonitor(ctx);
-  return hyprctlEval(ctx, buildRuleInstallLua(ruleName, classPattern, size, monitor));
+  if (!await hyprctlEval(ctx, buildRuleInstallLua(ruleName, classPattern, size, monitor))) return false;
+  // Opacity is cosmetic, so a refused opacity rule does not fail placement.
+  await hyprctlEval(ctx, buildOpacityRuleLua(ruleName, classPattern));
+  return true;
 }
 
 /** Disable the named launch rule. It stays registered until a config reload. */
 export async function disableViewerRule(ctx: HyprlandContext, ruleName: string): Promise<boolean> {
   return hyprctlEval(ctx, buildRuleDisableLua(ruleName));
+}
+
+/** Disable the opacity rule once the viewer window is gone. */
+export async function disableViewerOpacityRule(ctx: HyprlandContext, ruleName: string): Promise<boolean> {
+  return hyprctlEval(ctx, buildRuleDisableLua(opacityRuleName(ruleName)));
 }
 
 export interface WaitForViewerWindowOptions {

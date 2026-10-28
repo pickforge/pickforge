@@ -11,6 +11,8 @@ import {
 } from "@pickforge/lab-android";
 import {
   createBrowserSession,
+  listBrowserProfiles,
+  BROWSER_PROFILE_NAME,
   destroyBrowserSession,
   getBrowserSessionStatus,
   teardownBrowserSession,
@@ -72,6 +74,7 @@ function createRuntime(
     vnc?: boolean;
     vncControl?: boolean;
     inheritHome?: boolean;
+    profile?: string;
     avdName?: string;
     coldBoot?: boolean;
     readOnly?: boolean;
@@ -102,6 +105,7 @@ function createRuntime(
           width: args.width,
           height: args.height,
           signal: lifecycle.signal,
+          profile: args.profile,
         }),
     },
     android: {
@@ -172,12 +176,16 @@ export async function createSessions(
     vnc?: boolean;
     vncControl?: boolean;
     inheritHome?: boolean;
+    profile?: string;
     avdName?: string;
     coldBoot?: boolean;
     readOnly?: boolean;
   },
   lifecycle: SessionLifecycle = {},
 ): Promise<LocalSessionSummary[]> {
+  if (args.profile !== undefined && args.type !== "browser") {
+    throw new Error("profile requires type browser");
+  }
   await reapDeadRunningSessions(ctx.env, reaperRuntime(ctx));
   return createLocalSessions(
     args.type ?? "desktop",
@@ -256,6 +264,7 @@ function registerSessionCreateTool(
         inheritHome: z.boolean().optional().describe(
           "Desktop only: consent to the caller's HOME/XDG homes for this session (immutable). Default is private. Human takeover remains available and pauses agent actions.",
         ),
+        profile: z.string().regex(BROWSER_PROFILE_NAME).optional().describe("Browser only: persistent named login profile"),
         avdName: z.string().min(1).optional().describe("Android AVD name"),
         coldBoot: z
           .boolean()
@@ -386,6 +395,12 @@ export function registerSessionTools(
   server: McpServer,
   ctx: ServerContext,
 ): void {
+  server.registerTool("profile_list", {
+    title: "List browser profiles",
+    description: "List persistent browser profiles with size, last use, and holding session.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true, destructiveHint: false },
+  }, () => runTool(async () => ({ data: { profiles: await listBrowserProfiles(ctx.env) } })));
   registerSessionCreateTool(server, ctx);
   registerSessionStatusTool(server, ctx);
   registerSessionDestroyTool(server, ctx);

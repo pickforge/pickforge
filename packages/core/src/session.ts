@@ -63,7 +63,8 @@ export interface BrowserSessionInfo {
   browserPid: number;
   browserStartTimeTicks: number;
   binaryPath: string;
-  profileMode: "ephemeral";
+  profileMode: "ephemeral" | "named";
+  profileName?: string;
   profileDir: string;
   cdpPort?: number;
   /**

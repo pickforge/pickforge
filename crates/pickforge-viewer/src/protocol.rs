@@ -231,7 +231,7 @@ impl<R: BufRead> LineReader<R> {
                 return Ok(None);
             }
             let newline = available.iter().position(|&b| b == b'\n');
-            let take = newline.map_or(available.len(), |at| at);
+            let take = newline.unwrap_or(available.len());
             if !self.overflow {
                 if self.buf.len() + take > MAX_LINE + 1 {
                     self.overflow = true;

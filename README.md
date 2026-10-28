@@ -217,7 +217,7 @@ never authorization for actions outside the session.
 
 ### Session logs
 
-Desktop, browser and Android logs stay in the session directory after teardown. Runtime sockets, locks, permits, profiles and temporary data are removed once processes are confirmed stopped. Failed starts keep their logs and error record; cleanup failures keep runtime data needed for retry.
+Desktop, browser and Android logs stay in the session directory after teardown. Runtime sockets, locks, permits, ephemeral profiles and temporary data are removed once processes are confirmed stopped. Failed starts keep their logs and error record; cleanup failures keep runtime data needed for retry.
 
 Logs are never pruned automatically. Run `pickforge-lab session prune --older-than 7d` or `pickforge-lab session prune --all-stopped` to remove retained logs. Age starts at successful teardown (`stopped.json`), not session creation. Destroy failed sessions explicitly before pruning; their failure record is retained in `stopped.json`. Pruning skips directories with registry records, teardown locks, unknown data or symlinks, and older directories without retention metadata.
 
@@ -631,6 +631,28 @@ web traffic remain available. CDP still binds to `127.0.0.1` on an allocated
 port; VNC remains loopback-only and read-only by default. Inbound loopback
 binding does not restrict outbound traffic.
 
+Use `pickforge-lab session create --type browser --profile ops` to keep logins
+between sessions. MCP `session_create` accepts `profile: "ops"` with
+`type: "browser"`. Profiles live in `~/.pickforge/lab/profiles/<name>` under
+the same `PICKFORGE_HOME` override as sessions. Names must match
+`[a-z0-9][a-z0-9-]{0,31}`. Profile directories use mode 0700. Pickforge refuses
+symlinks, foreign owners, and group or other permission bits.
+
+Only one live session can hold a profile. A refusal names that session.
+Teardown and crash recovery keep named profiles. Sessions without `--profile`
+keep ephemeral profiles. Stale Chrome singleton files are cleared only after
+the old owner is confirmed dead.
+
+`pickforge-lab profile list` shows name, size in bytes, last use, and holding
+session. `pickforge-lab profile delete ops` asks for confirmation and refuses
+held profiles. Non-interactive deletion requires `--yes`. Both commands accept
+`--json`. MCP offers the read-only `profile_list` tool and no delete tool.
+
+Profiles store cookies, login tokens, history, local storage, and site settings.
+Pickforge always selects Chrome's basic store. Cookies are encrypted with a
+fixed key, so only file permissions protect them. Keep banking, payment, and
+main email accounts out of agent profiles. See [SECURITY.md](SECURITY.md).
+
 The default browser arguments reduce vendor background traffic:
 `--disable-background-networking` disables selected background services
 (including Safe Browsing service traffic, extension updates and metrics upload),
@@ -822,7 +844,7 @@ pickforge-lab agents add --name my-agent --mcp-command "pickforge-lab mcp serve"
 | Android | `android start`, `android install-apk <apk> [--wait-ready <s>]`, `android launch-app <pkg> [--wait-ready <s>]`, `android screenshot`, `android tap <x> <y>`, `android type <text>`, `android back`, `android home`, `android ui-tree`, `android logcat`, `android adb [args...]` |
 | Artifacts | `artifacts list`, `artifacts open <runId>`, `artifacts report [runId]` (shareable HTML path and size; JSON includes `shareReportPath`, `shareReportBytes`, `reportPath`, `outcome`, `device`), `artifacts export [runId]` (glyph frames, pointer track, optional `--video` slideshow) |
 | Agents | `agents list`, `agents install <agent> [--browser]`, `agents link <agent> [--browser]`, `agents unlink <agent>`, `agents doctor`, `agents add` |
-| Browser | `browser devtools-mcp` |
+| Browser | `browser devtools-mcp`, `profile list`, `profile delete <name> [--yes]` |
 | MCP | `mcp serve` |
 
 Session types: `desktop` (Xvfb, optional VNC), `android` (emulator on the dedicated AVD), `desktop+android`, and `browser` (isolated headed Chrome with loopback CDP). Most commands accept `--json` for machine-readable output and `--project-dir` to target another project.
