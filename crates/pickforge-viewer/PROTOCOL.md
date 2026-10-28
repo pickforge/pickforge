@@ -132,13 +132,16 @@ Error codes in the `error` event: `display-refused`, `xvfb-mismatch`,
   characters. It drops one trailing line break (`\n`, `\r\n` or `\r`), types
   tabs and other line breaks as Tab and Return, and refuses text with other
   control characters. A held Control, Alt or Super is released for each
-  character, so text never triggers a shortcut. It types 32 characters per
+  character, Tab and line break, and a held Shift for each Tab and line
+  break, so text never triggers a shortcut. It types 32 characters per
   step and checks control before each step, so a revoke, an expired grant,
   Return control, collapse, close, stdin end of file or session end stops it
-  within one step; a read still running then asks for no content. A click
-  while a paste runs does nothing, and while a read that never answered
-  still runs, a click shows "Paste unavailable". Paste sends no event, and
-  the text never crosses stdio.
+  within one step. A read still running then never reads the content. On
+  Wayland, a stop during the library's setup can still let the source write
+  into a pipe that the viewer closes unread. A click while a paste runs does
+  nothing, and while a read that never answered still runs, a click shows
+  "Paste unavailable". Paste sends no event, and the text never crosses
+  stdio.
 - Attention banner: at the top of the image, below the bar. The message wraps
   to at most three lines and ends with an ellipsis when it is longer. The
   thumbnail shows the message without the button, because a thumbnail click

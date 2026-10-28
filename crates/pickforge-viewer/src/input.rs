@@ -41,6 +41,8 @@ pub const MAX_TEXT_CHARS: usize = 4096;
 const CLOSE_SYNC: Duration = Duration::from_secs(1);
 /// The Control, Mod1 (Alt) and Mod4 (Super) state bits.
 const SHORTCUT_MASK: u8 = 0x04 | 0x08 | 0x40;
+/// The Shift state bit.
+const SHIFT_MASK: u8 = 0x01;
 
 #[derive(Debug)]
 pub enum InjectError {
@@ -721,10 +723,30 @@ impl<C: Clock> Injector<C> {
         match stroke {
             Stroke::Key(keysym) => {
                 let code = self.code_for(keysym, |kb, group| kb.find_keysym(group, keysym))?;
-                self.tap(code)
+                // A Tab or line break in text is never a shortcut or a
+                // Shift+Tab either.
+                let held = self.down_keycodes()?;
+                let release = self.state()? as u8
+                    & self.releasable_mask(&held)
+                    & (SHORTCUT_MASK | SHIFT_MASK);
+                let changes = self.modifier_changes(0, release, &held);
+                self.tap_with(code, &changes)
             }
             Stroke::Char(cp) => self.type_codepoint(cp),
         }
+    }
+
+    /// Taps `code` with modifier `changes` applied, then undoes them.
+    fn tap_with(&mut self, code: u8, changes: &[(u8, bool)]) -> Result<(), InjectError> {
+        for &(code, pressed) in changes {
+            self.send_key(code, pressed)?;
+        }
+        self.tap(code)?;
+        for &(code, pressed) in changes.iter().rev() {
+            self.send_key(code, !pressed)?;
+        }
+        self.conn.flush()?;
+        Ok(())
     }
 
     fn tap(&mut self, code: u8) -> Result<(), InjectError> {
@@ -761,15 +783,7 @@ impl<C: Clock> Injector<C> {
         // level does not use is released for the character.
         plan.release |= state as u8 & releasable & SHORTCUT_MASK & !key_type.mask;
         let changes = self.modifier_changes(plan.press, plan.release, &held);
-        for &(code, pressed) in &changes {
-            self.send_key(code, pressed)?;
-        }
-        self.tap(found.code)?;
-        for &(code, pressed) in changes.iter().rev() {
-            self.send_key(code, !pressed)?;
-        }
-        self.conn.flush()?;
-        Ok(())
+        self.tap_with(found.code, &changes)
     }
 
     /// Keycodes the server reports down now.
