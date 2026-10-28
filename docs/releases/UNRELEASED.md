@@ -168,6 +168,9 @@ npm or GitHub releases. (#398)
   browser teardown. (#321)
 - Session lock timeout and cancel errors name the session lock, not VNC, so
   they no longer mislead during Android or other teardown. (#326)
+- The native viewer waits until the X server applies its key and button
+  releases before it closes its input connection. A closed viewer no longer
+  leaves a key such as Ctrl held on the session display. (#407)
 - The noVNC viewer bridge no longer fails its readiness check on a busy
   host. (#301)
 - The `pickforge` binary reads `pubspec.yaml` with a safe-Rust YAML parser

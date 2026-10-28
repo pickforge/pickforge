@@ -14,6 +14,9 @@ use pickforge_viewer::capture::connect_display;
 use pickforge_viewer::input::{read_keyboard, Button, Clock, InjectError, Injector};
 use pickforge_viewer::keysyms::named;
 use std::cell::Cell;
+use std::io::Write;
+use std::os::fd::AsFd;
+use std::os::unix::net::UnixStream;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use x11rb::protocol::Event;
@@ -204,8 +207,9 @@ fn revoke_releases_held_input_and_stops_sending() {
     injector.motion(100, 100).unwrap();
     injector.button(Button::Left, true).unwrap();
     listener.poll();
-    assert!(!listener.down_keys().is_empty());
-    assert_ne!(listener.buttons_down(), 0);
+    // The server can answer the listener before it handles the injector's presses.
+    assert!(wait_until(WAIT, || !listener.down_keys().is_empty()
+        && listener.buttons_down() != 0));
 
     injector.revoke().unwrap();
     assert_eq!(listener.settled_state(), (Vec::new(), 0));
@@ -268,6 +272,48 @@ fn drop_releases_held_input() {
     assert_eq!(injector.held_buttons().collect::<Vec<_>>(), vec![2]);
     drop(injector);
     assert_eq!(listener.settled_state(), (Vec::new(), 0));
+}
+
+#[test]
+fn drop_does_not_hang_on_a_stopped_server() {
+    if !xvfb_ready("drop_stopped_server") {
+        return;
+    }
+    let xvfb = Xvfb::start(SCREEN);
+    let (mut injector, _clock) = granted(xvfb.display);
+    injector.key(named::CONTROL_L, true).unwrap();
+    unsafe { libc::kill(xvfb.pid as i32, libc::SIGSTOP) };
+    let started = Instant::now();
+    drop(injector);
+    let took = started.elapsed();
+    unsafe { libc::kill(xvfb.pid as i32, libc::SIGCONT) };
+    assert!(took < Duration::from_secs(3), "drop took {took:?}");
+}
+
+#[test]
+fn drop_does_not_hang_on_a_full_send_queue() {
+    if !xvfb_ready("drop_full_queue") {
+        return;
+    }
+    let xvfb = Xvfb::start(SCREEN);
+    let clock = FakeClock(Rc::new(Cell::new(Instant::now())));
+    let conn = connect_display(xvfb.display).unwrap();
+    let fd = conn.stream().as_fd().try_clone_to_owned().unwrap();
+    let mut injector = Injector::with_clock(conn, clock.clone()).unwrap();
+    injector
+        .grant("lease-1", clock.now() + Duration::from_secs(10))
+        .unwrap();
+    injector.key(named::CONTROL_L, true).unwrap();
+    unsafe { libc::kill(xvfb.pid as i32, libc::SIGSTOP) };
+    // A stopped server reads nothing, so filling the queue makes writes block.
+    let mut socket = UnixStream::from(fd);
+    socket.set_nonblocking(true).unwrap();
+    while socket.write(&[0; 4096]).is_ok() {}
+    let started = Instant::now();
+    drop(injector);
+    let took = started.elapsed();
+    unsafe { libc::kill(xvfb.pid as i32, libc::SIGCONT) };
+    assert!(took < Duration::from_secs(3), "drop took {took:?}");
 }
 
 #[test]

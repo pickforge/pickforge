@@ -14,7 +14,11 @@ use crate::keymap::{
 };
 use crate::keysyms::{binding_symbols, codepoint_to_keysym, is_lock, named};
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::time::Instant;
+use std::net::Shutdown;
+use std::os::fd::AsFd;
+use std::os::unix::net::UnixStream;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::{Duration, Instant};
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::errors::{ConnectionError, ReplyError};
 use x11rb::protocol::xkb::{self, ConnectionExt as _};
@@ -33,6 +37,8 @@ pub const MAX_SCROLL_STEPS: u32 = 32;
 pub const MAX_BINDINGS: usize = 64;
 /// Longest text one call types, in characters.
 pub const MAX_TEXT_CHARS: usize = 4096;
+/// Longest a drop waits for the server to apply its releases.
+const CLOSE_SYNC: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
 pub enum InjectError {
@@ -527,6 +533,29 @@ impl<C: Clock> Injector<C> {
         Ok(())
     }
 
+    /// Releases held input and waits for a reply, so the server applies the
+    /// releases before the connection closes. The server can discard
+    /// requests that a closed connection left unread. A watchdog shuts the
+    /// socket down after `CLOSE_SYNC`, so a stalled or grabbed server cannot
+    /// hang the writes or the wait.
+    fn release_before_close(&mut self) {
+        let Ok(fd) = self.conn.stream().as_fd().try_clone_to_owned() else {
+            let _ = self.release_all();
+            return;
+        };
+        let socket = UnixStream::from(fd);
+        let (done, wait) = mpsc::channel::<()>();
+        let watchdog = std::thread::spawn(move || {
+            if wait.recv_timeout(CLOSE_SYNC) == Err(RecvTimeoutError::Timeout) {
+                let _ = socket.shutdown(Shutdown::Both);
+            }
+        });
+        let _ = self.release_all();
+        let _ = self.conn.get_input_focus().map(|cookie| cookie.reply());
+        let _ = done.send(());
+        let _ = watchdog.join();
+    }
+
     fn send_key(&mut self, code: u8, pressed: bool) -> Result<(), InjectError> {
         let kind = if pressed {
             xproto::KEY_PRESS_EVENT
@@ -786,7 +815,7 @@ impl<C: Clock> crate::control::Sink for Injector<C> {
 
 impl<C: Clock> Drop for Injector<C> {
     fn drop(&mut self) {
-        let _ = self.release_all();
+        self.release_before_close();
     }
 }
 
