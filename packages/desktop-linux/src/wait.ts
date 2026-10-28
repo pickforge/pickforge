@@ -14,7 +14,10 @@ export const MAX_STABLE_MS = 60_000;
  * Filesystem and scheduling delays are additional, not covered by this allowance. */
 export const WAIT_SUBPROCESS_KILL_GRACE_MS = 4_000;
 const SAMPLE_GAP_MS = 100;
-const WINDOW_QUERY_MS = 5_000;
+// One sample ends before the human lease drain timeout, so a stalled capture
+// never holds its agent permit long enough to block a takeover.
+const SAMPLE_MS = 3_000;
+const WINDOW_QUERY_MS = SAMPLE_MS;
 
 export type DesktopWaitReason = "changed" | "stable" | "window" | "timeout";
 
@@ -88,8 +91,9 @@ async function samplePixels(
   deadline: number,
   env: EnvLike | undefined,
 ): Promise<string> {
-  const timeoutMs = remainingMs(deadline);
-  observationBudget(deadline);
+  const sampleDeadline = Math.min(deadline, Date.now() + SAMPLE_MS);
+  const timeoutMs = remainingMs(sampleDeadline);
+  observationBudget(sampleDeadline);
   await screenshot({
     display,
     outPath,
@@ -97,8 +101,19 @@ async function samplePixels(
     timeoutMs,
     countWindows: false,
   });
-  observationBudget(deadline);
-  return digestFile(outPath, deadline, env);
+  observationBudget(sampleDeadline);
+  return digestFile(outPath, sampleDeadline, env);
+}
+
+/** One pixel sample under its own permit, retried after a stalled capture until the wait deadline. */
+async function sampleDigest(opts: DesktopWaitOptions, samplePath: string, deadline: number): Promise<string> {
+  for (;;) {
+    try {
+      return await withSamplePermit(opts, () => samplePixels(opts.display, samplePath, deadline, opts.env));
+    } catch (error) {
+      if (!timedOutError(error) || remainingMs(deadline) <= 0) throw error;
+    }
+  }
 }
 
 function withSamplePermit<T>(opts: DesktopWaitOptions, sample: () => Promise<T>): Promise<T> {
@@ -142,7 +157,7 @@ async function waitForChange(
     try {
       await scratch.verify("sample.png");
       await opts.busyCheck?.();
-      const digest = await withSamplePermit(opts, () => samplePixels(opts.display, samplePath, deadline, opts.env));
+      const digest = await sampleDigest(opts, samplePath, deadline);
       await scratch.verify("sample.png");
       samples += 1;
       if (remainingMs(deadline) <= 0) return timeoutResult(samples);
@@ -173,7 +188,7 @@ async function waitForStable(
     try {
       await scratch.verify("sample.png");
       await opts.busyCheck?.();
-      const digest = await withSamplePermit(opts, () => samplePixels(opts.display, samplePath, deadline, opts.env));
+      const digest = await sampleDigest(opts, samplePath, deadline);
       await scratch.verify("sample.png");
       const now = Date.now();
       samples += 1;

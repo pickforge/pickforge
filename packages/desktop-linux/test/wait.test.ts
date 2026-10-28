@@ -283,3 +283,18 @@ it.each(["changed", "stable", "window"] as const)("stops a running %s wait when 
   await expect(desktopWait({ display: ":219", mode, timeoutMs: 5_000, env, busyCheck })).rejects.toThrow(HumanControlActiveError);
   expect(checks).toBe(3);
 });
+
+it("ends a stalled sample before the takeover drain timeout, so the lease drains", async () => {
+  const baseline = path.join(tmp, "base.png");
+  fs.writeFileSync(baseline, encodePng(1, 1, rgb(3, 3, 3)));
+  const bin = writeCapture(`for a in "$@"; do out="$a"; done\n/bin/sleep 30\n/bin/cp "${baseline}" "$out"`);
+  const env = { ...toolEnv(bin), PICKFORGE_HOME: path.join(tmp, "home") };
+  const { id } = await createSession({ type: "desktop", status: "running", projectDir: tmp }, env);
+  const waiting = desktopWait({ display: ":219", mode: { type: "changed", baselinePath: baseline }, timeoutMs: 60_000, env, sessionId: id });
+  const outcome = waiting.then(() => "resolved", (error: unknown) => error);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const started = Date.now();
+  await acquireHumanLease(id, env);
+  expect(Date.now() - started).toBeLessThan(5_000);
+  expect(await outcome).toBeInstanceOf(HumanControlActiveError);
+}, 20_000);

@@ -60,7 +60,7 @@ export type ViewerControlEvent =
   | { event: "requestEnded"; requestId: string; outcome: "timeout" | "cancelled" };
 
 export function validTakeoverMessage(message: unknown): message is string {
-  return typeof message === "string" && Array.from(message).length <= 500 && !/[\p{Cc}\u200e\u200f\u202a-\u202e\u2066-\u2069]/u.test(message);
+  return typeof message === "string" && Array.from(message).length <= 500 && !/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(message);
 }
 export function validTakeoverTimeout(timeoutMs: unknown): timeoutMs is number {
   return Number.isSafeInteger(timeoutMs) && (timeoutMs as number) >= 0 && (timeoutMs as number) <= 3_600_000;

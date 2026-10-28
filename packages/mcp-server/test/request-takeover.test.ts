@@ -275,7 +275,7 @@ describe("request_takeover", () => {
     }).toBe(true);
   });
 
-  it.each([...[0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069].map((code) => ({ message: `Help${String.fromCodePoint(code)}` })), { message: "a".repeat(501) }, { message: "line\nbreak" }, { message: "Help", timeoutMs: -1 },
+  it.each([...[0x200b, 0x200d, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2028, 0x2029, 0x2066, 0x2067, 0x2068, 0x2069, 0xfeff, 0xe0041].map((code) => ({ message: `Help${String.fromCodePoint(code)}` })), { message: "a".repeat(501) }, { message: "line\nbreak" }, { message: "Help", timeoutMs: -1 },
     { message: "Help", timeoutMs: 3_600_001 }, { message: "Help", timeoutMs: 1.5 }])("rejects invalid arguments %j", async (args) => {
     const { client } = await connect();
     expect((await client.callTool({ name: "request_takeover", arguments: args })).isError).toBe(true);

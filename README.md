@@ -594,7 +594,7 @@ the native viewer with control. Without a usable native viewer, it opens
 While a human holds control, desktop input, launch, exec, screenshots, waits,
 and the DevTools relay fail closed with a stable busy error.
 `takeover_status` reports the lease. MCP `request_takeover` asks the human for
-help with a message of at most 500 characters, without control characters.
+help with a message of at most 500 characters, without control, formatting or line separator characters.
 It expands the viewer, shows the message, and sends a desktop notification
 without taking focus. Never include secrets in the message.
 Only `viewer.mode: "auto"` lets MCP open a missing viewer, with a matching

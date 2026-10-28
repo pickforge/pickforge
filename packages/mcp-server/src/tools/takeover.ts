@@ -144,7 +144,7 @@ function registerRequestTool(server: McpServer, ctx: ServerContext): void {
       "Only viewer.mode auto may open a viewer. Timeout and cancellation leave live human control unchanged.",
     inputSchema: {
       ...sessionArg,
-      message: z.string().refine(validTakeoverMessage, "Use at most 500 characters without control or bidirectional formatting characters"),
+      message: z.string().refine(validTakeoverMessage, "Use at most 500 characters without control, formatting or line separator characters"),
       timeoutMs: timeoutArg,
     },
   }, (args, extra) => runTool(async () => {
