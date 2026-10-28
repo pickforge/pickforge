@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import WebSocket from "ws";
 import {
   REAPER_CLEANUP_PENDING_META_KEY,
   createSession,
@@ -52,6 +53,13 @@ import {
   waitForDevToolsPort,
 } from "./devtools.js";
 import { buildSupervisedBrowserCommand } from "./supervisor.js";
+import {
+  abandonedBrowserProfileStartup,
+  claimBrowserProfile,
+  namedProfileBrowserEndpoint,
+  releaseBrowserProfile,
+  validateBrowserProfileName,
+} from "./profiles.js";
 import { asError, sleep } from "./util.js";
 
 // A cold Chrome can need more than 20 seconds under shared CI load. Keep the
@@ -74,6 +82,7 @@ function assertNotAborted(signal: AbortSignal | undefined): void {
 
 export interface CreateBrowserSessionOptions {
   projectDir: string;
+  profile?: string;
   /** Registry env (PICKFORGE_HOME) for session records. */
   registryEnv?: EnvLike;
   /** Spawn env: source for PATH, locale, and Chrome binary detection. */
@@ -299,6 +308,49 @@ async function stopBrowserGroup(
   }
 }
 
+/** Flush named-profile cookies before the verified group-stop fallback. */
+async function closeNamedProfileBrowser(record: SessionRecord, env: EnvLike, signal?: AbortSignal): Promise<void> {
+  const profileName = namedProfile(record);
+  const browser = record.browser;
+  if (profileName === undefined || browser?.cdpPort === undefined) return;
+  const identity = { pid: browser.browserPid, startTicks: browser.browserStartTimeTicks };
+  if (!processIdentityMatches(identity)) return;
+  try {
+    signal?.throwIfAborted();
+    const url = await namedProfileBrowserEndpoint(profileName, browser.cdpPort, env);
+    if (url === undefined || !await requestBrowserClose(url, identity, signal)) return;
+    const deadline = Date.now() + 10_000;
+    while (processIdentityMatches(identity) && Date.now() < deadline) await sleep(50, signal);
+  } catch {
+    // CDP is best effort. Always continue to the verified group stop.
+  }
+}
+
+async function requestBrowserClose(url: URL, identity: ProcessIdentity, signal?: AbortSignal): Promise<boolean> {
+  signal?.throwIfAborted();
+  const socket = new WebSocket(url);
+  return new Promise<boolean>((resolve) => {
+    let finished = false;
+    const timer = setTimeout(() => finish(false), 3_000);
+    const aborted = (): void => finish(false);
+    function finish(sent: boolean): void {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", aborted);
+      socket.terminate();
+      resolve(sent);
+    }
+    signal?.addEventListener("abort", aborted, { once: true });
+    socket.on("error", () => finish(false));
+    socket.once("close", () => finish(false));
+    socket.once("open", () => {
+      if (!processIdentityMatches(identity)) { finish(false); return; }
+      socket.send(JSON.stringify({ id: 1, method: "Browser.close" }), (error) => finish(!error));
+    });
+  });
+}
+
 function ownedDaemonExited(daemon: OwnedDaemonHandle): boolean {
   return daemon.child.exitCode !== null || daemon.child.signalCode !== null;
 }
@@ -335,6 +387,7 @@ interface BrowserCreationContext {
   record: SessionRecord;
   logDir: string;
   layout: BrowserRuntimeLayout;
+  profileDir: string;
 }
 
 interface BrowserCreationState {
@@ -350,7 +403,7 @@ async function launchBrowserDaemon(
   xvfb: XvfbHandle,
 ): Promise<OwnedDaemonHandle> {
   const args = buildChromeArgs({
-    profileDir: ctx.layout.profileDir,
+    profileDir: ctx.profileDir,
     width: xvfb.width,
     height: xvfb.height,
     noSandbox:
@@ -393,7 +446,7 @@ async function waitForReadyPort(
   }
   const timeoutMs = ctx.opts.cdpTimeoutMs ?? DEFAULT_CDP_TIMEOUT_MS;
   const waited = await waitForDevToolsPort({
-    profileDir: ctx.layout.profileDir,
+    profileDir: ctx.profileDir,
     logPath: browserDaemon.logPath,
     timeoutMs,
     isAlive: () => processIdentityMatches(browserIdentity),
@@ -433,8 +486,9 @@ async function finishBrowserStartup(
     browserPid: browserIdentity.pid,
     browserStartTimeTicks: browserIdentity.startTicks,
     binaryPath: ctx.binaryPath,
-    profileMode: "ephemeral",
-    profileDir: ctx.layout.profileDir,
+    profileMode: ctx.opts.profile === undefined ? "ephemeral" : "named",
+    ...(ctx.opts.profile === undefined ? {} : { profileName: ctx.opts.profile }),
+    profileDir: ctx.profileDir,
   };
   await updateSession(
     ctx.record.id,
@@ -478,7 +532,7 @@ async function finishBrowserStartup(
     xvfbPid: xvfb.pid,
     browserPid: browserIdentity.pid,
     cdpPort,
-    profileDir: ctx.layout.profileDir,
+    profileDir: ctx.profileDir,
     binaryPath: ctx.binaryPath,
     logDir: ctx.logDir,
   };
@@ -534,8 +588,9 @@ function failedBrowserInfo(
     browserPid: state.browserIdentity.pid,
     browserStartTimeTicks: state.browserIdentity.startTicks,
     binaryPath: ctx.binaryPath,
-    profileMode: "ephemeral",
-    profileDir: ctx.layout.profileDir,
+    profileMode: ctx.opts.profile === undefined ? "ephemeral" : "named",
+    ...(ctx.opts.profile === undefined ? {} : { profileName: ctx.opts.profile }),
+    profileDir: ctx.profileDir,
   };
 }
 
@@ -587,6 +642,9 @@ async function failBrowserCreation(
         },
     ctx.registryEnv,
   ).catch(() => {});
+  if (cleanupComplete && ctx.opts.profile !== undefined) {
+    await releaseBrowserProfile(ctx.opts.profile, ctx.record.id, ctx.registryEnv);
+  }
   throw error;
 }
 
@@ -607,6 +665,9 @@ async function startBrowserSession(
   const { opts, registryEnv, spawnEnv, record, logDir, layout } = ctx;
   assertNotAborted(opts.signal);
   await checkInput();
+  if (opts.profile !== undefined) {
+    ctx.profileDir = await claimBrowserProfile(opts.profile, record.id, registryEnv);
+  }
   await makeRuntimeDirs(layout);
 
   try {
@@ -658,10 +719,22 @@ async function startBrowserSession(
   return await finishBrowserStartup(ctx, state, desktop, checkInput);
 }
 
+async function recoverProfileStartup(name: string | undefined, registryEnv: EnvLike): Promise<void> {
+  if (name === undefined) return;
+  const id = await abandonedBrowserProfileStartup(name, registryEnv);
+  if (id === undefined) return;
+  try {
+    await destroyBrowserSession(id, registryEnv);
+  } catch (error) {
+    // Another creator may have completed the same recovery under the session lock.
+    if (await getSession(id, registryEnv) !== undefined) throw error;
+  }
+}
+
 /**
  * Create an isolated headed-Chrome session: a private Xvfb display plus headed
- * Chrome on an ephemeral profile with a loopback CDP endpoint. A partial
- * failure tears down every process and deletes the profile before rethrowing.
+ * Chrome on a private profile with a loopback CDP endpoint. A partial
+ * failure tears down every process and deletes ephemeral profiles before rethrowing.
  * If cleanup cannot be confirmed, the error record retains every known
  * identity and is marked for a later reaper retry.
  */
@@ -671,11 +744,13 @@ export async function createBrowserSession(
   const registryEnv = opts.registryEnv ?? process.env;
   const spawnEnv = opts.env ?? process.env;
   assertNotAborted(opts.signal);
+  if (opts.profile !== undefined) validateBrowserProfileName(opts.profile);
   const binaryPath = requireChromeBinary({
     env: spawnEnv,
     ...(opts.binaryPath !== undefined ? { binaryPath: opts.binaryPath } : {}),
   });
 
+  await recoverProfileStartup(opts.profile, registryEnv);
   await reapDeadRunningSessions(registryEnv, {
     browser: {
       teardown: (id, finalize, options) =>
@@ -684,7 +759,11 @@ export async function createBrowserSession(
   });
   assertNotAborted(opts.signal);
   const record = await createSession(
-    { type: "browser", projectDir: opts.projectDir },
+    {
+      type: "browser",
+      projectDir: opts.projectDir,
+      ...(opts.profile === undefined ? {} : { meta: { browserProfile: opts.profile } }),
+    },
     registryEnv,
   );
   const logDir = browserSessionLogDir(record.id, registryEnv);
@@ -698,6 +777,7 @@ export async function createBrowserSession(
     record,
     logDir,
     layout,
+    profileDir: layout.profileDir,
   };
   const state: BrowserCreationState = {};
   try {
@@ -811,6 +891,29 @@ async function requireBrowserSession(id: string, env: EnvLike): Promise<SessionR
   return record;
 }
 
+function namedProfile(record: SessionRecord): string | undefined {
+  const name = record.browser?.profileName ?? record.meta?.browserProfile;
+  return typeof name === "string" ? name : undefined;
+}
+
+async function removeStoppedBrowserRuntime(
+  record: SessionRecord,
+  registryEnv: EnvLike,
+  gone: boolean,
+): Promise<Error[]> {
+  const sessionDir = browserSessionLogDir(record.id, registryEnv);
+  const layout = browserRuntimeLayout(sessionDir);
+  const named = record.browser?.profileMode === "named" || namedProfile(record) !== undefined;
+  const profileDir = named ? layout.profileDir : record.browser?.profileDir ?? layout.profileDir;
+  if (!await isProfileConfined(sessionDir, profileDir)) {
+    return [new Error(`Refusing to delete profile outside the session directory: ${profileDir}`)];
+  }
+  if (!gone) {
+    return [new Error(`Refusing to delete profile for ${record.id}: Chrome process group is still alive`)];
+  }
+  return removeRuntimeData(layout, profileDir);
+}
+
 /**
  * Destroy a browser session: kill the verified Chrome process group and confirm
  * it is dead, stop lazy VNC before the private Xvfb, then delete the ephemeral
@@ -835,6 +938,7 @@ export async function teardownBrowserSession(
       options.signal?.throwIfAborted();
       const failures: Error[] = [];
       const browser = record.browser;
+      await closeNamedProfileBrowser(record, registryEnv, options.signal);
       const { gone, error: groupError } = await stopBrowserGroup(
         browser === undefined
           ? undefined
@@ -857,27 +961,7 @@ export async function teardownBrowserSession(
       await stopBrowserVnc(record, gone, failures);
       await stopBrowserDisplay(record, gone, failures);
 
-      const sessionDir = browserSessionLogDir(id, registryEnv);
-      const layout = browserRuntimeLayout(sessionDir);
-      const profileDir = browser?.profileDir ?? layout.profileDir;
-      // Confinement guard: never delete a profile path a tampered record points
-      // outside the session directory.
-      const confined = await isProfileConfined(sessionDir, profileDir);
-      if (!confined) {
-        failures.push(
-          new Error(
-            `Refusing to delete profile outside the session directory: ${profileDir}`,
-          ),
-        );
-      } else if (gone) {
-        failures.push(...(await removeRuntimeData(layout, profileDir)));
-      } else {
-        failures.push(
-          new Error(
-            `Refusing to delete profile for ${id}: Chrome process group is still alive`,
-          ),
-        );
-      }
+      failures.push(...await removeStoppedBrowserRuntime(record, registryEnv, gone));
 
       if (failures.length > 0) {
         await updateSession(
@@ -902,6 +986,8 @@ export async function teardownBrowserSession(
         const message = error instanceof Error ? error.message : String(error);
         throw new Error(`Failed to retain logs of session ${record.id}: ${message}`, { cause: error });
       }
+      const profileName = namedProfile(record);
+      if (profileName !== undefined) await releaseBrowserProfile(profileName, id, registryEnv);
       await finalize();
     } catch (error) {
       await markSessionCleanupPendingIfInputClosed(id, registryEnv).catch(() => {});
