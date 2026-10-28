@@ -8,7 +8,7 @@ import { runDesktopClick, runDesktopDrag } from "../src/commands/desktop.js";
 type Identity = { display: string; pid: number; startTicks: number } | undefined | "reject";
 const IDENTITY = vi.hoisted(() => ({ display: ":42", pid: 4242, startTicks: 777 }));
 const state = vi.hoisted(() => ({
-  order: [] as string[], fail: false, verify: [] as Identity[], appendFail: false, beginFail: false,
+  order: [] as string[], fail: false, unowned: false, verify: [] as Identity[], appendFail: false, beginFail: false,
   verifyArgs: [] as unknown[][], inputDisplays: [] as string[], beginGate: undefined as Promise<void> | undefined,
 }));
 vi.mock("@pickforge/lab-core", async (original) => {
@@ -31,6 +31,7 @@ vi.mock("@pickforge/lab-desktop-linux", async (original) => {
   const input = async (opts: { sessionId: string; display: string }) => withAgentPermit(opts.sessionId, process.env, async () => {
     state.order.push("input");
     state.inputDisplays.push(opts.display);
+    if (state.unowned) throw new actual.DesktopInputTargetError();
     if (state.fail) throw new Error("synthetic input failure");
   });
   return { ...actual, click: input, drag: input,
@@ -62,7 +63,7 @@ beforeEach(async () => {
   vi.spyOn(console, "error").mockImplementation((line: string) => { errors.push(line); });
   vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => { stderr.push(String(chunk)); return true; });
   session = (await createSession({ type: "desktop", projectDir: root, status: "running", desktop: { display: ":42", homePolicy: "private" } }, env)).id;
-  state.order = []; state.fail = false; state.verify = []; state.appendFail = false; state.beginFail = false;
+  state.order = []; state.fail = false; state.unowned = false; state.verify = []; state.appendFail = false; state.beginFail = false;
   state.verifyArgs = []; state.inputDisplays = []; state.beginGate = undefined;
 });
 afterEach(async () => {
@@ -219,6 +220,12 @@ it.each([["click", click], ["drag", drag]] as const)("records %s as not-attempte
   expect(await run()).toBe(1);
   expect(state.order).not.toContain("input");
   expect(await actions()).toMatchObject([{ status: "error", inputState: "not-attempted" }]);
+});
+
+it.each([["click", click], ["drag", drag]] as const)("records %s as not-attempted when the session display is not verified", async (_name, run) => {
+  state.unowned = true;
+  expect(await run()).toBe(1);
+  expect(await actions()).toMatchObject([{ status: "error", inputState: "not-attempted", error: expect.stringContaining("no input was sent") }]);
 });
 
 it("records input as attempted when permit release fails after input", async () => {

@@ -11,6 +11,7 @@ vi.mock("@pickforge/lab-desktop-linux", async (original) => {
     state.order.push("input");
     state.inputEffect?.();
     if (state.fail === "prepare") throw new actual.DesktopTextPreparationError("synthetic typed marker ghp_" + "b".repeat(36));
+    if (state.fail === "target") throw new actual.DesktopInputTargetError();
     if (state.fail === "input") throw new Error("synthetic typed marker ghp_" + "b".repeat(36));
   });
   return { ...actual, click: input, doubleClick: input, drag: input, scroll: input, typeText: input, pressKey: input,
@@ -124,6 +125,17 @@ it.each([
   // The uncaptured path keeps the redacted error text, as before.
   expect(JSON.stringify({ captured, action: actions[0] })).not.toContain("synthetic typed marker");
   expect(JSON.stringify({ captured, uncaptured, actions })).not.toContain("b".repeat(36));
+});
+
+it.each(cases.filter(([tool]) => tool !== "desktop_type" && tool !== "desktop_focus"))("%s reports an unverified session display as input not-attempted", async (tool, args) => {
+  state.fail = "target";
+  const captured = await call(tool, { ...args, capture: "both" });
+  expect(captured).toMatchObject({ ok: false, inputState: "not-attempted" });
+  const uncaptured = await call(tool, args);
+  expect(uncaptured.ok).toBe(false);
+  expect(state.order).toEqual(["before", "input", "input"]);
+  const { actions } = await evidence();
+  expect(actions.map((action) => [action.status, action.inputState])).toEqual([["error", "not-attempted"], ["error", "not-attempted"]]);
 });
 
 it("links a published PNG even if its subsequent metadata processing fails", async () => {
