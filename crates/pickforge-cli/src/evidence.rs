@@ -889,17 +889,19 @@ fn redact_secrets(value: &str) -> String {
         // An unquoted cookie stops at quotes and angle brackets, so the rest of a
         // one-line XML tree or a JSON string survives.
         Regex::new(r#"(?i)(\b(?:set-cookie|cookie)\b\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\r\n\"'<>]+)"#).unwrap(),
-        Regex::new(r#"(?i)(\b(?:api[_-]?key|token|secret|password|passwd)\b\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;\"']+)"#).unwrap(),
-        // JSON strings can hold escaped quotes, so the value runs to the first unescaped quote.
-        Regex::new(r#"(?i)(\"(?:api[_-]?key|token|secret|password|passwd|authorization|cookie|set-cookie)\"\s*:\s*\")(?:[^\"\\]|\\.)*(\")"#).unwrap(),
+        // Prefixed keys such as access_token, refresh_token and client_secret count too.
+        Regex::new(r#"(?i)(\b[\w.-]*(?:api[_-]?key|token|secret|password|passwd)\b\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;\"']+)"#).unwrap(),
+        Regex::new(r#"(?i)(\bbearer\s+)[^\s,;\"'<>]+"#).unwrap(),
+        // A JSON key that contains a secret word, with a value that may hold escaped quotes.
+        Regex::new(r#"(?i)(\"[^\"\r\n]*(?:api[_-]?key|token|secret|password|passwd|authorization|cookie)[^\"\r\n]*\"\s*:\s*\")(?:[^\"\\]|\\.)*(\")"#).unwrap(),
         Regex::new(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b").unwrap(),
         Regex::new(r"\b(?:gh[pousr]_[A-Za-z0-9]{8,}|sk-[A-Za-z0-9_-]{8,}|AKIA[A-Z0-9]{16})\b").unwrap(),
     ]);
     let mut output = value.to_owned();
     for (index, pattern) in patterns.iter().enumerate() {
-        output = if index == 3 {
+        output = if index == 4 {
             pattern.replace_all(&output, "$1[REDACTED]$2").into_owned()
-        } else if index < 3 {
+        } else if index < 4 {
             // A quoted value keeps its quotes, so a redacted XML attribute such as
             // `password="..."` in a stored UI tree stays well formed.
             pattern
@@ -1641,6 +1643,28 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&stored).unwrap();
         assert_eq!(value["token"], "[REDACTED]");
         assert_eq!(value["next"], 1);
+    }
+
+    #[test]
+    fn redaction_covers_oauth_tokens_in_logs() {
+        let log = "D/http: Bearer bearersecret1\nGET /cb?access_token=urlsecret1&state=s\n\
+            {\"access_token\":\"jsonsecret1\",\"refresh_token\":\"jsonsecret2\",\"n\":1}\n\
+            refresh_token=refreshsecret1 client_secret=clientsecret1 max_tokens=100\n";
+        let stored = redact_secrets(log);
+        for secret in [
+            "bearersecret1",
+            "urlsecret1",
+            "jsonsecret1",
+            "jsonsecret2",
+            "refreshsecret1",
+            "clientsecret1",
+        ] {
+            assert!(!stored.contains(secret), "{secret} in {stored}");
+        }
+        assert!(stored.contains("max_tokens=100"), "{stored}");
+        let json_line = stored.lines().nth(2).unwrap().trim();
+        let value: serde_json::Value = serde_json::from_str(json_line).unwrap();
+        assert_eq!(value["n"], 1);
     }
 
     #[test]
