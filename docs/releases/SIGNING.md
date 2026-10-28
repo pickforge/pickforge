@@ -20,13 +20,13 @@ smoke if reality drifts from this document in either direction.
   checksum.
 - **Why not sign yet.** Developer ID signing and notarization need a paid Apple
   Developer account, a distributable certificate, and secrets in CI. That is a
-  deliberate cost decision for the 0.4, 0.5.0, 0.6.0 and 0.7.0 trains, not
+  deliberate cost decision for the 0.4, 0.5.0, 0.6.0 and 0.7 trains, not
   an oversight.
 
-## Decision for 0.4.0, 0.5.0, 0.6.0 and 0.7.0
+## Decision for 0.4.0, 0.5.0, 0.6.0 and 0.7.x
 
-Ship unsigned and un-notarized for the 0.4 train, for 0.5.0, 0.6.0 and 0.7.0,
-with checksums, npm provenance, and this document. 0.7.0 continues the existing
+Ship unsigned and un-notarized for the 0.4 train, for 0.5.0, 0.6.0 and 0.7.x,
+with checksums, npm provenance, and this document. 0.7.1 continues the existing
 ad-hoc signed, not notarized, no Developer ID policy. Revisit before any release
 that advertises macOS as a first-class installed product rather than a verified
 CLI download.

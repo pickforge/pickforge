@@ -32,6 +32,9 @@ export default defineConfig({
   test: {
     pool: exitLoggingForksPool,
     globalSetup: ["./test/host-display-guard.ts", "./test/home-sessions-guard.ts"],
+    setupFiles: ["./test/wait-for-default.ts"],
+    // Polls wait on subprocesses, which can take over a second on a loaded runner.
+    expect: { poll: { timeout: 5_000 } },
     include: ["packages/*/test/**/*.test.ts", "test/**/*.test.ts"],
     exclude: runLiveAndroid ? [] : ["packages/android/test/integration.test.ts"],
     coverage: {

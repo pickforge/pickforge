@@ -25,7 +25,9 @@ else if (command === 'getwindowgeometry') console.log('X=-4\\nY=12\\nWIDTH=300\\
 else if (command === 'getwindowfocus') console.log(state.focused);
 else if (command === 'windowfocus') {
   if (!state.ignore) state.focused = id;
-  fs.writeFileSync(statePath, JSON.stringify(state));
+  // Replace the file in one step, so a kill or a concurrent read never sees it empty.
+  fs.writeFileSync(statePath + '.' + process.pid, JSON.stringify(state));
+  fs.renameSync(statePath + '.' + process.pid, statePath);
 } else process.exit(23);
 `, { mode: 0o700 });
   fs.writeFileSync(path.join(bin, "xprop"), `#!/usr/bin/env node
@@ -41,7 +43,10 @@ else console.log(state.classOutput ?? 'WM_CLASS(STRING) = "instance", "Zenity"')
   const session = await createSession({ type: "desktop", projectDir: root, status: "running", desktop: { display: ":42", homePolicy: "private" } }, env);
   return {
     root, env, session,
-    state: (patch: Record<string, unknown>) => fs.writeFileSync(state, JSON.stringify({ ...JSON.parse(fs.readFileSync(state, "utf8")), ...patch })),
+    state: (patch: Record<string, unknown>) => {
+      fs.writeFileSync(`${state}.test`, JSON.stringify({ ...JSON.parse(fs.readFileSync(state, "utf8")), ...patch }));
+      fs.renameSync(`${state}.test`, state);
+    },
     calls: (): string[][] => fs.existsSync(log) ? fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line)) : [],
     cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
   };
