@@ -96,7 +96,7 @@ function registerPrompt2(server: McpServer): void {
               ? " using its package name"
               : ` using packageName \`${packageName}\``
           }.`,
-          "5. Capture the screen with `android_screenshot` and dump the widget hierarchy with `android_get_ui_tree`. Use the XML bounds to compute tap coordinates.",
+          "5. Capture the screen with `android_screenshot` and dump the widget hierarchy with `android_get_ui_tree`. Each node line carries its bounds in pixels; tap the centre of the target node.",
           "6. Reproduce the issue: `android_tap` on widgets, `android_type` for text fields, `android_back`/`android_home` for navigation. Screenshot after each step.",
           "7. Read `android_logcat` output (it is secret-redacted) and look for exceptions, ANRs, or suspicious log lines from the app process.",
           "8. For anything else (e.g. `pm list packages`, `dumpsys`), use `android_run_adb` with an argument array.",

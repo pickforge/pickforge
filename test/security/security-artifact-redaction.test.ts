@@ -100,10 +100,17 @@ describe("MCP tool outputs (fake adb with planted secrets)", () => {
   });
 
   it("redacts secrets from the android UI tree", async () => {
+    const compact = await lab.client.callTool({
+      name: "android_get_ui_tree",
+      arguments: {},
+    });
+    expect(parseToolJson(compact).ok).toBe(true);
+    expect(JSON.stringify(compact)).toContain("[REDACTED]");
+    expect(JSON.stringify(compact)).not.toContain(GITHUB_TOKEN);
     const report = parseToolJson(
       await lab.client.callTool({
         name: "android_get_ui_tree",
-        arguments: {},
+        arguments: { raw: true },
       }),
     );
     expect(report.ok).toBe(true);

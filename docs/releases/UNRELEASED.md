@@ -125,6 +125,13 @@ session teardown are also more reliable.
   contention no longer uses up the 250 ms freeze limit. If the limit still
   expires, preparation makes up to three attempts within its 3 second budget.
   When preparation fails, no text is sent. (#222)
+- `android_get_ui_tree` returns a compact tree instead of the raw
+  uiautomator XML. It keeps every node with text, a content description, a
+  resource id or an action, and their hierarchy. Bounds stay in device pixels,
+  and the result reports the screen density. Output stops at `maxChars`
+  (default 20000) and says when it truncates. `raw: true` returns the XML. On
+  Settings, Flutter and Compose screens, the response shrinks by about 83 to
+  88 percent in tokens. (#351)
 
 ## Fixes
 

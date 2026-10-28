@@ -4,12 +4,19 @@ import { z } from "zod";
 import {
   back,
   clearLogcat,
+  compactUiTree,
+  DEFAULT_COMPACT_MAX_CHARS,
+  DEFAULT_RAW_MAX_CHARS,
+  getScreenDensity,
   getUiTree,
   home,
   installApk,
   launchApp,
+  limitRawUiTree,
   logcat,
+  MAX_UI_TREE_MAX_CHARS,
   maybeWaitForGuestReady,
+  MIN_UI_TREE_MAX_CHARS,
   runAdb,
   screenshot,
   tap,
@@ -24,6 +31,7 @@ import {
   resolveSessionRecord,
   runTool,
   type ServerContext,
+  type ToolReport,
 } from "../context.js";
 import { withMcpEvidence } from "../evidence.js";
 import {
@@ -435,15 +443,60 @@ function registerAndroidTool8(server: McpServer, ctx: ServerContext): void {
   );
 }
 
+async function readUiTree(
+  target: AndroidTarget,
+  ctx: ServerContext,
+  args: { raw?: boolean; maxChars?: number },
+): Promise<ToolReport> {
+  const xml = await getUiTree({ serial: target.serial, env: ctx.env });
+  const density = await getScreenDensity({ serial: target.serial, env: ctx.env });
+  if (args.raw === true) {
+    const limited = limitRawUiTree(redactSecrets(xml), args.maxChars);
+    return {
+      data: { ...targetData(target), format: "raw", density, ...limited },
+    };
+  }
+  // Compact from the unredacted XML: redaction rewrites attributes such as
+  // password="false". Each output line is redacted instead.
+  const { tree, ...compact } = compactUiTree(xml, {
+    maxChars: args.maxChars,
+    redact: redactSecrets,
+  });
+  return {
+    data: { ...targetData(target), format: "compact", density, ...compact },
+    extraContent: [{ type: "text", text: tree }],
+  };
+}
+
 function registerAndroidTool9(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "android_get_ui_tree",
     {
       title: "Android UI tree",
       description:
-        "Dump the current UI hierarchy as XML (uiautomator dump). Use it to " +
-        "find widget bounds before tapping.",
-      inputSchema: { ...targetArgs },
+        "Read the current UI hierarchy (uiautomator dump). By default a " +
+        "compact tree follows the JSON summary: one line per node with text, " +
+        "a label (desc), a resource id or an action, indented under its kept " +
+        "ancestors. Bounds are [left,top][right,bottom] in device pixels, " +
+        "ready for android_tap; dp = px * 160 / density. Pass raw=true for " +
+        "the full XML. Output over maxChars is cut and marked truncated.",
+      inputSchema: {
+        ...targetArgs,
+        raw: z
+          .boolean()
+          .optional()
+          .describe("Return the full uiautomator XML instead of the compact tree"),
+        maxChars: z
+          .number()
+          .int()
+          .min(MIN_UI_TREE_MAX_CHARS)
+          .max(MAX_UI_TREE_MAX_CHARS)
+          .optional()
+          .describe(
+            `Output size limit in characters (default ${DEFAULT_COMPACT_MAX_CHARS}, ` +
+              `raw ${DEFAULT_RAW_MAX_CHARS})`,
+          ),
+      },
     },
     (args) =>
       runTool(async () => {
@@ -451,12 +504,7 @@ function registerAndroidTool9(server: McpServer, ctx: ServerContext): void {
         return withMcpEvidence(
           ctx,
           { sessionId: target.sessionId, tool: "android_get_ui_tree" },
-          async () => {
-            const xml = redactSecrets(
-              await getUiTree({ serial: target.serial, env: ctx.env }),
-            );
-            return { data: { ...targetData(target), xml } };
-          },
+          () => readUiTree(target, ctx, args),
         );
       }),
   );

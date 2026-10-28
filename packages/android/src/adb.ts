@@ -6,6 +6,7 @@ import {
   type RunCommandResult,
 } from "@pickforge/lab-core";
 import { findSdkTool } from "./sdk.js";
+import { parseWmDensity } from "./ui-tree.js";
 import { sleep } from "./util.js";
 
 export const KEYCODE_HOME = "KEYCODE_HOME";
@@ -248,6 +249,11 @@ export function buildUiCatArgs(serial: string): string[] {
 export function buildUiCleanupArgs(serial: string): string[] {
   assertSerial(serial);
   return ["-s", serial, "shell", "rm", "-f", UI_DUMP_REMOTE_PATH];
+}
+
+export function buildDensityArgs(serial: string): string[] {
+  assertSerial(serial);
+  return ["-s", serial, "shell", "wm", "density"];
 }
 
 export interface LogcatArgsOptions {
@@ -579,6 +585,14 @@ export async function getUiTree(opts: GetUiTreeOptions): Promise<string> {
     }
   }
   throw lastError;
+}
+
+/** Effective screen density in dpi, or null when the device does not say. */
+export async function getScreenDensity(
+  opts: AdbTargetOptions,
+): Promise<number | null> {
+  const result = await execAdb(opts, buildDensityArgs(opts.serial));
+  return result.ok ? parseWmDensity(result.stdout) : null;
 }
 
 export async function logcat(
