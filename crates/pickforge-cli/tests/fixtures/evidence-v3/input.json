@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 3,
+  "scenario": "Counter increments and keeps state after hot reload",
+  "outcome": "passed",
+  "before": {"summary":"Counter was zero with the old theme.","observations":[{"label":"Counter","value":"0"}],"artifacts":[{"kind":"screenshot","label":"Initial frame","source":"/tmp/pf352-v3/before.png"}]},
+  "steps": [
+    {"label":"Clicks complete","summary":"Counter reached two before reload.","observations":[{"label":"Counter","value":"2"}],"artifacts":[]}
+  ],
+  "after": {"summary":"The new theme appeared and counter stayed at two.","observations":[{"label":"Counter","value":"2"}],"artifacts":[{"kind":"screenshot","label":"Reloaded frame","source":"/tmp/pf352-v3/after.png"}]},
+  "sourceChanges": ["lib/main.dart"],
+  "checks": [
+    {"name":"desktop click","status":"passed","summary":"Counter advanced to two.","step":"Clicks complete"},
+    {"name":"flutter test","status":"passed","summary":"Focused tests passed."}
+  ],
+  "limitations": ["Pixel review was manual."]
+}

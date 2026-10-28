@@ -15,15 +15,24 @@ use time::{format_description, OffsetDateTime};
 
 use crate::{adapters::Harness, init::INIT_SCHEMA_VERSION, project, state, Environment};
 
-// Version 3 adds ordered intermediate steps and optional check-to-step references. Versions 1
-// and 2 remain valid inputs; only the document this writes carries the current version.
-pub const EVIDENCE_SCHEMA_VERSION: u32 = 3;
+mod capture;
+use capture::{capture_from, captured_at, redact_capture, render_capture, Capture, CaptureInput};
+
+// Version 3 adds ordered intermediate steps and optional check-to-step references. Version 4
+// adds a capture record on every state and UI tree, log and report artifacts. Versions 1 to 3
+// remain valid inputs; only the document this writes carries the current version.
+pub const EVIDENCE_SCHEMA_VERSION: u32 = 4;
 const EVIDENCE_INPUT_MIN_VERSION: u32 = 1;
 pub const MAX_INPUT_BYTES: u64 = 1024 * 1024;
 pub const MAX_EVIDENCE_STEPS: usize = 32;
+pub const MAX_TEXT_ARTIFACT_BYTES: u64 = 4 * 1024 * 1024;
 const PREVIEW_MAX_EDGE: u32 = 1568;
 const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_TOTAL_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_TOTAL_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
+/// The value recorded for anything the caller did not observe.
+const UNKNOWN: &str = "unknown";
+/// Text artifacts are stored inert: a `.txt` file that no browser or Markdown viewer runs.
+const TEXT_MEDIA_TYPE: &str = "text/plain; charset=utf-8";
 const MAX_RUN_ID_ATTEMPTS: usize = 1024;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -65,6 +74,8 @@ pub struct EvidenceInput {
 struct PhaseInput {
     summary: String,
     #[serde(default)]
+    capture: Option<CaptureInput>,
+    #[serde(default)]
     observations: Vec<Observation>,
     #[serde(default)]
     artifacts: Vec<ArtifactInput>,
@@ -75,6 +86,8 @@ struct PhaseInput {
 struct StepInput {
     label: String,
     summary: String,
+    #[serde(default)]
+    capture: Option<CaptureInput>,
     #[serde(default)]
     observations: Vec<Observation>,
     #[serde(default)]
@@ -89,17 +102,74 @@ struct Observation {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ArtifactInput {
     kind: ArtifactKind,
     label: String,
-    source: PathBuf,
+    /// Absolute path of the file to copy. Absent only for an unavailable text source.
+    #[serde(default)]
+    source: Option<PathBuf>,
+    #[serde(default)]
+    origin: Option<ArtifactOrigin>,
+    #[serde(default)]
+    captured_at: Option<String>,
+    /// Why the source could not be captured. Excludes `source`.
+    #[serde(default)]
+    unavailable: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum ArtifactKind {
     Screenshot,
+    Tree,
+    Log,
+    Report,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum ArtifactOrigin {
+    AndroidUiTree,
+    AndroidLogcat,
+    DevtoolsAccessibility,
+    DevtoolsConsole,
+    Lighthouse,
+    AtspiTree,
+}
+
+impl ArtifactOrigin {
+    fn kind(self) -> ArtifactKind {
+        match self {
+            Self::AndroidUiTree | Self::DevtoolsAccessibility | Self::AtspiTree => {
+                ArtifactKind::Tree
+            }
+            Self::AndroidLogcat | Self::DevtoolsConsole => ArtifactKind::Log,
+            Self::Lighthouse => ArtifactKind::Report,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::AndroidUiTree => "android-ui-tree",
+            Self::AndroidLogcat => "android-logcat",
+            Self::DevtoolsAccessibility => "devtools-accessibility",
+            Self::DevtoolsConsole => "devtools-console",
+            Self::Lighthouse => "lighthouse",
+            Self::AtspiTree => "atspi-tree",
+        }
+    }
+}
+
+impl ArtifactKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Screenshot => "screenshot",
+            Self::Tree => "tree",
+            Self::Log => "log",
+            Self::Report => "report",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -133,6 +203,7 @@ struct EvidenceDocument<'a> {
 #[derive(Debug, Serialize)]
 struct Phase {
     summary: String,
+    capture: Capture,
     observations: Vec<Observation>,
     artifacts: Vec<Artifact>,
 }
@@ -141,13 +212,49 @@ struct Phase {
 struct Step {
     label: String,
     summary: String,
+    capture: Capture,
     observations: Vec<Observation>,
     artifacts: Vec<Artifact>,
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+enum Artifact {
+    Image(ImageArtifact),
+    Text(TextArtifact),
+    Unavailable(UnavailableArtifact),
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Artifact {
+struct TextArtifact {
+    kind: ArtifactKind,
+    origin: ArtifactOrigin,
+    label: String,
+    captured_at: String,
+    status: &'static str,
+    path: String,
+    /// What the stored text looks like: `json`, `xml`, `html` or `text`. It is never rendered.
+    format: &'static str,
+    sha256: String,
+    bytes: u64,
+    media_type: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UnavailableArtifact {
+    kind: ArtifactKind,
+    origin: ArtifactOrigin,
+    label: String,
+    captured_at: String,
+    status: &'static str,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImageArtifact {
     kind: &'static str,
     label: String,
     path: String,
@@ -547,12 +654,19 @@ fn validate_input(input: &EvidenceInput) -> Result<(), EvidenceError> {
     Ok(())
 }
 fn validate_phase(phase: &PhaseInput, name: &str) -> Result<(), EvidenceError> {
-    validate_phase_parts(&phase.summary, &phase.observations, &phase.artifacts, name)
+    validate_phase_parts(
+        &phase.summary,
+        phase.capture.as_ref(),
+        &phase.observations,
+        &phase.artifacts,
+        name,
+    )
 }
 fn validate_step(step: &StepInput, index: usize) -> Result<(), EvidenceError> {
     bounded_line(&step.label, 120, "step label")?;
     validate_phase_parts(
         &step.summary,
+        step.capture.as_ref(),
         &step.observations,
         &step.artifacts,
         &format!("step {}", index + 1),
@@ -560,11 +674,13 @@ fn validate_step(step: &StepInput, index: usize) -> Result<(), EvidenceError> {
 }
 fn validate_phase_parts(
     summary: &str,
+    capture: Option<&CaptureInput>,
     observations: &[Observation],
     artifacts: &[ArtifactInput],
     name: &str,
 ) -> Result<(), EvidenceError> {
     bounded_text(summary, 2000, &format!("{name} summary"))?;
+    capture_from(capture, name)?;
     if observations.len() > 32 || artifacts.len() > 8 {
         return bad(&format!("{name} exceeds observation or artifact limits"));
     }
@@ -573,18 +689,57 @@ fn validate_phase_parts(
         bounded_text(&item.value, 2000, "observation value")?;
     }
     for artifact in artifacts {
-        bounded_line(&artifact.label, 120, "artifact label")?;
-        if !artifact.source.is_absolute() {
-            return bad("artifact source must be absolute");
-        }
-        if artifact
-            .source
-            .to_string_lossy()
-            .chars()
-            .any(|character| character.is_control() || is_bidi_control(character))
+        validate_artifact(artifact)?;
+    }
+    Ok(())
+}
+fn validate_artifact(artifact: &ArtifactInput) -> Result<(), EvidenceError> {
+    bounded_line(&artifact.label, 120, "artifact label")?;
+    if artifact.kind == ArtifactKind::Screenshot {
+        if artifact.origin.is_some()
+            || artifact.captured_at.is_some()
+            || artifact.unavailable.is_some()
         {
-            return bad("artifact source contains a control or bidi-control character");
+            return bad("screenshot artifacts take only kind, label and source");
         }
+    } else {
+        let Some(origin) = artifact.origin else {
+            return bad(&format!(
+                "{} artifacts need an origin",
+                artifact.kind.name()
+            ));
+        };
+        if origin.kind() != artifact.kind {
+            return bad(&format!(
+                "origin {} records a {} artifact, not a {}",
+                origin.name(),
+                origin.kind().name(),
+                artifact.kind.name()
+            ));
+        }
+        captured_at(artifact.captured_at.as_deref(), "artifact capturedAt")?;
+        match (&artifact.source, &artifact.unavailable) {
+            (Some(_), Some(_)) => {
+                return bad("an artifact has either a source or an unavailable reason, not both")
+            }
+            (None, Some(reason)) => {
+                return bounded_line(reason, 300, "artifact unavailable reason");
+            }
+            _ => {}
+        }
+    }
+    let Some(source) = &artifact.source else {
+        return bad("artifact source is required unless the source is unavailable");
+    };
+    if !source.is_absolute() {
+        return bad("artifact source must be absolute");
+    }
+    if source
+        .to_string_lossy()
+        .chars()
+        .any(|character| character.is_control() || is_bidi_control(character))
+    {
+        return bad("artifact source contains a control or bidi-control character");
     }
     Ok(())
 }
@@ -720,6 +875,9 @@ fn sanitize_observations(observations: &mut [Observation]) {
 fn sanitize_artifacts(artifacts: &mut [ArtifactInput]) {
     for item in artifacts {
         item.label = redact_secrets(&item.label);
+        if let Some(reason) = &mut item.unavailable {
+            *reason = redact_secrets(reason);
+        }
     }
 }
 
@@ -738,7 +896,17 @@ fn redact_secrets(value: &str) -> String {
         output = if index == 3 {
             pattern.replace_all(&output, "$1[REDACTED]$2").into_owned()
         } else if index < 3 {
-            pattern.replace_all(&output, "$1[REDACTED]").into_owned()
+            // A quoted value keeps its quotes, so a redacted XML attribute such as
+            // `password="..."` in a stored UI tree stays well formed.
+            pattern
+                .replace_all(&output, |captures: &regex::Captures<'_>| {
+                    let quote = match captures[0][captures[1].len()..].chars().next() {
+                        Some(quote @ ('"' | '\'')) => quote.to_string(),
+                        _ => String::new(),
+                    };
+                    format!("{}{quote}[REDACTED]{quote}", &captures[1])
+                })
+                .into_owned()
         } else {
             pattern.replace_all(&output, "[REDACTED]").into_owned()
         };
@@ -756,26 +924,18 @@ fn build_run(
 ) -> Result<(), EvidenceError> {
     let artifacts_dir = temp.join("artifacts");
     state::create_private_dir(&artifacts_dir).map_err(|e| EvidenceError::Io(e.to_string()))?;
-    let mut total = 0u64;
-    let mut known = BTreeMap::<String, Artifact>::new();
-    let before = materialize_phase(
-        input.before,
-        "before",
-        &artifacts_dir,
-        &mut total,
-        &mut known,
-    )?;
+    let mut store = ArtifactStore {
+        run_dir: temp,
+        total: 0,
+        images: BTreeMap::new(),
+        texts: BTreeMap::new(),
+    };
+    let before = store.phase(input.before, "before")?;
     let mut steps = Vec::with_capacity(input.steps.len());
     for (index, step) in input.steps.into_iter().enumerate() {
-        steps.push(materialize_step(
-            step,
-            index,
-            &artifacts_dir,
-            &mut total,
-            &mut known,
-        )?);
+        steps.push(store.step(step, index)?);
     }
-    let after = materialize_phase(input.after, "after", &artifacts_dir, &mut total, &mut known)?;
+    let after = store.phase(input.after, "after")?;
     let doc = EvidenceDocument {
         schema_version: EVIDENCE_SCHEMA_VERSION,
         run_id,
@@ -797,123 +957,211 @@ fn build_run(
     write_private(&temp.join("report.md"), render_report(&doc).as_bytes())?;
     Ok(())
 }
-fn materialize_step(
-    input: StepInput,
-    index: usize,
-    dir: &Path,
-    total: &mut u64,
-    known: &mut BTreeMap<String, Artifact>,
-) -> Result<Step, EvidenceError> {
-    let StepInput {
-        label,
-        summary,
-        observations,
-        artifacts,
-    } = input;
-    let phase = materialize_phase(
-        PhaseInput {
+
+/// Copies artifacts into one run, deduplicating by content hash and enforcing the run budget.
+struct ArtifactStore<'a> {
+    run_dir: &'a Path,
+    total: u64,
+    images: BTreeMap<String, ImageArtifact>,
+    /// Content hash to the stored relative path.
+    texts: BTreeMap<String, String>,
+}
+
+impl ArtifactStore<'_> {
+    fn step(&mut self, input: StepInput, index: usize) -> Result<Step, EvidenceError> {
+        let StepInput {
+            label,
             summary,
+            capture,
             observations,
             artifacts,
-        },
-        &format!("step-{}", index + 1),
-        dir,
-        total,
-        known,
-    )?;
-    Ok(Step {
-        label,
-        summary: phase.summary,
-        observations: phase.observations,
-        artifacts: phase.artifacts,
-    })
-}
-fn materialize_phase(
-    input: PhaseInput,
-    phase: &str,
-    dir: &Path,
-    total: &mut u64,
-    known: &mut BTreeMap<String, Artifact>,
-) -> Result<Phase, EvidenceError> {
-    let mut artifacts = Vec::new();
-    for source in input.artifacts {
-        let ArtifactKind::Screenshot = source.kind;
-        let (bytes, media, ext, hash, image) = read_image(&source.source)?;
-        let artifact = if let Some(existing) = known.get(&hash) {
-            existing.clone()
-        } else {
-            let (width, height) = image.dimensions();
-            if width == 0 || height == 0 {
-                return Err(EvidenceError::Artifact {
-                    path: source.source,
-                    reason: "image dimensions must be nonzero".into(),
-                });
-            }
-            let slug = slug(&source.label);
-            let hash_prefix = &hash[..12];
-            let basename = format!("{phase}-{slug}-{hash_prefix}");
-            let relative = format!("artifacts/{basename}.{ext}");
-            let preview = make_preview(&source.source, &image, &basename)?;
-            let preview_bytes = preview.as_ref().map_or(0, |(_, bytes)| bytes.len() as u64);
-            // Derived previews count against the same 64 MiB run budget as source images.
-            let added = (bytes.len() as u64)
-                .checked_add(preview_bytes)
-                .ok_or_else(|| EvidenceError::Input("artifact byte total overflow".into()))?;
-            let next_total = total
-                .checked_add(added)
-                .ok_or_else(|| EvidenceError::Input("artifact byte total overflow".into()))?;
-            if next_total > MAX_TOTAL_IMAGE_BYTES {
-                return Err(EvidenceError::Artifact {
-                    path: source.source,
-                    reason: "copied artifacts and previews exceed 64 MiB total".into(),
-                });
-            }
-            let target = dir.parent().unwrap().join(&relative);
-            write_content_addressed(&target, &bytes)?;
-            let preview = if let Some((metadata, preview_bytes)) = preview {
-                let target = dir.parent().unwrap().join(&metadata.path);
-                write_content_addressed(&target, &preview_bytes)?;
-                Some(metadata)
-            } else {
-                None
-            };
-            *total = next_total;
-            let artifact = Artifact {
-                kind: "screenshot",
-                label: source.label.clone(),
-                path: relative,
-                width,
-                height,
-                sha256: hash.clone(),
-                bytes: bytes.len() as u64,
-                media_type: media,
-                preview,
-            };
-            known.insert(hash.clone(), artifact.clone());
-            artifact
-        };
-        let mut artifact = artifact;
-        artifact.label = source.label;
-        artifacts.push(artifact);
+        } = input;
+        let phase = self.phase(
+            PhaseInput {
+                summary,
+                capture,
+                observations,
+                artifacts,
+            },
+            &format!("step-{}", index + 1),
+        )?;
+        Ok(Step {
+            label,
+            summary: phase.summary,
+            capture: phase.capture,
+            observations: phase.observations,
+            artifacts: phase.artifacts,
+        })
     }
-    Ok(Phase {
-        summary: input.summary,
-        observations: input.observations,
-        artifacts,
-    })
+
+    fn phase(&mut self, input: PhaseInput, phase: &str) -> Result<Phase, EvidenceError> {
+        let mut capture = capture_from(input.capture.as_ref(), phase)?;
+        redact_capture(&mut capture);
+        let mut artifacts = Vec::new();
+        for source in input.artifacts {
+            let artifact = match (source.kind, &source.source, source.origin) {
+                (ArtifactKind::Screenshot, Some(path), _) => {
+                    let mut artifact = self.image(path, &source.label, phase)?;
+                    artifact.label = source.label;
+                    Artifact::Image(artifact)
+                }
+                (kind, None, Some(origin)) => Artifact::Unavailable(UnavailableArtifact {
+                    kind,
+                    origin,
+                    label: source.label,
+                    captured_at: captured_at(source.captured_at.as_deref(), "artifact capturedAt")?,
+                    status: "unavailable",
+                    reason: source.unavailable.unwrap_or_default(),
+                }),
+                (kind, Some(path), Some(origin)) => {
+                    let (path, format, sha256, bytes) =
+                        self.text(path, &source.label, phase, origin)?;
+                    Artifact::Text(TextArtifact {
+                        kind,
+                        origin,
+                        label: source.label,
+                        captured_at: captured_at(
+                            source.captured_at.as_deref(),
+                            "artifact capturedAt",
+                        )?,
+                        status: "captured",
+                        path,
+                        format,
+                        sha256,
+                        bytes,
+                        media_type: TEXT_MEDIA_TYPE,
+                    })
+                }
+                _ => return bad("artifact failed validation"),
+            };
+            artifacts.push(artifact);
+        }
+        Ok(Phase {
+            summary: input.summary,
+            capture,
+            observations: input.observations,
+            artifacts,
+        })
+    }
+
+    /// Add copied bytes to the run total, refusing anything past the budget.
+    fn reserve(&mut self, source: &Path, added: u64) -> Result<(), EvidenceError> {
+        let next_total = self
+            .total
+            .checked_add(added)
+            .ok_or_else(|| EvidenceError::Input("artifact byte total overflow".into()))?;
+        if next_total > MAX_TOTAL_ARTIFACT_BYTES {
+            return Err(EvidenceError::Artifact {
+                path: source.into(),
+                reason: "copied artifacts and previews exceed 64 MiB total".into(),
+            });
+        }
+        self.total = next_total;
+        Ok(())
+    }
+
+    fn image(
+        &mut self,
+        source: &Path,
+        label: &str,
+        phase: &str,
+    ) -> Result<ImageArtifact, EvidenceError> {
+        let (bytes, media, ext, hash, image) = read_image(source)?;
+        if let Some(existing) = self.images.get(&hash) {
+            return Ok(existing.clone());
+        }
+        let (width, height) = image.dimensions();
+        if width == 0 || height == 0 {
+            return Err(EvidenceError::Artifact {
+                path: source.into(),
+                reason: "image dimensions must be nonzero".into(),
+            });
+        }
+        let basename = format!("{phase}-{}-{}", slug(label), &hash[..12]);
+        let relative = format!("artifacts/{basename}.{ext}");
+        let preview = make_preview(source, &image, &basename)?;
+        let preview_bytes = preview.as_ref().map_or(0, |(_, bytes)| bytes.len() as u64);
+        // Derived previews count against the same 64 MiB run budget as source images.
+        let added = (bytes.len() as u64)
+            .checked_add(preview_bytes)
+            .ok_or_else(|| EvidenceError::Input("artifact byte total overflow".into()))?;
+        self.reserve(source, added)?;
+        write_content_addressed(&self.run_dir.join(&relative), &bytes)?;
+        let preview = if let Some((metadata, preview_bytes)) = preview {
+            write_content_addressed(&self.run_dir.join(&metadata.path), &preview_bytes)?;
+            Some(metadata)
+        } else {
+            None
+        };
+        let artifact = ImageArtifact {
+            kind: "screenshot",
+            label: label.to_owned(),
+            path: relative,
+            width,
+            height,
+            sha256: hash.clone(),
+            bytes: bytes.len() as u64,
+            media_type: media,
+            preview,
+        };
+        self.images.insert(hash, artifact.clone());
+        Ok(artifact)
+    }
+
+    /// Copy a UI tree, log or report as redacted, inert text.
+    fn text(
+        &mut self,
+        source: &Path,
+        label: &str,
+        phase: &str,
+        origin: ArtifactOrigin,
+    ) -> Result<(String, &'static str, String, u64), EvidenceError> {
+        let raw = read_source(
+            source,
+            MAX_TEXT_ARTIFACT_BYTES,
+            "text artifact exceeds 4 MiB",
+        )?;
+        let text = String::from_utf8(raw).map_err(|_| EvidenceError::Artifact {
+            path: source.into(),
+            reason: "text artifact is not valid UTF-8".into(),
+        })?;
+        let stored = redact_secrets(&text);
+        let format = text_format(&stored, origin);
+        let bytes = stored.into_bytes();
+        let hash = project::sha256_hex(&bytes);
+        let size = bytes.len() as u64;
+        if let Some(existing) = self.texts.get(&hash) {
+            return Ok((existing.clone(), format, hash, size));
+        }
+        let relative = format!("artifacts/{phase}-{}-{}.txt", slug(label), &hash[..12]);
+        self.reserve(source, size)?;
+        write_content_addressed(&self.run_dir.join(&relative), &bytes)?;
+        self.texts.insert(hash.clone(), relative.clone());
+        Ok((relative, format, hash, size))
+    }
 }
-fn read_image(
-    path: &Path,
-) -> Result<
-    (
-        Vec<u8>,
-        &'static str,
-        &'static str,
-        String,
-        image::DynamicImage,
-    ),
-    EvidenceError,
-> {
+
+/// A hint for readers. Markup is never parsed or rendered here.
+fn text_format(text: &str, origin: ArtifactOrigin) -> &'static str {
+    let trimmed = text.trim_start_matches('\u{feff}').trim_start();
+    if matches!(trimmed.as_bytes().first(), Some(b'{' | b'['))
+        && serde_json::from_str::<serde::de::IgnoredAny>(trimmed).is_ok()
+    {
+        "json"
+    } else if trimmed.starts_with('<') {
+        if origin == ArtifactOrigin::Lighthouse {
+            "html"
+        } else {
+            "xml"
+        }
+    } else {
+        "text"
+    }
+}
+
+/// Read one regular, unlinked source file while pinning its identity before, during and after
+/// the read.
+fn read_source(path: &Path, max: u64, too_large: &str) -> Result<Vec<u8>, EvidenceError> {
     let fail = |reason: &str| EvidenceError::Artifact {
         path: path.into(),
         reason: reason.into(),
@@ -922,8 +1170,8 @@ fn read_image(
     if before.file_type().is_symlink() || !before.is_file() {
         return Err(fail("source must be a non-symlink regular file"));
     }
-    if before.len() > MAX_IMAGE_BYTES {
-        return Err(fail("image exceeds 8 MiB"));
+    if before.len() > max {
+        return Err(fail(too_large));
     }
     let mut file = File::open(path).map_err(|e| fail(&e.to_string()))?;
     let opened = file.metadata().map_err(|e| fail(&e.to_string()))?;
@@ -934,13 +1182,13 @@ fn read_image(
     if opened_identity.link_count > 1 {
         return Err(fail("hardlinked source is refused"));
     }
-    let mut bytes = Vec::with_capacity((opened.len().min(MAX_IMAGE_BYTES + 1)) as usize);
+    let mut bytes = Vec::with_capacity((opened.len().min(max + 1)) as usize);
     Read::by_ref(&mut file)
-        .take(MAX_IMAGE_BYTES + 1)
+        .take(max + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| fail(&e.to_string()))?;
-    if bytes.len() as u64 > MAX_IMAGE_BYTES {
-        return Err(fail("image exceeds 8 MiB"));
+    if bytes.len() as u64 > max {
+        return Err(fail(too_large));
     }
     let after = file.metadata().map_err(|e| fail(&e.to_string()))?;
     if !same_file(&opened, &after) || after.len() != bytes.len() as u64 {
@@ -961,6 +1209,23 @@ fn read_image(
     if reopened_identity.link_count > 1 {
         return Err(fail("hardlinked source is refused"));
     }
+    Ok(bytes)
+}
+
+type ReadImage = (
+    Vec<u8>,
+    &'static str,
+    &'static str,
+    String,
+    image::DynamicImage,
+);
+
+fn read_image(path: &Path) -> Result<ReadImage, EvidenceError> {
+    let fail = |reason: &str| EvidenceError::Artifact {
+        path: path.into(),
+        reason: reason.into(),
+    };
+    let bytes = read_source(path, MAX_IMAGE_BYTES, "image exceeds 8 MiB")?;
     let (media, ext) =
         image_type(&bytes).ok_or_else(|| fail("source is not a PNG, JPEG, or WebP image"))?;
     let image = image::load_from_memory(&bytes)
@@ -1155,6 +1420,7 @@ fn render_report(doc: &EvidenceDocument<'_>) -> String {
         normalize_markdown(&doc.before.summary)
     );
     render_observations(&mut out, &doc.before.observations);
+    render_capture(&mut out, &doc.before.capture);
     for step in doc.steps {
         out.push_str("\n## Step: ");
         out.push_str(&normalize_markdown(&step.label));
@@ -1162,6 +1428,7 @@ fn render_report(doc: &EvidenceDocument<'_>) -> String {
         out.push_str(&normalize_markdown(&step.summary));
         out.push('\n');
         render_observations(&mut out, &step.observations);
+        render_capture(&mut out, &step.capture);
         out.push_str("\n### Artifacts\n\n");
         render_artifacts(&mut out, step.artifacts.iter());
     }
@@ -1169,6 +1436,7 @@ fn render_report(doc: &EvidenceDocument<'_>) -> String {
     out.push_str(&normalize_markdown(&doc.after.summary));
     out.push('\n');
     render_observations(&mut out, &doc.after.observations);
+    render_capture(&mut out, &doc.after.capture);
     out.push_str("\n## Source changes\n\n");
     render_list(
         &mut out,
@@ -1211,27 +1479,51 @@ fn render_artifacts<'a>(out: &mut String, artifacts: impl Iterator<Item = &'a Ar
         return;
     }
     for artifact in artifacts {
-        // The full capture is the evidence and is always what the entry links and hashes.
-        // A preview is a derivative offered alongside it, never in place of it.
-        out.push_str(&format!(
-            "- [{}]({}) ({}x{}, {} bytes, `{}`)\n",
-            normalize_markdown(&artifact.label),
-            normalize_markdown(&artifact.path),
-            artifact.width,
-            artifact.height,
-            artifact.bytes,
-            artifact.sha256,
-        ));
-        if let Some(preview) = &artifact.preview {
-            out.push_str(&format!(
-                "  - [preview]({}) ({}x{}, {} bytes, `{}`)\n",
-                normalize_markdown(&preview.path),
-                preview.width,
-                preview.height,
-                preview.bytes,
-                preview.sha256,
-            ));
+        match artifact {
+            Artifact::Image(image) => render_image(out, image),
+            // Text artifacts are linked, never inlined: imported HTML or XML stays inert.
+            Artifact::Text(text) => out.push_str(&format!(
+                "- [{}]({}) ({} from {}, {}, captured at {}, {} bytes, `{}`)\n",
+                normalize_markdown(&text.label),
+                normalize_markdown(&text.path),
+                text.kind.name(),
+                text.origin.name(),
+                text.format,
+                normalize_markdown(&text.captured_at),
+                text.bytes,
+                text.sha256,
+            )),
+            Artifact::Unavailable(missing) => out.push_str(&format!(
+                "- {} ({} from {}): unavailable, {}\n",
+                normalize_markdown(&missing.label),
+                missing.kind.name(),
+                missing.origin.name(),
+                normalize_markdown(&missing.reason),
+            )),
         }
+    }
+}
+fn render_image(out: &mut String, artifact: &ImageArtifact) {
+    // The full capture is the evidence and is always what the entry links and hashes.
+    // A preview is a derivative offered alongside it, never in place of it.
+    out.push_str(&format!(
+        "- [{}]({}) ({}x{}, {} bytes, `{}`)\n",
+        normalize_markdown(&artifact.label),
+        normalize_markdown(&artifact.path),
+        artifact.width,
+        artifact.height,
+        artifact.bytes,
+        artifact.sha256,
+    ));
+    if let Some(preview) = &artifact.preview {
+        out.push_str(&format!(
+            "  - [preview]({}) ({}x{}, {} bytes, `{}`)\n",
+            normalize_markdown(&preview.path),
+            preview.width,
+            preview.height,
+            preview.bytes,
+            preview.sha256,
+        ));
     }
 }
 fn render_observations(out: &mut String, items: &[Observation]) {
@@ -1310,6 +1602,36 @@ mod tests {
 
         let json = redact_secrets(r#"{"passwd":"json-secret"}"#);
         assert!(!json.contains("json-secret"), "{json}");
+    }
+
+    #[test]
+    fn quoted_values_keep_their_quotes_so_markup_stays_well_formed() {
+        let tree = r#"<node text="Sign in" password="false" token='abc' /><node api_key=plain />"#;
+        assert_eq!(
+            redact_secrets(tree),
+            r#"<node text="Sign in" password="[REDACTED]" token='[REDACTED]' /><node api_key=[REDACTED] />"#
+        );
+    }
+
+    #[test]
+    fn text_format_is_a_hint_and_never_trusts_markup() {
+        assert_eq!(text_format("{\"a\":1}", ArtifactOrigin::Lighthouse), "json");
+        assert_eq!(text_format("{not json", ArtifactOrigin::Lighthouse), "text");
+        assert_eq!(
+            text_format("<html><script>x</script>", ArtifactOrigin::Lighthouse),
+            "html"
+        );
+        assert_eq!(
+            text_format(
+                "\u{feff} <?xml?><hierarchy/>",
+                ArtifactOrigin::AndroidUiTree
+            ),
+            "xml"
+        );
+        assert_eq!(
+            text_format("I/flutter: tap", ArtifactOrigin::AndroidLogcat),
+            "text"
+        );
     }
 
     #[test]

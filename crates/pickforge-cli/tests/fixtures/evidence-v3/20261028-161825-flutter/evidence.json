@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 3,
+  "runId": "20261028-161825-flutter",
+  "projectId": "app-5a3d54725f19f32b",
+  "projectPath": "/tmp/pf352-v3/app",
+  "createdAt": "2026-10-28T16:18:25Z",
+  "scenario": "Counter increments and keeps state after hot reload",
+  "outcome": "passed",
+  "before": {
+    "summary": "Counter was zero with the old theme.",
+    "observations": [
+      {
+        "label": "Counter",
+        "value": "0"
+      }
+    ],
+    "artifacts": [
+      {
+        "kind": "screenshot",
+        "label": "Initial frame",
+        "path": "artifacts/before-initial-frame-a874ead9968c.png",
+        "width": 4,
+        "height": 8,
+        "sha256": "a874ead9968c10c86189afd3395889c28225240ba5a299e0953983a77470c6aa",
+        "bytes": 74,
+        "mediaType": "image/png"
+      }
+    ]
+  },
+  "steps": [
+    {
+      "label": "Clicks complete",
+      "summary": "Counter reached two before reload.",
+      "observations": [
+        {
+          "label": "Counter",
+          "value": "2"
+        }
+      ],
+      "artifacts": []
+    }
+  ],
+  "after": {
+    "summary": "The new theme appeared and counter stayed at two.",
+    "observations": [
+      {
+        "label": "Counter",
+        "value": "2"
+      }
+    ],
+    "artifacts": [
+      {
+        "kind": "screenshot",
+        "label": "Reloaded frame",
+        "path": "artifacts/after-reloaded-frame-fdb14ef3ce60.png",
+        "width": 4,
+        "height": 8,
+        "sha256": "fdb14ef3ce6054588fb486f85ae7d5fa2fb43cec60e7b44eb4c9e640d3d71a25",
+        "bytes": 73,
+        "mediaType": "image/png"
+      }
+    ]
+  },
+  "sourceChanges": [
+    "lib/main.dart"
+  ],
+  "checks": [
+    {
+      "name": "desktop click",
+      "status": "passed",
+      "summary": "Counter advanced to two.",
+      "step": "Clicks complete"
+    },
+    {
+      "name": "flutter test",
+      "status": "passed",
+      "summary": "Focused tests passed."
+    }
+  ],
+  "limitations": [
+    "Pixel review was manual."
+  ]
+}

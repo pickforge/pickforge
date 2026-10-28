@@ -1,0 +1,127 @@
+{
+  "schemaVersion": 4,
+  "runId": "20261028-162536-flutter",
+  "projectId": "app-39915da0df56e92a",
+  "projectPath": "/tmp/pf352-v4/app",
+  "createdAt": "2026-10-28T16:25:36Z",
+  "scenario": "Sign in stays labelled after unfolding",
+  "outcome": "passed",
+  "before": {
+    "summary": "Folded phone in dark mode.",
+    "capture": {
+      "capturedAt": "2026-10-28T15:59:00Z",
+      "appBuild": "1.4.0+42",
+      "emulatorVersion": "35.2.10",
+      "systemImage": "system-images;android-35;google_apis;x86_64",
+      "requested": {
+        "foldState": "folded",
+        "darkMode": true
+      },
+      "observed": {
+        "displayMode": "unknown",
+        "foldState": "folded",
+        "posture": "unknown",
+        "rotation": 0,
+        "density": 420,
+        "fontScale": 1.0,
+        "darkMode": true,
+        "locale": "en-US"
+      }
+    },
+    "observations": [],
+    "artifacts": [
+      {
+        "kind": "tree",
+        "origin": "android-ui-tree",
+        "label": "UI tree",
+        "capturedAt": "2026-10-28T15:59:01Z",
+        "status": "captured",
+        "path": "artifacts/before-ui-tree-7ddbcdc4b028.txt",
+        "format": "xml",
+        "sha256": "7ddbcdc4b0281f282ef2f0bdf739d6cbb9e4efc78ecaf46935cf0e1ea1f38c6b",
+        "bytes": 204,
+        "mediaType": "text/plain; charset=utf-8"
+      },
+      {
+        "kind": "log",
+        "origin": "android-logcat",
+        "label": "Logcat",
+        "capturedAt": "2026-10-28T15:59:02Z",
+        "status": "captured",
+        "path": "artifacts/before-logcat-921da56f023f.txt",
+        "format": "text",
+        "sha256": "921da56f023f5c928a417346efe0f08dac03555ef3222ff42c7be637637e1ddb",
+        "bytes": 80,
+        "mediaType": "text/plain; charset=utf-8"
+      }
+    ]
+  },
+  "steps": [],
+  "after": {
+    "summary": "Unfolded tablet posture.",
+    "capture": {
+      "capturedAt": "2026-10-28T16:00:00Z",
+      "appBuild": "1.4.0+42",
+      "emulatorVersion": "unknown",
+      "systemImage": "unknown",
+      "requested": {
+        "foldState": "flat",
+        "posture": "open"
+      },
+      "observed": {
+        "displayMode": "unknown",
+        "foldState": "flat",
+        "posture": "unknown",
+        "rotation": 90,
+        "density": "unknown",
+        "fontScale": "unknown",
+        "darkMode": "unknown",
+        "locale": "unknown"
+      }
+    },
+    "observations": [],
+    "artifacts": [
+      {
+        "kind": "screenshot",
+        "label": "Unfolded",
+        "path": "artifacts/after-unfolded-fdb14ef3ce60.png",
+        "width": 4,
+        "height": 8,
+        "sha256": "fdb14ef3ce6054588fb486f85ae7d5fa2fb43cec60e7b44eb4c9e640d3d71a25",
+        "bytes": 73,
+        "mediaType": "image/png"
+      },
+      {
+        "kind": "report",
+        "origin": "lighthouse",
+        "label": "Lighthouse",
+        "capturedAt": "2026-10-28T16:00:05Z",
+        "status": "captured",
+        "path": "artifacts/after-lighthouse-2dc745debb1a.txt",
+        "format": "html",
+        "sha256": "2dc745debb1a1daf252d1b1dbe11802c4e9c60a87682e82c2a6ce01eec6303ce",
+        "bytes": 124,
+        "mediaType": "text/plain; charset=utf-8"
+      },
+      {
+        "kind": "tree",
+        "origin": "atspi-tree",
+        "label": "Desktop tree",
+        "capturedAt": "unknown",
+        "status": "unavailable",
+        "reason": "AT-SPI capture lands with #359"
+      }
+    ]
+  },
+  "sourceChanges": [],
+  "checks": [
+    {
+      "name": "labels",
+      "status": "passed",
+      "summary": "Every tappable control has a label."
+    }
+  ],
+  "limitations": [
+    "Emulator only."
+  ]
+}

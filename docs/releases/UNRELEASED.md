@@ -4,6 +4,14 @@
 
 ## Changes
 
+- `pickforge evidence record` writes schema v4. Each state records its capture
+  time, app build, emulator and system image versions, and the requested and
+  observed display mode, fold state, posture, rotation, density, font scale,
+  dark mode and locale. A value that was not observed reads `unknown`. Evidence
+  also holds UI trees, log excerpts and Lighthouse reports from Android,
+  DevTools and AT-SPI origins, up to 4 MiB each, redacted and stored as plain
+  text. An unavailable source is recorded with its reason. Schema v1 to v3
+  inputs and recorded runs stay valid. (#352)
 - `watch` and automatic session viewing prefer the matching native `pickforge-viewer` binary on graphical Linux hosts.
   The native path reads the verified lab display without VNC, a bridge, or Chromium.
   It opens a thumbnail with expand, fullscreen, collapse, and close controls.

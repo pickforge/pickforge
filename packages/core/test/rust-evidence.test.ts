@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { DirHandle, withDirHandle } from "../src/dir-handle.js";
 import { openRunCatalog, RunCatalog } from "../src/run-catalog.js";
@@ -31,7 +32,7 @@ it("merges both sources, reports corruption and never recovers Rust evidence", a
   expect(fs.existsSync(path.join(fixture.rustDir, "manifest.json"))).toBe(false);
 });
 
-it.each([1, 2, 3])("accepts schema %s, unknown fields and root screenshots", async schemaVersion => {
+it.each([1, 2, 3, 4])("accepts schema %s, unknown fields and root screenshots", async schemaVersion => {
   const { rustDir } = await mixedRuns(project);
   const doc = rustDocument();
   fs.writeFileSync(path.join(rustDir, "root.png"), "picture");
@@ -104,4 +105,78 @@ it("omits the report path when report.md is absent and keeps keyword-like check 
   expect(report).not.toContain("Report:");
   expect(report).toContain("- Login session: passed Visible");
   expect(report).not.toContain(plantedSecret);
+});
+
+const fixtures = fileURLToPath(new URL("../../../crates/pickforge-cli/tests/fixtures/", import.meta.url));
+function copyRustFixture(root: string, version: "v3" | "v4"): string {
+  const source = path.join(fixtures, `evidence-${version}`);
+  const runId = fs.readdirSync(source).find(name => /^\d{8}-\d{6}-flutter$/.test(name))!;
+  fs.cpSync(path.join(source, runId), path.join(root, runId), { recursive: true });
+  return path.join(root, runId);
+}
+
+it("reads a real schema v3 run recorded by the Rust CLI", async () => {
+  const { rustDir } = await mixedRuns(project);
+  const dir = copyRustFixture(path.dirname(rustDir), "v3");
+  const run = await readRustEvidenceRun(dir);
+  expect(run).toMatchObject({
+    state: "valid", outcome: "passed", stepCount: 1, captures: [], artifacts: [],
+    screenshots: ["artifacts/before-initial-frame-a874ead9968c.png", "artifacts/after-reloaded-frame-fdb14ef3ce60.png"],
+  });
+  const report = renderRustEvidenceReport(run!).join("\n");
+  expect(report).not.toContain("Captures:");
+  expect(report).not.toContain("Artifacts:");
+});
+
+it("shows captures and text artifacts from a real schema v4 run without reading their content", async () => {
+  const { rustDir } = await mixedRuns(project);
+  const dir = copyRustFixture(path.dirname(rustDir), "v4");
+  const run = await readRustEvidenceRun(dir);
+  expect(run?.state).toBe("valid");
+  expect(run!.screenshots).toEqual(["artifacts/after-unfolded-fdb14ef3ce60.png"]);
+  expect(run!.captures).toEqual([
+    {
+      phase: "before", capturedAt: "2026-10-28T15:59:00Z", appBuild: "1.4.0+42", emulatorVersion: "35.2.10",
+      systemImage: "system-images;android-35;google_apis;x86_64",
+      requested: { foldState: "folded", darkMode: true },
+      observed: { displayMode: "unknown", foldState: "folded", posture: "unknown", rotation: 0, density: 420,
+        fontScale: 1, darkMode: true, locale: "en-US" },
+    },
+    expect.objectContaining({ phase: "after", emulatorVersion: "unknown", requested: { foldState: "flat", posture: "open" } }),
+  ]);
+  expect(run!.artifacts.map(item => [item.phase, item.kind, item.origin, item.status, item.format])).toEqual([
+    ["before", "tree", "android-ui-tree", "captured", "xml"],
+    ["before", "log", "android-logcat", "captured", "text"],
+    ["after", "report", "lighthouse", "captured", "html"],
+    ["after", "tree", "atspi-tree", "unavailable", undefined],
+  ]);
+  expect(run!.artifacts[3]).toMatchObject({ reason: "AT-SPI capture lands with #359", capturedAt: "unknown" });
+  const report = renderRustEvidenceReport(run!).join("\n");
+  expect(report).toContain("- before: captured at 2026-10-28T15:59:00Z; app build 1.4.0+42; emulator 35.2.10;");
+  expect(report).toContain("  requested: foldState folded, darkMode true");
+  expect(report).toContain("- after: Lighthouse (report from lighthouse): artifacts/after-lighthouse-2dc745debb1a.txt, html, 124 bytes");
+  expect(report).toContain("- after: Desktop tree (tree from atspi-tree): unavailable, AT-SPI capture lands with #359");
+  // The imported HTML stays in its file; neither the summary nor the report carries it.
+  expect(JSON.stringify(run)).not.toContain("<script");
+  expect(report).not.toContain("<script");
+  const listed = (await listArtifactRuns(await openRunCatalog(project, env))).find(item => item.runId === run!.runId);
+  expect(listed?.artifacts).toBe(4);
+});
+
+it("marks listed text artifacts missing when a partial run lacks their files and redacts tampered fields", async () => {
+  const { rustDir } = await mixedRuns(project);
+  const dir = copyRustFixture(path.dirname(rustDir), "v4");
+  fs.rmSync(path.join(dir, "artifacts/before-logcat-921da56f023f.txt"));
+  const doc = JSON.parse(fs.readFileSync(path.join(dir, "evidence.json"), "utf8"));
+  doc.before.artifacts[0].path = "../evidence.json";
+  doc.after.artifacts[2].reason = `token=${plantedSecret}`;
+  doc.after.capture.appBuild = `password=${plantedSecret}`;
+  doc.after.capture.observed = { rotation: 90, nested: { a: 1 }, "bad key": 1, fontScale: Number.MAX_VALUE };
+  fs.writeFileSync(path.join(dir, "evidence.json"), JSON.stringify(doc));
+  const run = await readRustEvidenceRun(dir);
+  expect(run?.state).toBe("valid");
+  expect(run!.artifacts.slice(0, 2).map(item => item.status)).toEqual(["missing", "missing"]);
+  expect(run!.captures[1]!.observed).toEqual({ rotation: 90, fontScale: Number.MAX_VALUE });
+  expect(JSON.stringify(run)).not.toContain(plantedSecret);
+  expect(renderRustEvidenceReport(run!).join("\n")).toContain("- before: UI tree (tree from android-ui-tree): missing ../evidence.json");
 });

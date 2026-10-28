@@ -1,0 +1,2 @@
+I/flutter( 4242): login ok patient=SYN-0001
+D/okhttp: Authorization: [REDACTED]
