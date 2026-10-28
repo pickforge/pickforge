@@ -151,28 +151,28 @@ function captures(doc: JsonObject): RustEvidenceCapture[] {
     }];
   });
 }
+async function textArtifact(dir: DirHandle, ref: PhaseRef, artifact: JsonObject): Promise<RustEvidenceArtifact> {
+  const entry: RustEvidenceArtifact = {
+    ...where(ref), kind: text(artifact.kind), origin: text(artifact.origin), label: text(artifact.label),
+    capturedAt: typeof artifact.capturedAt === "string" ? text(artifact.capturedAt) : "unknown",
+    status: "missing",
+  };
+  if (artifact.status === "unavailable") return { ...entry, status: "unavailable", reason: text(artifact.reason) };
+  if (typeof artifact.path !== "string") return entry;
+  const found = artifact.status === "captured" && await artifactExists(dir, artifact.path);
+  return {
+    ...entry, status: found ? "captured" : "missing", path: text(artifact.path), format: text(artifact.format),
+    ...(typeof artifact.bytes === "number" ? { bytes: artifact.bytes } : {}),
+  };
+}
+
 async function textArtifacts(dir: DirHandle, doc: JsonObject): Promise<RustEvidenceArtifact[]> {
   const artifacts: RustEvidenceArtifact[] = [];
   for (const ref of phases(doc)) {
     for (const item of array(ref.value.artifacts)) {
       const artifact = object(item);
       if (artifact.kind === "screenshot" || typeof artifact.kind !== "string") continue;
-      const entry: RustEvidenceArtifact = {
-        ...where(ref), kind: text(artifact.kind), origin: text(artifact.origin), label: text(artifact.label),
-        capturedAt: typeof artifact.capturedAt === "string" ? text(artifact.capturedAt) : "unknown",
-        status: "missing",
-      };
-      if (artifact.status === "unavailable") {
-        artifacts.push({ ...entry, status: "unavailable", reason: text(artifact.reason) });
-      } else if (typeof artifact.path === "string") {
-        const found = artifact.status === "captured" && await artifactExists(dir, artifact.path);
-        artifacts.push({
-          ...entry, status: found ? "captured" : "missing", path: text(artifact.path), format: text(artifact.format),
-          ...(typeof artifact.bytes === "number" ? { bytes: artifact.bytes } : {}),
-        });
-      } else {
-        artifacts.push(entry);
-      }
+      artifacts.push(await textArtifact(dir, ref, artifact));
     }
   }
   return artifacts;
