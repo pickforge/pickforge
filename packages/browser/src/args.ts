@@ -85,12 +85,10 @@ export function buildChromeArgs(opts: BuildChromeArgsOptions): string[] {
     "--gcm-mcs-endpoint=https://127.0.0.1:0",
     // Browser sign-in list-accounts polling and the on-device model manifest
     // fetch ignore the switches above; sink them on loopback like GCM.
-    "--gaia-url=https://127.0.0.1:0",
-    // --gaia-url is on Chrome's bad-flags list, which shows an "unsupported
-    // command-line flag" bar on every session. A bare --test-type skips the
-    // startup info bars without the automation bar of --enable-automation.
-    // It also skips component extensions with background pages. See #348.
-    "--test-type",
+    // The Gaia config sets the same origin as --gaia-url. That switch is on
+    // Chrome's bad-flags list and shows an "unsupported command-line flag" bar.
+    // --test-type would hide the bar but exposes chrome.test to extensions. See #348.
+    `--gaia-config-contents=${JSON.stringify({ urls: { gaia_url: { url: "https://127.0.0.1:0" } } })}`,
     "--component-updater=url-source=https://127.0.0.1:0",
     "--disable-component-update",
     "--disable-domain-reliability",
