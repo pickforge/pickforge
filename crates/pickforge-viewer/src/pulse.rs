@@ -32,11 +32,12 @@ pub struct Pulse {
 }
 
 impl Pulse {
-    /// A pulse at a session pixel. `None` outside the session.
+    /// A pulse at a session pixel. A point past the edge moves to the edge,
+    /// as X moves the pointer there. `None` for a session without pixels.
     pub fn new(x: u32, y: u32, session: (u32, u32), start: Instant) -> Option<Self> {
-        (x < session.0 && y < session.1).then_some(Self {
-            x,
-            y,
+        (session.0 > 0 && session.1 > 0).then(|| Self {
+            x: x.min(session.0 - 1),
+            y: y.min(session.1 - 1),
             start,
             next_frame: start,
         })
@@ -111,11 +112,17 @@ mod tests {
     }
 
     #[test]
-    fn refuses_points_outside_the_session() {
+    fn moves_points_past_the_edge_to_the_edge() {
         let now = Instant::now();
-        assert!(Pulse::new(799, 599, SESSION, now).is_some());
-        assert!(Pulse::new(800, 10, SESSION, now).is_none());
-        assert!(Pulse::new(10, 600, SESSION, now).is_none());
+        let image = Rect::new(0, 0, 800, 600);
+        let center = |x, y| {
+            let pulse = Pulse::new(x, y, SESSION, now).unwrap();
+            pulse.ring(image, SESSION, 1.0, now).unwrap().center
+        };
+        assert_eq!(center(799, 599), (799.5, 599.5));
+        assert_eq!(center(900, 700), (799.5, 599.5));
+        assert_eq!(center(32767, 10), (799.5, 10.5));
+        assert!(Pulse::new(10, 10, (0, 0), now).is_none());
     }
 
     #[test]

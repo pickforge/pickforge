@@ -59,8 +59,9 @@ afterEach(async () => {
 
 const opts = () => ({ session: sessionId, projectDir: root, json: true });
 const pulses = (): unknown[] => fakes.calls().filter((entry) => entry.cmd === "pulse").map(({ x, y }) => ({ x, y }));
-/** Pulses are sent before the command returns, so a short settle finds any extra. */
-async function settledPulses(): Promise<unknown[]> {
+/** Waits for the expected pulses to reach the fake viewer, then a short settle finds any extra. */
+async function settledPulses(expected = 0): Promise<unknown[]> {
+  for (let count = 0; count < 80 && pulses().length < expected; count++) await sleep(25);
   await sleep(100);
   return pulses();
 }
@@ -68,9 +69,9 @@ async function settledPulses(): Promise<unknown[]> {
 describe.skipIf(!available)("desktop click pulse", () => {
   it("sends one pulse per completed click and double click, and none for a drag", async () => {
     expect(await runDesktopClick("12", "34", opts())).toBe(0);
-    expect(await settledPulses()).toEqual([{ x: 12, y: 34 }]);
+    expect(await settledPulses(1)).toEqual([{ x: 12, y: 34 }]);
     expect(await runDesktopDoubleClick("56", "78", opts())).toBe(0);
-    expect(await settledPulses()).toEqual([{ x: 12, y: 34 }, { x: 56, y: 78 }]);
+    expect(await settledPulses(2)).toEqual([{ x: 12, y: 34 }, { x: 56, y: 78 }]);
     expect(await runDesktopDrag("1", "2", "30", "40", { ...opts(), duration: "0" })).toBe(0);
     expect(await settledPulses()).toHaveLength(2);
   }, 20_000);

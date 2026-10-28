@@ -890,7 +890,7 @@ impl App {
             return;
         }
         let Some(next) = Pulse::new(x, y, self.session, now) else {
-            log("ignored a pulse outside the session");
+            log("ignored a pulse for a session without pixels");
             return;
         };
         self.damage_pulse();

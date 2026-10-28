@@ -49,14 +49,12 @@ async function assertHostSocket(host: NativeViewerHostIdentity): Promise<void> {
   if (stats.ino !== host.socketIno || stats.dev !== host.socketDev) throw new Error("Unsafe viewer socket");
 }
 
-export async function requestNativeViewerHost(
-  host: NativeViewerHostIdentity, request: ViewerHostRequest, timeoutMs = 2_000,
-): Promise<ViewerHostResponse> {
+export async function requestNativeViewerHost(host: NativeViewerHostIdentity, request: ViewerHostRequest): Promise<ViewerHostResponse> {
   await assertHostSocket(host);
   return new Promise((resolve, reject) => {
     const socket = net.connect(host.socket);
     let pending = Buffer.alloc(0);
-    const timer = setTimeout(() => socket.destroy(new Error("Viewer host request timed out")), timeoutMs);
+    const timer = setTimeout(() => socket.destroy(new Error("Viewer host request timed out")), 2_000);
     socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
     socket.on("data", (chunk: Buffer) => {
       pending = Buffer.concat([pending, chunk]);
@@ -153,29 +151,31 @@ export async function findNativeViewerHost(sessionId: string, env: EnvLike = pro
   } catch { return undefined; }
 }
 
-/** The longest a completed click waits for its viewer pulse. */
-export const VIEWER_PULSE_TIMEOUT_MS = 300;
+/** The longest a pulse socket stays open when its write cannot finish. */
+const VIEWER_PULSE_TIMEOUT_MS = 300;
 
 /**
  * Asks the session's native viewer to show a click at a point on the Xvfb that
- * verified for that click. Best effort: no viewer, a dead host, a timeout or
- * any error is ignored, and the wait is bounded.
+ * verified for that click. It returns once the request is written and never
+ * waits for a reply, so a stuck host cannot delay the click. Best effort: no
+ * viewer, a dead host or any error is ignored.
  */
 export async function pulseNativeViewer(
   sessionId: string, target: OwnedDisplayIdentity, point: { x: number; y: number }, env: EnvLike = process.env,
 ): Promise<void> {
-  const send = async (): Promise<void> => {
+  const request: ViewerHostRequest = { op: "pulse", x: point.x, y: point.y, xvfbPid: target.pid, xvfbStartTicks: target.startTicks };
+  try {
     const host = await readNativeViewerHost(sessionId, env);
     if (host === undefined) return;
-    await requestNativeViewerHost(host, {
-      op: "pulse", x: point.x, y: point.y, xvfbPid: target.pid, xvfbStartTicks: target.startTicks,
-    }, VIEWER_PULSE_TIMEOUT_MS);
-  };
-  let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<void>((resolve) => { timer = setTimeout(resolve, VIEWER_PULSE_TIMEOUT_MS); });
-  try {
-    await Promise.race([send().catch(() => {}), timeout]);
-  } finally { clearTimeout(timer); }
+    await assertHostSocket(host);
+    await new Promise<void>((resolve) => {
+      const socket = net.connect(host.socket);
+      const done = (): void => { socket.destroy(); resolve(); };
+      socket.setTimeout(VIEWER_PULSE_TIMEOUT_MS, done);
+      socket.once("error", done);
+      socket.once("connect", () => socket.end(`${JSON.stringify(request)}\n`, done));
+    });
+  } catch { /* A pulse never changes the click result. */ }
 }
 
 /** Remove readiness whose host and viewer are both gone, refusing a replaced socket. */

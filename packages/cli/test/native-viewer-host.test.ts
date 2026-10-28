@@ -2,12 +2,14 @@ import fs from "node:fs";
 import os from "node:os";
 import net from "node:net";
 import path from "node:path";
+import { once } from "node:events";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSession, updateSession, processIdentityMatches, readProcessIdentity, acquireHumanLease, readHumanLease, releaseHumanLease } from "@pickforge/lab-core";
 import {
   startXvfb, stopXvfb, findOnPath, findNativeViewerHost, requestNativeViewerHost,
-  withSessionVncLock, followNativeViewerRequest, pulseNativeViewer, type NativeViewerHostIdentity, type XvfbHandle,
+  withSessionVncLock, followNativeViewerRequest, pulseNativeViewer, withViewerDir, writeViewerPrivateFile, sessionViewerDir,
+  type NativeViewerHostIdentity, type XvfbHandle,
 } from "@pickforge/lab-desktop-linux";
 import { runNativeViewerHost, type NativeHostOptions } from "../src/viewer/native-host.js";
 import { createViewerFakes, monitor, type ViewerFakes, type FakeViewerBehavior } from "./viewer-fakes.js";
@@ -373,6 +375,36 @@ describe.skipIf(!available)("native host click pulse", () => {
     expect(controlCommands()).toEqual([]);
     await requestNativeViewerHost(host, { op: "shutdown" });
     await running;
+  });
+
+  it("writes the pulse without waiting for a host that never reads", async () => {
+    const stuck: net.Socket[] = [];
+    const server = net.createServer({ pauseOnConnect: true }, (socket) => { stuck.push(socket); });
+    await withViewerDir(sessionId, process.env, true, async (directory) => {
+      server.listen(directory.resolve("host.sock"));
+      await once(server, "listening");
+      fs.chmodSync(directory.resolve("host.sock"), 0o600);
+      const stats = (await directory.lstatChild("host.sock"))!;
+      const identity = readProcessIdentity(process.pid)!;
+      await writeViewerPrivateFile(directory, "host.json", JSON.stringify({
+        version: nativeViewerVersion, sessionId, launchId: "a".repeat(32), ...identity,
+        viewerPid: identity.pid, viewerStartTicks: identity.startTicks,
+        socket: path.join(sessionViewerDir(sessionId, process.env), "host.sock"), socketIno: stats.ino, socketDev: stats.dev,
+      }));
+    });
+    try {
+      const started = performance.now();
+      await pulseNativeViewer(sessionId, { display: display.display, pid: display.pid, startTicks: display.startTimeTicks }, { x: 5, y: 6 });
+      expect(performance.now() - started).toBeLessThan(250);
+      await until(() => stuck.length === 1);
+      const data = once(stuck[0]!, "data");
+      stuck[0]!.resume();
+      const [chunk] = await data as [Buffer];
+      expect(JSON.parse(chunk.toString("utf8"))).toMatchObject({ op: "pulse", x: 5, y: 6, xvfbPid: display.pid });
+    } finally {
+      for (const socket of stuck) socket.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("returns quickly without a viewer", async () => {

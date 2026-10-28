@@ -163,12 +163,20 @@ fn pulse_damages_only_its_rows_and_draws_inside_the_image() {
 }
 
 #[test]
-fn pulse_ignores_points_outside_the_session_and_ended_sessions() {
+fn pulse_moves_a_point_past_the_edge_and_ignores_ended_sessions() {
     let mut app = app();
     app.size = PhysicalSize::new(100, 100);
     app.image = Rect::new(0, 0, 100, 100);
-    app.start_pulse(100, 5, Instant::now());
-    assert!(app.pulse.is_none() && app.damage.is_none());
+    let now = Instant::now();
+    app.start_pulse(100, 5, now);
+    let ring = app
+        .pulse
+        .as_ref()
+        .unwrap()
+        .ring(app.image, app.session, 1.0, now);
+    assert_eq!(ring.unwrap().center, (99.5, 5.5));
+    app.pulse = None;
+    app.damage = None;
     app.ended = true;
     app.start_pulse(5, 5, Instant::now());
     assert!(app.pulse.is_none() && app.damage.is_none());
