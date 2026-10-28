@@ -856,6 +856,22 @@ mod tests {
     }
 
     #[test]
+    fn json_in_a_line_accepts_lone_surrogates_and_deep_lighthouse_reports() {
+        let line = r#"D/app: {"credentials":{"token":{"value":"t1","label":"\ud83d"}}}"#;
+        assert_eq!(
+            redact_text_artifact(line, ArtifactOrigin::DevtoolsConsole),
+            r#"D/app: {"credentials":{"token":{"value":"[REDACTED]","label":"[REDACTED]"}}}"#
+        );
+        let html = format!(
+            "<script>window.__LIGHTHOUSE_JSON__ = {{\"audits\":{{\"third-party-cookies\":{{\"id\":\"third-party-cookies\",\"score\":1}},\"script-treemap-data\":{{\"details\":{{\"nodes\":{}1{}}}}}}}}};</script>",
+            "[".repeat(40),
+            "]".repeat(40)
+        );
+        let stored = redact_text_artifact(&html, ArtifactOrigin::Lighthouse);
+        assert_eq!(stored, html);
+    }
+
+    #[test]
     fn literal_markers_in_the_input_stay_as_written() {
         let line = "D/app: \u{FDD0}0\u{FDD1} [] \u{FDD0}x token=abc\n";
         assert_eq!(
