@@ -701,12 +701,11 @@ fn copy_rect(shared: &mut Shared, rect: Rect, bytes: &[u8], msb_first: bool) {
         let src = &bytes[row * w * 4..][..w * 4];
         let start = (rect.y as usize + row) * frame.width as usize + rect.x as usize;
         let dst = &mut frame.pixels[start..start + w];
-        for (pixel, chunk) in dst.iter_mut().zip(src.chunks_exact(4)) {
-            let raw = [chunk[0], chunk[1], chunk[2], chunk[3]];
+        for (pixel, chunk) in dst.iter_mut().zip(src.as_chunks::<4>().0) {
             let value = if msb_first {
-                u32::from_be_bytes(raw)
+                u32::from_be_bytes(*chunk)
             } else {
-                u32::from_le_bytes(raw)
+                u32::from_le_bytes(*chunk)
             };
             *pixel = value & 0x00ff_ffff;
         }
