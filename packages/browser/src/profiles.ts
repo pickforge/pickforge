@@ -1,15 +1,15 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import {
   DirHandle,
   getSession,
-  isPidAlive,
+  identityIsAlive,
   isProcessGroupAlive,
   pickforgeHome,
   processIdentityMatches,
   readProcessIdentity,
+  readProcessGroupLeaderIdentity,
   type EnvLike,
   type ProcessIdentity,
 } from "@pickforge/lab-core";
@@ -33,12 +33,17 @@ interface ProfileOwner {
   token: string;
 }
 
-export interface BrowserProfileEntry {
+interface HealthyBrowserProfileEntry {
   name: string;
   sizeBytes: number;
   lastUsedAt: string;
   holdingSession: string | null;
 }
+
+export type BrowserProfileEntry = HealthyBrowserProfileEntry | {
+  name: string;
+  error: string;
+};
 
 function errno(error: unknown): string | undefined {
   return (error as NodeJS.ErrnoException).code;
@@ -47,6 +52,19 @@ function errno(error: unknown): string | undefined {
 function assertPrivate(dir: DirHandle): void {
   if (dir.stat.uid !== process.getuid?.() || (dir.stat.mode & 0o077) !== 0) {
     throw new Error(`Refusing unsafe browser profile directory ${dir.dir}: must be owned by this user with mode 0700`);
+  }
+}
+
+async function openPrivateProfiles(base: DirHandle, create: boolean): Promise<DirHandle> {
+  const root = create
+    ? await base.ensureChildDir("profiles", 0o700)
+    : await base.openChild("profiles");
+  try {
+    assertPrivate(root);
+    return root;
+  } catch (error) {
+    await root.close();
+    throw error;
   }
 }
 
@@ -64,16 +82,7 @@ async function openProfiles(env: EnvLike, create: boolean): Promise<DirHandle | 
     if (base.stat.uid !== process.getuid?.() || (base.stat.mode & 0o022) !== 0) {
       throw new Error(`Refusing unsafe browser profile parent: ${home}`);
     }
-    const root = create
-      ? await base.ensureChildDir("profiles", 0o700)
-      : await base.openChild("profiles");
-    try {
-      assertPrivate(root);
-      return root;
-    } catch (error) {
-      await root.close();
-      throw error;
-    }
+    return await openPrivateProfiles(base, create);
   } catch (error) {
     if (!create && errno(error) === "ENOENT") return undefined;
     // DirHandle translates missing directory errors. Check via the pinned parent.
@@ -85,7 +94,15 @@ async function openProfiles(env: EnvLike, create: boolean): Promise<DirHandle | 
 }
 
 async function openProfile(root: DirHandle, name: string, create: boolean): Promise<DirHandle> {
-  const dir = create ? await root.ensureChildDir(name, 0o700) : await root.openChild(name);
+  let dir: DirHandle;
+  try {
+    dir = create ? await root.ensureChildDir(name, 0o700) : await root.openChild(name);
+  } catch (error) {
+    if ((await root.lstatChild(name))?.isSymbolicLink()) {
+      throw new Error(`Refusing browser profile "${name}": it is a symlink`);
+    }
+    throw error;
+  }
   try {
     assertPrivate(dir);
     return dir;
@@ -97,6 +114,11 @@ async function openProfile(root: DirHandle, name: string, create: boolean): Prom
 
 const lockName = (name: string): string => `.${name}.lock`;
 const sentinelName = (name: string, token: string): string => `.${name}.lock.${token}`;
+
+function validOwnerProcess(identity: ProcessIdentity | undefined): boolean {
+  if (identity?.pid === undefined) return false;
+  return Number.isSafeInteger(identity.pid) && identity.pid > 0 && Number.isSafeInteger(identity.startTicks);
+}
 
 async function readOwner(root: DirHandle, name: string): Promise<ProfileOwner | undefined> {
   let file: fs.promises.FileHandle;
@@ -113,8 +135,7 @@ async function readOwner(root: DirHandle, name: string): Promise<ProfileOwner | 
     }
     const value = JSON.parse(await file.readFile("utf8")) as ProfileOwner;
     if (typeof value.sessionId !== "string" || !/^[0-9a-f-]{36}$/.test(value.token) ||
-        !Number.isSafeInteger(value.process?.pid) || value.process.pid <= 0 ||
-        !Number.isSafeInteger(value.process.startTicks)) {
+        !validOwnerProcess(value.process)) {
       throw new Error(`Invalid browser profile lock: ${name}`);
     }
     return value;
@@ -127,9 +148,17 @@ async function ownerAlive(owner: ProfileOwner, env: EnvLike): Promise<boolean> {
   if (processIdentityMatches(owner.process)) return true;
   // A CLI can exit while its detached browser and display still run.
   const record = await getSession(owner.sessionId, env);
-  return [record?.browser?.browserPid, record?.desktop?.xvfbPid].some(
-    (pid) => pid !== undefined && (isPidAlive(pid) || isProcessGroupAlive(pid)),
-  );
+  return recordedProcessAlive(record?.browser?.browserPid, record?.browser?.browserStartTimeTicks) ||
+    recordedProcessAlive(record?.desktop?.xvfbPid, record?.desktop?.xvfbStartTimeTicks);
+}
+
+function recordedProcessAlive(pid: number | undefined, startTicks: number | undefined): boolean {
+  if (pid === undefined) return false;
+  if (startTicks === undefined) return identityIsAlive(pid) || isProcessGroupAlive(pid);
+  // A reused leader cannot belong to the recorded process group.
+  const current = readProcessGroupLeaderIdentity(pid) ?? readProcessIdentity(pid);
+  if (current !== undefined && current.startTicks !== startTicks) return false;
+  return identityIsAlive(pid, startTicks) || isProcessGroupAlive(pid);
 }
 
 /** Catch a creator crash between spawning Chrome and saving its process identity. */
@@ -228,14 +257,27 @@ async function acquire(root: DirHandle, name: string, sessionId: string, env: En
   }
 }
 
-async function clearSingletons(dir: DirHandle): Promise<void> {
+async function singletonOwnerUsesProfile(pid: number, profileDir: string): Promise<boolean> {
+  let argv: string[];
+  try {
+    argv = (await fs.promises.readFile(`/proc/${pid}/cmdline`, "utf8")).split("\0");
+  } catch (error) {
+    if (errno(error) === "ENOENT" || errno(error) === "ESRCH") return false;
+    throw error;
+  }
+  const executable = path.basename(argv[0] ?? "");
+  if (!/^(?:google-chrome(?:-stable|-beta|-unstable)?|chrome|chromium(?:-browser)?)$/.test(executable)) return false;
+  return argv.includes(`--user-data-dir=${profileDir}`);
+}
+
+async function clearSingletons(dir: DirHandle, profileName: string): Promise<void> {
   const lock = await dir.lstatChild("SingletonLock");
   if (lock !== undefined) {
-    if (!lock.isSymbolicLink()) throw new Error("Refusing unknown Chrome SingletonLock");
+    if (!lock.isSymbolicLink()) throw new Error(`Refusing browser profile "${profileName}": remove the unknown SingletonLock file`);
     const target = await fs.promises.readlink(dir.resolve("SingletonLock"));
     const match = /^(.*)-(\d+)$/.exec(target);
-    if (match === null || match[1] !== os.hostname() || isPidAlive(Number(match[2]))) {
-      throw new Error(`Refusing Chrome SingletonLock whose owner is not confirmed dead: ${target}`);
+    if (match === null || await singletonOwnerUsesProfile(Number(match[2]), dir.realDir)) {
+      throw new Error(`Refusing browser profile "${profileName}": SingletonLock owner is not confirmed dead; remove SingletonLock after closing Chrome`);
     }
   }
   for (const name of ["SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort"]) {
@@ -270,7 +312,7 @@ export async function claimBrowserProfile(name: string, sessionId: string, env: 
     const dir = await openProfile(root, name, true);
     try {
       await assertNoProfileProcess(browserProfileDir(name, env));
-      await clearSingletons(dir);
+      await clearSingletons(dir, name);
       const now = new Date();
       await fs.promises.utimes(dir.resolve(), now, now);
     } finally {
@@ -307,13 +349,33 @@ async function directorySize(dir: DirHandle): Promise<number> {
   for (const name of await dir.readEntryNames()) {
     const stat = await dir.lstatChild(name);
     if (stat?.isDirectory()) {
-      const child = await dir.openChild(name);
-      try { size += await directorySize(child); } finally { await child.close(); }
+      try {
+        const child = await dir.openChild(name);
+        try { size += await directorySize(child); } finally { await child.close(); }
+      } catch (error) {
+        // DirHandle translates ENOENT. Check absence through the pinned parent.
+        if (await dir.lstatChild(name) !== undefined) throw error;
+      }
     } else if (stat !== undefined) {
       size += stat.size;
     }
   }
   return size;
+}
+
+async function readProfileEntry(root: DirHandle, name: string, env: EnvLike): Promise<BrowserProfileEntry> {
+  const dir = await openProfile(root, name, false);
+  try {
+    const owner = await readOwner(root, name);
+    return {
+      name,
+      sizeBytes: await directorySize(dir),
+      lastUsedAt: dir.stat.mtime.toISOString(),
+      holdingSession: owner !== undefined && await ownerAlive(owner, env) ? owner.sessionId : null,
+    };
+  } finally {
+    await dir.close();
+  }
 }
 
 export async function listBrowserProfiles(env: EnvLike = process.env): Promise<BrowserProfileEntry[]> {
@@ -324,17 +386,10 @@ export async function listBrowserProfiles(env: EnvLike = process.env): Promise<B
     for (const name of (await root.readEntryNames()).sort()) {
       if (!BROWSER_PROFILE_NAME.test(name)) continue;
       if ((await root.lstatChild(name))?.isFile()) continue;
-      const dir = await openProfile(root, name, false);
       try {
-        const owner = await readOwner(root, name);
-        profiles.push({
-          name,
-          sizeBytes: await directorySize(dir),
-          lastUsedAt: dir.stat.mtime.toISOString(),
-          holdingSession: owner !== undefined && await ownerAlive(owner, env) ? owner.sessionId : null,
-        });
-      } finally {
-        await dir.close();
+        profiles.push(await readProfileEntry(root, name, env));
+      } catch (error) {
+        profiles.push({ name, error: (error as Error).message });
       }
     }
     return profiles;
@@ -350,12 +405,13 @@ export async function deleteBrowserProfile(name: string, env: EnvLike = process.
   const sessionId = `profile-delete-${randomUUID()}`;
   let held = false;
   try {
+    if (await root.lstatChild(name) === undefined) throw new Error(`Browser profile not found: ${name}`);
     await acquire(root, name, sessionId, env);
     held = true;
     const dir = await openProfile(root, name, false);
     try {
       await assertNoProfileProcess(browserProfileDir(name, env));
-      await clearSingletons(dir);
+      await clearSingletons(dir, name);
       // rm never follows symlinks in the tree. The parent is pinned and private.
       await fs.promises.rm(root.resolve(name), { recursive: true });
     } finally {

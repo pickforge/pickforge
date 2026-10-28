@@ -233,9 +233,9 @@ display. Pickforge hardens the launch, but v1 is for authorized, trusted
 development and QA — it is **not** a sandbox for hostile web pages.
 
 Named profiles store cookies, login tokens, history, local storage, and site
-settings. On Linux without a keyring, Chrome uses the basic store. Cookies are
-then protected only by file permissions. Profile directories require mode 0700
-and ownership by the current user. Symlinks and group or other permission bits
+settings. Pickforge always selects Chrome's basic store. Cookies are encrypted
+with a fixed key, so only file permissions protect them. Profile directories
+require mode 0700 and ownership by the current user. Symlinks and group or other permission bits
 are refused. Processes running as your user can still read them. Keep banking,
 payment, and main email accounts out of agent profiles.
 

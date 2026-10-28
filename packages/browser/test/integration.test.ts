@@ -134,8 +134,6 @@ describe.skipIf(!ready)("real headed Chrome under Xvfb", () => {
         name: "pickforge_test", value: "persisted", domain: "example.test", path: "/",
         expires: Math.floor(Date.now() / 1000) + 3600,
       }] });
-      await browserCdp(first, "Browser.close");
-      await vi.waitFor(() => expect(isPidAlive(first.browserPid)).toBe(false), { timeout: 5_000 });
       await destroyBrowserSession(first.id, registryEnv);
       expect(fs.existsSync(first.profileDir)).toBe(true);
       const second = await createBrowserSession(opts);

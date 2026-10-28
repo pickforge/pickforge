@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DirHandle, createSession, updateSession, type EnvLike } from "@pickforge/lab-core";
+import { DirHandle, createSession, readProcessStartTicks, updateSession, type EnvLike } from "@pickforge/lab-core";
 import {
   browserProfileDir,
   claimBrowserProfile,
@@ -33,6 +33,13 @@ function abandonOwner(name: string): void {
   const owner = JSON.parse(fs.readFileSync(lock, "utf8"));
   owner.process = { pid: deadPid, startTicks: 1 };
   fs.writeFileSync(lock, JSON.stringify(owner));
+}
+
+async function healthyProfiles() {
+  return (await listBrowserProfiles(env)).map((profile) => {
+    if ("error" in profile) throw new Error(profile.error);
+    return profile;
+  });
 }
 
 async function seedProfile(): Promise<string> {
@@ -66,15 +73,15 @@ describe("persistent browser profiles", () => {
     fs.writeFileSync(outside, "should not be read");
     fs.symlinkSync(outside, path.join(dir, "link"));
     const before = fs.readdirSync(path.dirname(dir));
-    const [profile] = await listBrowserProfiles(env);
+    const [profile] = await healthyProfiles();
     expect(profile).toMatchObject({ name: "ops", holdingSession: sessionId });
     expect(profile.sizeBytes).toBe("private-cookie".length + fs.lstatSync(path.join(dir, "link")).size);
     expect(Date.parse(profile.lastUsedAt)).toBeGreaterThan(Date.now() - 10_000);
     expect(fs.readdirSync(path.dirname(dir))).toEqual(before);
     await releaseBrowserProfile("ops", "brow-other", env);
-    expect((await listBrowserProfiles(env))[0].holdingSession).toBe(sessionId);
+    expect((await healthyProfiles())[0].holdingSession).toBe(sessionId);
     await releaseBrowserProfile("ops", sessionId, env);
-    expect((await listBrowserProfiles(env))[0].holdingSession).toBeNull();
+    expect((await healthyProfiles())[0].holdingSession).toBeNull();
     expect(fs.readFileSync(path.join(dir, "Default", "Cookies"), "utf8")).toBe("private-cookie");
   });
 
@@ -88,9 +95,13 @@ describe("persistent browser profiles", () => {
       fs.mkdirSync(root, { mode: 0o700 });
       fs.symlinkSync(outside, path.join(root, "ops"));
     }
-    await expect(claimBrowserProfile("ops", sessionId, env)).rejects.toThrow(/symlink/);
-    await expect(listBrowserProfiles(env)).rejects.toThrow(/symlink/);
-    await expect(deleteBrowserProfile("ops", env)).rejects.toThrow(/symlink/);
+    const message = which === "root" ? /symlink/ : 'Refusing browser profile "ops": it is a symlink';
+    await expect(claimBrowserProfile("ops", sessionId, env)).rejects.toThrow(message);
+    if (which === "root") await expect(listBrowserProfiles(env)).rejects.toThrow(message);
+    else expect(await listBrowserProfiles(env)).toEqual([{
+      name: "ops", error: message,
+    }]);
+    await expect(deleteBrowserProfile("ops", env)).rejects.toThrow(message);
     expect(fs.readdirSync(outside)).toEqual([]);
   });
 
@@ -98,7 +109,9 @@ describe("persistent browser profiles", () => {
     const dir = await seedProfile();
     fs.chmodSync(dir, mode);
     await expect(claimBrowserProfile("ops", sessionId, env)).rejects.toThrow("mode 0700");
-    await expect(listBrowserProfiles(env)).rejects.toThrow("mode 0700");
+    expect(await listBrowserProfiles(env)).toEqual([{
+      name: "ops", error: expect.stringContaining("mode 0700"),
+    }]);
     await expect(deleteBrowserProfile("ops", env)).rejects.toThrow("mode 0700");
     expect(fs.statSync(dir).mode & 0o777).toBe(mode);
   });
@@ -123,9 +136,12 @@ describe("persistent browser profiles", () => {
     await expect(claimBrowserProfile("ops", sessionId, env)).rejects.toThrow();
     expect(fs.readFileSync(outside, "utf8")).toBe("untouched");
     fs.unlinkSync(lock);
-    fs.writeFileSync(lock, "{}", { mode: 0o600 });
-    await expect(claimBrowserProfile("ops", sessionId, env)).rejects.toThrow("Invalid browser profile lock");
-    expect(fs.readFileSync(lock, "utf8")).toBe("{}");
+    for (const owner of [{}, { sessionId, token: "00000000-0000-0000-0000-000000000000", process: null }]) {
+      const contents = JSON.stringify(owner);
+      fs.writeFileSync(lock, contents, { mode: 0o600 });
+      await expect(claimBrowserProfile("ops", sessionId, env)).rejects.toThrow("Invalid browser profile lock");
+      expect(fs.readFileSync(lock, "utf8")).toBe(contents);
+    }
   });
 
   it("refuses a foreign uid from the opened directory's fstat", async () => {
@@ -163,7 +179,7 @@ describe("persistent browser profiles", () => {
     fs.symlinkSync("old-cookie", path.join(dir, "SingletonCookie"));
     fs.writeFileSync(path.join(dir, "DevToolsActivePort"), "old port");
     abandonOwner("ops");
-    expect((await listBrowserProfiles(env))[0].holdingSession).toBeNull();
+    expect((await healthyProfiles())[0].holdingSession).toBeNull();
     await claimBrowserProfile("ops", "brow-87654321", env);
     expect(fs.readdirSync(dir)).toEqual(["Cookies"]);
     expect(fs.readFileSync(outside, "utf8")).toBe("keep outside");
@@ -178,7 +194,7 @@ describe("persistent browser profiles", () => {
     const sentinel = path.join(root, `.ops.lock.${owner.token}`);
     fs.renameSync(sentinel, `${sentinel}.removing-${deadPid}-1`);
     await claimBrowserProfile("ops", "brow-87654321", env);
-    expect((await listBrowserProfiles(env))[0].holdingSession).toBe("brow-87654321");
+    expect((await healthyProfiles())[0].holdingSession).toBe("brow-87654321");
     expect(fs.readdirSync(root).some((name) => name.includes(".removing-"))).toBe(false);
   });
 
@@ -189,7 +205,7 @@ describe("persistent browser profiles", () => {
     const sentinel = path.join(root, `.ops.lock.${owner.token}`);
     fs.renameSync(sentinel, `${sentinel}.removing-${deadPid}-1`);
     await releaseBrowserProfile("ops", sessionId, env);
-    expect((await listBrowserProfiles(env))[0].holdingSession).toBeNull();
+    expect((await healthyProfiles())[0].holdingSession).toBeNull();
     await claimBrowserProfile("ops", "brow-87654321", env);
   });
 
@@ -197,7 +213,7 @@ describe("persistent browser profiles", () => {
     const record = await createSession({ type: "browser", projectDir: tmp }, env);
     await claimBrowserProfile("ops", record.id, env);
     abandonOwner("ops");
-    await updateSession(record.id, { desktop: { display: ":12345", xvfbPid: process.pid } }, env);
+    await updateSession(record.id, { desktop: { display: ":12345", xvfbPid: process.pid, xvfbStartTimeTicks: readProcessStartTicks(process.pid) } }, env);
     await expect(claimBrowserProfile("ops", sessionId, env)).rejects.toThrow(record.id);
     await expect(deleteBrowserProfile("ops", env)).rejects.toThrow(record.id);
   });
@@ -218,7 +234,7 @@ describe("persistent browser profiles", () => {
     await claimBrowserProfile("ops", "brow-87654321", env);
   });
 
-  it.each([`${os.hostname()}-${process.pid}`, "other-host-999999", "unknown"])(
+  it.each(["unknown"])(
     "keeps singleton files until their owner is confirmed dead (%s)", async (target) => {
       const dir = await seedProfile();
       fs.symlinkSync(target, path.join(dir, "SingletonLock"));
@@ -228,6 +244,91 @@ describe("persistent browser profiles", () => {
       expect(fs.readFileSync(path.join(dir, "SingletonCookie"), "utf8")).toBe("keep");
     },
   );
+
+  it.each([`${os.hostname()}-${process.pid}`, `old-host-${process.pid}`, "other-host-999999"])(
+    "clears singleton entries when the PID or hostname no longer identifies Chrome (%s)", async (target) => {
+      const dir = await seedProfile();
+      fs.symlinkSync(target, path.join(dir, "SingletonLock"));
+      await claimBrowserProfile("ops", sessionId, env);
+      expect(fs.existsSync(path.join(dir, "SingletonLock"))).toBe(false);
+    },
+  );
+
+  it("keeps a singleton owned by Chrome using this profile and names the profile and file", async () => {
+    const dir = await seedProfile();
+    fs.symlinkSync(`old-host-${process.pid}`, path.join(dir, "SingletonLock"));
+    const readFile = fs.promises.readFile;
+    const readdir = fs.promises.readdir;
+    vi.spyOn(fs.promises, "readdir").mockImplementation(((location: string, ...args: unknown[]) =>
+      location === "/proc" ? Promise.resolve([]) : Reflect.apply(readdir, fs.promises, [location, ...args])) as typeof readdir);
+    vi.spyOn(fs.promises, "readFile").mockImplementation(((location: string, ...args: unknown[]) =>
+      location === `/proc/${process.pid}/cmdline`
+        ? Promise.resolve(`/opt/google/chrome/chrome\0--user-data-dir=${dir}\0`)
+        : Reflect.apply(readFile, fs.promises, [location, ...args])) as typeof readFile);
+    await expect(claimBrowserProfile("ops", sessionId, env)).rejects.toThrow('browser profile "ops": SingletonLock');
+    expect(fs.readlinkSync(path.join(dir, "SingletonLock"))).toBe(`old-host-${process.pid}`);
+  });
+
+  it.each(["browser", "xvfb"])("recovers a hold when the recorded %s PID was reused", async (leg) => {
+    const record = await createSession({ type: "browser", projectDir: tmp }, env);
+    await claimBrowserProfile("ops", record.id, env);
+    abandonOwner("ops");
+    const wrongTicks = readProcessStartTicks(process.pid)! + 1;
+    await updateSession(record.id, leg === "browser" ? {
+      browser: { browserPid: process.pid, browserStartTimeTicks: wrongTicks, binaryPath: "/chrome", profileMode: "named", profileDir: browserProfileDir("ops", env) },
+    } : {
+      desktop: { display: ":12345", xvfbPid: process.pid, xvfbStartTimeTicks: wrongTicks },
+    }, env);
+    expect((await healthyProfiles())[0].holdingSession).toBeNull();
+    await claimBrowserProfile("ops", sessionId, env);
+    expect((await healthyProfiles())[0].holdingSession).toBe(sessionId);
+  });
+
+  it("lists a profile when a cache directory vanishes between stat and open", async () => {
+    const dir = await seedProfile();
+    fs.mkdirSync(path.join(dir, "Cache"));
+    fs.writeFileSync(path.join(dir, "Cookies"), "keep");
+    const openChild = DirHandle.prototype.openChild;
+    vi.spyOn(DirHandle.prototype, "openChild").mockImplementation(async function (this: DirHandle, name) {
+      if (name === "Cache") fs.rmdirSync(this.resolve(name));
+      return openChild.call(this, name);
+    });
+    expect(await listBrowserProfiles(env)).toEqual([expect.objectContaining({ name: "ops", sizeBytes: 4 })]);
+  });
+
+  it("keeps permission failures during the size walk visible", async () => {
+    const dir = await seedProfile();
+    fs.mkdirSync(path.join(dir, "Cache"));
+    const openChild = DirHandle.prototype.openChild;
+    vi.spyOn(DirHandle.prototype, "openChild").mockImplementation(async function (this: DirHandle, name) {
+      if (name === "Cache") throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+      return openChild.call(this, name);
+    });
+    expect(await listBrowserProfiles(env)).toEqual([{ name: "ops", error: "permission denied" }]);
+  });
+
+  it("lists healthy profiles alongside unsafe entries without opening symlink targets", async () => {
+    const dir = await seedProfile();
+    const root = path.dirname(dir);
+    const outside = path.join(tmp, "outside");
+    fs.mkdirSync(outside);
+    fs.symlinkSync(outside, path.join(root, "linked"));
+    fs.mkdirSync(path.join(root, "unsafe"), { mode: 0o750 });
+    expect(await listBrowserProfiles(env)).toEqual([
+      { name: "linked", error: 'Refusing browser profile "linked": it is a symlink' },
+      expect.objectContaining({ name: "ops", sizeBytes: 0 }),
+      { name: "unsafe", error: expect.stringContaining("mode 0700") },
+    ]);
+    expect(fs.readdirSync(outside)).toEqual([]);
+  });
+
+  it("reports a missing profile before creating any deletion hold", async () => {
+    const dir = await seedProfile();
+    const openFile = vi.spyOn(DirHandle.prototype, "openFile");
+    await expect(deleteBrowserProfile("missing", env)).rejects.toThrow("Browser profile not found: missing");
+    expect(openFile).not.toHaveBeenCalled();
+    expect(fs.readdirSync(path.dirname(dir))).toEqual(["ops"]);
+  });
 
   it("deletes an unused profile without following its links", async () => {
     const dir = await seedProfile();

@@ -147,6 +147,26 @@ function parseToolPayload<T>(
 }
 
 describe.skipIf(!hasXvfb)("built CLI browser lifecycle", () => {
+  it("reports unsafe profiles while listing healthy profiles in text and JSON", () => {
+    const profiles = path.join(env.PICKFORGE_HOME, "profiles");
+    fs.mkdirSync(profiles, { mode: 0o700 });
+    fs.mkdirSync(path.join(profiles, "healthy"), { mode: 0o700 });
+    fs.mkdirSync(path.join(profiles, "unsafe"), { mode: 0o750 });
+    fs.symlinkSync(projectDir, path.join(profiles, "linked"));
+    const result = runCli(["profile", "list", "--json"]);
+    expect(result.code).toBe(0);
+    expect(parseJson(result).profiles).toEqual([
+      expect.objectContaining({ name: "healthy", sizeBytes: 0 }),
+      { name: "linked", error: 'Refusing browser profile "linked": it is a symlink' },
+      { name: "unsafe", error: expect.stringContaining("mode 0700") },
+    ]);
+    const text = runCli(["profile", "list"]);
+    expect(text.code).toBe(0);
+    expect(text.stdout).toContain("healthy  0 bytes");
+    expect(text.stdout).toContain('linked  Refusing browser profile "linked": it is a symlink');
+    expect(text.stdout).not.toContain("undefined");
+  });
+
   it("creates, lists, refuses held deletion, and deletes a named profile with explicit consent", async () => {
     const create = () => runCli(["session", "create", "--type", "browser", "--profile", "ops", "--json"]);
     const first = parseJson(create()).sessions[0];

@@ -75,6 +75,21 @@ describe.skipIf(!hasXvfb)("MCP browser lifecycle", () => {
     await lab.client.callTool({ name: "session_destroy", arguments: { all: true } });
   }, TEST_TIMEOUT_MS);
 
+  it("reports unsafe profiles alongside healthy profiles through profile_list", async () => {
+    const profiles = path.join(dirs.home, "profiles");
+    fs.mkdirSync(profiles, { mode: 0o700, recursive: true });
+    fs.mkdirSync(path.join(profiles, "healthy"), { mode: 0o700 });
+    fs.mkdirSync(path.join(profiles, "unsafe"), { mode: 0o750 });
+    fs.symlinkSync(dirs.projectDir, path.join(profiles, "linked"));
+    const result = parseToolJson(await lab.client.callTool({ name: "profile_list", arguments: {} }));
+    expect(result.ok).toBe(true);
+    expect(result.profiles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "healthy", sizeBytes: 0 }),
+      { name: "linked", error: 'Refusing browser profile "linked": it is a symlink' },
+      { name: "unsafe", error: expect.stringContaining("mode 0700") },
+    ]));
+  });
+
   it(
     "creates, reports, lists, destroys, and destroys all browser sessions",
     async () => {

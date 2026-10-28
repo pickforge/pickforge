@@ -306,6 +306,50 @@ async function stopBrowserGroup(
   }
 }
 
+/** Flush named-profile cookies before the verified group-stop fallback. */
+async function closeNamedProfileBrowser(record: SessionRecord): Promise<void> {
+  if (record.browser?.profileMode !== "named" && namedProfile(record) === undefined) return;
+  const browser = record.browser;
+  if (browser?.cdpPort === undefined) return;
+  const identity = { pid: browser.browserPid, startTicks: browser.browserStartTimeTicks };
+  if (!processIdentityMatches(identity)) return;
+  const deadline = Date.now() + 3_000;
+  try {
+    const response = await fetch(`http://127.0.0.1:${browser.cdpPort}/json/version`, {
+      signal: AbortSignal.timeout(3_000),
+      redirect: "error",
+    });
+    const version = await response.json() as { webSocketDebuggerUrl?: unknown };
+    if (typeof version.webSocketDebuggerUrl !== "string") return;
+    const url = new URL(version.webSocketDebuggerUrl);
+    if (url.protocol !== "ws:" || url.host !== `127.0.0.1:${browser.cdpPort}`) return;
+    if (!processIdentityMatches(identity)) return;
+    await requestBrowserClose(url, Math.max(1, deadline - Date.now()), identity);
+    while (processIdentityMatches(identity) && Date.now() < deadline) await sleep(50);
+  } catch {
+    // CDP is best effort. Always continue to the verified group stop.
+  }
+}
+
+async function requestBrowserClose(url: URL, timeoutMs: number, identity: ProcessIdentity): Promise<void> {
+  const socket = new WebSocket(url);
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(finish, timeoutMs);
+    function finish(): void {
+      clearTimeout(timer);
+      socket.close();
+      resolve();
+    }
+    socket.addEventListener("error", finish, { once: true });
+    socket.addEventListener("close", finish, { once: true });
+    socket.addEventListener("message", finish, { once: true });
+    socket.addEventListener("open", () => {
+      if (!processIdentityMatches(identity)) { finish(); return; }
+      socket.send(JSON.stringify({ id: 1, method: "Browser.close" }));
+    }, { once: true });
+  });
+}
+
 function ownedDaemonExited(daemon: OwnedDaemonHandle): boolean {
   return daemon.child.exitCode !== null || daemon.child.signalCode !== null;
 }
@@ -893,6 +937,7 @@ export async function teardownBrowserSession(
       options.signal?.throwIfAborted();
       const failures: Error[] = [];
       const browser = record.browser;
+      await closeNamedProfileBrowser(record);
       const { gone, error: groupError } = await stopBrowserGroup(
         browser === undefined
           ? undefined

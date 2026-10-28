@@ -649,9 +649,9 @@ held profiles. Non-interactive deletion requires `--yes`. Both commands accept
 `--json`. MCP offers the read-only `profile_list` tool and no delete tool.
 
 Profiles store cookies, login tokens, history, local storage, and site settings.
-Chrome on Linux without a keyring uses the basic store. Cookie protection then
-relies only on file permissions. Keep banking, payment, and main email accounts
-out of agent profiles. See [SECURITY.md](SECURITY.md).
+Pickforge always selects Chrome's basic store. Cookies are encrypted with a
+fixed key, so only file permissions protect them. Keep banking, payment, and
+main email accounts out of agent profiles. See [SECURITY.md](SECURITY.md).
 
 The default browser arguments reduce vendor background traffic:
 `--disable-background-networking` disables selected background services

@@ -8,6 +8,7 @@ export async function runProfileList(opts: BaseCliOptions): Promise<number> {
     return {
       data: { profiles },
       lines: profiles.map((profile) =>
+        "error" in profile ? `${profile.name}  ${profile.error}` :
         `${profile.name}  ${profile.sizeBytes} bytes  ${profile.lastUsedAt}  ${profile.holdingSession ?? "-"}`),
     };
   });

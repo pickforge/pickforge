@@ -1265,6 +1265,22 @@ describe.skipIf(!hasXvfb)("named browser profile lifecycle", () => {
     }
   }, TEST_TIMEOUT_MS);
 
+  it("stops the verified browser group when the named profile CDP close fails", async () => {
+    const session = await createBrowserSession({ projectDir, registryEnv, env: spawnEnvFor("ready"), profile: "ops" });
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("CDP unavailable"));
+    try {
+      await destroyBrowserSession(session.id, registryEnv);
+      expect(fetch).toHaveBeenCalledWith(`http://127.0.0.1:${session.cdpPort}/json/version`, expect.any(Object));
+      expect(isPidAlive(session.browserPid)).toBe(false);
+      expect(isPidAlive(session.xvfbPid)).toBe(false);
+      expect(await getSession(session.id, registryEnv)).toBeUndefined();
+      expect(fs.existsSync(session.profileDir)).toBe(true);
+    } finally {
+      fetch.mockRestore();
+      await destroyBrowserSession(session.id, registryEnv).catch(() => {});
+    }
+  }, TEST_TIMEOUT_MS);
+
   it("keeps the profile after failed startup and releases its hold", async () => {
     const opts = { projectDir, registryEnv, profile: "ops" };
     await expect(createBrowserSession({ ...opts, env: spawnEnvFor("crash") })).rejects.toThrow("Chrome exited");
