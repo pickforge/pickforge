@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { fileURLToPath } from "node:url";
+import { nativeViewerLauncher } from "./viewer/native.js";
 import { createRequire } from "node:module";
 import { captureFatal, initTelemetry } from "./telemetry.js";
 
@@ -24,7 +26,9 @@ initTelemetry();
 
 try {
   const { runMcpServe } = await import("./commands/mcp.js");
-  process.exitCode = await runMcpServe();
+  process.exitCode = await runMcpServe({ viewerLauncher: nativeViewerLauncher(
+    fileURLToPath(new URL("./pickforge-lab.js", import.meta.url)),
+  ) });
 } catch (error) {
   await captureFatal(error);
   console.error(

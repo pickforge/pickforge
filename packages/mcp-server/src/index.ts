@@ -16,7 +16,7 @@ const { version } = require("../package.json") as { version: string };
 
 export const packageName = "@pickforge/lab-mcp-server";
 
-export type { CreateMcpServerOptions, ServerContext } from "./context.js";
+export type { CreateMcpServerOptions, ServerContext, ViewerLauncher } from "./context.js";
 
 export function createMcpServer(
   opts: CreateMcpServerOptions = {},

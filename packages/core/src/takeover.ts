@@ -20,9 +20,9 @@ import { getSession, REAPER_CLEANUP_PENDING_META_KEY, sessionDataDir, sessionInp
  * - `pause-requested`: `acquireHumanLease` atomically links the
  *   lease file — the instant it exists, every agent permit recheck starts
  *   failing closed — then waits for permits that predate the lease to drain.
- * - `human-active`: the lease is held; the caller (desktop-linux) switches
- *   VNC to writable and renews the lease every `heartbeatMs` until return.
- * - `returning`: the caller reverts VNC to read-only and releases the lease
+ * - `human-active`: the lease is held; the caller enables its input transport
+ *   and renews the lease every `heartbeatMs` until return.
+ * - `returning`: the caller stops human input and releases the lease
  *   on every exit path (normal return, cancellation, timeout).
  * - Crash recovery: a lease whose owner process died, or whose `expiresAt`
  *   elapsed without a heartbeat, is "stale" and safe to reclaim — see
@@ -177,6 +177,9 @@ export interface HumanLease {
   expiresAt: string;
   ttlMs: number;
   heartbeatMs: number;
+  inputTransport?: "x11vnc" | "viewer";
+  viewerPid?: number;
+  viewerStartTicks?: number;
   /** Writable VNC server metadata, patched in once VNC has switched mode. */
   vncPid?: number;
   vncStartTimeTicks?: number;
@@ -303,6 +306,30 @@ async function unlinkIfMatches(target: string, expected: string): Promise<boolea
   return unlinkIfPresent(target);
 }
 
+type TransportMetadata = Pick<HumanLease, "inputTransport" | "viewerPid" | "viewerStartTicks">;
+
+function validOptionalIdentityNumber(value: unknown, minimum: number): boolean {
+  if (value === undefined) return true;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= minimum;
+}
+
+function validTransportMetadata(c: Record<string, unknown>): c is Record<string, unknown> & TransportMetadata {
+  if (c.inputTransport !== undefined && c.inputTransport !== "x11vnc" && c.inputTransport !== "viewer") return false;
+  return validOptionalIdentityNumber(c.viewerPid, 1) && validOptionalIdentityNumber(c.viewerStartTicks, 0);
+}
+
+function optionalLeaseMetadata(c: Record<string, unknown> & TransportMetadata): Partial<HumanLease> {
+  const lease: Partial<HumanLease> = {};
+  if (c.inputTransport !== undefined) lease.inputTransport = c.inputTransport;
+  if (c.viewerPid !== undefined) lease.viewerPid = c.viewerPid;
+  if (c.viewerStartTicks !== undefined) lease.viewerStartTicks = c.viewerStartTicks;
+  if (typeof c.ownerStartTicks === "number") lease.ownerStartTicks = c.ownerStartTicks;
+  if (typeof c.vncPid === "number") lease.vncPid = c.vncPid;
+  if (typeof c.vncStartTimeTicks === "number") lease.vncStartTimeTicks = c.vncStartTimeTicks;
+  if (typeof c.vncPort === "number") lease.vncPort = c.vncPort;
+  return lease;
+}
+
 function parseHumanLease(raw: string): HumanLease | undefined {
   let parsed: unknown;
   try {
@@ -323,6 +350,7 @@ function parseHumanLease(raw: string): HumanLease | undefined {
   ) {
     return undefined;
   }
+  if (!validTransportMetadata(c)) return undefined;
   const lease: HumanLease = {
     leaseId: c.leaseId,
     sessionId: c.sessionId,
@@ -331,11 +359,9 @@ function parseHumanLease(raw: string): HumanLease | undefined {
     expiresAt: c.expiresAt,
     ttlMs: c.ttlMs,
     heartbeatMs: c.heartbeatMs,
+    ...optionalLeaseMetadata(c),
   };
-  if (typeof c.ownerStartTicks === "number") lease.ownerStartTicks = c.ownerStartTicks;
-  if (typeof c.vncPid === "number") lease.vncPid = c.vncPid;
-  if (typeof c.vncStartTimeTicks === "number") lease.vncStartTimeTicks = c.vncStartTimeTicks;
-  if (typeof c.vncPort === "number") lease.vncPort = c.vncPort;
+
   return lease;
 }
 
@@ -417,7 +443,7 @@ export function isHumanLeaseStale(lease: HumanLease, now: Date = new Date()): bo
   return now.getTime() > Date.parse(lease.expiresAt);
 }
 
-export interface AcquireHumanLeaseOptions {
+export interface AcquireHumanLeaseOptions extends TransportMetadata {
   ttlMs?: number;
   heartbeatMs?: number;
   drainTimeoutMs?: number;
@@ -438,6 +464,7 @@ function buildHumanLease(
   now: Date,
   opts: AcquireHumanLeaseOptions,
 ): HumanLease {
+  if (!validTransportMetadata({ ...opts })) throw new Error("Invalid human lease transport metadata");
   const ttlMs = opts.ttlMs ?? HUMAN_LEASE_TTL_MS;
   const heartbeatMs = opts.heartbeatMs ?? HUMAN_LEASE_HEARTBEAT_MS;
   const ownerPid = process.pid;
@@ -452,6 +479,9 @@ function buildHumanLease(
     heartbeatMs,
   };
   if (ownerStartTicks !== undefined) lease.ownerStartTicks = ownerStartTicks;
+  if (opts.inputTransport !== undefined) lease.inputTransport = opts.inputTransport;
+  if (opts.viewerPid !== undefined) lease.viewerPid = opts.viewerPid;
+  if (opts.viewerStartTicks !== undefined) lease.viewerStartTicks = opts.viewerStartTicks;
   if (opts.vncPid !== undefined) lease.vncPid = opts.vncPid;
   if (opts.vncStartTimeTicks !== undefined) {
     lease.vncStartTimeTicks = opts.vncStartTimeTicks;
@@ -592,10 +622,11 @@ export async function renewHumanLease(
   sessionId: string,
   leaseId: string,
   env: EnvLike = process.env,
-  patch: { vncPid?: number; vncStartTimeTicks?: number; vncPort?: number } = {},
+  patch: TransportMetadata & { vncPid?: number; vncStartTimeTicks?: number; vncPort?: number } = {},
   now: Date = new Date(),
 ): Promise<HumanLease | undefined> {
   assertSafeSessionId(sessionId);
+  if (!validTransportMetadata({ ...patch })) throw new Error("Invalid human lease transport metadata");
   return withSessionDirectory(sessionId, env, false, async (dir, _permits, verify) => {
     const leasePath = dir.resolve(HUMAN_LEASE_FILE);
     const raw = await readTextIfPresent(leasePath);
@@ -608,6 +639,9 @@ export async function renewHumanLease(
       ...current,
       expiresAt: new Date(now.getTime() + current.ttlMs).toISOString(),
     };
+    if (patch.inputTransport !== undefined) updated.inputTransport = patch.inputTransport;
+    if (patch.viewerPid !== undefined) updated.viewerPid = patch.viewerPid;
+    if (patch.viewerStartTicks !== undefined) updated.viewerStartTicks = patch.viewerStartTicks;
     if (patch.vncPid !== undefined) updated.vncPid = patch.vncPid;
     if (patch.vncStartTimeTicks !== undefined) updated.vncStartTimeTicks = patch.vncStartTimeTicks;
     if (patch.vncPort !== undefined) updated.vncPort = patch.vncPort;

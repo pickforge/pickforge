@@ -3,14 +3,18 @@
 
 use crate::args::{self, Config, Placement};
 use crate::capture::{Capture, Control, CursorImage, Shared};
+use crate::control::{Controller, Effect};
 use crate::geometry::{self, Rect};
+use crate::input::{self, InjectError, Injector};
+use crate::keysyms::{self, named};
 use crate::protocol::{
     self, Backend, Command, Event, HostMode, Line, LineReader, Mode, StatusCode,
 };
 use crate::scale::Scaler;
-use crate::ui::{self, palette, Bar, Button, Canvas, Metrics, Text};
+use crate::ui::{self, palette, Banner, Bar, BarKind, Button, Canvas, Metrics, Text};
 use crate::{procstat, EXIT_DISPLAY, EXIT_NO_WINDOW_SYSTEM};
 use softbuffer::{Context, Surface};
+use std::collections::HashMap;
 use std::io;
 use std::num::NonZeroU32;
 use std::rc::Rc;
@@ -20,9 +24,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
-use winit::event::{ElementState, KeyEvent, MouseButton, StartCause, WindowEvent};
+use winit::event::{
+    ElementState, Ime, KeyEvent, Modifiers, MouseButton, MouseScrollDelta, StartCause, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, KeyLocation, NamedKey, PhysicalKey};
 use winit::platform::wayland::{ActiveEventLoopExtWayland, WindowAttributesExtWayland};
 use winit::platform::x11::WindowAttributesExtX11;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -134,7 +140,17 @@ pub fn run(config: Config) -> i32 {
         });
     }
 
-    let mut app = App::new(config, session, shared, control, capture_pending);
+    // Input uses its own connection. Without XTEST or XKB the viewer stays
+    // watch only and offers no Take control.
+    let injector = match Injector::connect(config.display) {
+        Ok(injector) => Some(injector),
+        Err(e) => {
+            log(&format!("input is unavailable: {e}"));
+            None
+        }
+    };
+
+    let mut app = App::new(config, session, shared, control, capture_pending, injector);
     event_loop.set_control_flow(ControlFlow::Wait);
     if let Err(e) = event_loop.run_app(&mut app) {
         return fatal(
@@ -215,6 +231,13 @@ struct App {
     pressed: Option<Button>,
     thumb_press: bool,
 
+    controller: Controller<Injector>,
+    banner: Option<Banner>,
+    ime_allowed: bool,
+    modifiers: Modifiers,
+    /// What each held physical key sent, so its release matches.
+    keys: HashMap<PhysicalKey, Sent>,
+
     status: Option<StatusCode>,
     ended: bool,
     have_frame: bool,
@@ -234,6 +257,7 @@ impl App {
         shared: Arc<Mutex<Shared>>,
         control: Arc<Control>,
         capture_pending: Arc<AtomicBool>,
+        injector: Option<Injector>,
     ) -> Self {
         Self {
             config,
@@ -265,6 +289,11 @@ impl App {
             hover: None,
             pressed: None,
             thumb_press: false,
+            controller: Controller::new(injector),
+            banner: None,
+            ime_allowed: false,
+            modifiers: Modifiers::default(),
+            keys: HashMap::new(),
             status: Some(StatusCode::Connecting),
             ended: false,
             have_frame: false,
@@ -370,20 +399,30 @@ impl App {
     fn relayout(&mut self) {
         let (w, h) = (self.size.width, self.size.height);
         self.update_pause();
+        self.sync_ime();
         if w == 0 || h == 0 {
             return;
         }
         self.canvas.resize((w * h) as usize, palette::SURFACE);
+        let kind = if self.controller.controlling() {
+            BarKind::Control
+        } else {
+            BarKind::Watch {
+                take: self.controller.can_take(),
+            }
+        };
         self.bar = (self.mode != Mode::Thumbnail).then(|| {
             Bar::layout(
                 w,
                 self.metrics,
                 self.mode == Mode::Fullscreen,
+                kind,
                 &mut self.text,
             )
         });
         let top = self.bar.as_ref().map_or(0, |b| b.rect.h).min(h);
         let content = Rect::new(0, top as i32, w, h - top);
+        self.layout_banner(content);
         let image = geometry::fit(self.session.0, self.session.1, content);
         if image != self.image || self.scaler.is_none() {
             self.image = image;
@@ -402,6 +441,30 @@ impl App {
         self.cursor_drawn = None;
         self.update_hover();
         self.damage_all();
+    }
+
+    fn sync_ime(&mut self) {
+        // IME commits are text for the session, so IME is on only then.
+        let ime = self.controller.forwarding(self.mode);
+        if ime == self.ime_allowed {
+            return;
+        }
+        if let Some(window) = &self.window {
+            window.set_ime_allowed(ime);
+            self.ime_allowed = ime;
+        }
+    }
+
+    fn layout_banner(&mut self, content: Rect) {
+        // The banner hides while controlling. The thumbnail shows the
+        // message only, because a thumbnail click only expands.
+        let with_button = self.mode != Mode::Thumbnail && self.controller.can_take();
+        self.banner = match self.controller.attention() {
+            Some(message) if !self.controller.controlling() => {
+                Banner::layout(content, message, self.metrics, with_button, &mut self.text)
+            }
+            _ => None,
+        };
     }
 
     fn update_pause(&mut self) {
@@ -441,6 +504,9 @@ impl App {
         if !self.ended {
             self.ended = true;
             self.control.stop();
+            self.controller.end_session();
+            self.keys.clear();
+            self.relayout();
         }
         self.set_status(Some(StatusCode::SessionEnded));
     }
@@ -453,6 +519,10 @@ impl App {
             window.set_fullscreen(None);
         }
         let changed = self.mode != mode;
+        if mode == Mode::Thumbnail && self.controller.controlling() {
+            self.controller.release_held();
+            self.keys.clear();
+        }
         self.mode = mode;
         window.set_cursor(if mode == Mode::Thumbnail {
             CursorIcon::Pointer
@@ -507,8 +577,17 @@ impl App {
         }
     }
 
+    /// Closing while controlling returns control first.
     fn close(&mut self) {
-        emit(&Event::Closed);
+        for event in self.controller.close() {
+            emit(&event);
+        }
+        self.exit = Some(0);
+    }
+
+    /// Ends control without asking the host and exits.
+    fn quit(&mut self) {
+        self.controller.stop();
         self.exit = Some(0);
     }
 
@@ -517,21 +596,55 @@ impl App {
             Button::Fullscreen => self.toggle_fullscreen(),
             Button::Collapse => self.collapse(),
             Button::Close => self.close(),
+            Button::TakeControl | Button::BannerTake => {
+                if let Some(event) = self.controller.take(Instant::now()) {
+                    emit(&event);
+                }
+            }
+            Button::ReturnControl => {
+                self.keys.clear();
+                if let Some(event) = self.controller.give_back() {
+                    emit(&event);
+                }
+                self.control_changed();
+            }
         }
+    }
+
+    /// Redraws the bar, banner and status after a control change.
+    fn control_changed(&mut self) {
+        if !self.controller.controlling() {
+            self.keys.clear();
+        }
+        self.pressed = None;
+        self.relayout();
+    }
+
+    fn hit(&self, x: f64, y: f64) -> Option<Button> {
+        let bar = self.bar.as_ref().and_then(|bar| bar.hit(x, y));
+        bar.or_else(|| self.banner.as_ref().and_then(|b| b.hit(x, y)))
     }
 
     fn update_hover(&mut self) {
-        let hover = match (&self.bar, self.pointer) {
-            (Some(bar), Some((x, y))) => bar.hit(x, y),
-            _ => None,
-        };
+        let hover = self.pointer.and_then(|(x, y)| self.hit(x, y));
         if hover != self.hover {
             self.hover = hover;
-            self.damage_bar();
+            self.damage_all_controls();
         }
     }
 
+    fn damage_all_controls(&mut self) {
+        if let Some(banner) = &self.banner {
+            let rect = banner.rect;
+            self.damage_rows(rect.y, rect.bottom());
+        }
+        self.damage_bar();
+    }
+
     fn on_mouse(&mut self, state: ElementState, button: MouseButton) {
+        if self.forward_button(state, button) {
+            return;
+        }
         if button != MouseButton::Left {
             return;
         }
@@ -555,13 +668,10 @@ impl App {
     }
 
     fn press_bar(&mut self, x: f64, y: f64) {
-        let Some(bar) = &self.bar else {
-            return;
-        };
-        if let Some(hit) = bar.hit(x, y) {
+        if let Some(hit) = self.hit(x, y) {
             self.pressed = Some(hit);
-            self.damage_bar();
-        } else if bar.rect.contains(x, y) {
+            self.damage_all_controls();
+        } else if self.bar.as_ref().is_some_and(|bar| bar.rect.contains(x, y)) {
             if let Some(window) = &self.window {
                 let _ = window.drag_window();
             }
@@ -570,10 +680,137 @@ impl App {
 
     fn release_bar(&mut self) {
         if let Some(pressed) = self.pressed.take() {
-            self.damage_bar();
+            self.damage_all_controls();
             if self.hover == Some(pressed) {
                 self.activate(pressed);
             }
+        }
+    }
+
+    /// The session pixel under the pointer while input is forwarded. The
+    /// bar, the letterbox and the thumbnail map to nothing.
+    fn session_pointer(&self) -> Option<(i32, i32)> {
+        if !self.controller.forwarding(self.mode) {
+            return None;
+        }
+        let (x, y) = self.pointer?;
+        if self.bar.as_ref().is_some_and(|bar| bar.rect.contains(x, y)) {
+            return None;
+        }
+        let (sx, sy) = geometry::session_point(self.image, self.session.0, self.session.1, x, y)?;
+        Some((sx as i32, sy as i32))
+    }
+
+    /// Runs `send` on the injector while input is forwarded. A refused
+    /// grant ends control in the window too.
+    fn forward(&mut self, send: impl FnOnce(&mut Injector) -> Result<(), InjectError>) {
+        if !self.controller.forwarding(self.mode) {
+            return;
+        }
+        let Some(injector) = self.controller.sink_mut() else {
+            return;
+        };
+        match send(injector) {
+            Ok(()) => {}
+            Err(InjectError::NotGranted) => {
+                if self.controller.tick(Instant::now()) {
+                    self.control_changed();
+                }
+            }
+            Err(e) => log(&format!("input not sent: {e}")),
+        }
+    }
+
+    fn on_pointer_moved(&mut self) {
+        if let Some((sx, sy)) = self.session_pointer() {
+            self.forward(|injector| injector.motion(sx, sy));
+        }
+    }
+
+    /// Sends a button to the session. A release always goes out when the
+    /// session holds that button, wherever the pointer is. Returns true
+    /// when the window must not handle the click itself.
+    fn forward_button(&mut self, state: ElementState, button: MouseButton) -> bool {
+        if !self.controller.forwarding(self.mode) {
+            return false;
+        }
+        let Some(button) = input_button(button) else {
+            return false;
+        };
+        let held = self
+            .controller
+            .sink_mut()
+            .is_some_and(|injector| injector.held_buttons().any(|b| b == button.number()));
+        match state {
+            ElementState::Released if held => {
+                self.forward(|injector| injector.button(button, false));
+                true
+            }
+            ElementState::Pressed => match self.session_pointer() {
+                Some((sx, sy)) => {
+                    self.forward(|injector| {
+                        injector.motion(sx, sy)?;
+                        injector.button(button, true)
+                    });
+                    true
+                }
+                None => false,
+            },
+            ElementState::Released => false,
+        }
+    }
+
+    fn on_wheel(&mut self, delta: MouseScrollDelta) {
+        if self.session_pointer().is_none() {
+            return;
+        }
+        match delta {
+            MouseScrollDelta::LineDelta(x, y) => {
+                self.forward(|injector| injector.scroll_lines(x as f64, y as f64))
+            }
+            MouseScrollDelta::PixelDelta(p) => {
+                self.forward(|injector| injector.scroll_pixels(p.x, p.y))
+            }
+        }
+    }
+
+    /// Sends a key to the session while controlling. Composed text goes as
+    /// text; named keys, modifiers and chords go as keys.
+    fn on_key(&mut self, event: KeyEvent) {
+        let physical = event.physical_key;
+        if event.state == ElementState::Released {
+            match self.keys.remove(&physical) {
+                Some(Sent::Key(keysym)) => self.forward(|i| i.key(keysym, false)),
+                Some(Sent::Char(c)) => self.forward(|i| i.key_char(c, false)),
+                Some(Sent::Text) | None => {}
+            }
+            return;
+        }
+        let state = self.modifiers.state();
+        let chord = state.control_key() || state.alt_key() || state.super_key();
+        let sent = if let Some(keysym) = named_keysym(&event.logical_key, event.location) {
+            self.forward(|i| i.key(keysym, true));
+            Sent::Key(keysym)
+        } else if let Key::Dead(_) = event.logical_key {
+            // The host composes dead keys into the next key's text.
+            return;
+        } else if let Some(text) = event.text.as_ref().filter(|t| !chord && is_text(t)) {
+            let text = text.to_string();
+            self.forward(|i| i.type_text(&text));
+            Sent::Text
+        } else if let Some(c) = single_char(&event.logical_key) {
+            self.forward(|i| i.key_char(c, true));
+            Sent::Char(c)
+        } else {
+            return;
+        };
+        self.keys.insert(physical, sent);
+    }
+
+    fn on_focus_lost(&mut self) {
+        self.keys.clear();
+        if self.controller.controlling() {
+            self.controller.release_held();
         }
     }
 
@@ -594,9 +831,35 @@ impl App {
             },
             Command::Status(code) => self.set_status(Some(code)),
             Command::SessionEnded => self.end_session(),
-            Command::Shutdown => self.exit = Some(0),
+            Command::Shutdown => self.quit(),
             Command::Unknown(name) => log(&format!("ignored unknown command {name:?}")),
+            command @ (Command::Attention { .. }
+            | Command::ClearAttention
+            | Command::Grant { .. }
+            | Command::Revoke { .. }) => {
+                let effects = self
+                    .controller
+                    .on_command(&command, self.mode, Instant::now());
+                self.control_changed();
+                for effect in effects {
+                    match effect {
+                        Effect::Emit(event) => emit(&event),
+                        Effect::Expand => {
+                            if self.mode == Mode::Thumbnail {
+                                self.expand();
+                            }
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    /// The status pill text: the host's status first, then a control note.
+    fn status_text(&self) -> Option<&'static str> {
+        self.status
+            .map(StatusCode::text)
+            .or_else(|| self.controller.note().map(|note| note.text()))
     }
 
     /// Takes what the capture thread produced since the last call.
@@ -755,6 +1018,7 @@ impl App {
         let (w, h) = (self.size.width, self.size.height);
         let clip = Rect::new(0, y0, w, (y1 - y0) as u32);
         let image = self.image;
+        let status = self.status_text();
         let mut canvas = Canvas::new(&mut self.canvas, w, h, clip);
         canvas.fill(clip, palette::SURFACE);
         canvas.blit(image, &self.scaled, image.w as usize);
@@ -763,16 +1027,19 @@ impl App {
             canvas.premultiplied(x, y, c.width, c.height, &c.pixels, factor);
             canvas.clip = clip;
         }
-        if let Some(status) = self.status {
+        if let Some(label) = status {
             let top = self.bar.as_ref().map_or(0, |b| b.rect.h);
             let area = Rect::new(0, top as i32, w, h.saturating_sub(top));
-            let rect = ui::status_rect(area, status.text(), self.metrics, &mut self.text);
-            ui::draw_status(
+            let rect = ui::status_rect(area, label, self.metrics, &mut self.text);
+            ui::draw_status(&mut canvas, rect, label, self.metrics, &mut self.text);
+        }
+        if let Some(banner) = &self.banner {
+            banner.draw(
                 &mut canvas,
-                rect,
-                status.text(),
                 self.metrics,
                 &mut self.text,
+                self.hover,
+                self.pressed,
             );
         }
         if let Some(bar) = &self.bar {
@@ -819,7 +1086,7 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             UserEvent::Command(command) => self.on_command(command),
             UserEvent::Capture => self.on_capture(),
-            UserEvent::StdinClosed => self.exit = Some(0),
+            UserEvent::StdinClosed => self.quit(),
         }
         if self.exit.is_some() {
             event_loop.exit();
@@ -856,12 +1123,25 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer = Some((position.x, position.y));
                 self.update_hover();
+                self.on_pointer_moved();
             }
             WindowEvent::CursorLeft { .. } => {
                 self.pointer = None;
                 self.update_hover();
             }
             WindowEvent::MouseInput { state, button, .. } => self.on_mouse(state, button),
+            WindowEvent::MouseWheel { delta, .. } => self.on_wheel(delta),
+            WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers,
+            WindowEvent::Focused(false) => self.on_focus_lost(),
+            WindowEvent::Ime(Ime::Commit(text)) => {
+                if is_text(&text) {
+                    self.forward(|i| i.type_text(&text));
+                }
+            }
+            // All keys, Esc too, go to the session while controlling.
+            WindowEvent::KeyboardInput { event, .. } if self.controller.controlling() => {
+                self.on_key(event)
+            }
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
@@ -884,15 +1164,101 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        if self.controller.tick(now) {
+            self.control_changed();
+        }
         let mut deadline = self
             .redraw_since
             .filter(|_| !self.hidden)
             .map(|t| t + HIDDEN_AFTER);
-        if let Some(next) = self.refresh_x11_pause(Instant::now()) {
+        for next in [self.refresh_x11_pause(now), self.controller.deadline()]
+            .into_iter()
+            .flatten()
+        {
             deadline = Some(deadline.map_or(next, |t| t.min(next)));
         }
         event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
+}
+
+/// What a held physical key sent, so its release matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sent {
+    Key(u32),
+    Char(char),
+    /// Text is typed on press; its release sends nothing.
+    Text,
+}
+
+fn input_button(button: MouseButton) -> Option<input::Button> {
+    Some(match button {
+        MouseButton::Left => input::Button::Left,
+        MouseButton::Middle => input::Button::Middle,
+        MouseButton::Right => input::Button::Right,
+        MouseButton::Back => input::Button::Back,
+        MouseButton::Forward => input::Button::Forward,
+        MouseButton::Other(_) => return None,
+    })
+}
+
+fn is_text(text: &str) -> bool {
+    !text.is_empty() && !text.chars().any(char::is_control)
+}
+
+fn single_char(key: &Key) -> Option<char> {
+    let Key::Character(s) = key else {
+        return None;
+    };
+    let mut chars = s.chars();
+    let c = chars.next()?;
+    (chars.next().is_none() && !c.is_control()).then_some(c)
+}
+
+/// The keysym of a named or modifier key.
+fn named_keysym(key: &Key, location: KeyLocation) -> Option<u32> {
+    let Key::Named(key) = key else {
+        return None;
+    };
+    let right = location == KeyLocation::Right;
+    let pick = |left, right_sym| if right { right_sym } else { left };
+    Some(match key {
+        NamedKey::Enter => named::RETURN,
+        NamedKey::Tab => named::TAB,
+        NamedKey::Space => 0x20,
+        NamedKey::Backspace => named::BACKSPACE,
+        NamedKey::Escape => named::ESCAPE,
+        NamedKey::Delete => named::DELETE,
+        NamedKey::Insert => named::INSERT,
+        NamedKey::Home => named::HOME,
+        NamedKey::End => named::END,
+        NamedKey::PageUp => named::PAGE_UP,
+        NamedKey::PageDown => named::PAGE_DOWN,
+        NamedKey::ArrowLeft => named::LEFT,
+        NamedKey::ArrowRight => named::RIGHT,
+        NamedKey::ArrowUp => named::UP,
+        NamedKey::ArrowDown => named::DOWN,
+        NamedKey::Shift => pick(named::SHIFT_L, named::SHIFT_R),
+        NamedKey::Control => pick(named::CONTROL_L, named::CONTROL_R),
+        NamedKey::Alt => pick(named::ALT_L, named::ALT_R),
+        NamedKey::Super | NamedKey::Meta => pick(named::SUPER_L, named::SUPER_R),
+        NamedKey::AltGraph => named::ISO_LEVEL3_SHIFT,
+        NamedKey::CapsLock => named::CAPS_LOCK,
+        NamedKey::NumLock => named::NUM_LOCK,
+        NamedKey::F1 => keysyms::function_key(1)?,
+        NamedKey::F2 => keysyms::function_key(2)?,
+        NamedKey::F3 => keysyms::function_key(3)?,
+        NamedKey::F4 => keysyms::function_key(4)?,
+        NamedKey::F5 => keysyms::function_key(5)?,
+        NamedKey::F6 => keysyms::function_key(6)?,
+        NamedKey::F7 => keysyms::function_key(7)?,
+        NamedKey::F8 => keysyms::function_key(8)?,
+        NamedKey::F9 => keysyms::function_key(9)?,
+        NamedKey::F10 => keysyms::function_key(10)?,
+        NamedKey::F11 => keysyms::function_key(11)?,
+        NamedKey::F12 => keysyms::function_key(12)?,
+        _ => return None,
+    })
 }
 
 // X11 can unmap or iconify without a winit resize or occlusion event.

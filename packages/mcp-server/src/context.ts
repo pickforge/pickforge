@@ -27,14 +27,21 @@ export {
 
 const MAX_INLINE_IMAGE_BYTES = 2 * 1024 * 1024;
 
+export interface ViewerLauncher {
+  available(env: EnvLike): Promise<boolean>;
+  launch(sessionId: string, env: EnvLike): Promise<import("@pickforge/lab-desktop-linux").NativeViewerHostIdentity | undefined>;
+}
+
 export interface CreateMcpServerOptions {
   projectDir?: string;
   env?: EnvLike;
+  viewerLauncher?: ViewerLauncher;
 }
 
 export interface ServerContext {
   projectDir: string;
   env: EnvLike;
+  viewerLauncher?: ViewerLauncher;
 }
 
 export function resolveContext(
@@ -44,7 +51,7 @@ export function resolveContext(
   const projectDir = path.resolve(
     opts.projectDir ?? readPickforgeEnv(env, "PROJECT_DIR") ?? process.cwd(),
   );
-  return { projectDir, env };
+  return { projectDir, env, viewerLauncher: opts.viewerLauncher };
 }
 
 export interface ToolReport {

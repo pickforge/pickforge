@@ -2,8 +2,8 @@
 
 `pickforge-viewer` shows one lab session in a native window. A TypeScript viewer
 host starts it as a child process and talks to it over stdio. This file is the
-contract between the two sides. #340 implements the watch-only part. #341 adds
-the control messages marked as reserved below.
+contract between the two sides. #340 implements watching. #341 adds taking
+control: the control messages below and input to the session display.
 
 ## Launch
 
@@ -34,7 +34,7 @@ pickforge-viewer \
   `self`.
 - `--thumbnail-width` defaults to 384. All other flags are required.
 - The window itself uses the caller's environment (`WAYLAND_DISPLAY` or
-  `DISPLAY`). The session display is used only for capture and, in #341, input.
+  `DISPLAY`). The session display is used only for capture and input.
 
 Other entry points:
 
@@ -54,8 +54,8 @@ Error codes in the `error` event: `display-refused`, `xvfb-mismatch`,
 
 - stdin carries commands from the host. stdout carries events to the host.
 - Each message is one JSON object on one line, UTF-8, at most 64 KiB.
-- stderr carries human-readable logs only. It never carries frames, message
-  text from #341, or input.
+- stderr carries human-readable logs only. It never carries frames, attention
+  message text, or input.
 - Each side ignores unknown fields. An unknown `cmd` or `event` is logged and
   ignored.
 - End of file on stdin means the host is gone. The viewer then exits within one
@@ -72,9 +72,9 @@ Error codes in the `error` event: `display-refused`, `xvfb-mismatch`,
 | `closed` | none | The user closed the window. The viewer exits after this event. |
 | `sessionEnded` | `reason` (`"x11-eof"` or `"xvfb-gone"`) | The viewer saw the session end. It keeps the last frame and shows "Session ended". |
 | `error` | `code`, `message` | A fatal error. The viewer exits after this event. |
-
-Reserved for #341: `takeRequested`, `returnRequested`, and
-`controlAck` with `leaseId` and `state`.
+| `takeRequested` | none | The user pressed Take control in the bar or the attention banner. Never sent while a grant is live. A second press within 10 s of an unanswered request sends nothing. |
+| `returnRequested` | `reason` (`"button"` or `"closed"`) | The user pressed Return control, or closed the window while holding control. Sent after the viewer released every held key and button. With `"closed"`, the viewer then sends `closed` and exits. |
+| `controlAck` | `leaseId`, `state` (`"granted"` or `"revoked"`) | The viewer applied a `control` command. For `"revoked"` it is sent after the release of held input, with the command's `leaseId`, which is empty for `"unavailable"`. |
 
 ## Commands (host to viewer)
 
@@ -83,22 +83,55 @@ Reserved for #341: `takeRequested`, `returnRequested`, and
 | `setMode` | `mode` (`"thumbnail"` or `"expanded"`), optional `width`, `height` in logical pixels | The host placed the window. The viewer requests that inner size and updates its layout. The viewer drops a `setMode` that arrives before `ready`, so the host waits for `ready`. |
 | `status` | `code` (`"connecting"`, `"sessionEnded"`, `"stopping"`) | Show this status text. "Connecting" clears when the first frame is drawn. "Stopping" and "Session ended" stay. |
 | `sessionEnded` | none | The host saw the session end. Same display as the event. |
-| `shutdown` | none | Exit cleanly. |
+| `shutdown` | none | Exit cleanly. Held input is released first. |
+| `attention` | `message` | Show a banner with the message and a highlighted Take control button. It changes neither mode nor focus. The viewer refuses a message over 500 characters or with control characters. |
+| `clearAttention` | none | Remove the banner. |
+| `control` | `state: "granted"`, `leaseId`, `grantMs` | Input is allowed until now plus `grantMs` on a monotonic clock. Each renewal re-sends it with the same `leaseId` and extends the grant. The viewer clears the banner. A grant in thumbnail mode expands the window as a thumbnail click does. `leaseId` is 1 to 128 bytes without control characters. `grantMs` is a positive integer; a value over 120000 counts as 120000. The viewer ignores a grant after the session ended or when it cannot send input. |
+| `control` | `state: "revoked"`, `leaseId`, `reason` (`"returned"`, `"lease-lost"`, `"session-ended"`, `"stopping"`, `"unavailable"`) | Release all held input, stop forwarding, acknowledge, and show the watch bar. `"unavailable"` answers a `takeRequested` that the host could not grant, with an empty `leaseId`. A revoke with a missing or unknown field still revokes. |
 
-Reserved for #341: `attention` with `message`, `clearAttention`, and `control`
-with either `state: "granted"`, `leaseId`, `grantMs`, or `state: "revoked"`,
-`reason`.
+## Control
+
+- No socket and no other channel can grant control or inject input. Only the
+  host's `control` command grants it. The host grants control after a
+  `takeRequested`, or at startup of `pickforge-lab watch --control`, where
+  the user asked for control explicitly. The viewer does not check this.
+- The viewer sends input through XTEST on its own connection to the session
+  display, and only while a grant is live and the window is expanded or
+  fullscreen. Without XTEST or XKB the viewer stays watch only and offers no
+  Take control.
+- The viewer stops input on its own when a grant expires without renewal, on
+  stdin end of file, on `shutdown`, on session end, and on close. Each time it
+  releases every key and button it holds. Focus loss and a change to thumbnail
+  release held input too, but keep control.
+- The host sends a revoke when it loses the lease, waits at most 1 s for
+  `controlAck`, and otherwise kills the viewer.
 
 ## Window behavior
 
 - Thumbnail: `--thumbnail-width` logical pixels wide, session aspect ratio, no
-  controls. A click expands the window and is never forwarded.
+  controls. A click expands the window and is never forwarded, even while
+  controlling.
 - Expanded: a 32 logical pixel bar at the top with Fullscreen, Collapse and
-  Close. Close sends `closed`. Esc collapses in watch mode.
+  Close, and Take control at the left when control is offered. Close sends
+  `closed`. Esc collapses in watch mode.
+- Controlling: the bar shows only Return control at the left and Fullscreen
+  at the right, with an ember line under it. Every key, Esc too, goes to the
+  session, so Esc neither collapses nor leaves fullscreen. Closing the window
+  through the compositor returns control first. Pointer positions map through
+  the current scale and letterbox; clicks on the bar or the letterbox stay in
+  the viewer. A button pressed in the image is released in the session
+  wherever the pointer is let go. Text comes from the host's composed key text
+  and IME commits, so dead keys and input methods work in any host layout.
+- Attention banner: at the top of the image, below the bar. The message wraps
+  to at most three lines and ends with an ellipsis when it is longer. The
+  thumbnail shows the message without the button, because a thumbnail click
+  only expands. The banner hides while controlling.
 - Fullscreen: the viewer handles it itself and reports `mode`. Esc or the
   Fullscreen button leaves it.
 - Status text sits in the bottom-left corner: "Connecting", "Session ended",
-  "Stopping".
+  "Stopping". "Control unavailable" after a revoke with `"unavailable"`, and
+  "Control ended" after `"lease-lost"` or an expired grant, show for 4 s
+  unless a host status is shown.
 - The viewer never takes keyboard focus on its own. Esc works once the
   compositor focuses the window, for example after a click.
 - Capture pauses while the window is occluded or minimized. Wayland reports no

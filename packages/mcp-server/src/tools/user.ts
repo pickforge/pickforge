@@ -16,13 +16,9 @@ const SECRET_QUESTION_PATTERN =
 const SECRET_GUIDANCE =
   "This looks like a request for a secret (password, API key, token, 2FA " +
   "code, or other credential). Never collect secrets through this tool. " +
-  "Ask the user to run `pickforge-lab watch --control` to take temporary " +
-  "supervised control of the desktop over a writable VNC session, enter " +
-  "the secret themselves, and return control (or into the environment), " +
-  'then confirm out-of-band with kind "confirm" (e.g. "I\'ve entered the ' +
-  'password, continue?"). While control is held, agent desktop input and ' +
-  "the DevTools relay fail closed with a busy error; call " +
-  "`takeover_status` to check.";
+  "Call `request_takeover` with a short message so the user can enter the " +
+  "secret in the session and return control. Never put the secret in the message. " +
+  "Use `takeover_wait` if human control is already active.";
 
 const NO_ELICITATION_GUIDANCE =
   "This client does not support elicitation. Relay the question to the " +
@@ -73,10 +69,9 @@ export function registerUserTools(server: McpServer): void {
         "when you are blocked on something only a human can provide: a " +
         "judgment call, a license acceptance, a click you cannot perform, " +
         "or confirmation that an out-of-band step is done. SECURITY: never " +
-        "request passwords, API keys, or tokens through this tool — ask " +
-        "the user to enter them directly through an explicit writable VNC " +
-        "control session, or into the environment, then confirm with kind " +
-        '"confirm".',
+        "request passwords, API keys, or tokens through this tool. Call " +
+        "`request_takeover` so the user can enter them in the session. " +
+        "Never include the secret in the takeover message.",
       inputSchema: {
         question: z
           .string()

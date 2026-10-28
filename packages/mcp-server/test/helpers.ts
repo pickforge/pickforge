@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import type { McpServer } from "@modelcontextprotocol/server";
-import { createMcpServer } from "../src/index.js";
+import { createMcpServer, type ViewerLauncher } from "../src/index.js";
 
 export const FAKE_SERIAL = "emulator-5554";
 export const PLANTED_TOKEN = `ghp_${"a".repeat(36)}`;
@@ -46,6 +46,7 @@ export interface ConnectedLab {
 export async function connectLab(opts: {
   projectDir: string;
   env: Record<string, string | undefined>;
+  viewerLauncher?: ViewerLauncher;
 }): Promise<ConnectedLab> {
   // Default new runs to the pre-#34 project-local layout so existing
   // fixtures (`writeSyntheticRun`, hardcoded `.picklab/runs` assertions)
