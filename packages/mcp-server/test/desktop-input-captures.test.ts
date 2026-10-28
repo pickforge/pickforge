@@ -60,7 +60,7 @@ async function evidence() {
 it.each(cases)("%s exposes explicit default-off capture and orders every mode", async (tool, args) => {
   const schema = (await lab.client.listTools()).tools.find((item) => item.name === tool)!;
   expect(schema.description).toContain("Default off");
-  expect(schema.description).toContain("desktop_wait with baseline set to the before PNG path");
+  expect(schema.description).toContain("with both, desktop_wait with baseline set to the before PNG path");
   expect(schema.inputSchema.properties?.capture).toMatchObject({ enum: ["after", "both"] });
   expect(schema.inputSchema.required ?? []).not.toContain("capture");
   for (const capture of [undefined, "after", "both"]) {
