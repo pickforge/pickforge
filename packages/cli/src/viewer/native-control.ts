@@ -30,9 +30,13 @@ export class NativeControl {
 
   get active(): boolean { return this.handle !== undefined; }
 
-  take(): Promise<void> {
-    if (this.stopping || this.active || this.ending !== undefined) return Promise.resolve();
-    return this.starting ??= this.acquire().finally(() => { this.starting = undefined; });
+  take(reportFailure = false): Promise<void> {
+    if (this.stopping || this.ending !== undefined) {
+      this.options.send({ cmd: "control", state: "revoked", leaseId: "", reason: "unavailable" });
+      return Promise.resolve();
+    }
+    if (this.active) return Promise.resolve();
+    return this.starting ??= this.acquire(reportFailure).finally(() => { this.starting = undefined; });
   }
 
   private grant(handle: HumanTakeoverHandle): void {
@@ -40,7 +44,7 @@ export class NativeControl {
     this.options.send({ cmd: "control", state: "granted", leaseId: handle.leaseId, grantMs: handle.heartbeatMs * 2 });
   }
 
-  private async acquire(): Promise<void> {
+  private async acquire(reportFailure: boolean): Promise<void> {
     try {
       const handle = await startHumanTakeover(this.options.sessionId, {
         ...this.options.takeoverOptions, transport: "viewer", registryEnv: this.options.env, env: this.options.env,
@@ -52,8 +56,9 @@ export class NativeControl {
         onLost: () => { void this.end("lease-lost").catch(() => this.options.kill()); },
       });
       if (this.ready) this.beginInput(handle);
-    } catch {
+    } catch (error) {
       this.options.send({ cmd: "control", state: "revoked", leaseId: "", reason: "unavailable" });
+      if (reportFailure) throw error;
     }
   }
 

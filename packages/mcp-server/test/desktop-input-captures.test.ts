@@ -309,7 +309,7 @@ it.each(cases)("%s reports a storage refusal as not-attempted in results and evi
 it.each([undefined, "after", "both"])("keeps release failures attempted with capture=%s and omits the typed value", async (capture) => {
   const unlink = fs.promises.unlink;
   vi.spyOn(fs.promises, "unlink").mockImplementation(async (file) => {
-    if (String(file).startsWith("/proc/self/fd/") && String(file).endsWith(".json")) {
+    if (state.order.includes("input") && String(file).startsWith("/proc/self/fd/") && String(file).endsWith(".json")) {
       throw new Error("permit release failed");
     }
     return unlink(file);

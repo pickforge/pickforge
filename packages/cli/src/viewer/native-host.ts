@@ -93,11 +93,11 @@ class NativeHost {
     private readonly options: NativeHostOptions,
   ) {
     this.requests = new NativeRequests({ env, send: (command) => this.send(command),
-      mode: (mode) => this.setMode(mode), controlling: () => this.control.active });
+      mode: (mode) => this.setMode(mode), currentMode: () => this.mode, controlling: () => this.control.active });
     this.control = new NativeControl({ sessionId: record.sessionId, env, send: (command) => this.send(command),
       kill: () => { if (!this.exited) this.child.kill("SIGKILL"); },
       taken: () => this.requests.taken(), returned: (reason) => this.requests.returned(reason),
-      takeoverOptions: options._takeoverOptions, spawnWatchdog: options._spawnWatchdog });
+      takeoverOptions: { ...options._takeoverOptions, viewerPid: record.viewerPid, viewerStartTicks: record.viewerStartTicks }, spawnWatchdog: options._spawnWatchdog });
     this.exit = new Promise<void>((resolve) => child.once("exit", () => { this.exited = true; this.control.viewerExited(); resolve(); }));
     child.stderr.resume(); // Logs never enter socket responses or persisted state.
     child.stdin.on("error", () => {});
@@ -295,8 +295,12 @@ class NativeHost {
         this.readyReject(new Error("Invalid native viewer protocol frame")); void this.stop();
       });
       void this.exit.then(() => this.readyReject(new Error("Native viewer exited before readiness")));
-      if (this.options.control === true) void this.control.take();
+      const startupControl = this.options.control === true ? this.control.take(true) : undefined;
+      // Handle failure while readiness is pending, then surface it after readiness.
+      const startupResult = startupControl?.then(() => undefined, (error: unknown) => error);
       await this.ready;
+      const startupError = await startupResult;
+      if (startupError !== undefined) { console.error("Native viewer could not take control"); return 1; }
       const hyprland = this.record.hyprland;
       if (hyprland !== undefined) {
         await waitForViewerWindow(hyprland, hyprland.classPattern, this.record.viewerPid, { stopped: () => this.exited || this.stopped });

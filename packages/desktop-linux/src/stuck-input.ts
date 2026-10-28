@@ -27,7 +27,7 @@ export async function releaseStuckInput(display: string, env?: EnvLike): Promise
   for (const code of keys) {
     await runCommand("xdotool", ["keyup", String(code)], { env: commandEnv, check: true, timeoutMs: 2_000 });
   }
-  for (let button = 1; button <= 7; button++) {
+  for (let button = 1; button <= 9; button++) {
     await runCommand("xdotool", ["mouseup", String(button)], { env: commandEnv, check: true, timeoutMs: 2_000 });
   }
 }

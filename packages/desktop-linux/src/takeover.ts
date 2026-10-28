@@ -68,6 +68,8 @@ export type HumanTakeoverHandle = VncTakeoverHandle | ViewerTakeoverHandle;
 
 export interface StartHumanTakeoverOptions {
   transport?: "x11vnc" | "viewer";
+  viewerPid?: number;
+  viewerStartTicks?: number;
   registryEnv?: EnvLike;
   env?: EnvLike;
   ttlMs?: number;
@@ -144,27 +146,25 @@ export async function startHumanTakeover(
   opts: StartHumanTakeoverOptions = {},
 ): Promise<HumanTakeoverHandle> {
   const registryEnv = opts.registryEnv ?? process.env;
+  const leaseOptions = {
+    ttlMs: opts.ttlMs,
+    heartbeatMs: opts.heartbeatMs,
+    drainTimeoutMs: opts.drainTimeoutMs,
+    inputTransport: opts.transport,
+    viewerPid: opts.viewerPid,
+    viewerStartTicks: opts.viewerStartTicks,
+  };
   const start = async (): Promise<HumanTakeoverHandle> => {
     const { record, desktop } = await requireRunningDesktopSession(id, registryEnv);
 
     let lease: HumanLease;
     try {
-      lease = await acquireHumanLease(id, registryEnv, {
-        ttlMs: opts.ttlMs,
-        heartbeatMs: opts.heartbeatMs,
-        drainTimeoutMs: opts.drainTimeoutMs,
-        inputTransport: opts.transport,
-      });
+      lease = await acquireHumanLease(id, registryEnv, leaseOptions);
     } catch (error) {
       if (!(error instanceof StaleHumanLeaseError)) throw error;
       if (opts.transport === "viewer") await recoverStaleHumanLease(id, registryEnv);
       else await recoverStaleTakeoverLocked(id, record, registryEnv);
-      lease = await acquireHumanLease(id, registryEnv, {
-        ttlMs: opts.ttlMs,
-        heartbeatMs: opts.heartbeatMs,
-        drainTimeoutMs: opts.drainTimeoutMs,
-        inputTransport: opts.transport,
-      });
+      lease = await acquireHumanLease(id, registryEnv, leaseOptions);
     }
 
     if (opts.transport === "viewer") {

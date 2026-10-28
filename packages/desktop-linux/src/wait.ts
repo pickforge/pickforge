@@ -1,4 +1,4 @@
-import { MAX_BASELINE_BYTES, ObservationTimeoutError, observationBudget, readBaselineFile, redactSecrets, type EnvLike } from "@pickforge/lab-core";
+import { MAX_BASELINE_BYTES, ObservationTimeoutError, withAgentPermit, observationBudget, readBaselineFile, redactSecrets, type EnvLike } from "@pickforge/lab-core";
 import { listWindows, type WindowInfo } from "./apps.js";
 import { parseDisplayNumber } from "./display.js";
 import { pngPixelDigest } from "./png.js";
@@ -26,10 +26,11 @@ export type DesktopWaitMode =
 
 export interface DesktopWaitOptions {
   display: string;
+  sessionId?: string;
   mode: DesktopWaitMode;
   timeoutMs?: number;
   env?: EnvLike;
-  /** Recheck before every sample without holding an agent permit. */
+  /** Recheck before every sample. Session samples also hold a short agent permit. */
   busyCheck?: () => Promise<void>;
   /** Invoked inside the observation deadline and evidence action, only when budget remains. */
   readBaseline?: (path: string, deadline: number) => Promise<Buffer>;
@@ -100,6 +101,10 @@ async function samplePixels(
   return digestFile(outPath, deadline, env);
 }
 
+function withSamplePermit<T>(opts: DesktopWaitOptions, sample: () => Promise<T>): Promise<T> {
+  return opts.sessionId === undefined ? sample() : withAgentPermit(opts.sessionId, opts.env ?? process.env, sample);
+}
+
 async function waitGap(deadline: number): Promise<void> {
   const remaining = remainingMs(deadline);
   if (remaining <= 0) return;
@@ -137,7 +142,7 @@ async function waitForChange(
     try {
       await scratch.verify("sample.png");
       await opts.busyCheck?.();
-      const digest = await samplePixels(opts.display, samplePath, deadline, opts.env);
+      const digest = await withSamplePermit(opts, () => samplePixels(opts.display, samplePath, deadline, opts.env));
       await scratch.verify("sample.png");
       samples += 1;
       if (remainingMs(deadline) <= 0) return timeoutResult(samples);
@@ -168,7 +173,7 @@ async function waitForStable(
     try {
       await scratch.verify("sample.png");
       await opts.busyCheck?.();
-      const digest = await samplePixels(opts.display, samplePath, deadline, opts.env);
+      const digest = await withSamplePermit(opts, () => samplePixels(opts.display, samplePath, deadline, opts.env));
       await scratch.verify("sample.png");
       const now = Date.now();
       samples += 1;
@@ -202,11 +207,11 @@ async function waitForNamedWindow(
     let lastSeen: WindowInfo[];
     try {
       await opts.busyCheck?.();
-      lastSeen = await listWindows(
+      lastSeen = await withSamplePermit(opts, () => listWindows(
         opts.display,
         opts.env,
         Math.min(WINDOW_QUERY_MS, remaining),
-      );
+      ));
     } catch (error) {
       if (timedOutError(error)) {
         if (remainingMs(deadline) <= 0) return timeoutResult(samples);

@@ -41,7 +41,7 @@ afterEach(async () => {
 });
 
 /** A stdio-free host fixture exercises the real authenticated socket client. */
-async function openFakeHost(): Promise<{
+async function openFakeHost(beforeReply?: () => Promise<void>): Promise<{
   host: NativeViewerHostIdentity;
   calls: Array<Record<string, unknown>>;
   emit(event: ViewerControlEvent): void;
@@ -54,14 +54,19 @@ async function openFakeHost(): Promise<{
   let host!: NativeViewerHostIdentity;
   const emit = (event: ViewerControlEvent): void => {
     state = event;
-    for (const socket of subscribers) socket.write(`${JSON.stringify(event)}\n`);
+    for (const socket of subscribers) {
+      if (event.event === "controlTaken" || event.event === "controlReturned") {
+        socket.write(`${JSON.stringify({ ...event, requestId: undefined })}\n`);
+      }
+      socket.write(`${JSON.stringify(event)}\n`);
+    }
   };
   const server = net.createServer((socket) => {
     sockets.add(socket);
     socket.on("error", () => {});
     socket.once("close", () => { sockets.delete(socket); subscribers.delete(socket); });
     let pending = "";
-    socket.on("data", (chunk) => {
+    socket.on("data", async (chunk) => {
       pending += chunk.toString();
       if (!pending.includes("\n")) return;
       const request = JSON.parse(pending);
@@ -72,6 +77,7 @@ async function openFakeHost(): Promise<{
         subscribers.add(socket);
         socket.write(`${JSON.stringify({ ...response, requestState: state })}\n`);
       } else {
+        if (request.op === "requestTakeover") await beforeReply?.();
         socket.end(`${JSON.stringify({ ...response, ...(request.op === "requestTakeover" ? { requestId: "request-1" } : {}) })}\n`);
         if (request.op === "cancelRequest") emit({ event: "requestEnded", requestId: "request-1", outcome: "cancelled" });
       }
@@ -99,7 +105,7 @@ async function connect(viewerLauncher?: ViewerLauncher): Promise<ConnectedLab> {
 }
 
 async function waitForSubscription(): Promise<void> {
-  await expect.poll(() => fake!.calls.some((call) => call.op === "subscribe")).toBe(true);
+  await expect.poll(() => fake!.calls.some((call) => call.op === "subscribe" && call.requestId === "request-1")).toBe(true);
 }
 
 function autoMode(): void {
@@ -112,7 +118,7 @@ describe("request_takeover", () => {
     const launcher = { available: vi.fn(async () => true), launch: vi.fn() };
     const { client } = await connect(launcher);
     const result = parseToolJson(await client.callTool({ name: "request_takeover", arguments: { message: "Help" } }));
-    expect(result).toMatchObject({ ok: true, outcome: "viewer_not_open", command: `pickforge-lab watch --session ${id}`, screenshot: null });
+    expect(result).toMatchObject({ ok: true, outcome: "viewer_not_open", heldMs: 0, command: `pickforge-lab watch --session ${id}`, screenshot: null });
     expect(launcher.available).not.toHaveBeenCalled();
     expect(launcher.launch).not.toHaveBeenCalled();
   });
@@ -122,7 +128,7 @@ describe("request_takeover", () => {
     const launcher = { available: vi.fn(async () => false), launch: vi.fn() };
     const { client } = await connect(kind === "library" ? undefined : launcher);
     const result = parseToolJson(await client.callTool({ name: "request_takeover", arguments: { session: id, message: "Help" } }));
-    expect(result).toMatchObject({ ok: true, outcome: "viewer_not_open", command: `pickforge-lab watch --session ${id}` });
+    expect(result).toMatchObject({ ok: true, outcome: "viewer_not_open", heldMs: 0, command: `pickforge-lab watch --session ${id}` });
     expect(launcher.launch).not.toHaveBeenCalled();
   });
 
@@ -188,6 +194,44 @@ describe("request_takeover", () => {
     }
   });
 
+  it("excludes attention wait time and reports zero when control was never taken", async () => {
+    fake = await openFakeHost();
+    const { client } = await connect();
+    const pending = client.callTool({ name: "request_takeover", arguments: { message: "Help" } });
+    await waitForSubscription();
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    fake.emit({ event: "requestEnded", requestId: "request-1", outcome: "timeout" });
+    expect(parseToolJson(await pending)).toMatchObject({ outcome: "timeout", heldMs: 0 });
+  });
+
+  it("keeps the taken interval when completion is replayed before request subscription", async () => {
+    fake = await openFakeHost(async () => {
+      fake!.emit({ event: "controlTaken", requestId: "request-1" });
+      await new Promise((resolve) => setTimeout(resolve, 70));
+      fake!.emit({ event: "controlReturned", reason: "returned", requestId: "request-1", outcome: "returned" });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+    const { client } = await connect();
+    const result = parseToolJson(await client.callTool({ name: "request_takeover", arguments: { message: "Help" } }));
+    expect(result.outcome).toBe("returned");
+    expect(result.heldMs).toBeGreaterThanOrEqual(50);
+    expect(result.heldMs).toBeLessThan(160);
+  });
+
+  it("counts only the taken interval after a delayed acceptance", async () => {
+    fake = await openFakeHost();
+    const { client } = await connect();
+    const pending = client.callTool({ name: "request_takeover", arguments: { message: "Help" } });
+    await waitForSubscription();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    fake.emit({ event: "controlTaken", requestId: "request-1" });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    fake.emit({ event: "controlReturned", reason: "returned", requestId: "request-1", outcome: "returned" });
+    const result = parseToolJson(await pending);
+    expect(result.heldMs).toBeGreaterThanOrEqual(40);
+    expect(result.heldMs).toBeLessThan(250);
+  });
+
   it("reports a disconnected viewer with a screenshot", async () => {
     fake = await openFakeHost();
     const { client } = await connect();
@@ -231,7 +275,7 @@ describe("request_takeover", () => {
     }).toBe(true);
   });
 
-  it.each([{ message: "a".repeat(501) }, { message: "line\nbreak" }, { message: "Help", timeoutMs: -1 },
+  it.each([...[0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069].map((code) => ({ message: `Help${String.fromCodePoint(code)}` })), { message: "a".repeat(501) }, { message: "line\nbreak" }, { message: "Help", timeoutMs: -1 },
     { message: "Help", timeoutMs: 3_600_001 }, { message: "Help", timeoutMs: 1.5 }])("rejects invalid arguments %j", async (args) => {
     const { client } = await connect();
     expect((await client.callTool({ name: "request_takeover", arguments: args })).isError).toBe(true);

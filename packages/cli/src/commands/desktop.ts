@@ -367,8 +367,7 @@ export async function runDesktopScreenshot(
     let imageSize: ScreenshotMetadata["imageSize"] | undefined;
     let liveDisplay: ScreenshotMetadata["displaySize"] | undefined;
     const data = await captureToTarget(target, async (outPath) => {
-      await assertNoHumanLease(id);
-      const result = await screenshot({ display, outPath });
+      const result = await withAgentPermit(id, process.env, () => screenshot({ display, outPath }));
       tool = result.tool;
       windowCount = result.windowCount;
       warnings = result.warnings;
@@ -456,7 +455,7 @@ export async function runDesktopWait(opts: DesktopWaitOptions): Promise<number> 
       status: "ok",
     };
     try {
-      const waited = await desktopWait({ display, mode, timeoutMs, busyCheck: () => assertNoHumanLease(id) });
+      const waited = await desktopWait({ display, mode, timeoutMs, sessionId: id, busyCheck: () => assertNoHumanLease(id) });
       action.status = waited.reason === "timeout" ? "timeout" : "ok";
       const data: Record<string, unknown> = {
         sessionId: id,

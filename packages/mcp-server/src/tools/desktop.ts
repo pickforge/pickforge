@@ -295,12 +295,11 @@ export async function captureDesktopScreenshot(opts: {
   let imageSize: ScreenshotMetadata["imageSize"] | undefined;
   let liveDisplay: ScreenshotMetadata["displaySize"] | undefined;
   const capture = async (outPath: string): Promise<void> => {
-    await assertNoHumanLease(opts.ctx, opts.id);
-    const result = await screenshot({
+    const result = await withAgentPermit(opts.id, opts.ctx.env, () => screenshot({
       display: opts.display,
       outPath,
       env: opts.ctx.env,
-    });
+    }));
     tool = result.tool;
     windowCount = result.windowCount;
     warnings = result.warnings;
@@ -1001,6 +1000,7 @@ function registerWaitTool(server: McpServer, ctx: ServerContext): void {
             const waited = await desktopWait({
               display,
               mode,
+              sessionId: id,
               busyCheck: () => assertNoHumanLease(ctx, id),
               readBaseline: (file, deadline) => resolveWaitBaseline(ctx, file, deadline),
               timeoutMs: args.timeoutMs,

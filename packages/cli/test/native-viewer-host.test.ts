@@ -160,7 +160,7 @@ describe.skipIf(!available)("native host human control", () => {
   it("takes the lease at explicit CLI startup after readiness", async () => {
     const host = await start({ control: true });
     await until(() => controlCommands().some((entry) => entry.state === "granted"));
-    expect(await readHumanLease(sessionId)).toMatchObject({ inputTransport: "viewer" });
+    expect(await readHumanLease(sessionId)).toMatchObject({ inputTransport: "viewer", viewerPid: host.viewerPid, viewerStartTicks: host.viewerStartTicks });
     await requestNativeViewerHost(host, { op: "shutdown" });
     await running;
     expect(await readHumanLease(sessionId)).toBeUndefined();
@@ -202,6 +202,18 @@ describe.skipIf(!available)("native host human control", () => {
     await releaseHumanLease(sessionId, lease.leaseId);
     await requestNativeViewerHost(host, { op: "shutdown" });
     await running;
+  });
+
+  it("exits non-zero and reports a failed startup take", async () => {
+    const lease = await acquireHumanLease(sessionId);
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const binary = fakes.installViewer({ version: nativeViewerVersion });
+      running = runNativeViewerHost({ session: sessionId, binary, viewerVersion: nativeViewerVersion, control: true });
+      expect(await running).toBe(1);
+      expect(stderr).toHaveBeenCalledWith("Native viewer could not take control");
+      expect((await readHumanLease(sessionId))?.leaseId).toBe(lease.leaseId);
+    } finally { stderr.mockRestore(); await releaseHumanLease(sessionId, lease.leaseId); }
   });
 
   it.each([false, true])("revokes a lost lease with noControlAck=%s", async (noControlAck) => {
@@ -285,7 +297,7 @@ describe.skipIf(!available)("native host request socket", () => {
     expect(response.ok && response.requestId).toBeTruthy();
     await until(() => fs.existsSync(notification));
     expect(JSON.parse(fs.readFileSync(notification, "utf8"))).toEqual([
-      "--app-name=Pickforge", "--urgency=normal", "Pickforge needs your help", message,
+      "--app-name=Pickforge", "--urgency=normal", "Pickforge needs your help", message.replaceAll("<", "&lt;").replaceAll(">", "&gt;"),
     ]);
     expect(fakes.calls()).toContainEqual(expect.objectContaining({ cmd: "attention", message }));
     expect(fakes.calls().filter((entry) => entry.tool === "hyprctl").every((entry) => !JSON.stringify(entry.args).includes("focuswindow"))).toBe(true);

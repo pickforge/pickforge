@@ -274,6 +274,7 @@ async function tryNativeViewer(sessionId: string, binary: string, control = fals
     if (cliEntry === undefined) throw new Error("CLI entry point unavailable");
     return await startNativeViewerHost({ sessionId, cliEntry, binary, version: nativeViewerVersion, control });
   } catch (error) {
+    if (control) throw error;
     console.error(`Native viewer unavailable: ${error instanceof Error ? error.message : String(error)}`);
     return findNativeViewerHost(sessionId);
   }

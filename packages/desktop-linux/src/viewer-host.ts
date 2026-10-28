@@ -75,9 +75,9 @@ export async function requestNativeViewerHost(host: NativeViewerHostIdentity, re
   });
 }
 
-/** Subscribe after requesting. The host replays current state to avoid a take/return race. */
-export async function followNativeViewerRequest(host: NativeViewerHostIdentity, requestId: string, options: {
-  signal: AbortSignal; timeoutMs: number;
+/** Subscribe to one request or global control events. The host replays request state. */
+export async function followNativeViewerRequest(host: NativeViewerHostIdentity, requestId: string | undefined, options: {
+  signal: AbortSignal; timeoutMs: number; onTaken?: () => void; onReturned?: () => void; onReady?: () => void;
 }): Promise<ViewerRequestOutcome> {
   await assertHostSocket(host);
   return new Promise((resolve) => {
@@ -97,12 +97,16 @@ export async function followNativeViewerRequest(host: NativeViewerHostIdentity, 
     const cancelWith = (outcome: "cancelled" | "timeout"): void => {
       if (settled || cancellation !== undefined) return;
       cancellation = outcome;
+      if (requestId === undefined) { finish(outcome); return; }
       void requestNativeViewerHost(host, { op: "cancelRequest", requestId }).catch(() => {}).finally(() => finish(outcome));
     };
     const cancel = (): void => cancelWith("cancelled");
     const timer = setTimeout(() => cancelWith("timeout"), options.timeoutMs + 2_000);
     const apply = (event: ViewerControlEvent | undefined): void => {
-      if (event?.requestId === requestId && "outcome" in event) finish(cancellation ?? event.outcome);
+      if (event === undefined || event.requestId !== requestId) return;
+      if (event.event === "controlTaken") options.onTaken?.();
+      if (event.event === "controlReturned") options.onReturned?.();
+      if ("outcome" in event) finish(cancellation ?? event.outcome);
     };
     socket.once("connect", () => socket.write(`${JSON.stringify({ op: "subscribe", requestId })}\n`));
     socket.on("data", (chunk: Buffer) => {
@@ -117,6 +121,7 @@ export async function followNativeViewerRequest(host: NativeViewerHostIdentity, 
             if (value.ok !== true || !sameHost(value.host, host)) throw new Error("Viewer subscription refused");
             ready = true;
             apply(value.requestState);
+            options.onReady?.();
           } else apply(value);
         } catch { socket.destroy(new Error("Invalid viewer subscription")); return; }
       }

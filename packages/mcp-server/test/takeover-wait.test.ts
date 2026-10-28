@@ -52,7 +52,14 @@ describe("takeover_wait", () => {
     const result = parseToolJson(await lab.client.callTool({ name: "takeover_wait", arguments: { session: id, timeoutMs: 0 } }));
     expect(result.ok).toBe(true);
     expect(result.outcome).toBe("returned");
+    expect(result.heldMs).toBe(0);
     expect(result.screenshot.path).toBeTruthy();
+  });
+
+  it("counts control held before takeover_wait was called", async () => {
+    await acquireHumanLease(id, env, { now: new Date(Date.now() - 2_000) });
+    const result = parseToolJson(await lab.client.callTool({ name: "takeover_wait", arguments: { session: id, timeoutMs: 0 } }));
+    expect(result.heldMs).toBeGreaterThanOrEqual(2_000);
   });
 
   it("times out without capturing or changing a live lease", async () => {
