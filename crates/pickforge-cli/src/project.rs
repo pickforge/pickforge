@@ -107,6 +107,14 @@ pub enum ProjectIdentityError {
     NonUtf8Path,
 }
 
+/// Lowercase hex SHA-256 of `bytes`.
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// Stable per-project id: a readable slug of the directory basename plus the
 /// leading hex of a SHA-256 digest over the canonical path. Must stay
 /// byte-identical to PickLab's TypeScript `deriveProjectId`. Paths that cannot
@@ -115,8 +123,7 @@ pub fn derive_project_id(canonical_path: &Path) -> Result<String, ProjectIdentit
     let canonical = canonical_path
         .to_str()
         .ok_or(ProjectIdentityError::NonUtf8Path)?;
-    let digest = Sha256::digest(canonical.as_bytes());
-    let hash: String = format!("{digest:x}")
+    let hash: String = sha256_hex(canonical.as_bytes())
         .chars()
         .take(PROJECT_ID_HASH_LENGTH)
         .collect();

@@ -17,14 +17,14 @@
     "build": "tsup src/index.ts --format esm --dts --clean"
   },
   "dependencies": {
-    "@modelcontextprotocol/server": "2.2.0",
+    "@modelcontextprotocol/server": "2.3.0",
     "@pickforge/lab-android": "*",
     "@pickforge/lab-browser": "*",
     "@pickforge/lab-core": "*",
     "@pickforge/lab-desktop-linux": "*",
-    "zod": "^4.2.0"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
-    "@modelcontextprotocol/client": "2.2.0"
+    "@modelcontextprotocol/client": "2.3.0"
   }
 }

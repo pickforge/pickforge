@@ -14,6 +14,13 @@ use tempfile::TempDir;
 
 const PUBSPEC: &str = "name: app\ndependencies:\n  flutter:\n    sdk: flutter\n";
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 fn encode_png(image: RgbImage) -> Vec<u8> {
     let mut bytes = Vec::new();
     DynamicImage::ImageRgb8(image)
@@ -121,7 +128,7 @@ fn golden_documents_are_byte_exact_and_aliases_dedupe() {
     );
     let canonical_project = canonical_project_path(&project);
     let project_id = derive_project_id(&canonical_project).unwrap();
-    let hash = format!("{:x}", Sha256::digest(&source_bytes));
+    let hash = sha256_hex(&source_bytes);
     let hash_prefix = &hash[..12];
     let artifact_path = format!("artifacts/before-initial-shot-{hash_prefix}.png");
     let artifact = serde_json::json!({
@@ -270,10 +277,7 @@ fn oversized_artifact_gets_one_bounded_preview_and_keeps_its_source_bytes() {
     let preview_path = run_dir.join(before["preview"]["path"].as_str().unwrap());
     assert_eq!(std::fs::read(&artifact_path).unwrap(), source_bytes);
     let preview_bytes = std::fs::read(&preview_path).unwrap();
-    assert_eq!(
-        before["preview"]["sha256"],
-        format!("{:x}", Sha256::digest(&preview_bytes))
-    );
+    assert_eq!(before["preview"]["sha256"], sha256_hex(&preview_bytes));
     assert_eq!(before["preview"]["bytes"], preview_bytes.len() as u64);
     assert_eq!(
         image::load_from_memory(&preview_bytes)
