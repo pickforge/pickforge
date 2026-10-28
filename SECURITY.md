@@ -105,7 +105,7 @@ The socket accepts only status, expand, collapse, and shutdown. It cannot grant 
 Teardown checks process identities before stopping the host and viewer, and uses SIGKILL if SIGTERM fails.
 
 Paste in the native viewer types host clipboard text into the session during control.
-The viewer reads the clipboard only after a click on Paste while a grant is live. A read whose paste stopped never reads the content; on Wayland a stop during setup can still let the source write into a pipe that the viewer closes unread. A read that never answers blocks further reads instead of starting new ones.
+The viewer reads the clipboard only after a click on Paste while a grant is live. A read whose paste stopped starts no further step, and its result is dropped; on Wayland a stop during setup can still let the source write into a pipe that the viewer closes unread. A read that never answers blocks further reads instead of starting new ones.
 On X11 it connects to the caller's `DISPLAY` with normal authorization. The empty-authorization rule above is for the session display.
 On Wayland it uses the data-control protocol. Compositors without it, such as GNOME, show "Paste unavailable".
 It asks for UTF-8 text only and reads at most 16 KiB within one second. It refuses INCR transfers, other formats, and text over 4096 characters.

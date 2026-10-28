@@ -136,9 +136,9 @@ Error codes in the `error` event: `display-refused`, `xvfb-mismatch`,
   break, so text never triggers a shortcut. It types 32 characters per
   step and checks control before each step, so a revoke, an expired grant,
   Return control, collapse, close, stdin end of file or session end stops it
-  within one step. A read still running then never reads the content. On
-  Wayland, a stop during the library's setup can still let the source write
-  into a pipe that the viewer closes unread. A click while a paste runs does
+  within one step. A read still running starts no further step, and its
+  result is dropped. On Wayland, a stop during the library's setup can still
+  let the source write into a pipe that the viewer closes unread. A click while a paste runs does
   nothing, and while a read that never answered still runs, a click shows
   "Paste unavailable". Paste sends no event, and the text never crosses
   stdio.

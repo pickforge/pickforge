@@ -1,11 +1,13 @@
 //! Reads text from the host clipboard once, after the human clicks Paste.
 //!
 //! The text is often a password or a one-time code. It stays in this
-//! process: no log line, error, event or panic holds it, and its buffers
-//! are zeroed when dropped. Only UTF-8 text is read; other formats count as
+//! process: no log line, error, event or panic holds it, and the clipboard
+//! buffers are zeroed when dropped. Short-lived copies made for typing are
+//! not. Only UTF-8 text is read; other formats count as
 //! nothing to paste. A read is bounded in size and time, so a slow or huge
 //! clipboard cannot block typing or fill memory. A read whose paste was
-//! stopped, for example because control ended, asks for no content.
+//! stopped, for example because control ended, starts no further step, and
+//! the app drops any result that arrives after the stop.
 //!
 //! The X11 reader connects to the caller's `DISPLAY` with normal
 //! authorization. The session display is never read or written here.
@@ -165,7 +167,7 @@ pub fn read_bounded(
 }
 
 /// Reads the clipboard of the host window system the viewer runs on. Once
-/// `stopped` is set, the read asks for no more content.
+/// `stopped` is set, the read starts no further step.
 pub fn read(backend: Backend, stopped: &AtomicBool) -> Result<Secret, Refusal> {
     match backend {
         Backend::Wayland => read_wayland(READ_TIMEOUT, stopped),
