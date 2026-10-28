@@ -3,18 +3,16 @@
 //! a credential's quotes. JSON is rewritten token by token, so numbers, spacing and key order
 //! stay as written. Text that redaction does not change is stored byte for byte.
 
-use std::fmt;
 use std::sync::OnceLock;
 
 use regex::Regex;
-use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
-use serde::{Deserialize, Deserializer};
 
 use super::{is_flag, redact_secrets, ArtifactOrigin};
 
 const REDACTED: &str = "[REDACTED]";
 /// Noncharacters never appear in real documents. The first two wrap the index of a JSON value
-/// masked in plain text; the third marks an XML reference that decoding keeps as written.
+/// masked in plain text, where a literal `VALUE_START` is written as `VALUE_START` and `x`.
+/// The third marks an XML reference that decoding keeps as written.
 const VALUE_START: char = '\u{FDD0}';
 const VALUE_END: char = '\u{FDD1}';
 const KEPT: char = '\u{FDD2}';
@@ -28,7 +26,8 @@ pub(super) fn redact_text_artifact(text: &str, origin: ArtifactOrigin) -> String
             .len();
     let body = &text[start..];
     if matches!(body.as_bytes().first(), Some(b'{' | b'['))
-        && serde_json::from_str::<IgnoredAny>(body).is_ok()
+        && json_value_end(body.as_bytes())
+            .is_ok_and(|end| body[end..].trim_matches([' ', '\t', '\r', '\n']).is_empty())
     {
         return format!(
             "{}{}",
@@ -51,132 +50,191 @@ pub(super) fn redact_text_artifact(text: &str, origin: ArtifactOrigin) -> String
 /// covers the JSON in it too.
 fn redact_fragment(text: &str, lighthouse: bool) -> String {
     let (masked, values) = mask_json_values(text, lighthouse);
-    if values.is_empty() {
-        return redact_secrets(text);
-    }
     static MARKER: OnceLock<Regex> = OnceLock::new();
-    let marker = MARKER.get_or_init(|| Regex::new(r"\x{FDD0}([0-9]+)\x{FDD1}").unwrap());
+    let marker = MARKER.get_or_init(|| Regex::new(r"\x{FDD0}(?:([0-9]+)\x{FDD1}|x)").unwrap());
     marker
         .replace_all(
             &redact_secrets(&masked),
-            |captures: &regex::Captures<'_>| {
-                captures[1]
+            |captures: &regex::Captures<'_>| match captures.get(1) {
+                Some(index) => index
+                    .as_str()
                     .parse::<usize>()
                     .ok()
                     .and_then(|index| values.get(index))
-                    .map_or_else(|| captures[0].to_owned(), Clone::clone)
+                    .map_or_else(|| captures[0].to_owned(), Clone::clone),
+                None => VALUE_START.to_string(),
             },
         )
         .into_owned()
 }
 
 /// Replace each JSON object or array with a marker and return the redacted values in order.
-/// A value after a secret name, as in `password=[1,2]`, is secret as a whole. After 4096
-/// brackets that start no JSON, the rest is plain text, so a line of brackets stays fast.
+/// A value after a secret name, as in `password=[1,2]`, is secret as a whole. Where the JSON
+/// stops being valid, the valid part is redacted as JSON in place and stays plain text, so the
+/// plain-text rules still see its keys. The search goes on from there, so each byte is read
+/// once.
 fn mask_json_values(text: &str, lighthouse: bool) -> (String, Vec<String>) {
     let mut masked = String::with_capacity(text.len());
     let mut values = Vec::new();
-    let (mut last, mut from, mut misses) = (0, 0, 0);
-    while let Some(offset) = text[from..].find(['{', '[']).filter(|_| misses < 4096) {
-        let start = from + offset;
-        let Some(length) = json_value_len(&text[start..]) else {
-            misses += 1;
-            from = start + 1;
-            continue;
-        };
+    let mut last = 0;
+    while let Some(offset) = text[last..].find(['{', '[']) {
+        let start = last + offset;
         let prefix = &text[last..start];
-        masked.push_str(prefix);
-        let json = &text[start..start + length];
-        values.push(redact_json_text(json, assigns_secret(prefix), lighthouse));
-        masked.push_str(&format!("{VALUE_START}{}{VALUE_END}", values.len() - 1));
-        last = start + length;
-        from = last;
+        push_plain(&mut masked, prefix);
+        let secret = assigns_secret(prefix);
+        match json_value_end(&text.as_bytes()[start..]) {
+            Ok(length) => {
+                let json = &text[start..start + length];
+                values.push(redact_json_text(json, secret, lighthouse));
+                masked.push_str(&format!("{VALUE_START}{}{VALUE_END}", values.len() - 1));
+                last = start + length;
+            }
+            Err(valid) => {
+                let json = &text[start..start + valid];
+                push_plain(&mut masked, &redact_json_text(json, secret, lighthouse));
+                last = start + valid;
+            }
+        }
     }
-    masked.push_str(&text[last..]);
+    push_plain(&mut masked, &text[last..]);
     (masked, values)
 }
 
-/// The length of the JSON value at the start of the text, if one parses there.
-fn json_value_len(text: &str) -> Option<usize> {
-    let mut values = serde_json::Deserializer::from_str(text).into_iter::<Skipped>();
-    matches!(values.next(), Some(Ok(_))).then(|| values.byte_offset())
-}
-
-/// A JSON value that is checked and dropped. `IgnoredAny` has no nesting limit, so each bracket
-/// in a line of unclosed brackets would scan to the end; this stops 32 levels down, which keeps
-/// the scan linear. Deeper JSON in a line is redacted as plain text.
-struct Skipped;
-
-impl<'de> Deserialize<'de> for Skipped {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(Skip(32)).map(|()| Skipped)
+fn push_plain(masked: &mut String, text: &str) {
+    if text.contains(VALUE_START) {
+        masked.push_str(&text.replace(VALUE_START, "\u{FDD0}x"));
+    } else {
+        masked.push_str(text);
     }
 }
 
-#[derive(Clone, Copy)]
-struct Skip(u8);
-
-impl Skip {
-    fn inner<E: de::Error>(self) -> Result<Self, E> {
-        self.0
-            .checked_sub(1)
-            .map(Skip)
-            .ok_or_else(|| E::custom("nested too deep"))
-    }
+#[derive(Clone, Copy, PartialEq)]
+enum Expect {
+    Value,
+    /// Right after `[`.
+    ValueOrClose,
+    Key,
+    /// Right after `{`.
+    KeyOrClose,
+    Colon,
+    CommaOrClose,
 }
 
-impl<'de> de::DeserializeSeed<'de> for Skip {
-    type Value = ();
-
-    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
-        deserializer.deserialize_any(self)
-    }
-}
-
-impl<'de> Visitor<'de> for Skip {
-    type Value = ();
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a JSON value")
-    }
-
-    fn visit_bool<E>(self, _: bool) -> Result<(), E> {
-        Ok(())
-    }
-
-    fn visit_i64<E>(self, _: i64) -> Result<(), E> {
-        Ok(())
-    }
-
-    fn visit_u64<E>(self, _: u64) -> Result<(), E> {
-        Ok(())
-    }
-
-    fn visit_f64<E>(self, _: f64) -> Result<(), E> {
-        Ok(())
-    }
-
-    fn visit_str<E>(self, _: &str) -> Result<(), E> {
-        Ok(())
-    }
-
-    fn visit_unit<E>(self) -> Result<(), E> {
-        Ok(())
-    }
-
-    fn visit_seq<A: SeqAccess<'de>>(self, mut items: A) -> Result<(), A::Error> {
-        let inner = self.inner()?;
-        while items.next_element_seed(inner)?.is_some() {}
-        Ok(())
-    }
-
-    fn visit_map<A: MapAccess<'de>>(self, mut entries: A) -> Result<(), A::Error> {
-        let inner = self.inner()?;
-        while entries.next_key_seed(inner)?.is_some() {
-            entries.next_value_seed(inner)?;
+/// Where the JSON object or array at the start of `bytes` ends: `Ok(end)` when it is complete,
+/// or `Err(at)` at the start of the first token that is not valid JSON, or at the end of the
+/// text. Numbers are checked as text, nesting has no limit, and each byte is read once.
+fn json_value_end(bytes: &[u8]) -> Result<usize, usize> {
+    let mut closers = Vec::new();
+    let (mut expect, mut index) = (Expect::Value, 0);
+    loop {
+        index += bytes[index..]
+            .iter()
+            .take_while(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+            .count();
+        (expect, index) = json_token(bytes, index, expect, &mut closers).ok_or(index)?;
+        if closers.is_empty() {
+            return Ok(index);
         }
-        Ok(())
     }
+}
+
+/// Read one token. Returns what may follow it and the index after it.
+fn json_token(
+    bytes: &[u8],
+    index: usize,
+    expect: Expect,
+    closers: &mut Vec<u8>,
+) -> Option<(Expect, usize)> {
+    let byte = *bytes.get(index)?;
+    let value = matches!(expect, Expect::Value | Expect::ValueOrClose);
+    let closes = matches!(
+        expect,
+        Expect::CommaOrClose | Expect::ValueOrClose | Expect::KeyOrClose
+    ) && closers.last() == Some(&byte);
+    Some(match byte {
+        b'{' if value => {
+            closers.push(b'}');
+            (Expect::KeyOrClose, index + 1)
+        }
+        b'[' if value => {
+            closers.push(b']');
+            (Expect::ValueOrClose, index + 1)
+        }
+        b'}' | b']' if closes => {
+            closers.pop();
+            (Expect::CommaOrClose, index + 1)
+        }
+        b',' if expect == Expect::CommaOrClose && closers.last() == Some(&b'}') => {
+            (Expect::Key, index + 1)
+        }
+        b',' if expect == Expect::CommaOrClose => (Expect::Value, index + 1),
+        b':' if expect == Expect::Colon => (Expect::Value, index + 1),
+        b'"' if matches!(expect, Expect::Key | Expect::KeyOrClose) => {
+            (Expect::Colon, json_string_end(bytes, index)?)
+        }
+        _ if value => (Expect::CommaOrClose, json_scalar_end(bytes, index)?),
+        _ => return None,
+    })
+}
+
+fn json_scalar_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let word = |word: &[u8]| {
+        bytes[start..]
+            .starts_with(word)
+            .then_some(start + word.len())
+    };
+    match bytes[start] {
+        b'"' => json_string_end(bytes, start),
+        b'-' | b'0'..=b'9' => json_number_end(bytes, start),
+        b't' => word(b"true"),
+        b'f' => word(b"false"),
+        b'n' => word(b"null"),
+        _ => None,
+    }
+}
+
+fn json_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut index = start + 1;
+    loop {
+        match *bytes.get(index)? {
+            b'"' => return Some(index + 1),
+            b'\\' => index += 1 + json_escape_len(&bytes[index + 1..])?,
+            0..=0x1f => return None,
+            _ => index += 1,
+        }
+    }
+}
+
+fn json_escape_len(rest: &[u8]) -> Option<usize> {
+    match *rest.first()? {
+        b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => Some(1),
+        b'u' if rest.get(1..5)?.iter().all(u8::is_ascii_hexdigit) => Some(5),
+        _ => None,
+    }
+}
+
+fn json_number_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let digits = |from: usize| {
+        let end = from
+            + bytes[from..]
+                .iter()
+                .take_while(|byte| byte.is_ascii_digit())
+                .count();
+        (end > from).then_some(end)
+    };
+    let integer = start + usize::from(bytes[start] == b'-');
+    let mut index = match bytes.get(integer)? {
+        b'0' => integer + 1,
+        _ => digits(integer)?,
+    };
+    if bytes.get(index) == Some(&b'.') {
+        index = digits(index + 1)?;
+    }
+    if matches!(bytes.get(index), Some(b'e' | b'E')) {
+        let sign = usize::from(matches!(bytes.get(index + 1), Some(b'+' | b'-')));
+        index = digits(index + 1 + sign)?;
+    }
+    Some(index)
 }
 
 /// True when the text ends with a secret name and a separator, as in `password=` or
@@ -678,6 +736,48 @@ mod tests {
         assert_eq!(
             lines[3],
             "I/app max_tokens=[100,200] tokenizer={\"model\":\"m\"} bounds=[0,0][9,9]"
+        );
+    }
+
+    #[test]
+    fn json_in_a_line_has_no_depth_or_number_limit_and_invalid_json_keeps_its_context() {
+        let deep = format!(
+            "D/app: {{\"password\":{}\"hunter1\"{}}} took 3ms",
+            "{\"v\":".repeat(33),
+            "}".repeat(33)
+        );
+        let stored = redact_text_artifact(&deep, ArtifactOrigin::AndroidLogcat);
+        assert!(!stored.contains("hunter1"), "{stored}");
+        let brackets = format!(
+            "{} {{\"password\":{{\"value\":\"hunter2\"}}}}",
+            "[".repeat(4096)
+        );
+        let stored = redact_text_artifact(&brackets, ArtifactOrigin::AndroidLogcat);
+        assert!(!stored.contains("hunter2"), "{stored}");
+        let log = "D/app: {\"password\":{\"value\":\"hunter3\",\"n\":1e400}}\nI/app: [1, \"password\": \"hunter4\"]\nI/app: {\"password\":{\"v\":\"hunter5\"}, bad\nI/app: [\"a\tb\", \"token=hunter6\"]\n";
+        let stored = redact_text_artifact(log, ArtifactOrigin::AndroidLogcat);
+        let lines: Vec<&str> = stored.lines().collect();
+        assert_eq!(
+            lines[0],
+            "D/app: {\"password\":{\"value\":\"[REDACTED]\",\"n\":\"[REDACTED]\"}}"
+        );
+        for secret in ["hunter4", "hunter5", "hunter6"] {
+            assert!(!stored.contains(secret), "{secret} in {stored}");
+        }
+        assert!(lines[3].starts_with("I/app: [\"a\tb\", "), "{stored}");
+    }
+
+    #[test]
+    fn literal_markers_in_the_input_stay_as_written() {
+        let line = "D/app: \u{FDD0}0\u{FDD1} [] \u{FDD0}x token=abc\n";
+        assert_eq!(
+            redact_text_artifact(line, ArtifactOrigin::AndroidLogcat),
+            "D/app: \u{FDD0}0\u{FDD1} [] \u{FDD0}x token=[REDACTED]\n"
+        );
+        let json = "{\"s\":\"\u{FDD0}0\u{FDD1} []\"}";
+        assert_eq!(
+            redact_text_artifact(json, ArtifactOrigin::DevtoolsConsole),
+            json
         );
     }
 
