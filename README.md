@@ -724,9 +724,11 @@ a search preconnect (`www.google.com`), `gaia_auth_list_accounts`
 manifest (`update.googleapis.com`, then `edgedl.me.gvt1.com`) despite
 `--disable-component-update`. The first three are covered by the features
 listed above. Sign-in and the component updater have no kill switch, so the lab
-sets `--gaia-url=https://127.0.0.1:0` and
-`--component-updater=url-source=https://127.0.0.1:0`, which leave both clients
-running against an unusable loopback endpoint. Chrome no longer treats
+sets the Gaia URL to `https://127.0.0.1:0` through `--gaia-config-contents` and
+sets `--component-updater=url-source=https://127.0.0.1:0`, which leave both
+clients running against an unusable loopback endpoint. The lab does not use
+`--gaia-url`, because Chrome shows an "unsupported command-line flag" bar for
+it. Chrome no longer treats
 `accounts.google.com` as its sign-in origin; pages can still sign in to Google
 as ordinary web content, without browser account integration.
 

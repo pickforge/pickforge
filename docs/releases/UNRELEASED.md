@@ -130,6 +130,10 @@ npm or GitHub releases. (#398)
   contention no longer uses up the 250 ms freeze limit. If the limit still
   expires, preparation makes up to three attempts within its 3 second budget.
   When preparation fails, no text is sent. (#222)
+- Browser lab sessions no longer show Chrome's "unsupported command-line flag"
+  bar for `--gaia-url`. Chrome now gets the same loopback sign-in sink through
+  `--gaia-config-contents`, which is not on its list of unsupported flags.
+  (#348)
 
 ## Fixes
 
