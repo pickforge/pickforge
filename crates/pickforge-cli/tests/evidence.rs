@@ -141,13 +141,20 @@ fn golden_documents_are_byte_exact_and_aliases_dedupe() {
     assert!(value["before"]["artifacts"][0].get("preview").is_none());
     let mut final_artifact = artifact.clone();
     final_artifact["label"] = "Final [shot]".into();
+    // A document without capture details records every capture field as unknown.
+    let unknown_capture = serde_json::json!({
+        "capturedAt":"unknown","appBuild":"unknown","emulatorVersion":"unknown","systemImage":"unknown",
+        "requested":{},
+        "observed":{"displayMode":"unknown","foldState":"unknown","posture":"unknown","rotation":"unknown",
+            "density":"unknown","fontScale":"unknown","darkMode":"unknown","locale":"unknown"}
+    });
     let expected = serde_json::json!({
         "schemaVersion":EVIDENCE_SCHEMA_VERSION,"runId":"20240101-000000-flutter","projectId":project_id,
         "projectPath":canonical_project.to_str().unwrap(),"createdAt":"2024-01-01T00:00:00Z",
         "scenario":"Counter *increments*","outcome":"passed",
-        "before":{"summary":"Counter was **zero**.\nSecond line.","observations":[{"label":"Counter_[raw]","value":"0\nstill zero"}],"artifacts":[artifact]},
+        "before":{"summary":"Counter was **zero**.\nSecond line.","capture":unknown_capture.clone(),"observations":[{"label":"Counter_[raw]","value":"0\nstill zero"}],"artifacts":[artifact]},
         "steps":[],
-        "after":{"summary":"Counter is one.","observations":[{"label":"Counter","value":"1"}],"artifacts":[final_artifact]},
+        "after":{"summary":"Counter is one.","capture":unknown_capture,"observations":[{"label":"Counter","value":"1"}],"artifacts":[final_artifact]},
         "sourceChanges":["lib/main.dart"],"checks":[{"name":"flutter test","status":"passed","summary":"Passed."}],
         "limitations":["Pixel review was manual."]
     });
@@ -401,9 +408,9 @@ fn rejects_receipt_schema_paths_controls_unknown_fields_and_limits() {
             "{case}"
         );
     }
-    // Callers written against versions 1 and 2 keep working. Recorded documents carry v3 and
-    // project the absent intermediate states as an empty ordered array.
-    for (offset, version) in [1, 2].into_iter().enumerate() {
+    // Callers written against versions 1 to 3 keep working. Recorded documents carry the
+    // current version and project the absent intermediate states as an empty ordered array.
+    for (offset, version) in [1, 2, 3].into_iter().enumerate() {
         let mut legacy: serde_json::Value = serde_json::from_slice(&valid).unwrap();
         legacy["schemaVersion"] = serde_json::json!(version);
         legacy.as_object_mut().unwrap().remove("steps");
@@ -417,7 +424,7 @@ fn rejects_receipt_schema_paths_controls_unknown_fields_and_limits() {
         assert_eq!(recorded.schema_version, EVIDENCE_SCHEMA_VERSION);
         let document: serde_json::Value =
             serde_json::from_slice(&std::fs::read(recorded.evidence_path).unwrap()).unwrap();
-        assert_eq!(document["schemaVersion"], 3);
+        assert_eq!(document["schemaVersion"], EVIDENCE_SCHEMA_VERSION);
         assert_eq!(document["steps"], serde_json::json!([]));
     }
 

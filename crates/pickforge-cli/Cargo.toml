@@ -23,7 +23,7 @@ serde-saphyr = { version = "1.3", default-features = false, features = ["deseria
 sha2 = "0.11"
 regex = "1"
 thiserror = "2"
-time = { version = "0.3", features = ["formatting", "macros"] }
+time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 tempfile = "3"
 toml = { version = "1.1", default-features = false, features = ["parse", "serde", "std"] }
 which = "8"
