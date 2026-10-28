@@ -498,6 +498,7 @@ async function runLaunch(
     return result;
   }
   const status = await spawned.exited;
+  if (record.hyprland !== undefined) await disableViewerOpacityRule(record.hyprland, record.hyprland.ruleName);
   // A launch that cannot be removed now is pruned by a later launch.
   await removeViewerLaunch(opts.sessionId, record.launchId, opts.registryEnv).catch(() => {});
   return { ...result, ...status };

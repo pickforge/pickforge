@@ -351,7 +351,7 @@ describe("launchViewerWindow", () => {
 
     expect(Date.now() - started).toBeLessThan(10_000);
     expect(result).toMatchObject({ adapter: "none", exitCode: 0 });
-    expect(sequence().at(-1)).toBe("disable");
+    expect(sequence().slice(-2)).toEqual(["disable", "disable-opacity"]);
     expect(removeViewerLaunch).toHaveBeenCalledWith("desk-aaaaaa11", LAUNCH_ID, undefined);
   });
 
@@ -576,7 +576,7 @@ describe("launchViewerWindow", () => {
     expect(Date.now() - started).toBeLessThan(10_000);
     expect(exitOnSignal).toHaveBeenCalledWith("SIGINT");
     expect(fs.existsSync(`/proc/${String(pid)}`)).toBe(false);
-    expect(sequence().at(-1)).toBe("disable");
+    expect(sequence().slice(-2)).toEqual(["disable", "disable-opacity"]);
     expect(removeViewerLaunch).toHaveBeenCalledWith("desk-aaaaaa11", LAUNCH_ID, undefined);
     expect(process.listenerCount("SIGINT")).toBe(0);
   });
