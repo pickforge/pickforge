@@ -95,6 +95,7 @@ export {
   buildPidofArgs,
   buildResolveLauncherArgs,
   buildScreenshotArgs,
+  buildSwipeArgs,
   buildTapArgs,
   buildTypeTextArgs,
   buildUiCatArgs,
@@ -111,6 +112,8 @@ export {
   launchApp,
   listDevices,
   logcat,
+  MAX_SWIPE_COORDINATE,
+  MAX_SWIPE_DURATION_MS,
   parseAdbDevices,
   parseResolvedLauncher,
   pressKey,
@@ -118,6 +121,7 @@ export {
   runAdb,
   screenshot,
   splitInputText,
+  swipe,
   tap,
   typeText,
   UI_DUMP_REMOTE_PATH,
@@ -127,6 +131,7 @@ export {
   type LaunchAppOptions,
   type LaunchAppResult,
   type LogcatArgsOptions,
+  type SwipeGesture,
 } from "./adb.js";
 
 export {

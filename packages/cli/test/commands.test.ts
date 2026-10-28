@@ -1814,6 +1814,47 @@ describe("pickforge-lab android (fake adb)", () => {
     cliSpawnTimeout(4),
   );
 
+  it(
+    "swipes with exact adb argv and rejects out-of-range values",
+    async () => {
+      const { env, adbLog } = fakeAdbEnv();
+      const ok = await runCli(
+        ["android", "swipe", "160", "500", "160", "120", "--serial", FAKE_SERIAL, "--json"],
+        env,
+      );
+      expect(ok.code).toBe(0);
+      expect(parseJson(ok)).toMatchObject({
+        serial: FAKE_SERIAL,
+        fromX: 160,
+        fromY: 500,
+        toX: 160,
+        toY: 120,
+      });
+      const timed = await runCli(
+        ["android", "swipe", "5", "6", "5", "6", "800", "--serial", FAKE_SERIAL],
+        env,
+      );
+      expect(timed.code).toBe(0);
+      expect(timed.stdout).toContain(`swiped (5, 6) to (5, 6) on ${FAKE_SERIAL}`);
+      for (const args of [
+        ["1", "2", "3", "16384"],
+        ["1", "2", "3", "4", "10001"],
+        ["-1", "2", "3", "4"],
+      ]) {
+        const bad = await runCli(
+          ["android", "swipe", ...args, "--serial", FAKE_SERIAL, "--json"],
+          env,
+        );
+        expect(bad.code).not.toBe(0);
+      }
+      expect(adbLogLines(adbLog)).toEqual([
+        `-s ${FAKE_SERIAL} shell input swipe 160 500 160 120`,
+        `-s ${FAKE_SERIAL} shell input swipe 5 6 5 6 800`,
+      ]);
+    },
+    cliSpawnTimeout(5),
+  );
+
   it("screenshots the device into a run directory", async () => {
     const { env, adbLog } = fakeAdbEnv();
     const projectDir = makeProjectDir();

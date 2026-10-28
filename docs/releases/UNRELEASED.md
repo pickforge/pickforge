@@ -132,6 +132,11 @@ session teardown are also more reliable.
   (default 20000) and says when it truncates. `raw: true` returns the XML. On
   Settings, Flutter and Compose screens, the response shrinks by about 83 to
   88 percent in tokens. (#351)
+- The `android_swipe` MCP tool and `pickforge-lab android swipe <x1> <y1>
+  <x2> <y2> [durationMs]` run `adb shell input swipe` to scroll lists or
+  dismiss sheets. Coordinates are device pixels from 0 to 16383, and the
+  optional duration is 0 to 10000 ms. The same start and end with a duration
+  is a long press. Evidence records both endpoints. (#231)
 
 ## Fixes
 

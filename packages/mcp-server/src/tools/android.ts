@@ -18,7 +18,10 @@ import {
   maybeWaitForGuestReady,
   MIN_UI_TREE_MAX_CHARS,
   runAdb,
+  MAX_SWIPE_COORDINATE,
+  MAX_SWIPE_DURATION_MS,
   screenshot,
+  swipe,
   tap,
   typeText,
 } from "@pickforge/lab-android";
@@ -363,6 +366,59 @@ function registerAndroidTool5(server: McpServer, ctx: ServerContext): void {
   );
 }
 
+const swipeCoordinate = (label: string) =>
+  z.number().int().min(0).max(MAX_SWIPE_COORDINATE).describe(label);
+
+function registerAndroidSwipe(server: McpServer, ctx: ServerContext): void {
+  server.registerTool(
+    "android_swipe",
+    {
+      title: "Android swipe",
+      description:
+        "Swipe from (fromX, fromY) to (toX, toY) in screen pixels, for " +
+        "example to scroll a list or dismiss a sheet. The same start and end " +
+        "with a duration is a long press.",
+      inputSchema: {
+        ...targetArgs,
+        fromX: swipeCoordinate("Start X coordinate"),
+        fromY: swipeCoordinate("Start Y coordinate"),
+        toX: swipeCoordinate("End X coordinate"),
+        toY: swipeCoordinate("End Y coordinate"),
+        durationMs: z
+          .number()
+          .int()
+          .min(0)
+          .max(MAX_SWIPE_DURATION_MS)
+          .optional()
+          .describe("Gesture duration in milliseconds (device default 300)"),
+      },
+    },
+    (args) =>
+      runTool(async () => {
+        const target = await resolveAndroidTarget(ctx, args);
+        const gesture = {
+          fromX: args.fromX,
+          fromY: args.fromY,
+          toX: args.toX,
+          toY: args.toY,
+          ...(args.durationMs === undefined ? {} : { durationMs: args.durationMs }),
+        };
+        return withMcpEvidence(
+          ctx,
+          {
+            sessionId: target.sessionId,
+            tool: "android_swipe",
+            target: { fromX: args.fromX, fromY: args.fromY, x: args.toX, y: args.toY },
+          },
+          async () => {
+            await swipe({ serial: target.serial, env: ctx.env, ...gesture });
+            return { data: { ...targetData(target), ...gesture } };
+          },
+        );
+      }),
+  );
+}
+
 function registerAndroidTool6(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "android_type",
@@ -642,6 +698,7 @@ export function registerAndroidTools(server: McpServer, ctx: ServerContext): voi
   registerAndroidTool3(server, ctx);
   registerAndroidTool4(server, ctx);
   registerAndroidTool5(server, ctx);
+  registerAndroidSwipe(server, ctx);
   registerAndroidTool6(server, ctx);
   registerAndroidTool7(server, ctx);
   registerAndroidTool8(server, ctx);
