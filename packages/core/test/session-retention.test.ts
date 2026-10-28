@@ -2,10 +2,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createSession, destroySessionRecord, sessionDataDir, takeoverIdentityName, updateSession } from "../src/session.js";
+import { createSession, destroySessionRecord, sessionDataDir, sessionInputClosedName, takeoverIdentityName, updateSession } from "../src/session.js";
+import { DirHandle } from "../src/dir-handle.js";
 import { sessionsDir } from "../src/paths.js";
-import { parseSessionRetentionDuration, pruneSessionLogs, retainSessionLogs } from "../src/session-retention.js";
-import { acquireAgentPermit, readHumanLease, withAgentPermit } from "../src/takeover.js";
+import { parseSessionRetentionDuration, pruneSessionLogs, retainSessionLogs, SESSION_MARKER_HORIZON_MS } from "../src/session-retention.js";
+import {
+  AgentPermitUnavailableError, acquireAgentPermit, acquireHumanLease, isSessionInputClosed,
+  readHumanLease, stopSessionAgentInput, withAgentPermit,
+} from "../src/takeover.js";
 
 const forcedIds = vi.hoisted(() => [] as string[]);
 vi.mock("node:crypto", async (importOriginal) => {
@@ -24,6 +28,7 @@ beforeEach(() => {
   env = { PICKFORGE_HOME: home };
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   forcedIds.length = 0;
   fs.rmSync(home, { recursive: true, force: true });
 });
@@ -256,5 +261,211 @@ describe("explicit session log pruning", () => {
   });
   it.each(["1s", "2m", "3h", "4d", "5w"])("accepts duration %s", (value) => {
     expect(parseSessionRetentionDuration(value)).toBeGreaterThan(0);
+  });
+});
+
+describe("session marker horizon", () => {
+  const markers = (id: string) =>
+    [takeoverIdentityName(id), sessionInputClosedName(id)].map((name) => path.join(sessionsDir(env), name));
+  const past = () => new Date(Date.now() - SESSION_MARKER_HORIZON_MS - 60_000);
+  const backdate = (files: string[], when = past()) => { for (const file of files) fs.utimesSync(file, when, when); };
+  const exist = (files: string[]) => files.map((file) => fs.existsSync(file));
+  const setStoppedAt = (id: string, when: Date) =>
+    fs.writeFileSync(path.join(sessionDataDir(id, env), "stopped.json"), JSON.stringify({ id, stoppedAt: when.toISOString() }));
+
+  async function closed() {
+    const record = await createSession({ type: "desktop", status: "running", projectDir: home }, env);
+    await withAgentPermit(record.id, env, async () => {});
+    await stopSessionAgentInput(record.id, env, 0);
+    await retainSessionLogs(record, env);
+    await destroySessionRecord(record.id, env);
+    return record;
+  }
+
+  function orphanMarkers(id: string) {
+    fs.mkdirSync(sessionsDir(env), { recursive: true });
+    const files = markers(id);
+    fs.writeFileSync(files[0]!, "[0,0,null]");
+    fs.writeFileSync(files[1]!, "");
+    backdate(files);
+    return files;
+  }
+
+  async function lateInput(id: string) {
+    let delivered = false;
+    await expect(withAgentPermit(id, env, async () => { delivered = true; })).rejects.toThrow(AgentPermitUnavailableError);
+    await expect(acquireHumanLease(id, env)).rejects.toThrow();
+    expect(delivered).toBe(false);
+  }
+
+  it("keeps both markers inside the horizon, so late callers fail closed and the id stays reserved", async () => {
+    const record = await closed();
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+    expect(exist(markers(record.id))).toEqual([true, true]);
+    await lateInput(record.id);
+    expect(fs.existsSync(sessionDataDir(record.id, env))).toBe(false);
+    forcedIds.push(record.id.slice("desk-".length), "0badf00d");
+    expect((await createSession({ type: "desktop", projectDir: home }, env)).id).toBe("desk-0badf00d");
+  });
+
+  it("measures the horizon from teardown when markers are older", async () => {
+    const record = await closed();
+    backdate(markers(record.id));
+    const teardown = new Date(Date.now() - 3_600_000);
+    setStoppedAt(record.id, teardown);
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+    for (const file of markers(record.id)) expect(Math.abs(fs.statSync(file).mtimeMs - teardown.getTime())).toBeLessThan(1_000);
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(exist(markers(record.id))).toEqual([true, true]);
+    await lateInput(record.id);
+  });
+
+  it("removes both markers past the horizon and frees the id", async () => {
+    const record = await closed();
+    setStoppedAt(record.id, past());
+    backdate(markers(record.id));
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+    // A late caller still fails closed on the missing record and recreates nothing.
+    await lateInput(record.id);
+    expect(await readHumanLease(record.id, env)).toBeUndefined();
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+    forcedIds.push(record.id.slice("desk-".length));
+    expect((await createSession({ type: "desktop", projectDir: home }, env)).id).toBe(record.id);
+  });
+
+  it("removes old markers whose directory is already gone and keeps other files", async () => {
+    const old = orphanMarkers("desk-0badc0de");
+    const fresh = orphanMarkers("brow-0badf00d");
+    backdate(fresh, new Date());
+    const others = [".desk-0badc0de.notes", ".desk-0badc0de.input-closed.tmp", "notes.txt"].map((name) => path.join(sessionsDir(env), name));
+    for (const file of others) fs.writeFileSync(file, "keep");
+    backdate(others);
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(exist(old)).toEqual([false, false]);
+    expect(exist(fresh)).toEqual([true, true]);
+    expect(exist(others)).toEqual([true, true, true]);
+  });
+
+  it.each(["starting", "running", "error"] as const)("keeps old markers while a %s record exists", async (status) => {
+    const record = await createSession({ type: "desktop", status: "running", projectDir: home }, env);
+    await withAgentPermit(record.id, env, async () => {});
+    await stopSessionAgentInput(record.id, env, 0);
+    await updateSession(record.id, { status }, env);
+    backdate(markers(record.id));
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(exist(markers(record.id))).toEqual([true, true]);
+    // The reaper revives an interrupted teardown through the closure marker.
+    expect(await isSessionInputClosed(record.id, env)).toBe(true);
+  });
+
+  it("keeps old markers while the session lock or a data directory exists", async () => {
+    const files = orphanMarkers("desk-0badc0de");
+    const lock = path.join(sessionsDir(env), "desk-0badc0de.ensure-vnc.lock");
+    fs.writeFileSync(lock, "{}");
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(exist(files)).toEqual([true, true]);
+    fs.rmSync(lock);
+    const data = path.join(sessionsDir(env), "desk-0badc0de");
+    fs.mkdirSync(path.join(data, "permits"), { recursive: true });
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(exist(files)).toEqual([true, true]);
+    fs.rmSync(data, { recursive: true });
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(exist(files)).toEqual([false, false]);
+  });
+
+  it("keeps markers when one of them is not a regular file", async () => {
+    const files = orphanMarkers("desk-0badc0de");
+    fs.rmSync(files[1]!);
+    fs.mkdirSync(files[1]!);
+    backdate(files);
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(exist(files)).toEqual([true, true]);
+  });
+
+  it("does not rebuild storage for a caller that resumes after its markers are pruned", async () => {
+    const record = await createSession({ type: "desktop", status: "running", projectDir: home }, env);
+    await withAgentPermit(record.id, env, async () => {});
+    const closure = markers(record.id)[1]!;
+    const lstat = fs.promises.lstat;
+    let paused!: () => void;
+    let resume!: () => void;
+    const reached = new Promise<void>((resolve) => { paused = resolve; });
+    const gate = new Promise<void>((resolve) => { resume = resolve; });
+    let armed = true;
+    vi.spyOn(fs.promises, "lstat").mockImplementation((async (file: fs.PathLike, options?: fs.StatOptions) => {
+      // The late caller read the running record and stops before its closure check.
+      if (armed && file === closure) { armed = false; paused(); await gate; }
+      return lstat(file, options);
+    }) as typeof fs.promises.lstat);
+    let delivered = false;
+    const late = withAgentPermit(record.id, env, async () => { delivered = true; });
+    await reached;
+    await stopSessionAgentInput(record.id, env, 0);
+    await retainSessionLogs(record, env);
+    await destroySessionRecord(record.id, env);
+    setStoppedAt(record.id, past());
+    backdate(markers(record.id));
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+    resume();
+    await expect(late).rejects.toThrow(AgentPermitUnavailableError);
+    expect(delivered).toBe(false);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+  });
+
+  it("accepts a marker that a concurrent prune removed first, and refuses a replaced one", async () => {
+    const files = orphanMarkers("desk-0badc0de");
+    const unlink = DirHandle.prototype.unlinkOwnedFile;
+    const spy = vi.spyOn(DirHandle.prototype, "unlinkOwnedFile").mockImplementation(async function (this: DirHandle, name, stat) {
+      fs.rmSync(path.join(sessionsDir(env), name));
+      return unlink.call(this, name, stat);
+    });
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(exist(files)).toEqual([false, false]);
+    const replaced = orphanMarkers("desk-0badc0de");
+    spy.mockImplementation(async function (this: DirHandle, name, stat) {
+      // Created before the swap, so ext4 cannot hand back the old inode.
+      const file = path.join(sessionsDir(env), name);
+      fs.writeFileSync(`${file}.new`, "");
+      fs.renameSync(`${file}.new`, file);
+      return unlink.call(this, name, stat);
+    });
+    await expect(pruneSessionLogs(0, env)).rejects.toThrow("replaced");
+    expect(exist(replaced)).toEqual([true, true]);
+  });
+
+  it("stays closed and reserved when prune stops between the two markers", async () => {
+    const files = orphanMarkers("desk-0badc0de");
+    const unlink = DirHandle.prototype.unlinkOwnedFile;
+    let calls = 0;
+    vi.spyOn(DirHandle.prototype, "unlinkOwnedFile").mockImplementation(async function (this: DirHandle, name, stat) {
+      calls += 1;
+      if (calls === 2) throw new Error("crash");
+      return unlink.call(this, name, stat);
+    });
+    await expect(pruneSessionLogs(0, env)).rejects.toThrow("crash");
+    expect(exist(files)).toEqual([false, true]);
+    await lateInput("desk-0badc0de");
+    expect(await readHumanLease("desk-0badc0de", env)).toBeUndefined();
+    forcedIds.push("0badc0de", "0badf00d");
+    expect((await createSession({ type: "desktop", projectDir: home }, env)).id).toBe("desk-0badf00d");
+    vi.restoreAllMocks();
+    await pruneSessionLogs(0, env);
+    expect(exist(files)).toEqual([false, false]);
+  });
+
+  it("keeps markers when prune stops after carrying the teardown time", async () => {
+    const record = await closed();
+    backdate(markers(record.id));
+    setStoppedAt(record.id, new Date(Date.now() - 3_600_000));
+    vi.spyOn(DirHandle.prototype, "unlinkChild").mockRejectedValueOnce(new Error("crash"));
+    await expect(pruneSessionLogs(0, env)).rejects.toThrow("crash");
+    expect(fs.existsSync(path.join(sessionDataDir(record.id, env), "stopped.json"))).toBe(true);
+    vi.restoreAllMocks();
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+    expect(exist(markers(record.id))).toEqual([true, true]);
+    await lateInput(record.id);
   });
 });
