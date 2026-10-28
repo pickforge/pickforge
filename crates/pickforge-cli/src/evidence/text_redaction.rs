@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 use serde_json::Value;
 
-use super::{redact_secrets, ArtifactOrigin};
+use super::{is_flag, redact_secrets, ArtifactOrigin};
 
 const REDACTED: &str = "[REDACTED]";
 
@@ -46,10 +46,11 @@ fn redact_json_document(text: &str) -> Option<String> {
     Some(format!("{}{}{}", &text[..start], json.ok()?, &text[end..]))
 }
 
-/// Under a secret key every number and string is replaced, whatever its type. Booleans stay,
-/// because they are flags rather than credentials.
+/// Under a secret key every number and string is replaced, whatever its type. Booleans and
+/// "true" or "false" strings stay, because they are flags rather than credentials.
 fn redact_json(value: Value, secret: bool) -> Value {
     match value {
+        Value::String(text) if secret && is_flag(&text) => Value::String(text),
         Value::String(_) | Value::Number(_) if secret => Value::String(REDACTED.into()),
         Value::String(text) => Value::String(redact_secrets(&text)),
         Value::Array(items) => Value::Array(
@@ -127,10 +128,6 @@ fn redact_markup_text(text: &str) -> String {
     } else {
         encode_xml(&redacted)
     }
-}
-
-fn is_flag(value: &str) -> bool {
-    value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false")
 }
 
 fn decode_xml(text: &str) -> String {
@@ -227,6 +224,11 @@ mod tests {
         assert_eq!(stored["auth"]["token"][0], REDACTED);
         assert_eq!(stored["cookies"]["sid"], REDACTED);
         assert_eq!(stored["passwordField"], false);
+        let flag = r#"{"password":"false","n":1}"#;
+        assert_eq!(
+            redact_text_artifact(flag, ArtifactOrigin::DevtoolsAccessibility),
+            flag
+        );
         assert_eq!(stored["n"], 1);
     }
 

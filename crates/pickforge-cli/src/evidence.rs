@@ -889,15 +889,15 @@ fn redact_secrets(value: &str) -> String {
         // unquoted value stops at a backslash, so that JSON string stays valid.
         // Any scheme word (Bearer, Basic, Digest, ...) belongs to the credential, and so do
         // Digest's `name="value"` parameters.
-        Regex::new(r#"(?i)(\bauthorization\b[ \t]*[:=][ \t]*)(?:\\"(?:[^"\\]|\\[^"])*\\"|"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|(?:[a-z][a-z0-9-]*[ \t]+)?(?:[\w-]+=(?:"[^"\r\n]*"|[^\s,;"'<>\\]*)(?:[ \t]*,[ \t]*[\w-]+=(?:"[^"\r\n]*"|[^\s,;"'<>\\]*))*|[^\s,;"'<>\\]+))"#).unwrap(),
+        Regex::new(r#"(?i)(\bauthorization\b[ \t]*[:=][ \t]*)(?:\\"(?:[^"\\]|\\[^"])*\\"|"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|(?:[a-z][a-z0-9-]*[ \t]+)?(?:[\w-]+=(?:"[^"\r\n]*"|[^\s,;"'<>\\]*)(?:[ \t]*,[ \t]*[\w-]+=(?:"[^"\r\n]*"|[^\s,;"'<>\\]*))*|(?:[^\s,;"'<>\\]|\\[^"\s])+))"#).unwrap(),
         // An unquoted cookie stops at quotes and angle brackets, so the rest of a
         // one-line XML tree or a JSON string survives.
         Regex::new(r#"(?i)(\b(?:set-cookie|cookie)\b[ \t]*[:=][ \t]*)(?:\\"(?:[^"\\]|\\[^"])*\\"|"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[^\r\n"'<>\\]+)"#).unwrap(),
         // Prefixed keys such as access_token and suffixed keys such as SECRET_KEY or
-        // passwordHash count too. A suffix starts with a separator or a capital, so
-        // max_tokens and tokenizer stay readable.
-        Regex::new(r#"(?i)(\b[\w.-]*(?:api[_-]?key|token|secret|password|passwd)(?:[_.-][\w.-]*|(?-i:[A-Z])[\w.-]*)?[ \t]*[=:][ \t]*)(?:\\"(?:[^"\\]|\\[^"])*\\"|"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[^\s,;"'<>\\]+)"#).unwrap(),
-        Regex::new(r#"(?i)(\bbearer[ \t]+)[^\s,;"'<>\\]+"#).unwrap(),
+        // passwordhash count too. After token, a suffix starts with a separator, a capital
+        // or a digit, so max_tokens and tokenizer stay readable.
+        Regex::new(r#"(?i)(\b[\w.-]*(?:api[_-]?key|(?:secret|password|passwd)[\w.-]*|token(?:[_.-][\w.-]*|(?-i:[A-Z])[\w.-]*|[0-9][\w.-]*)?)[ \t]*[=:][ \t]*)(?:\\"(?:[^"\\]|\\[^"])*\\"|"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|(?:[^\s,;"'<>\\]|\\[^"\s])+)"#).unwrap(),
+        Regex::new(r#"(?i)(\bbearer[ \t]+)(?:[^\s,;"'<>\\]|\\[^"\s])+"#).unwrap(),
         // A JSON key that contains a secret word, with a string value that may hold escaped
         // quotes or a number. The value becomes a string, so the JSON stays valid.
         Regex::new(r#"(?i)("[^"\r\n]*(?:api[_-]?key|token|secret|password|passwd|authorization|cookie)[^"\r\n]*"\s*:\s*)(?:"(?:[^"\\]|\\.)*"|-?[0-9][0-9.eE+-]*)"#).unwrap(),
@@ -908,7 +908,14 @@ fn redact_secrets(value: &str) -> String {
     for (index, pattern) in patterns.iter().enumerate() {
         output = if index == 4 {
             pattern
-                .replace_all(&output, "$1\"[REDACTED]\"")
+                .replace_all(&output, |captures: &regex::Captures<'_>| {
+                    let value = &captures[0][captures[1].len()..];
+                    if is_flag(value.trim_matches('"')) {
+                        captures[0].to_owned()
+                    } else {
+                        format!("{}\"[REDACTED]\"", &captures[1])
+                    }
+                })
                 .into_owned()
         } else if index < 4 {
             pattern
@@ -938,10 +945,14 @@ fn redact_value(captures: &regex::Captures<'_>) -> String {
         ""
     };
     let bare = &rest[quote.len()..rest.len() - quote.len()];
-    if bare.eq_ignore_ascii_case("true") || bare.eq_ignore_ascii_case("false") {
+    if is_flag(bare) {
         return captures[0].to_owned();
     }
     format!("{}{quote}[REDACTED]{quote}", &captures[1])
+}
+
+fn is_flag(value: &str) -> bool {
+    value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false")
 }
 
 fn build_run(
@@ -1722,6 +1733,20 @@ mod tests {
         assert_eq!(
             redact_secrets("Authorization: Bearer\nnext line"),
             "Authorization: [REDACTED]\nnext line"
+        );
+    }
+
+    #[test]
+    fn redaction_covers_backslashes_lowercase_suffixes_and_keeps_json_flags() {
+        let log = "password=abc\\def secretkey=s1 passwordhash=s2 token2=s3 max_tokens=9\n";
+        let stored = redact_secrets(log);
+        for secret in ["abc", "def", "s1", "s2", "s3"] {
+            assert!(!stored.contains(secret), "{secret} in {stored}");
+        }
+        assert!(stored.contains("max_tokens=9"), "{stored}");
+        assert_eq!(
+            redact_secrets(r#"{"password":"false","token":"x"}"#),
+            r#"{"password":"false","token":"[REDACTED]"}"#
         );
     }
 
