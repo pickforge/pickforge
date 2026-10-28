@@ -123,11 +123,19 @@ export interface OwnedDisplayIdentity {
   startTicks: number;
 }
 
+/** Desktop input refused before dispatch, because the display is not the session's owned Xvfb. */
+export class DesktopInputTargetError extends Error {
+  override name = "DesktopInputTargetError";
+  constructor() {
+    super("Desktop input refused: the display is not the session's verified Xvfb; no input was sent");
+  }
+}
+
 /**
- * Evidence-only ownership check for pointer markers (pickforge/pickforge#199).
- * Resolves the session's owned Xvfb identity when `display` is verified as
- * that server, and `undefined` otherwise. It never throws and never gates or
- * redirects input.
+ * Ownership check for pointer markers (pickforge/pickforge#199) and the gate
+ * for pointer and key input (pickforge/pickforge#219). Resolves the session's
+ * owned Xvfb identity when `display` is verified as that server, and
+ * `undefined` otherwise. It never throws.
  */
 export async function verifyOwnedDisplayTarget(
   sessionId: string,

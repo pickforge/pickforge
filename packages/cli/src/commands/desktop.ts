@@ -7,6 +7,7 @@ import {
 import {
   click,
   DEFAULT_DESKTOP_WAIT_TIMEOUT_MS,
+  DesktopInputTargetError,
   desktopWait,
   desktopWindows,
   focusWindow,
@@ -172,7 +173,8 @@ async function pointerWithEvidence(
     await input();
     action.inputState = "completed";
   } catch (error) {
-    if (error instanceof HumanControlActiveError || error instanceof AgentPermitUnavailableError) {
+    if (error instanceof HumanControlActiveError || error instanceof AgentPermitUnavailableError ||
+        error instanceof DesktopInputTargetError) {
       action.inputState = "not-attempted";
     }
     action.error = sanitizeErrorText(error instanceof Error ? error.message : String(error));

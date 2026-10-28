@@ -9,8 +9,8 @@ vi.mock("@pickforge/lab-core", async (original) => {
   return { ...actual, runCommand: vi.fn() };
 });
 import { createSession, runCommand, updateSession, type EnvLike } from "@pickforge/lab-core";
-import { click, drag } from "../src/input.js";
-import { verifyOwnedDisplayTarget } from "../src/x11-target.js";
+import { click, doubleClick, drag, move, pressKey, scroll } from "../src/input.js";
+import { DesktopInputTargetError, verifyOwnedDisplayTarget } from "../src/x11-target.js";
 import { X11_SETUP_MS } from "../src/x11-wire.js";
 
 let root: string;
@@ -176,13 +176,9 @@ it("never reads caller host endpoints or home configuration", async () => {
   await expect(verify()).resolves.toEqual(identity);
 });
 
-it.each([
-  ["click", true], ["drag", true], ["click", false], ["drag", false],
-] as const)("%s uses the session display despite inherited endpoints and evidence ownership %s", async (action, matched) => {
+it.each(["click", "drag"] as const)("%s uses the session display despite inherited endpoints", async (action) => {
   for (const [name, value] of Object.entries({ DISPLAY: ":0", WAYLAND_DISPLAY: "wayland-host", XAUTHORITY: "/tmp/host-auth" })) vi.stubEnv(name, value);
   env = { ...env, DISPLAY: ":0", WAYLAND_DISPLAY: "wayland-caller", XAUTHORITY: "/tmp/caller-auth" };
-  if (!matched) writeProc(1, "778\n");
-  await expect(verify()).resolves.toEqual(matched ? identity : undefined);
   const options = { sessionId, display: desktop.display, env };
   if (action === "click") await click({ ...options, x: 10, y: 20 });
   else await drag({ ...options, fromX: 10, fromY: 20, toX: 30, toY: 40 });
@@ -191,6 +187,41 @@ it.each([
   expect(command).toBe("xdotool");
   expect(args.slice(0, 3)).toEqual(["mousemove", "10", "20"]);
   expect(commandOptions?.env).toEqual({ DISPLAY: desktop.display });
+});
+
+const inputs = {
+  click: () => click({ sessionId, display: desktop.display, env, x: 10, y: 20 }),
+  doubleClick: () => doubleClick({ sessionId, display: desktop.display, env, x: 10, y: 20 }),
+  drag: () => drag({ sessionId, display: desktop.display, env, fromX: 10, fromY: 20, toX: 30, toY: 40 }),
+  move: () => move({ sessionId, display: desktop.display, env, x: 10, y: 20 }),
+  scroll: () => scroll({ sessionId, display: desktop.display, env, deltaX: 0, deltaY: 2 }),
+  pressKey: () => pressKey({ sessionId, display: desktop.display, env, key: "Return" }),
+};
+const unowned: Record<string, () => void> = {
+  "another lock owner": () => writeProc(1, "778\n"),
+  "a dead server": () => fs.writeFileSync(processStat, ""),
+  "a zombie server": () => fs.writeFileSync(processStat, fs.readFileSync(processStat, "utf8").replace(") S ", ") Z ")),
+  "a recycled pid": () => fs.writeFileSync(processStat, fs.readFileSync(processStat, "utf8").replace("123\n", "124\n")),
+  "a new server on the display number": () => {
+    writeProc(1, "778\n");
+    writeProc(2, "Num RefCount Protocol Flags Type St Inode Path\n0: 2 0 10000 0001 01 54321 /tmp/.X11-unix/X190\n");
+  },
+};
+
+it.each(Object.keys(inputs))("%s dispatches only to the verified owned Xvfb", async (name) => {
+  await inputs[name as keyof typeof inputs]();
+  expect(runCommand).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(runCommand).mock.calls[0]![0]).toBe("xdotool");
+  for (const [scenario, apply] of Object.entries(unowned)) {
+    vi.mocked(runCommand).mockClear();
+    const stat = fs.readFileSync(processStat, "utf8");
+    const files = [1, 2].map((index) => fs.readFileSync(path.join(root, `proc-${index}`), "utf8"));
+    apply();
+    await expect(inputs[name as keyof typeof inputs](), scenario).rejects.toBeInstanceOf(DesktopInputTargetError);
+    expect(runCommand, scenario).not.toHaveBeenCalled();
+    fs.writeFileSync(processStat, stat);
+    files.forEach((content, index) => writeProc(index + 1, content));
+  }
 });
 
 it("resolves undefined when a procfs read throws", async () => {

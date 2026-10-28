@@ -140,6 +140,7 @@ export {
 } from "./input.js";
 
 export {
+  DesktopInputTargetError,
   verifyOwnedDisplayTarget,
   type OwnedDisplayIdentity,
 } from "./x11-target.js";
