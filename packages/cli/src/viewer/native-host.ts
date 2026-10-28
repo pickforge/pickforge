@@ -8,10 +8,14 @@ import { getSession, readProcessIdentity, processIdentityMatches } from "@pickfo
 import {
   prepareViewerLaunch, writeViewerLaunchRecord, verifyOwnedDisplayTarget,
   withViewerDir, writeViewerPrivateFile, sessionViewerDir, withSessionVncLock,
-  VIEWER_MESSAGE_MAX_BYTES,
+  VIEWER_MESSAGE_MAX_BYTES, validTakeoverMessage, validTakeoverTimeout,
+  type StartHumanTakeoverOptions,
   type NativeViewerCommand, type NativeViewerHostIdentity, type NativeViewerLaunchRecord,
   type NativeViewerMode, type ViewerHostResponse, type ViewerWindowSize,
 } from "@pickforge/lab-desktop-linux";
+import { NativeControl } from "./native-control.js";
+import { NativeRequests } from "./native-requests.js";
+import type { SpawnWatchdogFn } from "../commands/takeover-hold.js";
 import { viewerWindowSizes, viewerWindowClass } from "./launch.js";
 import {
   detectHyprland, hyprlandRuleName, viewerClassPattern, installViewerRule,
@@ -61,6 +65,8 @@ function watchOperation(run: () => Promise<void>, serial = false): HostOperation
 }
 
 class NativeHost {
+  private readonly control: NativeControl;
+  private readonly requests: NativeRequests;
   private exited = false;
   private stopped = false;
   private ended = false;
@@ -84,8 +90,15 @@ class NativeHost {
     private readonly record: NativeViewerLaunchRecord,
     private readonly version: string,
     private readonly env: NodeJS.ProcessEnv,
+    private readonly options: NativeHostOptions,
   ) {
-    this.exit = new Promise<void>((resolve) => child.once("exit", () => { this.exited = true; resolve(); }));
+    this.requests = new NativeRequests({ env, send: (command) => this.send(command),
+      mode: (mode) => this.setMode(mode), controlling: () => this.control.active });
+    this.control = new NativeControl({ sessionId: record.sessionId, env, send: (command) => this.send(command),
+      kill: () => { if (!this.exited) this.child.kill("SIGKILL"); },
+      taken: () => this.requests.taken(), returned: (reason) => this.requests.returned(reason),
+      takeoverOptions: options._takeoverOptions, spawnWatchdog: options._spawnWatchdog });
+    this.exit = new Promise<void>((resolve) => child.once("exit", () => { this.exited = true; this.control.viewerExited(); resolve(); }));
     child.stderr.resume(); // Logs never enter socket responses or persisted state.
     child.stdin.on("error", () => {});
     process.on("SIGTERM", this.onSignal);
@@ -109,7 +122,26 @@ class NativeHost {
     this.mode = next;
   }
 
+  private controlEvent(message: Record<string, unknown>): boolean {
+    switch (message.event) {
+      case "takeRequested":
+        if (this.receivedReady && !this.ended && !this.stopped) void this.control.take();
+        else this.send({ cmd: "control", state: "revoked", leaseId: "", reason: "unavailable" });
+        break;
+      case "returnRequested":
+        if (message.reason === "button" || message.reason === "closed") {
+          if (message.reason === "closed") this.requests.beginClose();
+          void this.control.end("returned").catch(() => { void this.stop(); });
+        }
+        break;
+      case "controlAck": this.control.acknowledge(message.leaseId, message.state); break;
+      default: return false;
+    }
+    return true;
+  }
+
   private event(message: Record<string, unknown>): void {
+    if (this.controlEvent(message)) return;
     switch (message.event) {
       case "ready":
         if (!validReady(message, this.record, this.version)) this.readyReject(new Error("Native viewer readiness identity or version differs"));
@@ -120,8 +152,8 @@ class NativeHost {
       case "mode":
         if (["thumbnail", "expanded", "fullscreen"].includes(String(message.mode))) this.mode = message.mode as typeof this.mode;
         break;
-      case "sessionEnded": this.ended = true; break;
-      case "closed": void this.stop(); break;
+      case "sessionEnded": this.endSession(); break;
+      case "closed": this.requests.beginClose(); void this.stop(); break;
       case "error": this.readyReject(new Error("Native viewer reported an error")); void this.stop(); break;
       default: console.error("Unknown native viewer event ignored");
     }
@@ -138,12 +170,27 @@ class NativeHost {
     socket.setTimeout(2_000, () => socket.destroy());
     let handled = false;
     const reply = (response: ViewerHostResponse): void => { if (!socket.destroyed) socket.end(`${JSON.stringify(response)}\n`); };
-    // No input, grant or lease operations. Future requests extend this table.
+    // No socket operation grants control or injects input.
+    let requestId: string | undefined;
     const operations: Record<string, HostOperation> = Object.assign(Object.create(null), {
       status: watchOperation(async () => {}),
       expand: watchOperation(() => this.setMode("expanded"), true),
       collapse: watchOperation(() => this.setMode("thumbnail"), true),
       shutdown: watchOperation(async () => {}),
+      requestTakeover: {
+        valid: (r: Record<string, unknown>) => Object.keys(r).every((key) => ["op", "message", "timeoutMs"].includes(key)) &&
+          validTakeoverMessage(r.message) && validTakeoverTimeout(r.timeoutMs),
+        run: async (r: Record<string, unknown>) => { requestId = await this.requests.request(r.message as string, r.timeoutMs as number); }, serial: true,
+      },
+      cancelRequest: {
+        valid: (r: Record<string, unknown>) => Object.keys(r).every((key) => ["op", "requestId"].includes(key)) && typeof r.requestId === "string",
+        run: (r: Record<string, unknown>) => this.requests.cancel(r.requestId as string), serial: false,
+      },
+      subscribe: {
+        valid: (r: Record<string, unknown>) => Object.keys(r).every((key) => ["op", "requestId"].includes(key)) &&
+          (r.requestId === undefined || typeof r.requestId === "string" && this.requests.has(r.requestId)),
+        run: async () => {}, serial: false,
+      },
     });
     readViewerLines(socket, (request) => {
       if (handled) return;
@@ -158,7 +205,17 @@ class NativeHost {
       const run = async (): Promise<void> => {
         try {
           await operation.run(request);
-          reply({ ok: true, host: this.host!, mode: this.mode, sessionEnded: this.ended });
+          const response: ViewerHostResponse = { ok: true, host: this.host!, mode: this.mode, sessionEnded: this.ended,
+            ...(requestId === undefined ? {} : { requestId }) };
+          if (op === "subscribe") {
+            socket.setTimeout(0);
+            const id = request.requestId as string | undefined;
+            const unsubscribe = this.requests.subscribe((event) => {
+              if (event.requestId === id && !socket.destroyed) socket.write(`${JSON.stringify(event)}\n`);
+            });
+            socket.once("close", unsubscribe);
+            socket.write(`${JSON.stringify({ ...response, requestState: id === undefined ? undefined : this.requests.state(id) })}\n`);
+          } else reply(response);
           if (op === "shutdown") setImmediate(() => { void this.stop(); });
         } catch { reply({ ok: false, error: "operation-failed" }); }
       };
@@ -189,6 +246,13 @@ class NativeHost {
     });
   }
 
+  private endSession(): void {
+    this.ended = true;
+    this.send({ cmd: "sessionEnded" });
+    this.requests.beginClose();
+    void this.control.end("session-ended", true).then(() => this.requests.close()).catch(() => { void this.stop(); });
+  }
+
   private monitorSession(): void {
     let polling = false;
     this.timer = setInterval(() => {
@@ -196,7 +260,7 @@ class NativeHost {
       polling = true;
       const read = (): ReturnType<typeof getSession> => getSession(this.record.sessionId, this.env);
       void withSessionVncLock(this.record.sessionId, this.env, read, { signal: this.sessionMonitor.signal }).catch(read).then((current) => {
-        if (!this.stopped && current?.status !== "running") { this.ended = true; this.send({ cmd: "sessionEnded" }); }
+        if (!this.stopped && current?.status !== "running") { this.endSession(); }
       }).catch(() => {}).finally(() => { polling = false; });
     }, 500);
     this.timer.unref();
@@ -205,8 +269,11 @@ class NativeHost {
   private stop(): Promise<void> {
     return this.stopping ??= (async () => {
       this.stopped = true;
+      this.requests.beginClose();
       this.sessionMonitor.abort();
       if (this.timer !== undefined) clearInterval(this.timer);
+      await this.control.end("stopping", true).catch(() => { if (!this.exited) this.child.kill("SIGKILL"); });
+      this.requests.close();
       this.send({ cmd: "status", code: "stopping" });
       this.send({ cmd: "shutdown" });
       await Promise.race([this.exit, sleep(300)]);
@@ -228,6 +295,7 @@ class NativeHost {
         this.readyReject(new Error("Invalid native viewer protocol frame")); void this.stop();
       });
       void this.exit.then(() => this.readyReject(new Error("Native viewer exited before readiness")));
+      if (this.options.control === true) void this.control.take();
       await this.ready;
       const hyprland = this.record.hyprland;
       if (hyprland !== undefined) {
@@ -236,6 +304,7 @@ class NativeHost {
       }
       if (this.exited || this.stopped) throw new Error("Native viewer stopped during startup");
       await this.listen();
+      this.control.viewerReady();
       this.monitorSession();
       await this.exit;
       return this.child.exitCode === 0 || this.stopped ? 0 : 1;
@@ -247,9 +316,13 @@ class NativeHost {
   }
 }
 
-export async function runNativeViewerHost(options: {
-  session: string; binary: string; viewerVersion: string;
-}): Promise<number> {
+export interface NativeHostOptions {
+  session: string; binary: string; viewerVersion: string; control?: boolean;
+  /** Test hooks use real isolated displays without spawning a CLI watchdog. */
+  _takeoverOptions?: StartHumanTakeoverOptions;
+  _spawnWatchdog?: SpawnWatchdogFn;
+}
+export async function runNativeViewerHost(options: NativeHostOptions): Promise<number> {
   const env = process.env;
   const session = await getSession(options.session, env);
   const desktop = session?.desktop;
@@ -283,7 +356,7 @@ export async function runNativeViewerHost(options: {
       kind: "native", sessionId: options.session, launchId, createdAt: new Date().toISOString(), binary: options.binary,
       hostPid: hostIdentity.pid, hostStartTicks: hostIdentity.startTicks,
       viewerPid: viewerIdentity.pid, viewerStartTicks: viewerIdentity.startTicks, ...viewerIdentity, ...sizes, hyprland,
-    }, options.viewerVersion, env).run();
+    }, options.viewerVersion, env, options).run();
   } finally {
     if (hyprland !== undefined) {
       await disableViewerRule(hyprland, ruleName);

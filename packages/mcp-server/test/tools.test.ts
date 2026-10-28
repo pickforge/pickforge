@@ -54,6 +54,7 @@ const EXPECTED_TOOLS = [
   "evidence_outcome",
   "takeover_status",
   "takeover_wait",
+  "request_takeover",
   "request_user_input",
 ];
 

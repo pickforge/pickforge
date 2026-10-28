@@ -7,6 +7,7 @@ import {
   beginEvidenceRun,
   isEvidenceEnabled,
   getSession,
+  processIdentityMatches,
   desktopHomePolicy,
   loadConfig,
   recordTakeoverEvidence,
@@ -143,7 +144,7 @@ export async function startHumanTakeover(
   opts: StartHumanTakeoverOptions = {},
 ): Promise<HumanTakeoverHandle> {
   const registryEnv = opts.registryEnv ?? process.env;
-  return withSessionVncLock(id, registryEnv, async () => {
+  const start = async (): Promise<HumanTakeoverHandle> => {
     const { record, desktop } = await requireRunningDesktopSession(id, registryEnv);
 
     let lease: HumanLease;
@@ -156,7 +157,8 @@ export async function startHumanTakeover(
       });
     } catch (error) {
       if (!(error instanceof StaleHumanLeaseError)) throw error;
-      await recoverStaleTakeoverLocked(id, record, registryEnv);
+      if (opts.transport === "viewer") await recoverStaleHumanLease(id, registryEnv);
+      else await recoverStaleTakeoverLocked(id, record, registryEnv);
       lease = await acquireHumanLease(id, registryEnv, {
         ttlMs: opts.ttlMs,
         heartbeatMs: opts.heartbeatMs,
@@ -238,7 +240,10 @@ export async function startHumanTakeover(
       expiresAt: lease.expiresAt,
       projectDir: record.projectDir,
     };
-  });
+  };
+  // Viewer startup changes no VNC state. The launcher holds this lock until
+  // readiness, so native control claims its lease through core's atomic gate.
+  return opts.transport === "viewer" ? start() : withSessionVncLock(id, registryEnv, start);
 }
 
 /**
@@ -273,6 +278,12 @@ export interface EndHumanTakeoverResult {
   reason: TakeoverEndReason;
 }
 
+async function releaseViewerInput(handle: HumanTakeoverHandle, desktop: DesktopSessionInfo | undefined, env?: EnvLike): Promise<void> {
+  if (desktop?.xvfbPid !== undefined && desktop.xvfbStartTimeTicks !== undefined &&
+      !processIdentityMatches({ pid: desktop.xvfbPid, startTicks: desktop.xvfbStartTimeTicks })) return;
+  await releaseStuckInput(handle.display, env);
+}
+
 /**
  * Release viewer input or revert VNC to read-only, capture a fresh screenshot into
  * evidence as the agent's resume state, record the transition, and release
@@ -285,14 +296,14 @@ export async function endHumanTakeover(
   opts: EndHumanTakeoverOptions,
 ): Promise<EndHumanTakeoverResult> {
   const registryEnv = opts.registryEnv ?? process.env;
-  return withSessionVncLock(handle.sessionId, registryEnv, async () => {
+  const end = async (): Promise<EndHumanTakeoverResult> => {
     const record = await getSession(handle.sessionId, registryEnv);
     const desktop = record?.desktop;
 
     if (handle.transport === "viewer") {
       const lease = await readHumanLease(handle.sessionId, registryEnv);
       if (lease?.leaseId !== handle.leaseId) return { reason: opts.reason };
-      await releaseStuckInput(handle.display, opts.env);
+      await releaseViewerInput(handle, desktop, opts.env);
     } else if (desktop !== undefined && desktop.vncPid === handle.vncPid) {
       await stopOwnedSessionVnc(handle.sessionId, desktop).catch(() => {});
       try {
@@ -382,5 +393,8 @@ export async function endHumanTakeover(
     );
 
     return { screenshotPath, reason: opts.reason };
-  });
+  };
+  // Viewer cleanup changes no VNC state. Teardown may hold the session lock
+  // while waiting for this host to stop, so native cleanup must not retake it.
+  return handle.transport === "viewer" ? end() : withSessionVncLock(handle.sessionId, registryEnv, end);
 }

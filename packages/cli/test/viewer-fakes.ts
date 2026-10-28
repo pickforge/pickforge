@@ -32,6 +32,7 @@ export interface FakeBrowserBehavior {
 }
 
 export interface FakeViewerBehavior {
+  noControlAck?: boolean;
   version?: string;
   readyPid?: number;
   readyVersion?: string;
@@ -134,6 +135,7 @@ if (!behavior.noReady) emit({ event: "ready", version: behavior.readyVersion ?? 
 require("node:readline").createInterface({ input: process.stdin }).on("line", (line) => {
   const command = JSON.parse(line);
   fs.appendFileSync(callsLog, JSON.stringify({ tool: "viewer-command", ...command }) + "\\n");
+  if (command.cmd === "control" && !behavior.noControlAck) emit({ event: "controlAck", leaseId: command.leaseId, state: command.state });
   if (command.cmd === "setMode") emit({ event: "mode", mode: command.mode });
   if (command.cmd === "shutdown" && !behavior.ignoreShutdown) process.exit(0);
 }).on("close", () => { if (!behavior.ignoreShutdown) process.exit(0); });
@@ -166,6 +168,7 @@ export function createViewerFakes(root: string): ViewerFakes {
     fs.chmodSync(file, 0o755);
     return file;
   };
+  install("notify-send", "process.exit(0);");
   return {
     binDir,
     callsLog,

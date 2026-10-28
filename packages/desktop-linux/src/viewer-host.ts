@@ -14,7 +14,7 @@ import {
 } from "./viewer-state.js";
 import {
   VIEWER_MESSAGE_MAX_BYTES, type NativeViewerHostIdentity, type ViewerHostRequest,
-  type ViewerHostResponse,
+  type ViewerHostResponse, type ViewerControlEvent, type ViewerRequestOutcome,
 } from "./viewer-host-protocol.js";
 
 function positive(value: unknown): value is number {
@@ -37,7 +37,7 @@ function sameHost(actual: NativeViewerHostIdentity, expected: NativeViewerHostId
   return keys.every((key) => actual[key] === expected[key]);
 }
 
-export async function requestNativeViewerHost(host: NativeViewerHostIdentity, request: ViewerHostRequest): Promise<ViewerHostResponse> {
+async function assertHostSocket(host: NativeViewerHostIdentity): Promise<void> {
   if (!processIdentityMatches({ pid: host.pid, startTicks: host.startTicks }) ||
       !processIdentityMatches({ pid: host.viewerPid, startTicks: host.viewerStartTicks })) {
     throw new Error("Native viewer identity changed");
@@ -47,6 +47,10 @@ export async function requestNativeViewerHost(host: NativeViewerHostIdentity, re
     throw new Error("Unsafe viewer socket");
   }
   if (stats.ino !== host.socketIno || stats.dev !== host.socketDev) throw new Error("Unsafe viewer socket");
+}
+
+export async function requestNativeViewerHost(host: NativeViewerHostIdentity, request: ViewerHostRequest): Promise<ViewerHostResponse> {
+  await assertHostSocket(host);
   return new Promise((resolve, reject) => {
     const socket = net.connect(host.socket);
     let pending = Buffer.alloc(0);
@@ -68,6 +72,60 @@ export async function requestNativeViewerHost(host: NativeViewerHostIdentity, re
     });
     socket.once("error", reject);
     socket.once("close", () => { clearTimeout(timer); reject(new Error("Viewer host disconnected")); });
+  });
+}
+
+/** Subscribe after requesting. The host replays current state to avoid a take/return race. */
+export async function followNativeViewerRequest(host: NativeViewerHostIdentity, requestId: string, options: {
+  signal: AbortSignal; timeoutMs: number;
+}): Promise<ViewerRequestOutcome> {
+  await assertHostSocket(host);
+  return new Promise((resolve) => {
+    const socket = net.connect(host.socket);
+    let settled = false;
+    let cancellation: "cancelled" | "timeout" | undefined;
+    let ready = false;
+    let pending = Buffer.alloc(0);
+    const finish = (outcome: ViewerRequestOutcome): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      options.signal.removeEventListener("abort", cancel);
+      socket.destroy();
+      resolve(outcome);
+    };
+    const cancelWith = (outcome: "cancelled" | "timeout"): void => {
+      if (settled || cancellation !== undefined) return;
+      cancellation = outcome;
+      void requestNativeViewerHost(host, { op: "cancelRequest", requestId }).catch(() => {}).finally(() => finish(outcome));
+    };
+    const cancel = (): void => cancelWith("cancelled");
+    const timer = setTimeout(() => cancelWith("timeout"), options.timeoutMs + 2_000);
+    const apply = (event: ViewerControlEvent | undefined): void => {
+      if (event?.requestId === requestId && "outcome" in event) finish(cancellation ?? event.outcome);
+    };
+    socket.once("connect", () => socket.write(`${JSON.stringify({ op: "subscribe", requestId })}\n`));
+    socket.on("data", (chunk: Buffer) => {
+      pending = Buffer.concat([pending, chunk]);
+      while (pending.includes(10)) {
+        const end = pending.indexOf(10);
+        if (end > VIEWER_MESSAGE_MAX_BYTES) { socket.destroy(new Error("Viewer response too large")); return; }
+        try {
+          const value = JSON.parse(pending.subarray(0, end).toString("utf8"));
+          pending = pending.subarray(end + 1);
+          if (!ready) {
+            if (value.ok !== true || !sameHost(value.host, host)) throw new Error("Viewer subscription refused");
+            ready = true;
+            apply(value.requestState);
+          } else apply(value);
+        } catch { socket.destroy(new Error("Invalid viewer subscription")); return; }
+      }
+      if (pending.length > VIEWER_MESSAGE_MAX_BYTES) socket.destroy(new Error("Viewer response too large"));
+    });
+    socket.once("error", () => finish(cancellation ?? "viewer_closed"));
+    socket.once("close", () => finish(cancellation ?? "viewer_closed"));
+    options.signal.addEventListener("abort", cancel, { once: true });
+    if (options.signal.aborted) cancel();
   });
 }
 
@@ -96,6 +154,12 @@ async function removeDeadReadiness(directory: DirHandle, host: NativeViewerHostI
 }
 
 export async function stopNativeViewerHost(sessionId: string, env: EnvLike = process.env): Promise<void> {
+  const host = await findNativeViewerHost(sessionId, env);
+  if (host !== undefined) {
+    await requestNativeViewerHost(host, { op: "shutdown" }).catch(() => {});
+    const deadline = Date.now() + 3_000;
+    while (processIdentityMatches({ pid: host.pid, startTicks: host.startTicks }) && Date.now() < deadline) await sleep(25);
+  }
   await withSessionVncLock(sessionId, env, () => stopNativeViewerHostLocked(sessionId, env));
 }
 
@@ -140,21 +204,27 @@ function assertStartedHost(host: NativeViewerHostIdentity, identity: ProcessIden
   }
 }
 
+async function requireViewerDisplay(sessionId: string, env: EnvLike): Promise<void> {
+  const record = await getSession(sessionId, env);
+  if (record?.status !== "running" || record.desktop === undefined ||
+      await verifyOwnedDisplayTarget(record.id, record.desktop.display, env) === undefined) {
+    throw new Error("Native viewer requires a verified running desktop display");
+  }
+}
+
 /** Start one detached host per session, using the caller's graphical environment. */
 export async function startNativeViewerHost(options: {
   sessionId: string; cliEntry: string; binary: string; version: string;
-  env?: NodeJS.ProcessEnv; readyMs?: number;
+  env?: NodeJS.ProcessEnv; readyMs?: number; control?: boolean;
 }): Promise<NativeViewerHostIdentity> {
   const env = options.env ?? process.env;
   sessionViewerDir(options.sessionId, env);
   return withSessionVncLock(options.sessionId, env, async () => {
-    const record = await getSession(options.sessionId, env);
-    if (record?.status !== "running" || record.desktop === undefined ||
-        await verifyOwnedDisplayTarget(record.id, record.desktop.display, env) === undefined) {
-      throw new Error("Native viewer requires a verified running desktop display");
-    }
+    await requireViewerDisplay(options.sessionId, env);
     const previous = await findNativeViewerHost(options.sessionId, env);
-    if (previous?.version === options.version) return previous;
+    if (options.control !== true) {
+      if (previous?.version === options.version) return previous;
+    }
     await withViewerDir(options.sessionId, env, true, async (directory) => {
       // A stale readiness file still identifies an unresponsive owned host.
       if (await readViewerPrivateFile(directory, "host.json") !== undefined) {
@@ -168,7 +238,8 @@ export async function startNativeViewerHost(options: {
       }
     });
     const daemon = await startDaemon(process.execPath, [options.cliEntry, "internal", "viewer-host",
-      "--session", options.sessionId, "--binary", options.binary, "--viewer-version", options.version], {
+      "--session", options.sessionId, "--binary", options.binary, "--viewer-version", options.version,
+      ...(options.control === true ? ["--control"] : [])], {
       logDir: sessionDataDir(options.sessionId, env), name: "viewer-host", env, cleanEnv: true, owned: true,
     });
     const started = Date.now();

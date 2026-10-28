@@ -10,7 +10,12 @@
   MCP `takeover_wait` waits for return, then supplies a fresh screenshot.
   Its default timeout is 10 minutes, with a one-hour limit and request cancellation.
   Timeout and cancellation keep the lease; screenshots stay null while it is active.
-  Native viewer controls and agent-requested takeover follow in a later increment. (#341)
+  The native viewer now takes and returns control through its host.
+  Grants renew each heartbeat. Lost grants revoke input and require an ack within one second.
+  MCP `request_takeover` expands the viewer and sends a notification without taking focus.
+  Messages stay out of logs and evidence. Cancellation clears attention without ending live control.
+  MCP opens a missing viewer only in auto mode with a matching binary and graphical session.
+  Otherwise it returns the exact watch command. `watch --control` prefers the native viewer. (#341)
 
 - `watch` and automatic session viewing prefer the matching native `pickforge-viewer` binary on graphical Linux hosts.
   The native path reads the verified lab display without VNC, a bridge, or Chromium.
@@ -19,7 +24,7 @@
   Session destruction stops the detached host and viewer by process identity.
   Linux x86_64 release assets and the installer include the viewer.
   npm-only installs and mismatched binaries keep the noVNC fallback.
-  `watch --control` still uses the external VNC client. (#340)
+  The external VNC client remains the control fallback. (#340)
 - Browser sessions accept `--profile <name>` or MCP `session_create`'s `profile`
   argument to keep logins under `~/.pickforge/lab/profiles/<name>`. Private
   directories survive teardown and crash recovery. One session can hold a
@@ -42,7 +47,7 @@
   or browser, `watch` prints the URL and an SSH tunnel command. On Hyprland
   with a Lua config, the window opens floating and pinned in the bottom-right
   corner without taking focus. `session create --viewer` and
-  `viewer.mode: "auto"` use the same viewer. `watch --control` is unchanged.
+  `viewer.mode: "auto"` use the same viewer.
   After the window closes, the bridge and the read-only x11vnc keep running
   idle. The bridge exits after 10 minutes without a viewer or request. (#207)
 - Evidence reports now show where the agent clicked, double-clicked,

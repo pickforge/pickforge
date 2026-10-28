@@ -1,7 +1,11 @@
 import { setTimeout as delay } from "node:timers/promises";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { checkHumanLeaseBusy, getTakeoverStatus } from "@pickforge/lab-core";
+import { checkHumanLeaseBusy, getTakeoverStatus, loadConfig } from "@pickforge/lab-core";
+import {
+  findNativeViewerHost, requestNativeViewerHost, followNativeViewerRequest, validTakeoverMessage,
+  type NativeViewerHostIdentity, type ViewerRequestOutcome,
+} from "@pickforge/lab-desktop-linux";
 import { requireDisplay, resolveSessionRecord, runTool, type ServerContext } from "../context.js";
 import { withMcpEvidence } from "../evidence.js";
 import { captureDesktopScreenshot } from "./desktop.js";
@@ -15,6 +19,8 @@ const sessionArg = {
 };
 
 type WaitOutcome = "returned" | "timeout" | "cancelled";
+const timeoutArg = z.number().int().min(0).max(3_600_000).optional()
+  .describe("Maximum wait in milliseconds (default 600000, max 3600000)");
 
 async function waitForReturn(ctx: ServerContext, id: string, timeoutMs: number, signal: AbortSignal): Promise<WaitOutcome> {
   const deadline = Date.now() + timeoutMs;
@@ -41,8 +47,7 @@ function registerWaitTool(server: McpServer, ctx: ServerContext): void {
       "Timeout and cancellation leave control unchanged; screenshot is null while a human lease remains active.",
     inputSchema: {
       ...sessionArg,
-      timeoutMs: z.number().int().min(0).max(3_600_000).optional()
-        .describe("Maximum wait in milliseconds (default 600000, max 3600000)"),
+      timeoutMs: timeoutArg,
     },
   }, (args, extra) => runTool(async () => {
     const record = await resolveSessionRecord(ctx, "desktop", args.session);
@@ -71,8 +76,77 @@ function registerWaitTool(server: McpServer, ctx: ServerContext): void {
   }));
 }
 
+async function resolveViewer(ctx: ServerContext, id: string): Promise<NativeViewerHostIdentity | undefined> {
+  const host = await findNativeViewerHost(id, ctx.env);
+  if (host !== undefined) return host;
+  const config = await loadConfig(ctx.projectDir, ctx.env);
+  if (config.viewer?.mode !== "auto" || ctx.viewerLauncher === undefined || !await ctx.viewerLauncher.available(ctx.env)) return undefined;
+  return ctx.viewerLauncher.launch(id, ctx.env);
+}
+
+async function requestViewer(host: NativeViewerHostIdentity, message: string,
+  timeoutMs: number, signal: AbortSignal): Promise<ViewerRequestOutcome> {
+  if (signal.aborted) return "cancelled";
+  const response = await requestNativeViewerHost(host, { op: "requestTakeover", message, timeoutMs });
+  if (!response.ok || response.requestId === undefined) throw new Error("Viewer request was refused");
+  try {
+    return await followNativeViewerRequest(host, response.requestId, { signal, timeoutMs });
+  } catch {
+    await requestNativeViewerHost(host, { op: "cancelRequest", requestId: response.requestId }).catch(() => {});
+    return signal.aborted ? "cancelled" : "viewer_closed";
+  }
+}
+
+async function requestOutcome(ctx: ServerContext, id: string, message: string, timeoutMs: number,
+  signal: AbortSignal): Promise<ViewerRequestOutcome | "viewer_not_open"> {
+  if (signal.aborted) return "cancelled";
+  if (await checkHumanLeaseBusy(id, ctx.env) !== undefined) return waitForReturn(ctx, id, timeoutMs, signal);
+  const host = await resolveViewer(ctx, id);
+  if (signal.aborted) return "cancelled";
+  if (host === undefined) return "viewer_not_open";
+  try { return await requestViewer(host, message, timeoutMs, signal); }
+  catch { return signal.aborted ? "cancelled" : "viewer_closed"; }
+}
+
+function registerRequestTool(server: McpServer, ctx: ServerContext): void {
+  server.registerTool("request_takeover", {
+    title: "Ask the human to take control",
+    description: "Ask for help in the native viewer without taking focus. Wait for return, then capture a fresh screenshot. " +
+      "Only viewer.mode auto may open a viewer. Timeout and cancellation leave live human control unchanged.",
+    inputSchema: {
+      ...sessionArg,
+      message: z.string().refine(validTakeoverMessage, "Use at most 500 characters without control characters"),
+      timeoutMs: timeoutArg,
+    },
+  }, (args, extra) => runTool(async () => {
+    const record = await resolveSessionRecord(ctx, "desktop", args.session);
+    return withMcpEvidence(ctx, {
+      sessionId: record.id, tool: "takeover_requested",
+      artifacts: (result) => {
+        const shot = result.data?.screenshot as Record<string, unknown> | null | undefined;
+        return typeof shot?.path === "string" ? [shot.path] : [];
+      },
+    }, async ({ actionId, run }) => {
+      const startedAt = Date.now();
+      const signal = extra.mcpReq.signal;
+      const timeoutMs = args.timeoutMs ?? 600_000;
+      const outcome = await requestOutcome(ctx, record.id, args.message, timeoutMs, signal);
+      if (outcome === "viewer_not_open") return { data: { sessionId: record.id, outcome,
+        command: `pickforge-lab watch --session ${record.id}`, heldMs: Date.now() - startedAt, screenshot: null } };
+      const heldMs = Date.now() - startedAt;
+      const capture = await checkHumanLeaseBusy(record.id, ctx.env) === undefined
+        ? await captureDesktopScreenshot({ ctx, id: record.id, display: requireDisplay(record), type: record.type,
+          desktop: record.desktop, actionId, run }) : undefined;
+      return { data: { sessionId: record.id, outcome, heldMs, screenshot: capture?.data ?? null },
+        extraContent: capture?.extraContent,
+        evidenceStatus: outcome === "timeout" || outcome === "cancelled" ? outcome : "ok" };
+    });
+  }));
+}
+
 export function registerTakeoverTools(server: McpServer, ctx: ServerContext): void {
   registerWaitTool(server, ctx);
+  registerRequestTool(server, ctx);
   server.registerTool(
     "takeover_status",
     {
@@ -80,7 +154,7 @@ export function registerTakeoverTools(server: McpServer, ctx: ServerContext): vo
       description:
         "Check whether a session is currently under supervised human control. " +
         "While active, desktop input, screenshots, waits and the DevTools " +
-        "relay fail closed with a busy error. Use `takeover_wait` to wait " +
+        "relay fail closed with a busy error. Use `request_takeover` to ask for help, or `takeover_wait` to wait " +
         "for control to return and receive a fresh screenshot.",
       inputSchema: { ...sessionArg },
     },

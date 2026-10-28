@@ -1,15 +1,16 @@
 import fs from "node:fs";
 import os from "node:os";
+import net from "node:net";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createSession, updateSession, processIdentityMatches, readProcessIdentity } from "@pickforge/lab-core";
+import { createSession, updateSession, processIdentityMatches, readProcessIdentity, acquireHumanLease, readHumanLease, releaseHumanLease } from "@pickforge/lab-core";
 import {
   startXvfb, stopXvfb, findOnPath, findNativeViewerHost, requestNativeViewerHost,
-  withSessionVncLock, type NativeViewerHostIdentity, type XvfbHandle,
+  withSessionVncLock, followNativeViewerRequest, type NativeViewerHostIdentity, type XvfbHandle,
 } from "@pickforge/lab-desktop-linux";
-import { runNativeViewerHost } from "../src/viewer/native-host.js";
-import { createViewerFakes, monitor, type ViewerFakes } from "./viewer-fakes.js";
+import { runNativeViewerHost, type NativeHostOptions } from "../src/viewer/native-host.js";
+import { createViewerFakes, monitor, type ViewerFakes, type FakeViewerBehavior } from "./viewer-fakes.js";
 import { unusedTestDisplay } from "../../desktop-linux/test/test-resources.js";
 import { nativeViewerVersion } from "../src/viewer/native.js";
 
@@ -32,7 +33,7 @@ beforeEach(async () => {
   if (!available) return;
   display = await startXvfb({ display: unusedTestDisplay(), logDir: root, width: 640, height: 480 });
   sessionId = (await createSession({ type: "desktop", projectDir: root, status: "running", desktop: {
-    display: display.display, xvfbPid: display.pid, xvfbStartTimeTicks: display.startTimeTicks, width: 640, height: 480,
+    display: display.display, xvfbPid: display.pid, xvfbStartTimeTicks: display.startTimeTicks, width: 640, height: 480, homePolicy: "private",
   } })).id;
 });
 afterEach(async () => {
@@ -46,9 +47,10 @@ afterEach(async () => {
   vi.unstubAllEnvs();
   fs.rmSync(root, { recursive: true, force: true });
 });
-async function start(): Promise<NativeViewerHostIdentity> {
-  const binary = fakes.installViewer({ version: nativeViewerVersion });
-  running = runNativeViewerHost({ session: sessionId, binary, viewerVersion: nativeViewerVersion });
+async function start(options: Partial<NativeHostOptions> = {}, behavior: FakeViewerBehavior = {}): Promise<NativeViewerHostIdentity> {
+  const binary = fakes.installViewer({ version: nativeViewerVersion, ...behavior });
+  running = runNativeViewerHost({ session: sessionId, binary, viewerVersion: nativeViewerVersion,
+    _spawnWatchdog: () => ({ kill() {} }), _takeoverOptions: { heartbeatMs: 100, ttlMs: 5_000 }, ...options });
   for (let count = 0; count < 200; count++) {
     const host = await findNativeViewerHost(sessionId);
     if (host !== undefined) return host;
@@ -124,5 +126,216 @@ describe.skipIf(!available)("native host source behavior", () => {
     const binary = fakes.installViewer({ readyPid: 1, version: nativeViewerVersion });
     running = runNativeViewerHost({ session: sessionId, binary, viewerVersion: nativeViewerVersion });
     await expect(running).rejects.toThrow("readiness identity");
+  });
+});
+
+async function take(): Promise<string> {
+  fakes.cueViewer({ event: "takeRequested" });
+  await until(() => fakes.calls().some((entry) => entry.cmd === "control" && entry.state === "granted"));
+  return (await readHumanLease(sessionId))!.leaseId;
+}
+
+function controlCommands(): Array<Record<string, unknown>> {
+  return fakes.calls().filter((entry) => entry.cmd === "control");
+}
+
+describe.skipIf(!available)("native host human control", () => {
+  it("grants and renews the same lease, then returns through normal cleanup", async () => {
+    const host = await start();
+    const leaseId = await take();
+    await until(() => controlCommands().filter((entry) => entry.state === "granted").length >= 3);
+    expect(controlCommands().filter((entry) => entry.state === "granted")).toEqual(
+      expect.arrayContaining([expect.objectContaining({ leaseId, grantMs: 200 })]));
+    expect(new Set(controlCommands().map((entry) => entry.leaseId))).toEqual(new Set([leaseId]));
+    fakes.cueViewer({ event: "returnRequested", reason: "button" });
+    await expect.poll(() => readHumanLease(sessionId), { timeout: 4_000 }).toBeUndefined();
+    expect(controlCommands().at(-1)).toMatchObject({ state: "revoked", leaseId, reason: "returned" });
+    const count = controlCommands().length;
+    await sleep(250);
+    expect(controlCommands()).toHaveLength(count);
+    await requestNativeViewerHost(host, { op: "shutdown" });
+    await running;
+  });
+
+  it("takes the lease at explicit CLI startup after readiness", async () => {
+    const host = await start({ control: true });
+    await until(() => controlCommands().some((entry) => entry.state === "granted"));
+    expect(await readHumanLease(sessionId)).toMatchObject({ inputTransport: "viewer" });
+    await requestNativeViewerHost(host, { op: "shutdown" });
+    await running;
+    expect(await readHumanLease(sessionId)).toBeUndefined();
+  });
+
+  it("holds the startup lease before readiness without granting early input", async () => {
+    const binary = fakes.installViewer({ version: nativeViewerVersion, noReady: true });
+    running = runNativeViewerHost({ session: sessionId, binary, viewerVersion: nativeViewerVersion, control: true,
+      _spawnWatchdog: () => ({ kill() {} }), _takeoverOptions: { heartbeatMs: 100, ttlMs: 5_000 } });
+    await expect.poll(() => readHumanLease(sessionId), { timeout: 2_000 }).toMatchObject({ inputTransport: "viewer" });
+    expect(controlCommands()).toEqual([]);
+    await until(() => fakes.calls().some((entry) => entry.tool === "viewer"));
+    fakes.cueViewer({ event: "ready", version: nativeViewerVersion,
+      pid: fakes.calls().find((entry) => entry.tool === "viewer")!.pid, backend: "x11", scale: 1 });
+    await until(() => controlCommands().some((entry) => entry.state === "granted"));
+    const host = (await findNativeViewerHost(sessionId))!;
+    await requestNativeViewerHost(host, { op: "shutdown" });
+    await running;
+    expect(await readHumanLease(sessionId)).toBeUndefined();
+  });
+
+  it("ends control while teardown holds the session lock", async () => {
+    const host = await start();
+    await take();
+    await withSessionVncLock(sessionId, process.env, async () => {
+      await requestNativeViewerHost(host, { op: "shutdown" });
+      await running;
+      expect(await readHumanLease(sessionId)).toBeUndefined();
+    });
+  });
+
+  it("answers unavailable without changing another human lease", async () => {
+    const host = await start();
+    const lease = await acquireHumanLease(sessionId);
+    fakes.cueViewer({ event: "takeRequested" });
+    await until(() => controlCommands().length > 0);
+    expect(controlCommands()).toEqual([expect.objectContaining({ state: "revoked", leaseId: "", reason: "unavailable" })]);
+    expect((await readHumanLease(sessionId))?.leaseId).toBe(lease.leaseId);
+    await releaseHumanLease(sessionId, lease.leaseId);
+    await requestNativeViewerHost(host, { op: "shutdown" });
+    await running;
+  });
+
+  it.each([false, true])("revokes a lost lease with noControlAck=%s", async (noControlAck) => {
+    const host = await start({}, { noControlAck });
+    const leaseId = await take();
+    const started = Date.now();
+    await releaseHumanLease(sessionId, leaseId);
+    await until(() => controlCommands().some((entry) => entry.reason === "lease-lost"));
+    expect(Date.now() - started).toBeLessThan(500);
+    if (noControlAck) {
+      await running;
+      expect(Date.now() - started).toBeLessThan(1_600);
+      expect(processIdentityMatches({ pid: host.viewerPid, startTicks: host.viewerStartTicks })).toBe(false);
+    } else {
+      await sleep(1_100);
+      expect(processIdentityMatches({ pid: host.viewerPid, startTicks: host.viewerStartTicks })).toBe(true);
+      await requestNativeViewerHost(host, { op: "shutdown" });
+      await running;
+    }
+    expect(controlCommands().at(-1)).toMatchObject({ state: "revoked", leaseId, reason: "lease-lost" });
+  });
+
+  it.each(["close", "exit", "session", "shutdown"])("releases control on %s", async (path) => {
+    const host = await start();
+    await take();
+    if (path === "close") {
+      fakes.cueViewer({ event: "returnRequested", reason: "closed" });
+      fakes.cueViewer({ event: "closed" });
+    } else if (path === "exit") process.kill(host.viewerPid, "SIGKILL");
+    else if (path === "session") await updateSession(sessionId, { status: "stopped" });
+    else await requestNativeViewerHost(host, { op: "shutdown" });
+    await expect.poll(() => readHumanLease(sessionId), { timeout: 4_000 }).toBeUndefined();
+    if (path === "session") await requestNativeViewerHost(host, { op: "shutdown" });
+    await running;
+    const reason = path === "close" ? "returned" : path === "session" ? "session-ended" : "stopping";
+    if (path !== "exit") expect(controlCommands().at(-1)).toMatchObject({ state: "revoked", reason });
+  }, 10_000);
+});
+
+async function rawRequest(host: NativeViewerHostIdentity, request: unknown): Promise<unknown> {
+  return new Promise((resolve) => {
+    const socket = net.connect(host.socket);
+    let body = "";
+    socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
+    socket.on("data", (chunk) => { body += chunk.toString(); });
+    socket.once("end", () => resolve(JSON.parse(body)));
+  });
+}
+
+describe.skipIf(!available)("native host request socket", () => {
+  it("rejects every grant/input operation and malformed attention without acquiring a lease", async () => {
+    const host = await start();
+    for (const op of ["takeControl", "control", "takeRequested", "grant", "key", "pointer", "input"]) {
+      expect(await rawRequest(host, { op })).toEqual({ ok: false, error: "unknown-operation" });
+    }
+    for (const message of ["x".repeat(501), "line\nbreak", "null\0byte", "delete\x7f", "c1\u0085"]) {
+      expect(await rawRequest(host, { op: "requestTakeover", message, timeoutMs: 100 })).toEqual({ ok: false, error: "invalid-request" });
+    }
+    for (const timeoutMs of [-1, 1.5, 3_600_001, "100"]) {
+      expect(await rawRequest(host, { op: "requestTakeover", message: "Help", timeoutMs })).toEqual({ ok: false, error: "invalid-request" });
+    }
+    expect(await rawRequest(host, { op: "status", grant: true })).toEqual({ ok: false, error: "invalid-request" });
+    await requestNativeViewerHost(host, { op: "expand" });
+    await requestNativeViewerHost(host, { op: "collapse" });
+    expect(await readHumanLease(sessionId)).toBeUndefined();
+    expect(controlCommands()).toEqual([]);
+    await requestNativeViewerHost(host, { op: "shutdown" });
+    await running;
+  });
+
+  it("expands without focus, sends attention, and uses literal notify-send argv", async () => {
+    const notification = path.join(root, "notification.json");
+    fs.writeFileSync(path.join(fakes.binDir, "notify-send"), `#!${process.execPath}\nrequire("node:fs").writeFileSync(${JSON.stringify(notification)}, JSON.stringify(process.argv.slice(2)));`, { mode: 0o755 });
+    fakes.installHyprctl();
+    fakes.setState({ status: { configProvider: "lua" }, monitors: [monitor()] });
+    vi.stubEnv("HYPRLAND_INSTANCE_SIGNATURE", "test_native");
+    vi.stubEnv("XDG_RUNTIME_DIR", path.join(root, "runtime"));
+    const host = await start();
+    const message = "Please help $(touch /never) `echo literal` <b>now</b>";
+    const response = await requestNativeViewerHost(host, { op: "requestTakeover", message, timeoutMs: 2_000 });
+    expect(response.ok && response.requestId).toBeTruthy();
+    await until(() => fs.existsSync(notification));
+    expect(JSON.parse(fs.readFileSync(notification, "utf8"))).toEqual([
+      "--app-name=Pickforge", "--urgency=normal", "Pickforge needs your help", message,
+    ]);
+    expect(fakes.calls()).toContainEqual(expect.objectContaining({ cmd: "attention", message }));
+    expect(fakes.calls().filter((entry) => entry.tool === "hyprctl").every((entry) => !JSON.stringify(entry.args).includes("focuswindow"))).toBe(true);
+    expect(await readHumanLease(sessionId)).toBeUndefined();
+    if (!response.ok) throw new Error("Request failed");
+    await requestNativeViewerHost(host, { op: "cancelRequest", requestId: response.requestId! });
+    expect(fakes.calls().some((entry) => entry.cmd === "control")).toBe(false);
+    await requestNativeViewerHost(host, { op: "shutdown" });
+    await running;
+  });
+
+  it("works when notify-send is absent", async () => {
+    fs.rmSync(path.join(fakes.binDir, "notify-send"));
+    vi.stubEnv("PATH", fakes.binDir);
+    const host = await start();
+    const response = await requestNativeViewerHost(host, { op: "requestTakeover", message: "Help", timeoutMs: 5_000 });
+    expect(response.ok).toBe(true);
+    await requestNativeViewerHost(host, { op: "shutdown" });
+    await running;
+  });
+
+  it.each(["returned", "timeout", "cancelled", "viewer_closed"] as const)("subscribes to %s and replays completion", async (outcome) => {
+    const host = await start();
+    const response = await requestNativeViewerHost(host, { op: "requestTakeover", message: "Help", timeoutMs: outcome === "timeout" ? 80 : 5_000 });
+    if (!response.ok || response.requestId === undefined) throw new Error("Request failed");
+    const controller = new AbortController();
+    const pending = followNativeViewerRequest(host, response.requestId, { signal: controller.signal, timeoutMs: 5_000 });
+    if (outcome === "returned") {
+      await take();
+      fakes.cueViewer({ event: "returnRequested", reason: "button" });
+    } else if (outcome === "cancelled") controller.abort();
+    else if (outcome === "viewer_closed") fakes.cueViewer({ event: "closed" });
+    expect(await pending).toBe(outcome);
+    if (outcome === "viewer_closed") { await running; return; }
+    expect(await followNativeViewerRequest(host, response.requestId, { signal: new AbortController().signal, timeoutMs: 100 })).toBe(outcome);
+    expect(await readHumanLease(sessionId)).toBeUndefined();
+    if (outcome !== "returned") await until(() => fakes.calls().some((entry) => entry.cmd === "setMode" && entry.mode === "thumbnail"));
+    await requestNativeViewerHost(host, { op: "shutdown" });
+    await running;
+  });
+
+  it("cancels attention without collapsing or ending control after take", async () => {
+    const host = await start();
+    const response = await requestNativeViewerHost(host, { op: "requestTakeover", message: "Help", timeoutMs: 5_000 });
+    if (!response.ok || response.requestId === undefined) throw new Error("Request failed");
+    const leaseId = await take();
+    await requestNativeViewerHost(host, { op: "cancelRequest", requestId: response.requestId });
+    expect((await readHumanLease(sessionId))?.leaseId).toBe(leaseId);
+    expect(fakes.calls().some((entry) => entry.cmd === "setMode" && entry.mode === "thumbnail")).toBe(false);
+    await requestNativeViewerHost(host, { op: "shutdown" });
+    await running;
   });
 });
