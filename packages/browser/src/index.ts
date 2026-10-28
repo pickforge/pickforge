@@ -82,3 +82,14 @@ export {
   type RunDevtoolsMcpRelayOptions,
   type RunProjectDevtoolsMcpOptions,
 } from "./devtools-mcp.js";
+
+export {
+  BROWSER_PROFILE_NAME,
+  browserProfileDir,
+  claimBrowserProfile,
+  releaseBrowserProfile,
+  listBrowserProfiles,
+  deleteBrowserProfile,
+  validateBrowserProfileName,
+  type BrowserProfileEntry,
+} from "./profiles.js";

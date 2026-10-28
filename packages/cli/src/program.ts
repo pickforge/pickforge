@@ -27,6 +27,7 @@ import {
   runAgentsList,
   runAgentsUnlink,
 } from "./commands/agents.js";
+import { runProfileList, runProfileDelete } from "./commands/profile.js";
 import { runBrowserDevtoolsMcp } from "./commands/browser.js";
 import {
   runDesktopWindows,
@@ -184,6 +185,7 @@ function registerSessionCommands(program: Command): void {
             .choices(SESSION_TYPES)
             .makeOptionMandatory(),
         )
+        .option("--profile <name>", "browser: persistent named login profile")
         .option("--width <pixels>", "desktop display width")
         .option("--height <pixels>", "desktop display height")
         .option("--inherit-home", "desktop: consent to caller HOME/XDG homes for this session (immutable); human takeover pauses agent actions")
@@ -234,6 +236,22 @@ function registerSessionCommands(program: Command): void {
       .option("--all-stopped", "delete all eligible retained session logs, regardless of age"),
   ).action(async (opts) => {
     process.exitCode = await runSessionPrune(opts);
+  });
+}
+
+function registerProfileCommands(program: Command): void {
+  const profile = program.command("profile").description("Manage persistent browser login profiles");
+  withJson(profile.command("list").description("Show profile name, size, last use, and holding session"))
+    .action(async (opts) => {
+      process.exitCode = await runProfileList(opts);
+    });
+  withJson(
+    profile.command("delete")
+      .argument("<name>")
+      .description("Delete a profile and its stored logins")
+      .option("--yes", "confirm deletion without prompting"),
+  ).action(async (name, opts) => {
+    process.exitCode = await runProfileDelete(name, opts);
   });
 }
 
@@ -864,6 +882,7 @@ with the same values and one deprecation warning per process.
 
   registerProvisioningCommands(program);
   registerSessionCommands(program);
+  registerProfileCommands(program);
   registerWatchAndBrowserCommands(program);
   registerDesktopCommands(program);
   registerAndroidCommands(program);

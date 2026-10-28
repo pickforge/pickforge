@@ -44,6 +44,52 @@ describe.skipIf(!hasXvfb)("MCP browser lifecycle", () => {
     removeLabDirs(dirs);
   });
 
+  it("creates and lists a named profile, preserves it on destroy, and exposes no delete tool", async () => {
+    const tools = (await lab.client.listTools()).tools;
+    expect(tools.find((tool) => tool.name === "profile_list")?.annotations?.readOnlyHint).toBe(true);
+    expect(tools.some((tool) => tool.name === "profile_delete")).toBe(false);
+    expect(tools.find((tool) => tool.name === "session_create")?.inputSchema.properties).toHaveProperty("profile");
+    const created = parseToolJson(await lab.client.callTool({
+      name: "session_create", arguments: { type: "browser", profile: "ops" },
+    }));
+    expect(created.ok).toBe(true);
+    const session = created.sessions[0];
+    expect(session.profileDir).toBe(path.join(dirs.home, "profiles", "ops"));
+    const profiles = parseToolJson(await lab.client.callTool({ name: "profile_list", arguments: {} })).profiles;
+    expect(profiles[0]).toMatchObject({ name: "ops", holdingSession: session.id });
+    const refused = parseToolJson(await lab.client.callTool({
+      name: "session_create", arguments: { type: "browser", profile: "ops" },
+    }));
+    expect(refused.ok).toBe(false);
+    expect(refused.errors.join()).toContain(session.id);
+    await lab.client.callTool({ name: "session_destroy", arguments: { sessionId: session.id } });
+    expect(fs.existsSync(session.profileDir)).toBe(true);
+    expect(parseToolJson(await lab.client.callTool({ name: "profile_list", arguments: {} })).profiles[0].holdingSession).toBeNull();
+    const wrongType = parseToolJson(await lab.client.callTool({
+      name: "session_create", arguments: { type: "desktop", profile: "ops" },
+    }));
+    expect(wrongType.ok).toBe(false);
+    expect(wrongType.errors.join()).toContain("profile requires type browser");
+    const invalid = await lab.client.callTool({ name: "session_create", arguments: { type: "browser", profile: "../ops" } });
+    expect(invalid.isError).toBe(true);
+    await lab.client.callTool({ name: "session_destroy", arguments: { all: true } });
+  }, TEST_TIMEOUT_MS);
+
+  it("reports unsafe profiles alongside healthy profiles through profile_list", async () => {
+    const profiles = path.join(dirs.home, "profiles");
+    fs.mkdirSync(profiles, { mode: 0o700, recursive: true });
+    fs.mkdirSync(path.join(profiles, "healthy"), { mode: 0o700 });
+    fs.mkdirSync(path.join(profiles, "unsafe"), { mode: 0o750 });
+    fs.symlinkSync(dirs.projectDir, path.join(profiles, "linked"));
+    const result = parseToolJson(await lab.client.callTool({ name: "profile_list", arguments: {} }));
+    expect(result.ok).toBe(true);
+    expect(result.profiles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "healthy", sizeBytes: 0 }),
+      { name: "linked", error: 'Refusing browser profile "linked": it is a symlink' },
+      { name: "unsafe", error: expect.stringContaining("mode 0700") },
+    ]));
+  });
+
   it(
     "creates, reports, lists, destroys, and destroys all browser sessions",
     async () => {
