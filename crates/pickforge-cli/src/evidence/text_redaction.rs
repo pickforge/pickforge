@@ -69,10 +69,8 @@ fn redact_fragment(text: &str, lighthouse: bool) -> String {
 }
 
 /// Replace each JSON object or array with a marker and return the redacted values in order.
-/// A value after a secret name, as in `password=[1,2]`, is secret as a whole. Where the JSON
-/// stops being valid, the valid part is redacted as JSON in place and stays plain text, so the
-/// plain-text rules still see its keys. The search goes on from there, so each byte is read
-/// once.
+/// A value after a secret name, as in `password=[1,2]`, is secret as a whole. The search goes
+/// on after each value or break, so each byte is read once.
 fn mask_json_values(text: &str, lighthouse: bool) -> (String, Vec<String>) {
     let mut masked = String::with_capacity(text.len());
     let mut values = Vec::new();
@@ -90,14 +88,65 @@ fn mask_json_values(text: &str, lighthouse: bool) -> (String, Vec<String>) {
                 last = start + length;
             }
             Err(valid) => {
-                let json = &text[start..start + valid];
-                push_plain(&mut masked, &redact_json_text(json, secret, lighthouse));
-                last = start + valid;
+                last = push_broken_json(
+                    text,
+                    start..start + valid,
+                    (secret, lighthouse),
+                    &mut masked,
+                );
             }
         }
     }
     push_plain(&mut masked, &text[last..]);
     (masked, values)
+}
+
+/// Push the valid start of JSON that breaks off, redacted as JSON in place. It stays plain
+/// text, so the plain-text rules still see its keys. When the break is inside a secret value,
+/// the rest of that value is redacted too, up to where it closes. Returns where plain text
+/// resumes.
+fn push_broken_json(
+    text: &str,
+    valid: std::ops::Range<usize>,
+    (secret, lighthouse): (bool, bool),
+    masked: &mut String,
+) -> usize {
+    let (json, open, outside) = rewrite_json(&text[valid.clone()], secret, lighthouse);
+    push_plain(masked, &json);
+    let end = outside.map_or(valid.end, |outside| {
+        secret_value_end(text, valid.end, open, outside)
+    });
+    if end > valid.end {
+        masked.push_str(REDACTED);
+    }
+    end.max(valid.end)
+}
+
+/// Where a secret value that broke off at `from` ends. With `outside` containers outside the
+/// value and `open` containers open, the value is a container that ends before its closer, or,
+/// when both are equal, a single value that ends before a comma or the closer of its
+/// container. Strings count as text, and a line break at the end stays.
+fn secret_value_end(text: &str, from: usize, open: usize, outside: usize) -> usize {
+    let bytes = text.as_bytes();
+    let end = text.trim_end_matches(['\r', '\n']).len();
+    let limit = if outside < open { outside + 1 } else { open };
+    let (mut depth, mut index) = (open, from);
+    while index < end {
+        match bytes[index] {
+            b'"' => index = string_end(bytes, index).min(end),
+            b'}' | b']' if depth <= limit => return index,
+            b',' if outside == open && depth == open => return index,
+            byte => {
+                match byte {
+                    b'{' | b'[' => depth += 1,
+                    b'}' | b']' => depth -= 1,
+                    _ => {}
+                }
+                index += 1;
+            }
+        }
+    }
+    end
 }
 
 fn push_plain(masked: &mut String, text: &str) {
@@ -269,10 +318,24 @@ enum Frame {
     },
 }
 
+impl Frame {
+    fn is_secret(&self) -> bool {
+        match self {
+            Frame::Object { secret, .. } | Frame::Array { secret } => *secret,
+        }
+    }
+}
+
 /// Rewrite one valid JSON value. Under a secret key every string and number is replaced, in
 /// nested values too; booleans and "true" or "false" strings stay, because they are flags.
 /// Keys and other strings are redacted as text.
 fn redact_json_text(json: &str, secret: bool, lighthouse: bool) -> String {
+    rewrite_json(json, secret, lighthouse).0
+}
+
+/// Rewrite JSON that may break off. Also returns how many containers are open at the end and,
+/// when the end is inside a secret value, how many of them are outside that value.
+fn rewrite_json(json: &str, secret: bool, lighthouse: bool) -> (String, usize, Option<usize>) {
     let bytes = json.as_bytes();
     let mut frames: Vec<Frame> = Vec::new();
     let mut stored = String::with_capacity(json.len());
@@ -296,7 +359,11 @@ fn redact_json_text(json: &str, secret: bool, lighthouse: bool) -> String {
             }
         };
     }
-    stored
+    let outside = frames
+        .iter()
+        .position(Frame::is_secret)
+        .or_else(|| inherited_secret(&frames, secret).then_some(frames.len()));
+    (stored, frames.len(), outside)
 }
 
 fn inherited_secret(frames: &[Frame], root: bool) -> bool {
@@ -320,8 +387,10 @@ fn push_string(
     let root = frames.len() == 1;
     match frames.last_mut() {
         Some(Frame::Object { key, audit_map, .. }) if *key == Key::Expected => {
-            let name = serde_json::from_str(token).unwrap_or_else(|_| token.to_owned());
-            *key = key_kind(&name, *audit_map, lighthouse && root);
+            // A key that does not decode may hide a secret name.
+            *key = serde_json::from_str::<String>(token).map_or(Key::Secret, |name| {
+                key_kind(&name, *audit_map, lighthouse && root)
+            });
             stored.push_str(&redact_json_string(token, false));
         }
         _ => stored.push_str(&redact_json_string(token, inherited)),
@@ -765,6 +834,25 @@ mod tests {
             assert!(!stored.contains(secret), "{secret} in {stored}");
         }
         assert!(lines[3].starts_with("I/app: [\"a\tb\", "), "{stored}");
+    }
+
+    #[test]
+    fn json_that_breaks_inside_a_secret_value_loses_the_rest_of_that_value() {
+        let log = "D/app: {\"password\":{\"n\":1e+,\"value\":\"hunter7\"}} took 3ms\nD/app: {\"password\":{\"value\":\"hunter8\nI/app: token: [none] received 5 items\n";
+        let stored = redact_text_artifact(log, ArtifactOrigin::AndroidLogcat);
+        let lines: Vec<&str> = stored.lines().collect();
+        assert_eq!(
+            lines[0],
+            "D/app: {\"password\":{\"n\":[REDACTED]}} took 3ms"
+        );
+        assert_eq!(lines[1], "D/app: {\"password\":{\"value\":[REDACTED]");
+        assert_eq!(lines[2], "I/app: token: [REDACTED] received 5 items");
+        assert!(stored.ends_with('\n'), "{stored}");
+        let json = r#"{"password\ud800":"hunter9","n":1}"#;
+        assert_eq!(
+            redact_text_artifact(json, ArtifactOrigin::DevtoolsConsole),
+            r#"{"[REDACTED]":"[REDACTED]","n":1}"#
+        );
     }
 
     #[test]
