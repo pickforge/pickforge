@@ -1,4 +1,5 @@
 use super::*;
+use crate::control;
 use crate::pulse;
 
 fn app() -> App {
@@ -180,4 +181,216 @@ fn pulse_moves_a_point_past_the_edge_and_ignores_ended_sessions() {
     app.ended = true;
     app.start_pulse(5, 5, Instant::now());
     assert!(app.pulse.is_none() && app.damage.is_none());
+}
+
+/// A focused window on a test display that counts key presses.
+struct KeyCounter {
+    conn: RustConnection,
+    presses: usize,
+}
+
+impl KeyCounter {
+    fn new(display: u32) -> KeyCounter {
+        use x11rb::connection::Connection;
+        use x11rb::protocol::xproto::{CreateWindowAux, EventMask, InputFocus, WindowClass};
+        let conn = crate::capture::connect_display(display).unwrap();
+        let root = conn.setup().roots[0].root;
+        let window = conn.generate_id().unwrap();
+        conn.create_window(
+            0,
+            window,
+            root,
+            0,
+            0,
+            100,
+            100,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            0,
+            &CreateWindowAux::new()
+                .override_redirect(1)
+                .event_mask(EventMask::KEY_PRESS),
+        )
+        .unwrap();
+        conn.map_window(window).unwrap();
+        conn.set_input_focus(InputFocus::PARENT, window, x11rb::CURRENT_TIME)
+            .unwrap();
+        conn.get_input_focus().unwrap().reply().unwrap();
+        KeyCounter { conn, presses: 0 }
+    }
+
+    /// Key presses so far, once the server handled the injector's input.
+    fn count(&mut self, injector_sync: &mut App) -> usize {
+        use x11rb::connection::Connection;
+        if let Some(injector) = injector_sync.controller.sink_mut() {
+            let _ = injector.is_granted();
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        self.conn.get_input_focus().unwrap().reply().unwrap();
+        while let Some(event) = self.conn.poll_for_event().unwrap() {
+            if let x11rb::protocol::Event::KeyPress(_) = event {
+                self.presses += 1;
+            }
+        }
+        self.presses
+    }
+}
+
+fn grant(lease: &str) -> Command {
+    Command::Grant {
+        lease_id: lease.into(),
+        grant_ms: 60_000,
+    }
+}
+
+/// An expanded app that controls a test display through a real injector.
+fn controlling(display: u32) -> App {
+    let mut app = app();
+    app.controller = Controller::new(Some(Injector::connect(display).unwrap()));
+    app.mode = Mode::Expanded;
+    app.status = None;
+    app.on_command(grant("L1"));
+    assert!(app.controller.controlling());
+    app
+}
+
+fn reading(app: &mut App, id: u64, lease: &str) {
+    app.paste = Some(Paste::Reading {
+        id,
+        lease: lease.into(),
+        until: Instant::now() + PASTE_READ_LIMIT,
+    });
+}
+
+fn typed_at(app: &App) -> Option<usize> {
+    match &app.paste {
+        Some(Paste::Typing { at, .. }) => Some(*at),
+        _ => None,
+    }
+}
+
+#[test]
+fn paste_types_in_steps_and_stops_at_a_revoke() {
+    use crate::protocol::RevokeReason;
+    use crate::test_common::{xvfb_ready, Xvfb};
+    if !xvfb_ready("paste_steps") {
+        return;
+    }
+    let display = Xvfb::start("640x480x24");
+    let mut keys = KeyCounter::new(display.display);
+    let mut app = controlling(display.display);
+
+    // A late answer to an older read changes nothing.
+    reading(&mut app, 2, "L1");
+    app.on_clipboard(1, clipboard::prepare("x"));
+    assert!(matches!(app.paste, Some(Paste::Reading { id: 2, .. })));
+
+    app.on_clipboard(2, clipboard::prepare(&"a".repeat(100)));
+    assert_eq!(typed_at(&app), Some(PASTE_STEP));
+    app.paste_step();
+    assert_eq!(typed_at(&app), Some(2 * PASTE_STEP));
+    assert_eq!(keys.count(&mut app), 2 * PASTE_STEP);
+
+    app.on_command(Command::Revoke {
+        lease_id: "L1".into(),
+        reason: RevokeReason::LeaseLost,
+    });
+    assert!(app.paste.is_none(), "a revoke stops the paste");
+    app.paste_step();
+    assert_eq!(
+        keys.count(&mut app),
+        2 * PASTE_STEP,
+        "nothing after the revoke"
+    );
+    let held: Vec<u8> = app.controller.sink_mut().unwrap().held_keys().collect();
+    assert!(held.is_empty(), "{held:?}");
+}
+
+#[test]
+fn paste_stops_on_collapse_new_lease_and_late_reads() {
+    use crate::test_common::{xvfb_ready, Xvfb};
+    if !xvfb_ready("paste_stops") {
+        return;
+    }
+    let display = Xvfb::start("640x480x24");
+    let mut keys = KeyCounter::new(display.display);
+    let mut app = controlling(display.display);
+
+    // A thumbnail forwards nothing, so the next step ends the paste.
+    app.on_clipboard(0, clipboard::prepare("x"));
+    reading(&mut app, 1, "L1");
+    app.on_clipboard(1, clipboard::prepare(&"b".repeat(100)));
+    app.mode = Mode::Thumbnail;
+    app.paste_step();
+    assert!(app.paste.is_none());
+    app.mode = Mode::Expanded;
+
+    // A grant for another lease ends a paste of the old one.
+    reading(&mut app, 2, "L1");
+    app.on_clipboard(2, clipboard::prepare(&"c".repeat(100)));
+    app.on_command(grant("L2"));
+    assert!(app.paste.is_none());
+
+    // A read that finishes after its lease ended types nothing.
+    reading(&mut app, 3, "L1");
+    app.on_clipboard(3, clipboard::prepare("late"));
+    assert!(app.paste.is_none());
+    assert_eq!(app.controller.note(), None, "no note for a stale read");
+    assert_eq!(keys.count(&mut app), 2 * PASTE_STEP);
+}
+
+#[test]
+fn refused_reads_show_a_note_and_type_nothing() {
+    use crate::test_common::{xvfb_ready, Xvfb};
+    if !xvfb_ready("paste_refusals") {
+        return;
+    }
+    let display = Xvfb::start("640x480x24");
+    let mut keys = KeyCounter::new(display.display);
+    let mut app = controlling(display.display);
+    for (refusal, note) in [
+        (Refusal::Empty, Note::NothingToPaste),
+        (Refusal::TooLong, Note::PasteTooLong),
+        (Refusal::Unavailable, Note::PasteUnavailable),
+    ] {
+        reading(&mut app, 1, "L1");
+        app.on_clipboard(1, Err(refusal));
+        assert!(app.paste.is_none());
+        assert_eq!(app.status_text(), Some(note.text()));
+    }
+
+    // More new characters than the binding limit are refused before any
+    // of them is typed.
+    let many: String = (0..=input::MAX_BINDINGS as u32)
+        .filter_map(|i| char::from_u32(0x4e00 + i))
+        .collect();
+    reading(&mut app, 2, "L1");
+    app.on_clipboard(2, clipboard::prepare(&format!("ok{many}")));
+    assert!(app.paste.is_none());
+    assert_eq!(app.status_text(), Some("Paste unavailable"));
+    assert_eq!(keys.count(&mut app), 0);
+
+    // A read without an answer is given up.
+    let now = Instant::now();
+    app.paste = Some(Paste::Reading {
+        id: 3,
+        lease: "L1".into(),
+        until: now,
+    });
+    app.controller
+        .show(Note::PasteTooLong, now - control::NOTE_FOR);
+    app.controller.tick(now);
+    assert_eq!(app.check_paste_read(now), None);
+    assert!(app.paste.is_none());
+    assert_eq!(app.status_text(), Some("Paste unavailable"));
+}
+
+#[test]
+fn paste_needs_control_in_an_expanded_window() {
+    let mut app = app();
+    app.start_paste();
+    assert!(app.paste.is_none(), "no control, no read");
+    app.mode = Mode::Expanded;
+    app.start_paste();
+    assert!(app.paste.is_none());
 }

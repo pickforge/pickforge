@@ -10,6 +10,7 @@ use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
@@ -31,6 +32,8 @@ pub struct Viewer {
     pub child: Child,
     pub stdin: Option<ChildStdin>,
     pub events: Receiver<Value>,
+    /// Everything the viewer wrote to stdout and stderr so far.
+    pub output: Arc<Mutex<String>>,
 }
 
 impl Viewer {
@@ -56,14 +59,18 @@ impl Viewer {
             .env("WINIT_X11_SCALE_FACTOR", scale)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("spawn pickforge-viewer");
         let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let output = Arc::new(Mutex::new(String::new()));
         let (tx, events) = mpsc::channel();
+        let log = output.clone();
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else { break };
+                log.lock().unwrap().push_str(&format!("{line}\n"));
                 let value: Value = serde_json::from_str(&line)
                     .unwrap_or_else(|e| panic!("bad event {line:?}: {e}"));
                 if tx.send(value).is_err() {
@@ -71,10 +78,19 @@ impl Viewer {
                 }
             }
         });
+        let log = output.clone();
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                let Ok(line) = line else { break };
+                eprintln!("{line}");
+                log.lock().unwrap().push_str(&format!("{line}\n"));
+            }
+        });
         Viewer {
             stdin: child.stdin.take(),
             child,
             events,
+            output,
         }
     }
 

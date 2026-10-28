@@ -3,7 +3,8 @@
 
 use crate::args::{self, Config, Placement};
 use crate::capture::{Capture, Control, CursorImage, Shared};
-use crate::control::{Controller, Effect};
+use crate::clipboard::{self, Refusal, Secret};
+use crate::control::{Controller, Effect, Note};
 use crate::geometry::{self, Rect};
 use crate::input::{self, InjectError, Injector};
 use crate::keysyms::{self, named};
@@ -28,7 +29,7 @@ use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{
     ElementState, Ime, KeyEvent, Modifiers, MouseButton, MouseScrollDelta, StartCause, WindowEvent,
 };
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, KeyLocation, NamedKey, PhysicalKey};
 use winit::platform::wayland::{ActiveEventLoopExtWayland, WindowAttributesExtWayland};
 use winit::platform::x11::WindowAttributesExtX11;
@@ -44,12 +45,40 @@ const HIDDEN_AFTER: Duration = Duration::from_millis(500);
 /// After stdin closes, the process exits by this deadline even if the
 /// event loop is stuck.
 const STDIN_EXIT_DEADLINE: Duration = Duration::from_millis(900);
+/// Characters a paste types per turn of the event loop, so a revoke that
+/// arrives meanwhile stops it within one step.
+const PASTE_STEP: usize = 32;
+/// A clipboard read without an answer by then is given up.
+const PASTE_READ_LIMIT: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
 enum UserEvent {
     Command(Command),
     StdinClosed,
     Capture,
+    /// The clipboard read `id` finished.
+    Clipboard {
+        id: u64,
+        result: Result<Secret, Refusal>,
+    },
+    /// Type the next part of the paste.
+    PasteStep,
+}
+
+/// A paste in progress. Its text never leaves this process.
+enum Paste {
+    /// A worker thread reads the host clipboard.
+    Reading {
+        id: u64,
+        lease: String,
+        until: Instant,
+    },
+    /// Typing `PASTE_STEP` characters per step from byte `at`.
+    Typing {
+        lease: String,
+        text: Secret,
+        at: usize,
+    },
 }
 
 fn log(message: &str) {
@@ -152,6 +181,7 @@ pub fn run(config: Config) -> i32 {
     };
 
     let mut app = App::new(config, session, shared, control, capture_pending, injector);
+    app.proxy = Some(event_loop.create_proxy());
     event_loop.set_control_flow(ControlFlow::Wait);
     if let Err(e) = event_loop.run_app(&mut app) {
         return fatal(
@@ -203,6 +233,7 @@ struct App {
     shared: Arc<Mutex<Shared>>,
     control: Arc<Control>,
     capture_pending: Arc<AtomicBool>,
+    proxy: Option<EventLoopProxy<UserEvent>>,
 
     window: Option<Rc<Window>>,
     x11_visibility: Option<X11Visibility>,
@@ -242,6 +273,9 @@ struct App {
     modifiers: Modifiers,
     /// What each held physical key sent, so its release matches.
     keys: HashMap<PhysicalKey, Sent>,
+    paste: Option<Paste>,
+    /// Clipboard reads started, so a late answer cannot match a new read.
+    paste_reads: u64,
 
     status: Option<StatusCode>,
     ended: bool,
@@ -270,6 +304,7 @@ impl App {
             shared,
             control,
             capture_pending,
+            proxy: None,
             window: None,
             x11_visibility: None,
             next_pause_check: Instant::now(),
@@ -301,6 +336,8 @@ impl App {
             ime_allowed: false,
             modifiers: Modifiers::default(),
             keys: HashMap::new(),
+            paste: None,
+            paste_reads: 0,
             status: Some(StatusCode::Connecting),
             ended: false,
             have_frame: false,
@@ -530,6 +567,7 @@ impl App {
             self.control.stop();
             self.controller.end_session();
             self.keys.clear();
+            self.paste = None;
             self.relayout();
         }
         self.set_status(Some(StatusCode::SessionEnded));
@@ -544,6 +582,7 @@ impl App {
         }
         let changed = self.mode != mode;
         if mode == Mode::Thumbnail && self.controller.controlling() {
+            self.paste = None;
             self.controller.release_held();
             self.keys.clear();
         }
@@ -603,6 +642,7 @@ impl App {
 
     /// Closing while controlling returns control first.
     fn close(&mut self) {
+        self.paste = None;
         for event in self.controller.close() {
             emit(&event);
         }
@@ -611,6 +651,7 @@ impl App {
 
     /// Ends control without asking the host and exits.
     fn quit(&mut self) {
+        self.paste = None;
         self.controller.stop();
         self.exit = Some(0);
     }
@@ -632,11 +673,16 @@ impl App {
                 }
                 self.control_changed();
             }
+            Button::Paste => self.start_paste(),
         }
     }
 
     /// Redraws the bar, banner and status after a control change.
     fn control_changed(&mut self) {
+        let lease = self.paste.as_ref().map(Paste::lease);
+        if lease.is_some() && lease != self.controller.lease_id() {
+            self.paste = None;
+        }
         if !self.controller.controlling() {
             self.keys.clear();
         } else {
@@ -645,6 +691,133 @@ impl App {
         }
         self.pressed = None;
         self.relayout();
+    }
+
+    /// The user clicked Paste. A worker thread reads the host clipboard, so
+    /// the event loop never waits for it. A click while a paste runs does
+    /// nothing.
+    fn start_paste(&mut self) {
+        if self.paste.is_some() || !self.controller.forwarding(self.mode) {
+            return;
+        }
+        let (Some(lease), Some(proxy)) = (self.controller.lease_id(), self.proxy.clone()) else {
+            return;
+        };
+        self.paste_reads += 1;
+        let id = self.paste_reads;
+        self.paste = Some(Paste::Reading {
+            id,
+            lease: lease.to_owned(),
+            until: Instant::now() + PASTE_READ_LIMIT,
+        });
+        let backend = self.backend;
+        thread::spawn(move || {
+            let result = clipboard::read(backend);
+            let _ = proxy.send_event(UserEvent::Clipboard { id, result });
+        });
+    }
+
+    /// True while the paste under `lease` may type.
+    fn paste_allowed(&self, lease: &str) -> bool {
+        self.controller.forwarding(self.mode) && self.controller.lease_id() == Some(lease)
+    }
+
+    /// Takes the clipboard text, binds every character the session map
+    /// lacks, and starts typing. Nothing is typed when the read was
+    /// refused, the binding failed, or control changed during the read.
+    fn on_clipboard(&mut self, id: u64, result: Result<Secret, Refusal>) {
+        let lease = match &self.paste {
+            Some(Paste::Reading {
+                id: want, lease, ..
+            }) if *want == id => lease.clone(),
+            _ => return,
+        };
+        self.paste = None;
+        if !self.paste_allowed(&lease) {
+            return;
+        }
+        let text = match result {
+            Ok(text) => text,
+            Err(refusal) => return self.show_note(refusal_note(refusal)),
+        };
+        let Some(injector) = self.controller.sink_mut() else {
+            return;
+        };
+        match injector.bind_text(text.as_str()) {
+            Ok(()) => {
+                self.paste = Some(Paste::Typing { lease, text, at: 0 });
+                self.paste_step();
+            }
+            Err(e) => self.paste_failed(e),
+        }
+    }
+
+    /// Types the next `PASTE_STEP` characters and asks for another step,
+    /// so host commands such as a revoke run in between.
+    fn paste_step(&mut self) {
+        let (lease, text, at) = match self.paste.take() {
+            Some(Paste::Typing { lease, text, at }) => (lease, text, at),
+            other => {
+                self.paste = other;
+                return;
+            }
+        };
+        if !self.paste_allowed(&lease) {
+            return;
+        }
+        let rest = &text.as_str()[at..];
+        let end = rest
+            .char_indices()
+            .nth(PASTE_STEP)
+            .map_or(rest.len(), |(i, _)| i);
+        let Some(injector) = self.controller.sink_mut() else {
+            return;
+        };
+        if let Err(e) = injector.type_text(&rest[..end]) {
+            return self.paste_failed(e);
+        }
+        let at = at + end;
+        if at < text.as_str().len() {
+            self.paste = Some(Paste::Typing { lease, text, at });
+            if let Some(proxy) = &self.proxy {
+                let _ = proxy.send_event(UserEvent::PasteStep);
+            }
+        }
+    }
+
+    /// Ends a paste that the injector refused. The error never holds text.
+    fn paste_failed(&mut self, error: InjectError) {
+        self.paste = None;
+        match error {
+            InjectError::NotGranted => {
+                if self.controller.tick(Instant::now()) {
+                    self.control_changed();
+                }
+            }
+            e => {
+                log(&format!("paste stopped: {e}"));
+                self.show_note(Note::PasteUnavailable);
+            }
+        }
+    }
+
+    fn show_note(&mut self, note: Note) {
+        self.controller.show(note, Instant::now());
+        self.damage_all();
+    }
+
+    /// Gives up a clipboard read that did not answer in time. Returns when
+    /// the next check is due.
+    fn check_paste_read(&mut self, now: Instant) -> Option<Instant> {
+        let Some(Paste::Reading { until, .. }) = &self.paste else {
+            return None;
+        };
+        if now < *until {
+            return Some(*until);
+        }
+        self.paste = None;
+        self.show_note(Note::PasteUnavailable);
+        None
     }
 
     fn hit(&self, x: f64, y: f64) -> Option<Button> {
@@ -1170,6 +1343,8 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Command(command) => self.on_command(command),
             UserEvent::Capture => self.on_capture(),
             UserEvent::StdinClosed => self.quit(),
+            UserEvent::Clipboard { id, result } => self.on_clipboard(id, result),
+            UserEvent::PasteStep => self.paste_step(),
         }
         if self.exit.is_some() {
             event_loop.exit();
@@ -1257,6 +1432,7 @@ impl ApplicationHandler<UserEvent> for App {
             .map(|t| t + HIDDEN_AFTER);
         for next in [
             self.refresh_x11_pause(now),
+            self.check_paste_read(now),
             self.controller.deadline(),
             self.tick_pulse(now),
         ]
@@ -1266,6 +1442,22 @@ impl ApplicationHandler<UserEvent> for App {
             deadline = Some(deadline.map_or(next, |t| t.min(next)));
         }
         event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+    }
+}
+
+impl Paste {
+    fn lease(&self) -> &str {
+        match self {
+            Paste::Reading { lease, .. } | Paste::Typing { lease, .. } => lease,
+        }
+    }
+}
+
+fn refusal_note(refusal: Refusal) -> Note {
+    match refusal {
+        Refusal::Empty => Note::NothingToPaste,
+        Refusal::TooLong => Note::PasteTooLong,
+        Refusal::Unavailable => Note::PasteUnavailable,
     }
 }
 

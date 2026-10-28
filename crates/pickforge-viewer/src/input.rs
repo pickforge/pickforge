@@ -500,6 +500,22 @@ impl<C: Clock> Injector<C> {
     /// conflict are released for that character and pressed again.
     pub fn type_text(&mut self, text: &str) -> Result<(), InjectError> {
         let strokes = strokes(text)?;
+        self.bind_strokes(&strokes)?;
+        for stroke in strokes {
+            self.check()?;
+            self.type_stroke(stroke)?;
+        }
+        Ok(())
+    }
+
+    /// Binds every character of `text` that the map lacks and types
+    /// nothing. A paste calls it first, so text over `MAX_BINDINGS` is
+    /// refused before any of it is typed.
+    pub fn bind_text(&mut self, text: &str) -> Result<(), InjectError> {
+        self.bind_strokes(&strokes(text)?)
+    }
+
+    fn bind_strokes(&mut self, strokes: &[Stroke]) -> Result<(), InjectError> {
         self.check()?;
         self.refresh()?;
         let points: Vec<u32> = strokes
@@ -509,12 +525,7 @@ impl<C: Clock> Injector<C> {
                 Stroke::Key(_) => None,
             })
             .collect();
-        self.bind_codepoints(&points)?;
-        for stroke in strokes {
-            self.check()?;
-            self.type_stroke(stroke)?;
-        }
-        Ok(())
+        self.bind_codepoints(&points)
     }
 
     /// Releases every key and button this injector holds. It sends only

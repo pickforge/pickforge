@@ -20,8 +20,9 @@ pickforge-viewer \
 
 - `--display` is the session's owned Xvfb display. The host verifies it before
   launch. The viewer refuses a display equal to its own `DISPLAY`.
-- The viewer connects through `/tmp/.X11-unix/X<N>` with empty authorization. It
-  never reads `XAUTHORITY` or `~/.Xauthority`.
+- The viewer connects to the session display through `/tmp/.X11-unix/X<N>`
+  with empty authorization. It never reads `XAUTHORITY` or `~/.Xauthority` for
+  it.
 - `--xvfb-pid` and `--xvfb-start-ticks` identify the Xvfb process. A different
   start time at launch is refused with exit 3 and error code `xvfb-mismatch`.
   A change after launch is treated as session end.
@@ -33,8 +34,9 @@ pickforge-viewer \
   means the viewer resizes itself and reports the result. The default is
   `self`.
 - `--thumbnail-width` defaults to 384. All other flags are required.
-- The window itself uses the caller's environment (`WAYLAND_DISPLAY` or
-  `DISPLAY`). The session display is used only for capture and input.
+- The window and Paste use the caller's environment (`WAYLAND_DISPLAY` or
+  `DISPLAY`) with its normal authorization. The session display is used only
+  for capture and input.
 
 Other entry points:
 
@@ -55,7 +57,7 @@ Error codes in the `error` event: `display-refused`, `xvfb-mismatch`,
 - stdin carries commands from the host. stdout carries events to the host.
 - Each message is one JSON object on one line, UTF-8, at most 64 KiB.
 - stderr carries human-readable logs only. It never carries frames, attention
-  message text, or input.
+  message text, input, or pasted text.
 - Each side ignores unknown fields. An unknown `cmd` or `event` is logged and
   ignored.
 - End of file on stdin means the host is gone. The viewer then exits within one
@@ -115,14 +117,24 @@ Error codes in the `error` event: `display-refused`, `xvfb-mismatch`,
 - Expanded: a 32 logical pixel bar at the top with Fullscreen, Collapse and
   Close, and Take control at the left when control is offered. Close sends
   `closed`. Esc collapses in watch mode.
-- Controlling: the bar shows only Return control at the left and Fullscreen
-  at the right, with an ember line under it. Every key, Esc too, goes to the
+- Controlling: the bar shows only Return control and Paste at the left and
+  Fullscreen at the right, with an ember line under it. A narrow bar drops
+  Fullscreen first, then Paste. Every key, Esc too, goes to the
   session, so Esc neither collapses nor leaves fullscreen. Closing the window
   through the compositor returns control first. Pointer positions map through
   the current scale and letterbox; clicks on the bar or the letterbox stay in
   the viewer. A button pressed in the image is released in the session
   wherever the pointer is let go. Text comes from the host's composed key text
   and IME commits, so dead keys and input methods work in any host layout.
+- Paste: only a click on Paste reads the host clipboard, once. There is no
+  shortcut. The viewer asks for UTF-8 text only and waits at most 1 s. It
+  types nothing for an empty clipboard, another format, or text over 4096
+  characters. It drops one trailing line break, types tabs and other line
+  breaks as Tab and Return, and refuses text with other control characters.
+  It types 32 characters per step and checks control before each step, so a
+  revoke, an expired grant, Return control, collapse, close, stdin end of
+  file or session end stops it within one step. A click while a paste runs
+  does nothing. Paste sends no event, and the text never crosses stdio.
 - Attention banner: at the top of the image, below the bar. The message wraps
   to at most three lines and ends with an ellipsis when it is longer. The
   thumbnail shows the message without the button, because a thumbnail click
@@ -135,7 +147,8 @@ Error codes in the `error` event: `display-refused`, `xvfb-mismatch`,
 - Status text sits in the bottom-left corner: "Connecting", "Session ended",
   "Stopping". "Control unavailable" after a revoke with `"unavailable"`, and
   "Control ended" after `"lease-lost"` or an expired grant, show for 4 s
-  unless a host status is shown.
+  unless a host status is shown. So do "Nothing to paste", "Too long to
+  paste" and "Paste unavailable" after a refused paste.
 - The viewer never takes keyboard focus on its own. Esc works once the
   compositor focuses the window, for example after a click.
 - Capture pauses while the window is occluded or minimized. Wayland reports no

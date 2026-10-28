@@ -367,6 +367,8 @@ pub enum Button {
     Close,
     TakeControl,
     ReturnControl,
+    /// Types the host clipboard text into the session.
+    Paste,
     /// Take control in the attention banner.
     BannerTake,
 }
@@ -376,7 +378,7 @@ pub enum Button {
 pub enum BarKind {
     /// Fullscreen, Collapse and Close, with Take control when offered.
     Watch { take: bool },
-    /// Return control and Fullscreen only.
+    /// Return control, Paste and Fullscreen only.
     Control,
 }
 
@@ -422,6 +424,7 @@ fn label(button: Button, fullscreen: bool) -> &'static str {
         Button::Close => "",
         Button::TakeControl | Button::BannerTake => "Take control",
         Button::ReturnControl => "Return control",
+        Button::Paste => "Paste",
     }
 }
 
@@ -442,41 +445,60 @@ impl Bar {
         let button_h = metrics.round(24.0);
         let gap = metrics.round(4.0) as i32;
         let top = ((rect.h - button_h) / 2) as i32;
-        let (left, right): (Option<Button>, &[Button]) = match kind {
-            BarKind::Watch { take } => (
-                take.then_some(Button::TakeControl),
+        let (left, right): (&[Button], &[Button]) = match kind {
+            BarKind::Watch { take: true } => (
+                &[Button::TakeControl],
                 &[Button::Close, Button::Collapse, Button::Fullscreen],
             ),
-            BarKind::Control => (Some(Button::ReturnControl), &[Button::Fullscreen]),
+            BarKind::Watch { take: false } => {
+                (&[], &[Button::Close, Button::Collapse, Button::Fullscreen])
+            }
+            BarKind::Control => (
+                &[Button::ReturnControl, Button::Paste],
+                &[Button::Fullscreen],
+            ),
         };
-        let left = left.map(|button| {
-            let w = label_width(text, metrics, button, fullscreen);
-            (button, Rect::new(gap, top, w, button_h))
-        });
+        let width_of = |button: Button, text: &mut Text| match button {
+            Button::Close => button_h,
+            _ => label_width(text, metrics, button, fullscreen),
+        };
+        let mut x = gap;
+        let mut lefts = Vec::new();
+        for &button in left {
+            let w = width_of(button, text);
+            lefts.push((button, Rect::new(x, top, w, button_h)));
+            x += w as i32 + gap;
+        }
         let mut x = width as i32 - gap;
-        let mut buttons = Vec::new();
+        let mut rights = Vec::new();
         for &button in right {
-            let w = match button {
-                Button::Close => button_h,
-                _ => label_width(text, metrics, button, fullscreen),
-            };
+            let w = width_of(button, text);
             x -= w as i32;
-            buttons.push((button, Rect::new(x, top, w, button_h)));
+            rights.push((button, Rect::new(x, top, w, button_h)));
             x -= gap;
         }
-        buttons.reverse();
-        // A narrow bar keeps Return control and Close; the left button
-        // or Fullscreen gives way.
-        if let Some((button, r)) = left {
-            let clear = buttons
+        rights.reverse();
+        // A narrow bar keeps Return control and Close. In the control bar
+        // Fullscreen gives way first, then Paste; in the watch bar Take
+        // control gives way.
+        let fits = |lefts: &[(Button, Rect)], rights: &[(Button, Rect)]| {
+            let limit = rights
                 .first()
-                .is_none_or(|(_, first)| r.right() + gap <= first.x);
-            if clear {
-                buttons.insert(0, (button, r));
-            } else if button == Button::ReturnControl {
-                buttons = vec![(button, r)];
+                .map_or(width as i32 - gap, |(_, first)| first.x - gap);
+            lefts.last().is_none_or(|(_, last)| last.right() <= limit)
+        };
+        if kind == BarKind::Control {
+            if !fits(&lefts, &rights) {
+                rights.clear();
             }
+            if !fits(&lefts, &rights) {
+                lefts.truncate(1);
+            }
+        } else if !fits(&lefts, &rights) {
+            lefts.clear();
         }
+        let mut buttons = lefts;
+        buttons.extend(rights);
         Bar {
             rect,
             buttons,
@@ -977,13 +999,39 @@ mod tests {
             let control = Bar::layout(width, metrics, true, BarKind::Control, &mut text);
             assert_eq!(
                 names(&control),
-                vec![Button::ReturnControl, Button::Fullscreen]
+                vec![Button::ReturnControl, Button::Paste, Button::Fullscreen]
             );
             assert_in_order(&control.buttons, width);
-            // A narrow bar keeps Return control and drops Take control.
+            // Paste sits directly right of Return control.
+            let gap = metrics.round(4.0) as i32;
+            assert_eq!(control.buttons[1].1.x, control.buttons[0].1.right() + gap);
+            // A narrow bar drops Fullscreen first, then Paste, and always
+            // keeps Return control.
+            let mut seen = Vec::new();
+            for logical in (60..=640).step_by(4) {
+                let narrow = (logical as f64 * scale) as u32;
+                let control = Bar::layout(narrow, metrics, true, BarKind::Control, &mut text);
+                let shown = names(&control);
+                assert_eq!(shown[0], Button::ReturnControl, "{logical}");
+                if shown.contains(&Button::Fullscreen) {
+                    assert!(shown.contains(&Button::Paste), "{logical}: {shown:?}");
+                }
+                if shown.len() > 1 {
+                    assert_in_order(&control.buttons, narrow);
+                }
+                if !seen.contains(&shown) {
+                    seen.push(shown);
+                }
+            }
+            assert_eq!(
+                seen,
+                vec![
+                    vec![Button::ReturnControl],
+                    vec![Button::ReturnControl, Button::Paste],
+                    vec![Button::ReturnControl, Button::Paste, Button::Fullscreen],
+                ]
+            );
             let narrow = (200.0 * scale) as u32;
-            let control = Bar::layout(narrow, metrics, true, BarKind::Control, &mut text);
-            assert_eq!(names(&control), vec![Button::ReturnControl]);
             let watch = Bar::layout(
                 narrow,
                 metrics,
@@ -993,6 +1041,10 @@ mod tests {
             );
             assert!(!names(&watch).contains(&Button::TakeControl));
             assert!(names(&watch).contains(&Button::Close));
+            for take in [true, false] {
+                let watch = Bar::layout(width, metrics, false, BarKind::Watch { take }, &mut text);
+                assert!(!names(&watch).contains(&Button::Paste), "no Paste in watch");
+            }
         }
     }
 

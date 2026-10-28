@@ -8,11 +8,14 @@
 mod common;
 #[path = "common/listener.rs"]
 mod listener;
+#[path = "common/selection.rs"]
+mod selection;
 #[path = "common/viewer.rs"]
 mod viewer;
 
 use common::{near, wait_until, xvfb_ready, Xvfb};
 use listener::Listener;
+use selection::{selection_owner, Owner, Serve};
 use std::thread;
 use std::time::{Duration, Instant};
 use viewer::*;
@@ -22,6 +25,8 @@ const SHIFT_L: u32 = 0xffe1;
 const KEY_A: u32 = 0x61;
 const KEY_B: u32 = 0x62;
 const EMBER: u32 = 0x00ff_7a1a;
+/// Clipboard text that must reach the session and nothing else.
+const MARKER: &str = "marker-5e2a";
 const LONG_MESSAGE: &str = "O agente precisa que você entre na conta do banco com a sua senha e confirme o código que chegou por SMS no seu celular. Depois volte o controle para o agente continuar a tarefa de conciliação das faturas abertas deste mês, sem fechar a janela do navegador nem trocar de aba enquanto a página carrega.";
 
 struct Rig {
@@ -129,6 +134,46 @@ impl Rig {
             .filter(|e| matches!(e, Event::KeyPress(_) | Event::ButtonPress(_)))
             .collect();
         assert!(presses.is_empty(), "input reached the session: {presses:?}");
+    }
+
+    /// Paste in the control bar, relative to the window: the bar's middle
+    /// row, just right of Return control's ember outline.
+    fn paste_point(&mut self) -> (u32, u32) {
+        let window = self.window;
+        let mut shot = self.screen.shot();
+        wait_until(WAIT, || {
+            shot = self.screen.shot();
+            near(at(&shot, window, 320, 31), EMBER, 12)
+        });
+        let right = (0..300)
+            .rev()
+            .find(|&x| near(at(&shot, window, x, 16), EMBER, 60))
+            .expect("Return control");
+        (right + 4 + 24, 16)
+    }
+
+    fn click_paste(&mut self) {
+        let (x, y) = self.paste_point();
+        self.screen
+            .click(self.window.x + x as i32, self.window.y + y as i32);
+    }
+
+    /// Key presses that reached the session since the last call, once no
+    /// more arrive.
+    fn presses_until_quiet(&mut self) -> usize {
+        let mut total = 0;
+        loop {
+            let presses = self
+                .listener
+                .take_quiet()
+                .into_iter()
+                .filter(|e| matches!(e, Event::KeyPress(_)))
+                .count();
+            if presses == 0 {
+                return total;
+            }
+            total += presses;
+        }
     }
 
     fn assert_types(&mut self, keysym: u32, text: &str) {
@@ -390,9 +435,102 @@ fn renders_the_bar_banner_and_control_states() {
         }),
         "control bar with an ember line and no banner"
     );
-    save(&rig.screen.shot(), window, "control-bar.png");
+    rig.window = window;
+    let (px, py) = rig.paste_point();
+    let shot = rig.screen.shot();
+    let label = (px - 16..px + 16)
+        .any(|x| (py - 4..py + 4).any(|y| !near(at(&shot, window, x, y), BAR, 40)));
+    assert!(label, "Paste right of Return control");
+    assert!(
+        !near(at(&shot, window, px, 6), EMBER, 60),
+        "only Return control has an ember outline"
+    );
+    save(&shot, window, "control-bar.png");
 
     rig.revoke("L1", "lease-lost");
     thread::sleep(Duration::from_millis(300));
     save(&rig.screen.shot(), window, "status-ended.png");
+}
+
+#[test]
+fn paste_types_host_text_into_the_session_only() {
+    if !xvfb_ready("paste_text") {
+        return;
+    }
+    let class = "pickforge-viewer-paste";
+    let mut rig = Rig::start(class, "self");
+    let text = format!("Olá ß €\t{MARKER}\n");
+    let owner = Owner::start(rig._host.display, Serve::Text(text.into_bytes()));
+
+    // The thumbnail and the watch bar offer no Paste.
+    let thumb = rig.window;
+    rig.screen.click(thumb.x + 150, thumb.y + 16);
+    assert_eq!(rig.viewer.expect("mode")["mode"], "expanded");
+    rig.window = rig.screen.wait_size(class, 640, 512);
+    rig.screen.click(rig.window.x + 150, rig.window.y + 16);
+    rig.viewer.expect_quiet(Duration::from_millis(300));
+    assert_eq!(owner.requests(), 0, "no clipboard read without control");
+
+    rig.grant("L1", 10_000);
+    rig.listener.take_quiet();
+    rig.click_paste();
+    // One trailing line break is dropped; the tab is a Tab key.
+    let want = format!("Olá ß €<Tab>{MARKER}");
+    let mut got = String::new();
+    let typed = wait_until(WAIT, || {
+        rig.listener.poll();
+        got = rig.listener.decode(&rig.listener.presses());
+        got == want
+    });
+    assert!(typed, "typed {got:?}");
+    rig.viewer.expect_quiet(Duration::from_millis(300));
+    rig.listener.events.clear();
+    assert_eq!(rig.presses_until_quiet(), 0, "no Return after the text");
+    assert_eq!(owner.requests(), 1, "one read per click");
+    rig.assert_released();
+
+    let output = rig.viewer.output.lock().unwrap().clone();
+    assert!(!output.contains(MARKER), "the text reached viewer output");
+    for selection in ["CLIPBOARD", "PRIMARY"] {
+        assert_eq!(
+            selection_owner(rig._session.display, selection),
+            x11rb::NONE,
+            "{selection} on the session display has an owner"
+        );
+    }
+}
+
+#[test]
+fn a_long_paste_stops_at_lease_loss_and_collapse() {
+    if !xvfb_ready("paste_stops") {
+        return;
+    }
+    let class = "pickforge-viewer-paste-stop";
+    let mut rig = Rig::start_controlling(class);
+    let long = "a".repeat(4000);
+    let _owner = Owner::start(rig._host.display, Serve::Text(long.into_bytes()));
+
+    for stop in ["lease-lost", "collapse"] {
+        rig.listener.take_quiet();
+        rig.click_paste();
+        let started = wait_until(WAIT, || {
+            rig.listener.poll();
+            !rig.listener.presses().is_empty()
+        });
+        assert!(started, "{stop}: the paste started");
+        if stop == "lease-lost" {
+            rig.revoke("L1", "lease-lost");
+        } else {
+            rig.viewer.send(r#"{"cmd":"setMode","mode":"thumbnail"}"#);
+            assert_eq!(rig.viewer.expect("mode")["mode"], "thumbnail");
+        }
+        let typed = rig.presses_until_quiet();
+        assert!(typed > 0 && typed < 4000, "{stop}: {typed} presses");
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(rig.presses_until_quiet(), 0, "{stop}: typing went on");
+        rig.assert_released();
+        if stop == "lease-lost" {
+            rig.grant("L2", 10_000);
+        }
+    }
 }
