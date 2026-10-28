@@ -158,8 +158,6 @@ npm or GitHub releases. (#398)
   DevTools and AT-SPI origins, up to 4 MiB each, redacted and stored as plain
   text. An unavailable source is recorded with its reason. Schema v1 to v3
   inputs and recorded runs stay valid. (#352)
-- Viewer window placement on Hyprland also works with a hyprlang config, on
-  Hyprland 0.53 and later. (#228)
 
 ## Fixes
 
