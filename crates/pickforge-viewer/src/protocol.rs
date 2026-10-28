@@ -243,19 +243,23 @@ impl<R: BufRead> LineReader<R> {
             let consumed = newline.map_or(take, |at| at + 1);
             self.inner.consume(consumed);
             if newline.is_some() {
-                if std::mem::take(&mut self.overflow) {
-                    return Ok(Some(Line::TooLong));
-                }
-                let mut line = std::mem::take(&mut self.buf);
-                if line.last() == Some(&b'\r') {
-                    line.pop();
-                }
-                if line.len() > MAX_LINE {
-                    return Ok(Some(Line::TooLong));
-                }
-                return Ok(Some(Line::Message(line)));
+                return Ok(Some(self.finish_line()));
             }
         }
+    }
+
+    fn finish_line(&mut self) -> Line {
+        if std::mem::take(&mut self.overflow) {
+            return Line::TooLong;
+        }
+        let mut line = std::mem::take(&mut self.buf);
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        if line.len() > MAX_LINE {
+            return Line::TooLong;
+        }
+        Line::Message(line)
     }
 }
 

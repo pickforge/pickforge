@@ -518,25 +518,33 @@ impl App {
                 }
             }
             (ElementState::Pressed, _) => {
-                let Some(bar) = &self.bar else {
-                    return;
-                };
-                if let Some(hit) = bar.hit(x, y) {
-                    self.pressed = Some(hit);
-                    self.damage_bar();
-                } else if bar.rect.contains(x, y) {
-                    if let Some(window) = &self.window {
-                        let _ = window.drag_window();
-                    }
-                }
+                self.press_bar(x, y);
             }
             (ElementState::Released, _) => {
-                if let Some(pressed) = self.pressed.take() {
-                    self.damage_bar();
-                    if self.hover == Some(pressed) {
-                        self.activate(pressed);
-                    }
-                }
+                self.release_bar();
+            }
+        }
+    }
+
+    fn press_bar(&mut self, x: f64, y: f64) {
+        let Some(bar) = &self.bar else {
+            return;
+        };
+        if let Some(hit) = bar.hit(x, y) {
+            self.pressed = Some(hit);
+            self.damage_bar();
+        } else if bar.rect.contains(x, y) {
+            if let Some(window) = &self.window {
+                let _ = window.drag_window();
+            }
+        }
+    }
+
+    fn release_bar(&mut self) {
+        if let Some(pressed) = self.pressed.take() {
+            self.damage_bar();
+            if self.hover == Some(pressed) {
+                self.activate(pressed);
             }
         }
     }
@@ -621,32 +629,7 @@ impl App {
             return;
         }
 
-        // Rescale the session rows that changed.
-        if let Some(scaler) = &mut self.scaler {
-            let rows = if self.rescale_all {
-                0..self.image.h
-            } else if let Some(d) = self.src_dirty {
-                scaler.dst_rows_for(d.y.max(0) as u32..d.bottom().max(0) as u32)
-            } else {
-                0..0
-            };
-            if !rows.is_empty() {
-                let shared = self.shared.clone();
-                let s = shared.lock().unwrap();
-                scaler.scale_rows(
-                    &s.frame.pixels,
-                    s.frame.width as usize,
-                    &mut self.scaled,
-                    self.image.w as usize,
-                    rows.clone(),
-                );
-                drop(s);
-                let top = self.image.y;
-                self.damage_rows(top + rows.start as i32, top + rows.end as i32);
-            }
-        }
-        self.rescale_all = false;
-        self.src_dirty = None;
+        self.rescale_dirty_rows();
 
         let cursor = self.cursor_rect();
         let cursor_rect = cursor.map(|(r, _)| r.intersect(&self.image));
@@ -702,6 +685,35 @@ impl App {
                 scale: self.metrics.scale,
             });
         }
+    }
+
+    fn rescale_dirty_rows(&mut self) {
+        // Rescale the session rows that changed.
+        if let Some(scaler) = &mut self.scaler {
+            let rows = if self.rescale_all {
+                0..self.image.h
+            } else if let Some(d) = self.src_dirty {
+                scaler.dst_rows_for(d.y.max(0) as u32..d.bottom().max(0) as u32)
+            } else {
+                0..0
+            };
+            if !rows.is_empty() {
+                let shared = self.shared.clone();
+                let s = shared.lock().unwrap();
+                scaler.scale_rows(
+                    &s.frame.pixels,
+                    s.frame.width as usize,
+                    &mut self.scaled,
+                    self.image.w as usize,
+                    rows.clone(),
+                );
+                drop(s);
+                let top = self.image.y;
+                self.damage_rows(top + rows.start as i32, top + rows.end as i32);
+            }
+        }
+        self.rescale_all = false;
+        self.src_dirty = None;
     }
 
     /// Repaints canvas rows `y0..y1`: letterbox, image, cursor, status and

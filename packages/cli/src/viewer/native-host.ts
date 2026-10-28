@@ -40,11 +40,14 @@ export function readViewerLines(stream: NodeJS.ReadableStream, onMessage: (messa
   });
 }
 
+function validReadyScale(scale: unknown): boolean {
+  return typeof scale === "number" && Number.isFinite(scale) && scale > 0;
+}
+
 function validReady(message: Record<string, unknown>, record: NativeViewerLaunchRecord, version: string): boolean {
-  return message.version === version && message.pid === record.viewerPid &&
-    ["wayland", "x11"].includes(String(message.backend)) && typeof message.scale === "number" &&
-    Number.isFinite(message.scale) && message.scale > 0 &&
-    processIdentityMatches({ pid: record.viewerPid, startTicks: record.viewerStartTicks });
+  if (message.version !== version || message.pid !== record.viewerPid) return false;
+  if (!["wayland", "x11"].includes(String(message.backend)) || !validReadyScale(message.scale)) return false;
+  return processIdentityMatches({ pid: record.viewerPid, startTicks: record.viewerStartTicks });
 }
 
 interface HostOperation {

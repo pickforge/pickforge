@@ -394,29 +394,9 @@ impl Bar {
             palette::WHITE,
             palette::HAIRLINE,
         );
-        let radius = metrics.px(6.0);
         let font = metrics.font_px();
         for &(button, r) in &self.buttons {
-            let is_pressed = pressed == Some(button) && hover == Some(button);
-            if is_pressed {
-                canvas.rounded(r, radius, palette::WHITE, palette::PRESSED);
-            } else if hover == Some(button) || pressed == Some(button) {
-                canvas.rounded(r, radius, palette::WHITE, palette::HOVER);
-            }
-            if hover == Some(button) || is_pressed {
-                canvas.rounded_outline(
-                    r,
-                    radius,
-                    metrics.px(1.0),
-                    palette::WHITE,
-                    palette::HAIRLINE_STRONG,
-                );
-            }
-            let color = if hover == Some(button) || is_pressed {
-                palette::TEXT
-            } else {
-                blend(palette::TEXT, palette::SURFACE_1, 40)
-            };
+            let color = draw_button_background(canvas, metrics, button, r, hover, pressed);
             let cx = r.x as f32 + r.w as f32 / 2.0;
             let cy = r.y as f32 + r.h as f32 / 2.0;
             match button {
@@ -437,6 +417,37 @@ impl Bar {
                 }
             }
         }
+    }
+}
+
+fn draw_button_background(
+    canvas: &mut Canvas,
+    metrics: Metrics,
+    button: Button,
+    r: Rect,
+    hover: Option<Button>,
+    pressed: Option<Button>,
+) -> u32 {
+    let radius = metrics.px(6.0);
+    let is_pressed = pressed == Some(button) && hover == Some(button);
+    if is_pressed {
+        canvas.rounded(r, radius, palette::WHITE, palette::PRESSED);
+    } else if hover == Some(button) || pressed == Some(button) {
+        canvas.rounded(r, radius, palette::WHITE, palette::HOVER);
+    }
+    if hover == Some(button) || is_pressed {
+        canvas.rounded_outline(
+            r,
+            radius,
+            metrics.px(1.0),
+            palette::WHITE,
+            palette::HAIRLINE_STRONG,
+        );
+    }
+    if hover == Some(button) || is_pressed {
+        palette::TEXT
+    } else {
+        blend(palette::TEXT, palette::SURFACE_1, 40)
     }
 }
 

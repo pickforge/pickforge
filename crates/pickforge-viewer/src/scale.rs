@@ -31,51 +31,63 @@ impl Taps {
         };
         taps.starts.push(0);
         if dst < src {
-            // Destination pixel i covers [i * src, (i + 1) * src) and source
-            // pixel j covers [j * dst, (j + 1) * dst), in units of 1/dst
-            // source pixels.
-            taps.denom = src;
-            let (src, dst) = (src as u64, dst as u64);
-            for i in 0..dst {
-                let lo = i * src;
-                let hi = lo + src;
-                for j in lo / dst..hi.div_ceil(dst) {
-                    let overlap = hi.min((j + 1) * dst) - lo.max(j * dst);
-                    if overlap > 0 {
-                        taps.src.push(j as u32);
-                        taps.weight.push(overlap as u32);
-                    }
-                }
-                taps.starts.push(taps.src.len() as u32);
-            }
+            taps.add_area(src, dst);
         } else if dst > src {
-            // Bilinear on pixel centers, in 1/256 steps.
-            taps.denom = 256;
-            let (src, dst) = (src as i64, dst as i64);
-            for i in 0..dst {
-                let center = ((2 * i + 1) * src * 256 / (2 * dst) - 128).max(0);
-                let j0 = (center >> 8).min(src - 1);
-                let frac = if j0 == src - 1 {
-                    0
-                } else {
-                    (center & 255) as u32
-                };
-                taps.src.push(j0 as u32);
-                taps.weight.push(256 - frac);
-                if frac > 0 {
-                    taps.src.push(j0 as u32 + 1);
-                    taps.weight.push(frac);
-                }
-                taps.starts.push(taps.src.len() as u32);
-            }
+            taps.add_bilinear(src, dst);
         } else {
-            for i in 0..dst {
-                taps.src.push(i);
-                taps.weight.push(1);
-                taps.starts.push(taps.src.len() as u32);
-            }
+            taps.add_identity(dst);
         }
         taps
+    }
+
+    fn add_area(&mut self, src: u32, dst: u32) {
+        // Destination pixel i covers [i * src, (i + 1) * src) and source
+        // pixel j covers [j * dst, (j + 1) * dst), in units of 1/dst
+        // source pixels.
+        self.denom = src;
+        let (src, dst) = (src as u64, dst as u64);
+        for i in 0..dst {
+            let lo = i * src;
+            let hi = lo + src;
+            for j in lo / dst..hi.div_ceil(dst) {
+                let overlap = hi.min((j + 1) * dst) - lo.max(j * dst);
+                if overlap > 0 {
+                    self.src.push(j as u32);
+                    self.weight.push(overlap as u32);
+                }
+            }
+            self.starts.push(self.src.len() as u32);
+        }
+    }
+
+    fn add_bilinear(&mut self, src: u32, dst: u32) {
+        // Bilinear on pixel centers, in 1/256 steps.
+        self.denom = 256;
+        let (src, dst) = (src as i64, dst as i64);
+        for i in 0..dst {
+            let center = ((2 * i + 1) * src * 256 / (2 * dst) - 128).max(0);
+            let j0 = (center >> 8).min(src - 1);
+            let frac = if j0 == src - 1 {
+                0
+            } else {
+                (center & 255) as u32
+            };
+            self.src.push(j0 as u32);
+            self.weight.push(256 - frac);
+            if frac > 0 {
+                self.src.push(j0 as u32 + 1);
+                self.weight.push(frac);
+            }
+            self.starts.push(self.src.len() as u32);
+        }
+    }
+
+    fn add_identity(&mut self, dst: u32) {
+        for i in 0..dst {
+            self.src.push(i);
+            self.weight.push(1);
+            self.starts.push(self.src.len() as u32);
+        }
     }
 
     fn range(&self, i: u32) -> Range<usize> {
@@ -167,8 +179,6 @@ impl Scaler {
             return;
         }
 
-        let denom = self.x.denom as u64 * self.y.denom as u64;
-        let half = denom / 2;
         let mut start = rows.start;
         while start < rows.end {
             let end = (start + ROW_BATCH).min(rows.end);
@@ -176,47 +186,58 @@ impl Scaler {
             let last = self.y.last_src(end - 1);
             let band = (last - first + 1) as usize;
 
-            // Horizontal pass for every source row the batch reads.
-            self.scratch.resize(band * dw * 3, 0);
-            for r in 0..band {
-                let line = &src[(first as usize + r) * src_stride..][..sw];
-                let out = &mut self.scratch[r * dw * 3..][..dw * 3];
-                for x in 0..dw {
-                    let (mut cr, mut cg, mut cb) = (0u32, 0u32, 0u32);
-                    for t in self.x.range(x as u32) {
-                        let p = line[self.x.src[t] as usize];
-                        let w = self.x.weight[t];
-                        cr += ((p >> 16) & 0xff) * w;
-                        cg += ((p >> 8) & 0xff) * w;
-                        cb += (p & 0xff) * w;
-                    }
-                    out[x * 3] = cr;
-                    out[x * 3 + 1] = cg;
-                    out[x * 3 + 2] = cb;
-                }
-            }
-
-            // Vertical pass.
-            for y in start..end {
-                let taps = self.y.range(y);
-                let out = &mut dst[y as usize * dst_stride..][..dw];
-                for (x, pixel) in out.iter_mut().enumerate() {
-                    let (mut cr, mut cg, mut cb) = (0u64, 0u64, 0u64);
-                    for t in taps.clone() {
-                        let row = (self.y.src[t] - first) as usize;
-                        let w = self.y.weight[t] as u64;
-                        let h = &self.scratch[(row * dw + x) * 3..][..3];
-                        cr += h[0] as u64 * w;
-                        cg += h[1] as u64 * w;
-                        cb += h[2] as u64 * w;
-                    }
-                    let r = ((cr + half) / denom) as u32;
-                    let g = ((cg + half) / denom) as u32;
-                    let b = ((cb + half) / denom) as u32;
-                    *pixel = (r << 16) | (g << 8) | b;
-                }
-            }
+            self.scale_horizontal(src, src_stride, first, band);
+            self.scale_vertical(dst, dst_stride, start..end, first);
             start = end;
+        }
+    }
+
+    fn scale_horizontal(&mut self, src: &[u32], src_stride: usize, first: u32, band: usize) {
+        let (sw, dw) = (self.src_w as usize, self.dst_w as usize);
+        // Horizontal pass for every source row the batch reads.
+        self.scratch.resize(band * dw * 3, 0);
+        for r in 0..band {
+            let line = &src[(first as usize + r) * src_stride..][..sw];
+            let out = &mut self.scratch[r * dw * 3..][..dw * 3];
+            for x in 0..dw {
+                let (mut cr, mut cg, mut cb) = (0u32, 0u32, 0u32);
+                for t in self.x.range(x as u32) {
+                    let p = line[self.x.src[t] as usize];
+                    let w = self.x.weight[t];
+                    cr += ((p >> 16) & 0xff) * w;
+                    cg += ((p >> 8) & 0xff) * w;
+                    cb += (p & 0xff) * w;
+                }
+                out[x * 3] = cr;
+                out[x * 3 + 1] = cg;
+                out[x * 3 + 2] = cb;
+            }
+        }
+    }
+
+    fn scale_vertical(&self, dst: &mut [u32], dst_stride: usize, rows: Range<u32>, first: u32) {
+        let dw = self.dst_w as usize;
+        let denom = self.x.denom as u64 * self.y.denom as u64;
+        let half = denom / 2;
+        // Vertical pass.
+        for y in rows {
+            let taps = self.y.range(y);
+            let out = &mut dst[y as usize * dst_stride..][..dw];
+            for (x, pixel) in out.iter_mut().enumerate() {
+                let (mut cr, mut cg, mut cb) = (0u64, 0u64, 0u64);
+                for t in taps.clone() {
+                    let row = (self.y.src[t] - first) as usize;
+                    let w = self.y.weight[t] as u64;
+                    let h = &self.scratch[(row * dw + x) * 3..][..3];
+                    cr += h[0] as u64 * w;
+                    cg += h[1] as u64 * w;
+                    cb += h[2] as u64 * w;
+                }
+                let r = ((cr + half) / denom) as u32;
+                let g = ((cg + half) / denom) as u32;
+                let b = ((cb + half) / denom) as u32;
+                *pixel = (r << 16) | (g << 8) | b;
+            }
         }
     }
 

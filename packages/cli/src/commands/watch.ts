@@ -10,6 +10,7 @@ import {
   renewHumanTakeover,
   startHumanTakeover,
   type HumanTakeoverHandle,
+  type NativeViewerHostIdentity,
   type TakeoverEndReason,
   withSessionVncLock,
 } from "@pickforge/lab-desktop-linux";
@@ -360,6 +361,20 @@ async function watchWithBrowser(
   };
 }
 
+async function waitForNativeViewer(sessionId: string, host: NativeViewerHostIdentity): Promise<void> {
+  let interrupted = false;
+  let stopping: Promise<void> | undefined;
+  let stopFailure: unknown;
+  const stop = (): void => { interrupted = true; stopping ??= stopNativeViewerHost(sessionId).catch((error: unknown) => { stopFailure = error; }); };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+  try {
+    while (!interrupted && processIdentityMatches({ pid: host.pid, startTicks: host.startTicks })) await sleep(100);
+    await stopping;
+    if (stopFailure !== undefined) throw stopFailure;
+  } finally { process.off("SIGINT", stop); process.off("SIGTERM", stop); }
+}
+
 export async function watchDesktopSession(
   opts: WatchOptions,
 ): Promise<CommandResult> {
@@ -382,17 +397,7 @@ export async function watchDesktopSession(
     const data = { sessionId: record.id, opened: true, viewer: "native", launchId: host.launchId,
       hostPid: host.pid, viewerPid: host.viewerPid };
     if (opts.waitForViewerExit !== false) {
-      let interrupted = false;
-      let stopping: Promise<void> | undefined;
-      let stopFailure: unknown;
-      const stop = (): void => { interrupted = true; stopping ??= stopNativeViewerHost(record.id).catch((error: unknown) => { stopFailure = error; }); };
-      process.on("SIGINT", stop);
-      process.on("SIGTERM", stop);
-      try {
-        while (!interrupted && processIdentityMatches({ pid: host.pid, startTicks: host.startTicks })) await sleep(100);
-        await stopping;
-        if (stopFailure !== undefined) throw stopFailure;
-      } finally { process.off("SIGINT", stop); process.off("SIGTERM", stop); }
+      await waitForNativeViewer(record.id, host);
     }
     return { data, lines: [`native viewer ${opts.waitForViewerExit === false ? "opened" : "closed"} for session ${record.id}`] };
   }

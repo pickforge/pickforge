@@ -484,85 +484,38 @@ impl Capture {
             shared.lock().unwrap().ended = Some(reason);
             notify();
         };
-        let full = Rect::new(0, 0, self.width, self.height);
-        let mut pending = Some(full);
-        let mut cursor_shape = self.xfixes;
-        let mut cursor_moved = true;
-        let mut last_fetch: Option<Instant> = None;
+        let mut state = CaptureSchedule::new(self.width, self.height, self.xfixes);
         let mut next_proc = Instant::now();
-        let mut next_pointer_poll = Instant::now();
-        let mut was_paused = false;
 
         loop {
             if control.stopped.load(Ordering::SeqCst) {
                 return;
             }
-            loop {
-                match self.conn.poll_for_event() {
-                    Ok(Some(Event::DamageNotify(e))) => {
-                        let area = Rect::new(
-                            e.area.x as i32,
-                            e.area.y as i32,
-                            e.area.width as u32,
-                            e.area.height as u32,
-                        );
-                        pending = Some(pending.map_or(area, |p| p.union(&area)));
-                    }
-                    Ok(Some(Event::XfixesCursorNotify(_))) => cursor_shape = true,
-                    Ok(Some(Event::XinputRawMotion(_))) => cursor_moved = true,
-                    Ok(Some(Event::Error(e))) => log(&format!("X error {:?}", e.error_kind)),
-                    Ok(Some(_)) => {}
-                    Ok(None) => break,
-                    Err(e) => return end(EndReason::X11Eof, &e.to_string()),
-                }
+            if let Err(e) = self.drain_events(&mut state) {
+                return end(EndReason::X11Eof, &e.to_string());
             }
 
             let now = Instant::now();
             if now >= next_proc {
-                if let Some((pid, ticks)) = xvfb {
-                    if procstat::read_start_ticks(pid) != Some(ticks) {
-                        return end(EndReason::XvfbGone, "the Xvfb process changed or exited");
-                    }
+                if xvfb.is_some_and(|(pid, ticks)| procstat::read_start_ticks(pid) != Some(ticks)) {
+                    return end(EndReason::XvfbGone, "the Xvfb process changed or exited");
                 }
                 next_proc = now + PROC_INTERVAL;
             }
 
-            let paused = control.is_paused();
-            if was_paused && !paused {
-                pending = Some(full);
-                cursor_shape = self.xfixes;
-                cursor_moved = true;
-            }
-            was_paused = paused;
-
-            let mut timeout = next_proc.saturating_duration_since(now);
-            if !paused {
-                if !self.xi2 {
-                    if now >= next_pointer_poll {
-                        cursor_moved = true;
-                        next_pointer_poll = now + POINTER_POLL;
-                    }
-                    timeout = timeout.min(next_pointer_poll.saturating_duration_since(now));
+            let timeout = match self.capture_due(&shared, &control, &mut state, now, next_proc) {
+                Ok(CaptureStep::Fetched(true)) => {
+                    notify();
+                    continue;
                 }
-                if pending.is_some() || cursor_shape || cursor_moved {
-                    let due = last_fetch.map_or(now, |t| t + FETCH_INTERVAL);
-                    if now >= due {
-                        last_fetch = Some(now);
-                        let update =
-                            self.update(&shared, pending.take(), cursor_shape, cursor_moved);
-                        cursor_shape = false;
-                        cursor_moved = false;
-                        match update {
-                            Ok(true) => notify(),
-                            Ok(false) => {}
-                            Err(CaptureError::Closed(e)) => return end(EndReason::X11Eof, &e),
-                            Err(e) => log(&e.to_string()),
-                        }
-                        continue;
-                    }
-                    timeout = timeout.min(due - now);
+                Ok(CaptureStep::Fetched(false)) => continue,
+                Ok(CaptureStep::Wait(timeout)) => timeout,
+                Err(CaptureError::Closed(e)) => return end(EndReason::X11Eof, &e),
+                Err(e) => {
+                    log(&e.to_string());
+                    continue;
                 }
-            }
+            };
 
             if let Err(e) = self.conn.flush() {
                 return end(EndReason::X11Eof, &e.to_string());
@@ -573,6 +526,63 @@ impl Capture {
             );
             control.drain();
         }
+    }
+
+    fn drain_events(&self, state: &mut CaptureSchedule) -> Result<(), ConnectionError> {
+        loop {
+            match self.conn.poll_for_event() {
+                Ok(Some(Event::DamageNotify(e))) => {
+                    let area = Rect::new(
+                        e.area.x as i32,
+                        e.area.y as i32,
+                        e.area.width as u32,
+                        e.area.height as u32,
+                    );
+                    state.pending = Some(state.pending.map_or(area, |p| p.union(&area)));
+                }
+                Ok(Some(Event::XfixesCursorNotify(_))) => state.cursor_shape = true,
+                Ok(Some(Event::XinputRawMotion(_))) => state.cursor_moved = true,
+                Ok(Some(Event::Error(e))) => log(&format!("X error {:?}", e.error_kind)),
+                Ok(Some(_)) => {}
+                Ok(None) => return Ok(()),
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    fn capture_due(
+        &mut self,
+        shared: &Mutex<Shared>,
+        control: &Control,
+        state: &mut CaptureSchedule,
+        now: Instant,
+        next_proc: Instant,
+    ) -> Result<CaptureStep, CaptureError> {
+        let full = Rect::new(0, 0, self.width, self.height);
+        let paused = control.is_paused();
+        state.resume(paused, full, self.xfixes);
+        let mut timeout = next_proc.saturating_duration_since(now);
+        if paused {
+            return Ok(CaptureStep::Wait(timeout));
+        }
+        timeout = state.pointer_timeout(self.xi2, now, timeout);
+        if state.pending.is_none() && !state.cursor_shape && !state.cursor_moved {
+            return Ok(CaptureStep::Wait(timeout));
+        }
+        let due = state.last_fetch.map_or(now, |t| t + FETCH_INTERVAL);
+        if now < due {
+            return Ok(CaptureStep::Wait(timeout.min(due - now)));
+        }
+        state.last_fetch = Some(now);
+        let update = self.update(
+            shared,
+            state.pending.take(),
+            state.cursor_shape,
+            state.cursor_moved,
+        );
+        state.cursor_shape = false;
+        state.cursor_moved = false;
+        update.map(CaptureStep::Fetched)
     }
 
     fn update(
@@ -611,6 +621,53 @@ impl Capture {
             }
         }
         Ok(changed)
+    }
+}
+
+enum CaptureStep {
+    Fetched(bool),
+    Wait(Duration),
+}
+
+struct CaptureSchedule {
+    pending: Option<Rect>,
+    cursor_shape: bool,
+    cursor_moved: bool,
+    last_fetch: Option<Instant>,
+    next_pointer_poll: Instant,
+    was_paused: bool,
+}
+
+impl CaptureSchedule {
+    fn new(width: u32, height: u32, xfixes: bool) -> Self {
+        Self {
+            pending: Some(Rect::new(0, 0, width, height)),
+            cursor_shape: xfixes,
+            cursor_moved: true,
+            last_fetch: None,
+            next_pointer_poll: Instant::now(),
+            was_paused: false,
+        }
+    }
+
+    fn resume(&mut self, paused: bool, full: Rect, xfixes: bool) {
+        if self.was_paused && !paused {
+            self.pending = Some(full);
+            self.cursor_shape = xfixes;
+            self.cursor_moved = true;
+        }
+        self.was_paused = paused;
+    }
+
+    fn pointer_timeout(&mut self, xi2: bool, now: Instant, timeout: Duration) -> Duration {
+        if xi2 {
+            return timeout;
+        }
+        if now >= self.next_pointer_poll {
+            self.cursor_moved = true;
+            self.next_pointer_poll = now + POINTER_POLL;
+        }
+        timeout.min(self.next_pointer_poll.saturating_duration_since(now))
     }
 }
 

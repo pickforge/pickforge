@@ -36,13 +36,18 @@ const records = await Promise.all([nativeId, browserId].map(async (id) => {
 }));
 const native = await findNativeViewerHost(nativeId);
 if (!native) throw new Error("Open a native watch on --native-session first");
+function isLiveChromiumLaunch(record) {
+  if (!record || record.kind === "native") return false;
+  if (record.browser.kind !== "chromium" || !record.pid || !record.startTicks) return false;
+  return processIdentityMatches({ pid: record.pid, startTicks: record.startTicks });
+}
 const browser = await withViewerDir(browserId, process.env, false, async (directory) => {
   const launches = await directory.openChild("launches");
   try {
     const matches = [];
     for (const name of await launches.readEntryNames()) {
       const record = await readViewerLaunchRecord(browserId, name);
-      if (record && record.kind !== "native" && record.browser.kind === "chromium" && record.pid && record.startTicks && processIdentityMatches({ pid: record.pid, startTicks: record.startTicks })) matches.push(record);
+      if (isLiveChromiumLaunch(record)) matches.push(record);
     }
     if (matches.length !== 1) throw new Error("Open exactly one Chromium noVNC watch on --novnc-session first");
     return matches[0];

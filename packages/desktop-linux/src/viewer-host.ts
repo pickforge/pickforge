@@ -25,9 +25,10 @@ function positive(value: unknown): value is number {
 export function validNativeViewerHost(value: unknown, sessionId: string, env: EnvLike): value is NativeViewerHostIdentity {
   if (typeof value !== "object" || value === null) return false;
   const host = value as NativeViewerHostIdentity;
-  return typeof host.version === "string" && /^[0-9A-Za-z.+-]+$/.test(host.version) && host.sessionId === sessionId && /^[a-f0-9]{32}$/.test(host.launchId) &&
-    [host.pid, host.startTicks, host.viewerPid, host.viewerStartTicks, host.socketIno].every(positive) &&
-    Number.isSafeInteger(host.socketDev) && host.socket === path.join(sessionViewerDir(sessionId, env), "host.sock");
+  if (typeof host.version !== "string" || !/^[0-9A-Za-z.+-]+$/.test(host.version)) return false;
+  if (host.sessionId !== sessionId || !/^[a-f0-9]{32}$/.test(host.launchId)) return false;
+  if (![host.pid, host.startTicks, host.viewerPid, host.viewerStartTicks, host.socketIno].every(positive)) return false;
+  return Number.isSafeInteger(host.socketDev) && host.socket === path.join(sessionViewerDir(sessionId, env), "host.sock");
 }
 
 function sameHost(actual: NativeViewerHostIdentity, expected: NativeViewerHostIdentity): boolean {
@@ -42,8 +43,10 @@ export async function requestNativeViewerHost(host: NativeViewerHostIdentity, re
     throw new Error("Native viewer identity changed");
   }
   const stats = await fs.promises.lstat(host.socket);
-  if (!stats.isSocket() || stats.uid !== process.getuid?.() || (stats.mode & 0o777) !== 0o600 ||
-      stats.ino !== host.socketIno || stats.dev !== host.socketDev) throw new Error("Unsafe viewer socket");
+  if (!stats.isSocket() || stats.uid !== process.getuid?.() || (stats.mode & 0o777) !== 0o600) {
+    throw new Error("Unsafe viewer socket");
+  }
+  if (stats.ino !== host.socketIno || stats.dev !== host.socketDev) throw new Error("Unsafe viewer socket");
   return new Promise((resolve, reject) => {
     const socket = net.connect(host.socket);
     let pending = Buffer.alloc(0);
@@ -88,8 +91,10 @@ export async function stopNativeViewerHost(sessionId: string, env: EnvLike = pro
     const host: unknown = JSON.parse(json);
     if (!validNativeViewerHost(host, sessionId, env)) throw new Error("Invalid viewer host readiness");
     const record = await readViewerLaunchRecord(sessionId, host.launchId, env);
-    if (record?.kind !== "native" || record.hostPid !== host.pid || record.hostStartTicks !== host.startTicks ||
-        record.viewerPid !== host.viewerPid || record.viewerStartTicks !== host.viewerStartTicks) {
+    if (record?.kind !== "native" || record.hostPid !== host.pid || record.hostStartTicks !== host.startTicks) {
+      throw new Error("Viewer launch identity differs from readiness");
+    }
+    if (record.viewerPid !== host.viewerPid || record.viewerStartTicks !== host.viewerStartTicks) {
       throw new Error("Viewer launch identity differs from readiness");
     }
     await stopNativeViewerProcesses(record);
@@ -104,8 +109,10 @@ function cpuWaitMs(pid: number): number {
 }
 
 function assertStartedHost(host: NativeViewerHostIdentity, identity: ProcessIdentity, version: string): void {
-  if (host.pid !== identity.pid || host.startTicks !== identity.startTicks || host.version !== version ||
-      !processIdentityMatches(identity) ||
+  if (host.pid !== identity.pid || host.startTicks !== identity.startTicks || host.version !== version) {
+    throw new Error("Native viewer host readiness identity differs");
+  }
+  if (!processIdentityMatches(identity) ||
       !processIdentityMatches({ pid: host.viewerPid, startTicks: host.viewerStartTicks })) {
     throw new Error("Native viewer host readiness identity differs");
   }
