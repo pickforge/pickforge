@@ -21,7 +21,7 @@ describe("buildChromeArgs", () => {
       "--gcm-checkin-url=https://127.0.0.1:0",
       "--gcm-registration-url=https://127.0.0.1:0",
       "--gcm-mcs-endpoint=https://127.0.0.1:0",
-      "--gaia-url=https://127.0.0.1:0",
+      '--gaia-config-contents={"urls":{"gaia_url":{"url":"https://127.0.0.1:0"}}}',
       "--component-updater=url-source=https://127.0.0.1:0",
       "--disable-component-update",
       "--disable-domain-reliability",
@@ -36,6 +36,14 @@ describe("buildChromeArgs", () => {
     expect(args).toContain("--remote-debugging-port=0");
     expect(args).not.toContain("--no-sandbox");
     expect(args.some((arg) => /^(--headless|--proxy-server|--host-resolver-rules)/.test(arg))).toBe(false);
+  });
+
+  it("keeps the Gaia sink without a flag that shows Chrome's unsupported-flag bar", () => {
+    const args = buildChromeArgs({ profileDir: "/tmp/p" });
+    // --gaia-url is on Chrome's bad-flags list. --test-type would hide the bar
+    // but exposes chrome.test to extensions, and --enable-automation would
+    // replace it with an automation bar.
+    expect(args.some((arg) => /^--(gaia-url|test-type|enable-automation)(=|$)/.test(arg))).toBe(false);
   });
 
   it("adds a window size only when both dimensions are given", () => {

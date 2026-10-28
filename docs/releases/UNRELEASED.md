@@ -125,6 +125,14 @@ session teardown are also more reliable.
   contention no longer uses up the 250 ms freeze limit. If the limit still
   expires, preparation makes up to three attempts within its 3 second budget.
   When preparation fails, no text is sent. (#222)
+- Browser lab sessions no longer show Chrome's "unsupported command-line flag"
+  bar for `--gaia-url`. Chrome now gets the same loopback sign-in sink through
+  `--gaia-config-contents`, which is not on its list of unsupported flags.
+  (#348)
+- The Flutter skill explains how to keep the Dart MCP server connected. Hot
+  reload and hot restart keep the connection. After a full rebuild, connect
+  again to the new DTD URI. When the server is not connected, the skill uses
+  Pickforge screenshots, the Android UI tree, logcat and adb. (#360)
 - `android_get_ui_tree` returns a compact tree instead of the raw
   uiautomator XML. It keeps every node with text, a content description, a
   resource id or an action, and their hierarchy. Bounds stay in device pixels,
@@ -210,7 +218,6 @@ session teardown are also more reliable.
 - A read-only `watch` or MCP launch from another CLI version replaces the
   native viewer host, even when that host holds live human control. The human
   loses control without warning. (#371)
-- Browser sessions show Chrome's unsupported command-line flag bar. (#348)
 - The native viewer does not start when the session's `host.sock` path is
   longer than 107 bytes, which happens with a `PICKFORGE_HOME` longer than 67
   bytes. `watch` then reports that the viewer host did not report
