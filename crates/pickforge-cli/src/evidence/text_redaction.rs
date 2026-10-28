@@ -271,9 +271,8 @@ enum Frame {
         audit_map: bool,
         key: Key,
     },
-    Array {
-        secret: bool,
-    },
+    /// Only JSON that broke off gives an array a key, as in `["a" "token": "x"]`.
+    Array { secret: bool, key: Key },
 }
 
 impl Frame {
@@ -302,7 +301,8 @@ struct Rewrite {
 
 /// Rewrite JSON token by token until its outer container closes. JSON that is `broken` is read
 /// leniently: other text is copied, or replaced under a secret key, and a closer that does not
-/// match closes back to the container it matches. Its structure is a guess, so inside a secret
+/// match closes back to the container it matches. A string or word before a colon names a key,
+/// even when the comma before it is missing. Its structure is a guess, so inside a secret
 /// container its keys are replaced too.
 fn rewrite_json(json: &str, secret: bool, (lighthouse, broken): (bool, bool)) -> Rewrite {
     let bytes = json.as_bytes();
@@ -313,7 +313,7 @@ fn rewrite_json(json: &str, secret: bool, (lighthouse, broken): (bool, bool)) ->
     while index < bytes.len() {
         let inherited = inherited_secret(&frames, secret);
         let byte = bytes[index];
-        index = match byte {
+        let next = match byte {
             b'"' => push_string(
                 json,
                 index,
@@ -321,21 +321,16 @@ fn rewrite_json(json: &str, secret: bool, (lighthouse, broken): (bool, bool)) ->
                 &mut frames,
                 &mut stored,
             ),
-            b'-' | b'0'..=b'9' => push_number(json, index, inherited, &mut stored),
+            b'-' | b'0'..=b'9' => Some(push_number(json, index, inherited, &mut stored)),
             b'{' | b'[' | b'}' | b']' | b':' | b',' | b' ' | b'\t' | b'\r' | b'\n' => {
                 // Secrecy only grows inward, so `inherited` covers every open container.
                 let mismatched =
                     matches!(byte, b'}' | b']') && frames.last().map(Frame::closer) != Some(byte);
-                if mismatched && inherited {
-                    return Rewrite {
-                        stored,
-                        used: index,
-                        uncertain: true,
-                    };
-                }
-                track_structure(byte, inherited, &mut frames, &mut objects);
-                stored.push(char::from(byte));
-                index + 1
+                (!mismatched || !inherited).then(|| {
+                    track_structure(byte, inherited, &mut frames, &mut objects);
+                    stored.push(char::from(byte));
+                    index + 1
+                })
             }
             _ => push_word(
                 json,
@@ -345,6 +340,14 @@ fn rewrite_json(json: &str, secret: bool, (lighthouse, broken): (bool, bool)) ->
                 &mut stored,
             ),
         };
+        let Some(next) = next else {
+            return Rewrite {
+                stored,
+                used: index,
+                uncertain: true,
+            };
+        };
+        index = next;
         if frames.is_empty() {
             break;
         }
@@ -358,34 +361,65 @@ fn rewrite_json(json: &str, secret: bool, (lighthouse, broken): (bool, bool)) ->
 
 fn inherited_secret(frames: &[Frame], root: bool) -> bool {
     match frames.last() {
-        Some(Frame::Object { secret, key, .. }) => *secret || *key == Key::Secret,
-        Some(Frame::Array { secret }) => *secret,
+        Some(Frame::Object { secret, key, .. } | Frame::Array { secret, key }) => {
+            *secret || *key == Key::Secret
+        }
         None => root,
     }
 }
 
-/// Copy one string token, redacted, and return the index after it.
+/// Copy one string token, redacted, and return the index after it, or None when the structure
+/// became uncertain inside a secret value.
 fn push_string(
     json: &str,
     start: usize,
     (inherited, lighthouse, broken): (bool, bool, bool),
     frames: &mut [Frame],
     stored: &mut String,
-) -> usize {
+) -> Option<usize> {
     let end = string_end(json.as_bytes(), start);
     let token = &json[start..end];
     let root = frames.len() == 1;
-    match frames.last_mut() {
-        Some(Frame::Object { key, audit_map, .. }) if *key == Key::Expected => {
+    match key_slot(frames, colon_follows(json.as_bytes(), end), inherited)? {
+        Some((key, audit_map)) => {
             // A key that does not decode may hide a secret name.
             *key = serde_json::from_str::<String>(token).map_or(Key::Secret, |name| {
-                key_kind(&name, *audit_map, lighthouse && root)
+                key_kind(&name, audit_map, lighthouse && root)
             });
             stored.push_str(&redact_json_string(token, broken && inherited));
         }
-        _ => stored.push_str(&redact_json_string(token, inherited)),
+        None => stored.push_str(&redact_json_string(token, inherited)),
     }
-    end
+    Some(end)
+}
+
+/// The key a string or word names, with whether it is in a Lighthouse audit map, or None for a
+/// value. A token before a colon names a key even without the comma before it; inside a secret
+/// value that leaves the structure uncertain, which is the outer None.
+fn key_slot(
+    frames: &mut [Frame],
+    colon: bool,
+    inherited: bool,
+) -> Option<Option<(&mut Key, bool)>> {
+    let (key, audit_map) = match frames.last_mut() {
+        Some(Frame::Object { key, audit_map, .. }) => (key, *audit_map),
+        Some(Frame::Array { key, .. }) => (key, false),
+        None => return Some(None),
+    };
+    let current = *key;
+    match current {
+        Key::Expected => Some(Some((key, audit_map))),
+        _ if !colon => Some(None),
+        _ if inherited => None,
+        _ => Some(Some((key, audit_map))),
+    }
+}
+
+fn colon_follows(bytes: &[u8], end: usize) -> bool {
+    bytes[end..]
+        .iter()
+        .find(|byte| !matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+        == Some(&b':')
 }
 
 /// An audit id in a Lighthouse report, such as `third-party-cookies`, is not a secret key.
@@ -409,7 +443,7 @@ fn push_word(
     (inherited, lighthouse): (bool, bool),
     frames: &mut [Frame],
     stored: &mut String,
-) -> usize {
+) -> Option<usize> {
     let length = json.as_bytes()[start..]
         .iter()
         .take_while(|byte| {
@@ -419,17 +453,18 @@ fn push_word(
             )
         })
         .count();
-    let word = &json[start..start + length];
+    let end = start + length;
+    let word = &json[start..end];
     let root = frames.len() == 1;
-    match frames.last_mut() {
-        Some(Frame::Object { key, audit_map, .. }) if *key == Key::Expected => {
-            *key = key_kind(word, *audit_map, lighthouse && root);
+    match key_slot(frames, colon_follows(json.as_bytes(), end), inherited)? {
+        Some((key, audit_map)) => {
+            *key = key_kind(word, audit_map, lighthouse && root);
             stored.push_str(if inherited { REDACTED } else { word });
         }
-        _ if inherited && !is_flag(word) && word != "null" => stored.push_str(REDACTED),
-        _ => stored.push_str(word),
+        None if inherited && !is_flag(word) && word != "null" => stored.push_str(REDACTED),
+        None => stored.push_str(word),
     }
-    start + length
+    Some(end)
 }
 
 /// Copy one number token as written, or replace it under a secret key.
@@ -465,13 +500,16 @@ fn track_structure(byte: u8, inherited: bool, frames: &mut Vec<Frame>, objects: 
                 key: Key::Expected,
             });
         }
-        b'[' => frames.push(Frame::Array { secret: inherited }),
+        b'[' => frames.push(Frame::Array {
+            secret: inherited,
+            key: Key::Plain,
+        }),
         b'}' | b']' => close_container(byte, frames, objects),
-        b',' => {
-            if let Some(Frame::Object { key, .. }) = frames.last_mut() {
-                *key = Key::Expected;
-            }
-        }
+        b',' => match frames.last_mut() {
+            Some(Frame::Object { key, .. }) => *key = Key::Expected,
+            Some(Frame::Array { key, .. }) => *key = Key::Plain,
+            None => {}
+        },
         _ => {}
     }
 }
@@ -922,6 +960,29 @@ mod tests {
             redact_text_artifact(json, ArtifactOrigin::DevtoolsConsole),
             r#"{"[REDACTED]":"[REDACTED]","n":1}"#
         );
+    }
+
+    #[test]
+    fn json_with_a_missing_comma_still_finds_later_secret_keys() {
+        let log = r#"{"a":1 "password":{"value":"hunter20"}} [INFO] ok
+{"a":1 "pass\u0077ord":"hunter15"} took 3ms
+["x" "pass\u0077ord":"hunter16"] ok
+{"a":"b" password:hunter17, "n":2} ok
+{"password":"hunter18" "a":"hunter19"} ok
+{"password":"hunter21" : "hunter22"} ok
+"#;
+        let stored = redact_text_artifact(log, ArtifactOrigin::AndroidLogcat);
+        let lines: Vec<&str> = stored.lines().collect();
+        assert_eq!(
+            lines[0],
+            r#"{"a":1 "password":{"[REDACTED]":"[REDACTED]"}} [INFO] ok"#
+        );
+        assert_eq!(lines[1], r#"{"a":1 "pass\u0077ord":"[REDACTED]"} took 3ms"#);
+        assert_eq!(lines[2], r#"["x" "pass\u0077ord":"[REDACTED]"] ok"#);
+        for secret in ["hunter17", "hunter18", "hunter19", "hunter21", "hunter22"] {
+            assert!(!stored.contains(secret), "{secret} in {stored}");
+        }
+        assert!(lines[3].ends_with(r#", "n":2} ok"#), "{stored}");
     }
 
     #[test]
