@@ -145,6 +145,11 @@ pub enum Command {
         lease_id: String,
         reason: RevokeReason,
     },
+    /// An agent click completed at this session pixel.
+    Pulse {
+        x: u32,
+        y: u32,
+    },
     /// A command this version does not know. It is logged and ignored.
     Unknown(String),
 }
@@ -225,8 +230,22 @@ pub fn parse_command(line: &[u8]) -> Result<Command, ParseError> {
         },
         "clearAttention" => Command::ClearAttention,
         "control" => control(object)?,
+        "pulse" => Command::Pulse {
+            x: session_coordinate(object.get("x"), "x")?,
+            y: session_coordinate(object.get("y"), "y")?,
+        },
         other => Command::Unknown(truncate(other, 64)),
     })
+}
+
+/// A session pixel coordinate: an integer from 0 to the X11 limit. The
+/// viewer checks it against the session size.
+fn session_coordinate(value: Option<&Value>, field: &'static str) -> Result<u32, ParseError> {
+    value
+        .and_then(Value::as_u64)
+        .filter(|&n| n <= MAX_LOGICAL_SIDE as u64)
+        .map(|n| n as u32)
+        .ok_or(ParseError::BadField(field))
 }
 
 fn attention_message(value: Option<&Value>) -> Result<String, ParseError> {
@@ -626,6 +645,34 @@ mod tests {
                 reason: RevokeReason::Unavailable
             })
         );
+    }
+
+    #[test]
+    fn parses_pulse_commands() {
+        assert_eq!(
+            parse_command(br#"{"cmd":"pulse","x":0,"y":599,"extra":true}"#),
+            Ok(Command::Pulse { x: 0, y: 599 })
+        );
+        assert_eq!(
+            parse_command(br#"{"cmd":"pulse","x":32767,"y":32767}"#),
+            Ok(Command::Pulse { x: 32767, y: 32767 })
+        );
+        let bad = [
+            (r#"{"cmd":"pulse","y":3}"#, "x"),
+            (r#"{"cmd":"pulse","x":3}"#, "y"),
+            (r#"{"cmd":"pulse","x":-1,"y":3}"#, "x"),
+            (r#"{"cmd":"pulse","x":1.5,"y":3}"#, "x"),
+            (r#"{"cmd":"pulse","x":"1","y":3}"#, "x"),
+            (r#"{"cmd":"pulse","x":1,"y":32768}"#, "y"),
+            (r#"{"cmd":"pulse","x":1,"y":null}"#, "y"),
+        ];
+        for (line, field) in bad {
+            assert_eq!(
+                parse_command(line.as_bytes()),
+                Err(ParseError::BadField(field)),
+                "{line}"
+            );
+        }
     }
 
     #[test]

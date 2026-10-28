@@ -7,7 +7,7 @@ import {
   HumanLeaseHeldError, readProcessIdentity, sessionDataDir, type DirHandle, type EnvLike, type ProcessIdentity,
 } from "@pickforge/lab-core";
 import { withSessionVncLock, recoverStaleTakeoverLocked, SESSION_VNC_LOCK_TIMEOUT_MS } from "./session.js";
-import { verifyOwnedDisplayTarget } from "./x11-target.js";
+import { verifyOwnedDisplayTarget, type OwnedDisplayIdentity } from "./x11-target.js";
 import {
   withViewerDir, readViewerPrivateFile, sessionViewerDir, readViewerLaunchRecord,
   stopNativeViewerProcesses,
@@ -134,17 +134,48 @@ export async function followNativeViewerRequest(host: NativeViewerHostIdentity, 
   });
 }
 
+async function readNativeViewerHost(sessionId: string, env: EnvLike): Promise<NativeViewerHostIdentity | undefined> {
+  return withViewerDir(sessionId, env, false, async (directory) => {
+    const json = await readViewerPrivateFile(directory, "host.json");
+    if (json === undefined) return undefined;
+    const host: unknown = JSON.parse(json);
+    return validNativeViewerHost(host, sessionId, env) ? host : undefined;
+  });
+}
+
 export async function findNativeViewerHost(sessionId: string, env: EnvLike = process.env): Promise<NativeViewerHostIdentity | undefined> {
   try {
-    return await withViewerDir(sessionId, env, false, async (directory) => {
-      const json = await readViewerPrivateFile(directory, "host.json");
-      if (json === undefined) return undefined;
-      const host: unknown = JSON.parse(json);
-      if (!validNativeViewerHost(host, sessionId, env)) return undefined;
-      await requestNativeViewerHost(host, { op: "status" });
-      return host;
-    });
+    const host = await readNativeViewerHost(sessionId, env);
+    if (host !== undefined) await requestNativeViewerHost(host, { op: "status" });
+    return host;
   } catch { return undefined; }
+}
+
+/** The longest a pulse socket stays open when its write cannot finish. */
+const VIEWER_PULSE_TIMEOUT_MS = 300;
+
+/**
+ * Asks the session's native viewer to show a click at a point on the Xvfb that
+ * verified for that click. It returns once the request is written and never
+ * waits for a reply, so a stuck host cannot delay the click. Best effort: no
+ * viewer, a dead host or any error is ignored.
+ */
+export async function pulseNativeViewer(
+  sessionId: string, target: OwnedDisplayIdentity, point: { x: number; y: number }, env: EnvLike = process.env,
+): Promise<void> {
+  const request: ViewerHostRequest = { op: "pulse", x: point.x, y: point.y, xvfbPid: target.pid, xvfbStartTicks: target.startTicks };
+  try {
+    const host = await readNativeViewerHost(sessionId, env);
+    if (host === undefined) return;
+    await assertHostSocket(host);
+    await new Promise<void>((resolve) => {
+      const socket = net.connect(host.socket);
+      const done = (): void => { socket.destroy(); resolve(); };
+      socket.setTimeout(VIEWER_PULSE_TIMEOUT_MS, done);
+      socket.once("error", done);
+      socket.once("connect", () => socket.end(`${JSON.stringify(request)}\n`, done));
+    });
+  } catch { /* A pulse never changes the click result. */ }
 }
 
 /** Remove readiness whose host and viewer are both gone, refusing a replaced socket. */

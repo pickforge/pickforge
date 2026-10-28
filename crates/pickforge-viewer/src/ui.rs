@@ -129,6 +129,20 @@ impl<'a> Canvas<'a> {
         });
     }
 
+    /// An antialiased circle outline of `width` pixels inside `radius`.
+    pub fn ring(&mut self, center: (f32, f32), radius: f32, width: f32, color: u32, alpha: u8) {
+        let reach = radius + 1.0;
+        let x0 = (center.0 - reach).floor() as i32;
+        let y0 = (center.1 - reach).floor() as i32;
+        let x1 = (center.0 + reach).ceil() as i32;
+        let y1 = (center.1 + reach).ceil() as i32;
+        let area = Rect::new(x0, y0, (x1 - x0) as u32, (y1 - y0) as u32);
+        self.shade(area, color, alpha, |px, py| {
+            let d = (px - center.0).hypot(py - center.1) - radius;
+            (0.5 - d).min(0.5 + d + width)
+        });
+    }
+
     /// An antialiased line with round caps.
     pub fn line(&mut self, from: (f32, f32), to: (f32, f32), width: f32, color: u32) {
         let pad = width.ceil() as i32 + 1;

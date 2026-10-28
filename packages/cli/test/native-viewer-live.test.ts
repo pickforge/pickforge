@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, expect, it } from "vitest";
 import { createSession, getSession, processIdentityMatches, runCommand, type EnvLike } from "@pickforge/lab-core";
 import {
-  startXvfb, stopXvfb, findOnPath, screenshot, startNativeViewerHost, requestNativeViewerHost, stopSessionViewer,
+  startXvfb, stopXvfb, findOnPath, screenshot, startNativeViewerHost, requestNativeViewerHost, stopSessionViewer, click,
   stopNativeViewerHost, type NativeViewerHostIdentity, type XvfbHandle,
 } from "@pickforge/lab-desktop-linux";
 import { unusedTestDisplay } from "../../desktop-linux/test/test-resources.js";
@@ -172,3 +172,70 @@ it.skipIf(binary === null && !required)("two viewers expand, collapse and close 
   expect(alive(b!)).toBe(false);
   expect((await getSession(sessions[1]!.id, env))?.status).toBe("running");
 }, 60_000);
+
+/** True when the PNG holds an ember pixel, at any opacity over the black session. */
+async function hasEmber(file: string, env: NodeJS.ProcessEnv): Promise<boolean> {
+  const histogram = await runCommand(imageCommand!, [file, "-format", "%c", "histogram:info:"], { env });
+  expect(histogram.ok).toBe(true);
+  return [...histogram.stdout.matchAll(/#([0-9A-F]{2})([0-9A-F]{2})([0-9A-F]{2})(?:[0-9A-F]{2})?\b/gi)].some((match) => {
+    const [r, g, b] = match.slice(1, 4).map((hex) => Number.parseInt(hex!, 16)) as [number, number, number];
+    return r >= 0x99 && Math.abs(g / r - 0x7a / 0xff) < 0.08 && b < 0x50;
+  });
+}
+
+/** A hash of the decoded pixels only, so PNG metadata cannot differ. */
+async function pixelHash(file: string, env: NodeJS.ProcessEnv): Promise<string> {
+  const result = await runCommand(imageCommand!, [file, "-format", "%#", "info:"], { env });
+  expect(result.ok).toBe(true);
+  return result.stdout.trim();
+}
+
+it.skipIf(binary === null && !required)("a click pulse shows in the viewer and never in session captures", async () => {
+  expect(binary, "PICKFORGE_REQUIRE_VIEWER requires pickforge-viewer on PATH").not.toBeNull();
+  expect(missing, "Live viewer dependencies must be present").toEqual([]);
+  await ensureCliBuilt();
+  const cliEntry = fileURLToPath(new URL("../dist/pickforge-lab.js", import.meta.url));
+  root = fs.mkdtempSync(path.join(os.tmpdir(), "pf-viewer-pulse-"));
+  const hostDisplay = await startXvfb({ display: unusedTestDisplay(), logDir: root, width: 1280, height: 800, env: process.env });
+  displays.push(hostDisplay);
+  const env: NodeJS.ProcessEnv = { ...process.env, PICKFORGE_HOME: root, DISPLAY: hostDisplay.display };
+  delete env.WAYLAND_DISPLAY;
+  delete env.HYPRLAND_INSTANCE_SIGNATURE;
+  const watched = await startXvfb({ display: unusedTestDisplay(), logDir: root, width: 640, height: 480, env });
+  displays.push(watched);
+  const { id } = await createSession({ type: "desktop", status: "running", projectDir: root,
+    desktop: { display: watched.display, xvfbPid: watched.pid, xvfbStartTimeTicks: watched.startTimeTicks, width: 640, height: 480, homePolicy: "private" } }, env);
+  viewerSessions.push({ id, env });
+  const point = { display: watched.display, sessionId: id, x: 320, y: 240, env };
+  const sessionShot = async (name: string): Promise<string> => {
+    const file = path.join(root!, name);
+    await screenshot({ display: watched.display, outPath: file, env, countWindows: false });
+    return file;
+  };
+  const hostShot = async (name: string): Promise<string> => {
+    const file = path.join(root!, name);
+    await screenshot({ display: hostDisplay.display, outPath: file, env, countWindows: false });
+    return file;
+  };
+
+  await click(point);
+  const withoutViewer = await pixelHash(await sessionShot("without-viewer.png"), env);
+  const host = await startNativeViewerHost({ sessionId: id, cliEntry, binary: binary!, version: nativeViewerVersion, env });
+  await waitForMode(host, "thumbnail");
+  expect(await hasEmber(await hostShot("idle.png"), env)).toBe(false);
+
+  // A loaded machine can miss the 500 ms ring, so a few clicks may try.
+  let seen = false;
+  for (let attempt = 0; attempt < 5 && !seen; attempt++) {
+    await click(point);
+    const [viewer, session] = await Promise.all([hostShot(`pulse-${attempt}.png`), sessionShot(`session-${attempt}.png`)]);
+    seen = await hasEmber(viewer, env);
+    expect(await pixelHash(session, env)).toBe(withoutViewer);
+    expect(await hasEmber(session, env)).toBe(false);
+  }
+  expect(seen, "The viewer must show the pulse").toBe(true);
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  expect(await hasEmber(await hostShot("after.png"), env)).toBe(false);
+  expect(await pixelHash(await sessionShot("after-session.png"), env)).toBe(withoutViewer);
+}, 60_000);
+

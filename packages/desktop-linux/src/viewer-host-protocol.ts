@@ -8,6 +8,7 @@ export type NativeViewerCommand =
   | { cmd: "shutdown" }
   | { cmd: "attention"; message: string }
   | { cmd: "clearAttention" }
+  | { cmd: "pulse"; x: number; y: number }
   | { cmd: "control"; state: "granted"; leaseId: string; grantMs: number }
   | { cmd: "control"; state: "revoked"; leaseId: string; reason: ControlRevokeReason };
 export type ControlRevokeReason = "returned" | "lease-lost" | "session-ended" | "stopping" | "unavailable";
@@ -23,6 +24,7 @@ export type NativeViewerEvent =
 
 /** Attention requests never authorize control.
  * No operation may grant control or carry keyboard or pointer input.
+ * A pulse only draws a ring in the viewer window after an agent click.
  */
 export interface ViewerHostOperations {
   status: Record<never, never>;
@@ -32,6 +34,7 @@ export interface ViewerHostOperations {
   requestTakeover: { message: string; timeoutMs: number };
   cancelRequest: { requestId: string };
   subscribe: { requestId?: string };
+  pulse: { x: number; y: number; xvfbPid: number; xvfbStartTicks: number };
 }
 export type ViewerHostRequest = {
   [K in keyof ViewerHostOperations]: { op: K } & ViewerHostOperations[K]

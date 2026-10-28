@@ -10,6 +10,7 @@ use crate::keysyms::{self, named};
 use crate::protocol::{
     self, Backend, Command, Event, HostMode, Line, LineReader, Mode, StatusCode,
 };
+use crate::pulse::Pulse;
 use crate::scale::Scaler;
 use crate::ui::{self, palette, Banner, Bar, BarKind, Button, Canvas, Metrics, Text};
 use crate::{procstat, EXIT_DISPLAY, EXIT_NO_WINDOW_SYSTEM};
@@ -225,6 +226,8 @@ struct App {
     cursor: Option<Arc<CursorImage>>,
     cursor_pos: (i32, i32),
     cursor_drawn: Option<Rect>,
+    /// The ring of the last completed agent click, while it runs.
+    pulse: Option<Pulse>,
 
     pointer: Option<(f64, f64)>,
     hover: Option<Button>,
@@ -287,6 +290,7 @@ impl App {
             cursor: None,
             cursor_pos: (0, 0),
             cursor_drawn: None,
+            pulse: None,
             pointer: None,
             hover: None,
             pressed: None,
@@ -635,6 +639,9 @@ impl App {
     fn control_changed(&mut self) {
         if !self.controller.controlling() {
             self.keys.clear();
+        } else {
+            // The human clicks now, so an agent ring would mislead.
+            self.pulse = None;
         }
         self.pressed = None;
         self.relayout();
@@ -852,6 +859,7 @@ impl App {
             Command::Status(code) => self.set_status(Some(code)),
             Command::SessionEnded => self.end_session(),
             Command::Shutdown => self.quit(),
+            Command::Pulse { x, y } => self.start_pulse(x, y, Instant::now()),
             Command::Unknown(name) => log(&format!("ignored unknown command {name:?}")),
             command @ (Command::Attention { .. }
             | Command::ClearAttention
@@ -873,6 +881,42 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Shows a ring at a session pixel. There is none while the human holds
+    /// control or after the session ended.
+    fn start_pulse(&mut self, x: u32, y: u32, now: Instant) {
+        if self.controller.controlling() || self.ended {
+            return;
+        }
+        let Some(next) = Pulse::new(x, y, self.session, now) else {
+            log("ignored a pulse for a session without pixels");
+            return;
+        };
+        self.damage_pulse();
+        self.pulse = Some(next);
+        self.damage_pulse();
+    }
+
+    fn damage_pulse(&mut self) {
+        if let Some(pulse) = &self.pulse {
+            let rect = pulse.bounds(self.image, self.session, self.metrics.scale);
+            self.damage_rows(rect.y, rect.bottom());
+        }
+    }
+
+    /// Redraws a running pulse at the frame rate and clears it at the end.
+    /// Returns when the next frame is due.
+    fn tick_pulse(&mut self, now: Instant) -> Option<Instant> {
+        let pulse = self.pulse.as_mut()?;
+        let done = pulse.done(now);
+        if done || pulse.frame_due(now) {
+            self.damage_pulse();
+        }
+        if done {
+            self.pulse = None;
+        }
+        self.pulse.as_ref().map(Pulse::next_frame)
     }
 
     /// The status pill text: the host's status first, then a control note.
@@ -1047,6 +1091,22 @@ impl App {
             canvas.premultiplied(x, y, c.width, c.height, &c.pixels, factor);
             canvas.clip = clip;
         }
+        let ring = self
+            .pulse
+            .as_ref()
+            .and_then(|p| p.ring(image, self.session, self.metrics.scale, Instant::now()));
+        if let Some(ring) = ring {
+            canvas.clip = clip.intersect(&image);
+            let center = (ring.center.0 as f32, ring.center.1 as f32);
+            canvas.ring(
+                center,
+                ring.radius as f32,
+                ring.width as f32,
+                palette::EMBER,
+                ring.alpha,
+            );
+            canvas.clip = clip;
+        }
         if let Some(label) = status {
             let top = self.bar.as_ref().map_or(0, |b| b.rect.h);
             let area = Rect::new(0, top as i32, w, h.saturating_sub(top));
@@ -1195,9 +1255,13 @@ impl ApplicationHandler<UserEvent> for App {
             .redraw_since
             .filter(|_| !self.hidden)
             .map(|t| t + HIDDEN_AFTER);
-        for next in [self.refresh_x11_pause(now), self.controller.deadline()]
-            .into_iter()
-            .flatten()
+        for next in [
+            self.refresh_x11_pause(now),
+            self.controller.deadline(),
+            self.tick_pulse(now),
+        ]
+        .into_iter()
+        .flatten()
         {
             deadline = Some(deadline.map_or(next, |t| t.min(next)));
         }

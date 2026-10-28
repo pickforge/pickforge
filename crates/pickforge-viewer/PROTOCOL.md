@@ -86,6 +86,7 @@ Error codes in the `error` event: `display-refused`, `xvfb-mismatch`,
 | `shutdown` | none | Exit cleanly. Held input is released first. |
 | `attention` | `message` | Show a banner with the message and a highlighted Take control button. It changes neither mode nor focus. The viewer refuses a message over 500 characters or with control characters. |
 | `clearAttention` | none | Remove the banner. |
+| `pulse` | `x`, `y` | An agent click completed at this session pixel. The viewer draws a short ember ring there, only in its own window. A point past the session edge moves to the edge, as X moves the pointer there. The viewer ignores a pulse while the human holds control and after the session ended. `x` and `y` are integers from 0 to 32767. |
 | `control` | `state: "granted"`, `leaseId`, `grantMs` | Input is allowed until now plus `grantMs` on a monotonic clock. Each renewal re-sends it with the same `leaseId` and extends the grant. The viewer clears the banner. A grant in thumbnail mode expands the window as a thumbnail click does. `leaseId` is 1 to 128 bytes without control characters. `grantMs` is a positive integer; a value over 120000 counts as 120000. The viewer ignores a grant after the session ended or when it cannot send input. |
 | `control` | `state: "revoked"`, `leaseId`, `reason` (`"returned"`, `"lease-lost"`, `"session-ended"`, `"stopping"`, `"unavailable"`) | Release all held input, stop forwarding, acknowledge, and show the watch bar. `"unavailable"` answers a `takeRequested` that the host could not grant, with an empty `leaseId`. A revoke with a missing or unknown field still revokes. |
 
@@ -126,6 +127,9 @@ Error codes in the `error` event: `display-refused`, `xvfb-mismatch`,
   to at most three lines and ends with an ellipsis when it is longer. The
   thumbnail shows the message without the button, because a thumbnail click
   only expands. The banner hides while controlling.
+- Click pulse: a ring that grows from 4 to 20 logical pixels and fades out
+  in 500 ms, mapped through the current scale and letterbox and clipped to
+  the image. It shows in every mode. A new pulse replaces the running one.
 - Fullscreen: the viewer handles it itself and reports `mode`. Esc or the
   Fullscreen button leaves it.
 - Status text sits in the bottom-left corner: "Connecting", "Session ended",
