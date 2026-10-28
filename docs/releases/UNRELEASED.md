@@ -1,12 +1,17 @@
-# Pickforge 0.7.0
+# Pickforge 0.7.1
 
-Pickforge 0.7.0 gives agents a browser that you can watch and take over.
+Pickforge 0.7.1 gives agents a browser that you can watch and take over.
 Browser sessions can keep logins in named profiles. On graphical Linux hosts,
 a small native viewer shows a session as a live picture in picture. You can
 take control in the viewer, and an agent can ask you for help, for example
 with a login. Evidence reports now show where the agent pointed, and one
 shareable HTML file can hold a whole run. Desktop typing, process cleanup and
 session teardown are also more reliable.
+
+0.7.1 is the first published release of this work. The `v0.7.0` tag exists,
+but its release run stopped at the Rust gates before publishing, because that
+job lacked the viewer's display test dependencies. Nothing from 0.7.0 reached
+npm or GitHub releases. (#398)
 
 ## Changes
 
@@ -162,29 +167,31 @@ session teardown are also more reliable.
 
 ## Validation
 
-- Local gates on the release commit `b45cba6`: frozen install, typecheck,
-  lint, `cargo fmt --check`, clippy with `-D warnings` for the Linux and
-  Windows targets, the Rust workspace tests on Xvfb (260 passed), and
-  `cargo build --release` with `pickforge 0.7.0` and `pickforge-viewer 0.7.0`
+- Local gates on `99c28a1`, the 0.7.1 version commit: frozen install,
+  typecheck, lint, `cargo fmt --check`, clippy with `-D warnings` for the
+  Linux and Windows targets, the Rust workspace tests on Xvfb (260 passed), and
+  `cargo build --release` with `pickforge 0.7.1` and `pickforge-viewer 0.7.1`
   version checks. The TypeScript suite ran with coverage and with the desktop,
-  browser and native viewer requirements on: 3,343 passed, 4 skipped, 90.26%
+  browser and native viewer requirements on: 3,343 passed, 4 skipped, 90.25%
   of lines covered. The build passed.
 - The opt-in live Flutter test passed with Flutter 3.41.6.
 - A device pass ran on Omarchy (Arch Linux) x86_64 with Flutter 3.41.6 and
-  the CLI packed from `b45cba6`, in an isolated home. `pickforge doctor` and
+  the CLI packed from `99c28a1`, in an isolated home. `pickforge doctor` and
   `pickforge init` passed, and `flutter run -d linux` ran through
   `pickforge-lab desktop exec` in a managed Xvfb session. Two clicks raised the
   counter from 0 to 2. A label change in `lib/main.dart` hot reloaded with the
   counter kept at 2, and one more click raised it to 3. `pickforge evidence
-  record` recorded the run, and an independent image review of the four
-  screenshots returned PASS. Hot reload used SIGUSR1 to `flutter run`, not a
-  Dart MCP reload call.
-- In the same pass, the 0.7.0 native viewer showed a live picture in picture
-  of a session on a separate Xvfb display, and a click appeared in it at once.
+  record` recorded the run. The 0.7.1 native viewer then showed the same
+  session, with the new label and 3, on a separate Xvfb display. An
+  independent image review of the five screenshots returned PASS. Hot reload
+  used SIGUSR1 to `flutter run`, not a Dart MCP reload call.
 - Takeover was checked on the merged `4c6e18e`, before the version change, on
   a Hyprland host with fcitx5. The viewer opened without focus,
   `request_takeover` expanded it, and Take control, typing with accents and
   Return control worked.
+- The `v0.7.0` tag run passed the Lab gates and both candidate smokes before
+  its Rust gates failed. The fixed Rust gates passed in a release workflow dry
+  run on the 0.7.1 branch.
 
 ## Known limits
 
