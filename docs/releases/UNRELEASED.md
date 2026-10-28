@@ -175,9 +175,6 @@ npm or GitHub releases. (#398)
   call for a destroyed session cannot reach a display that a new session
   reuses. A pruned session id is not reused while its takeover record
   remains. (#213, #170)
-- `session prune` removes the input closure and takeover identity markers of a
-  destroyed session one day after its teardown. Until then they keep the id
-  reserved, so late input for that session still fails. (#317)
 - Process cleanup sends SIGKILL only to proven members of a session's cgroup
   instead of writing `cgroup.kill`. A scope that cannot be inspected still
   gets the pre-kill guard. An unreadable process or a zombie leader with live
