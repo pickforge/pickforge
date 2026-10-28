@@ -134,6 +134,10 @@ npm or GitHub releases. (#398)
   bar for `--gaia-url`. Chrome now gets the same loopback sign-in sink through
   `--gaia-config-contents`, which is not on its list of unsupported flags.
   (#348)
+- The Flutter skill explains how to keep the Dart MCP server connected. Hot
+  reload and hot restart keep the connection. After a full rebuild, connect
+  again to the new DTD URI. When the server is not connected, the skill uses
+  Pickforge screenshots, the Android UI tree, logcat and adb. (#360)
 
 ## Fixes
 
