@@ -28,6 +28,13 @@ vi.mock("@pickforge/lab-desktop-linux", async (importOriginal) => {
   };
 });
 
+// These tests cover the x11vnc control path, so no native viewer is found,
+// even when one is on PATH.
+vi.mock("../src/viewer/native.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/viewer/native.js")>()),
+  detectNativeViewer: vi.fn(async () => null),
+}));
+
 import { createSession } from "@pickforge/lab-core";
 import { watchDesktopSession, type SpawnWatchdogFn } from "../src/commands/watch.js";
 
