@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createSession, updateSession, processIdentityMatches } from "@pickforge/lab-core";
+import { createSession, updateSession, processIdentityMatches, withSessionVncLock } from "@pickforge/lab-core";
 import {
   startXvfb, stopXvfb, findOnPath, startNativeViewerHost, findNativeViewerHost,
   stopNativeViewerHost, requestNativeViewerHost, sessionViewerDir, readViewerLaunchRecord,
@@ -189,6 +189,22 @@ describe.skipIf(!available)("native viewer host", () => {
     }
     const next = await start();
     expect(next.launchId).not.toBe(previous.launchId);
+  }, 20_000);
+
+  it("waits for the session lock before removing dead readiness", async () => {
+    const previous = await start();
+    await stopNativeViewerHost(sessionId, env);
+    const readiness = path.join(sessionViewerDir(sessionId, env), "host.json");
+    await withViewerDir(sessionId, env, false, (directory) => writeViewerPrivateFile(directory, "host.json", JSON.stringify(previous)));
+    let stopped: Promise<void> | undefined;
+    // A concurrent start holds this lock while it publishes new readiness.
+    await withSessionVncLock(sessionId, env, async () => {
+      stopped = stopNativeViewerHost(sessionId, env);
+      await sleep(300);
+      expect(fs.existsSync(readiness)).toBe(true);
+    });
+    await stopped;
+    expect(fs.existsSync(readiness)).toBe(false);
   }, 20_000);
 
   it.each([{ readyPid: 1 }, { readyVersion: "0.0.0" }, { noReady: true }])("cleans failed readiness %j", async (behavior) => {

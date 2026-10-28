@@ -85,6 +85,11 @@ export async function findNativeViewerHost(sessionId: string, env: EnvLike = pro
 }
 
 export async function stopNativeViewerHost(sessionId: string, env: EnvLike = process.env): Promise<void> {
+  await withSessionVncLock(sessionId, env, () => stopNativeViewerHostLocked(sessionId, env));
+}
+
+/** Caller holds the session lock, so a concurrent start cannot publish readiness mid-stop. */
+async function stopNativeViewerHostLocked(sessionId: string, env: EnvLike): Promise<void> {
   await withViewerDir(sessionId, env, false, async (directory) => {
     const json = await readViewerPrivateFile(directory, "host.json");
     if (json === undefined) return;
@@ -147,7 +152,7 @@ export async function startNativeViewerHost(options: {
     await withViewerDir(options.sessionId, env, true, async (directory) => {
       // A stale readiness file still identifies an unresponsive owned host.
       if (await readViewerPrivateFile(directory, "host.json") !== undefined) {
-        await stopNativeViewerHost(options.sessionId, env);
+        await stopNativeViewerHostLocked(options.sessionId, env);
         await directory.unlinkChild("host.json");
       }
       const socket = await directory.lstatChild("host.sock");
