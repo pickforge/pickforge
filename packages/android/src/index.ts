@@ -87,6 +87,7 @@ export {
 export {
   back,
   buildClearLogcatArgs,
+  buildDensityArgs,
   buildInstallApkArgs,
   buildKeyeventArgs,
   buildLaunchAppArgs,
@@ -94,6 +95,7 @@ export {
   buildPidofArgs,
   buildResolveLauncherArgs,
   buildScreenshotArgs,
+  buildSwipeArgs,
   buildTapArgs,
   buildTypeTextArgs,
   buildUiCatArgs,
@@ -101,6 +103,7 @@ export {
   buildUiDumpArgs,
   clearLogcat,
   escapeInputText,
+  getScreenDensity,
   getUiTree,
   home,
   installApk,
@@ -109,6 +112,8 @@ export {
   launchApp,
   listDevices,
   logcat,
+  MAX_SWIPE_COORDINATE,
+  MAX_SWIPE_DURATION_MS,
   parseAdbDevices,
   parseResolvedLauncher,
   pressKey,
@@ -116,6 +121,7 @@ export {
   runAdb,
   screenshot,
   splitInputText,
+  swipe,
   tap,
   typeText,
   UI_DUMP_REMOTE_PATH,
@@ -125,7 +131,25 @@ export {
   type LaunchAppOptions,
   type LaunchAppResult,
   type LogcatArgsOptions,
+  type SwipeGesture,
 } from "./adb.js";
+
+export {
+  assertUiTreeMaxChars,
+  compactUiTree,
+  DEFAULT_COMPACT_MAX_CHARS,
+  DEFAULT_RAW_MAX_CHARS,
+  limitRawUiTree,
+  MAX_NODE_TEXT_CHARS,
+  MAX_UI_TREE_MAX_CHARS,
+  MIN_UI_TREE_MAX_CHARS,
+  parseUiHierarchy,
+  parseWmDensity,
+  type CompactUiTree,
+  type CompactUiTreeOptions,
+  type UiHierarchy,
+  type UiNode,
+} from "./ui-tree.js";
 
 export {
   DEFAULT_LMK_QUIET_S,

@@ -11,6 +11,7 @@ import {
   runAndroidLaunchApp,
   runAndroidLogcat,
   runAndroidScreenshot,
+  runAndroidSwipe,
   runAndroidTap,
   runAndroidType,
   runAndroidUiTree,
@@ -615,6 +616,21 @@ function registerAndroidInputCommands(android: Command): void {
     ),
   ).action(async (x, y, opts) => {
     process.exitCode = await runAndroidTap(x, y, opts);
+  });
+
+  withJson(
+    withAndroidTarget(
+      android
+        .command("swipe")
+        .description("Swipe between two points; same points plus a duration is a long press")
+        .argument("<x1>", "start x coordinate")
+        .argument("<y1>", "start y coordinate")
+        .argument("<x2>", "end x coordinate")
+        .argument("<y2>", "end y coordinate")
+        .argument("[durationMs]", "duration in milliseconds, 0-10000 (device default 300)"),
+    ),
+  ).action(async (x1, y1, x2, y2, durationMs, opts) => {
+    process.exitCode = await runAndroidSwipe({ x1, y1, x2, y2 }, durationMs, opts);
   });
 
   withJson(

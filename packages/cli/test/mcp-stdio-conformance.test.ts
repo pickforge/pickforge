@@ -48,6 +48,7 @@ const EXPECTED_TOOLS = [
   "android_run_adb",
   "android_screenshot",
   "android_start",
+  "android_swipe",
   "android_tap",
   "android_type",
   "artifact_list",

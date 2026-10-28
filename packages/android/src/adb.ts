@@ -6,6 +6,7 @@ import {
   type RunCommandResult,
 } from "@pickforge/lab-core";
 import { findSdkTool } from "./sdk.js";
+import { parseWmDensity } from "./ui-tree.js";
 import { sleep } from "./util.js";
 
 export const KEYCODE_HOME = "KEYCODE_HOME";
@@ -198,6 +199,58 @@ export function buildTapArgs(serial: string, x: number, y: number): string[] {
   return ["-s", serial, "shell", "input", "tap", String(x), String(y)];
 }
 
+/**
+ * Swipe bounds. 16384 px is the largest surface size Android GPUs allocate,
+ * so no real display is wider or taller; larger values are a caller bug.
+ * 10 s covers slow drags and long-press gestures and stays well inside the
+ * 30 s adb timeout. Omitting the duration keeps the device default (300 ms).
+ */
+export const MAX_SWIPE_COORDINATE = 16_383;
+export const MAX_SWIPE_DURATION_MS = 10_000;
+
+export interface SwipeGesture {
+  fromX: number;
+  fromY: number;
+  toX: number;
+  toY: number;
+  durationMs?: number;
+}
+
+function assertSwipeCoordinate(value: number, label: string): void {
+  if (!Number.isInteger(value) || value < 0 || value > MAX_SWIPE_COORDINATE) {
+    throw new Error(
+      `Invalid ${label} coordinate ${value}: expected an integer from 0 to ` +
+        `${MAX_SWIPE_COORDINATE}`,
+    );
+  }
+}
+
+export function buildSwipeArgs(serial: string, gesture: SwipeGesture): string[] {
+  assertSerial(serial);
+  const { fromX, fromY, toX, toY, durationMs } = gesture;
+  assertSwipeCoordinate(fromX, "fromX");
+  assertSwipeCoordinate(fromY, "fromY");
+  assertSwipeCoordinate(toX, "toX");
+  assertSwipeCoordinate(toY, "toY");
+  const args = ["-s", serial, "shell", "input", "swipe"];
+  args.push(String(fromX), String(fromY), String(toX), String(toY));
+  if (durationMs === undefined) {
+    return args;
+  }
+  if (
+    !Number.isInteger(durationMs) ||
+    durationMs < 0 ||
+    durationMs > MAX_SWIPE_DURATION_MS
+  ) {
+    throw new Error(
+      `Invalid duration ${durationMs}: expected an integer from 0 to ` +
+        `${MAX_SWIPE_DURATION_MS} milliseconds`,
+    );
+  }
+  args.push(String(durationMs));
+  return args;
+}
+
 export function buildTypeTextArgs(serial: string, text: string): string[] {
   assertSerial(serial);
   if (text === "") {
@@ -248,6 +301,11 @@ export function buildUiCatArgs(serial: string): string[] {
 export function buildUiCleanupArgs(serial: string): string[] {
   assertSerial(serial);
   return ["-s", serial, "shell", "rm", "-f", UI_DUMP_REMOTE_PATH];
+}
+
+export function buildDensityArgs(serial: string): string[] {
+  assertSerial(serial);
+  return ["-s", serial, "shell", "wm", "density"];
 }
 
 export interface LogcatArgsOptions {
@@ -497,6 +555,20 @@ export async function tap(
   }
 }
 
+export async function swipe(
+  opts: AdbTargetOptions & SwipeGesture,
+): Promise<void> {
+  const args = buildSwipeArgs(opts.serial, opts);
+  const result = await execAdb(opts, args);
+  if (!result.ok) {
+    throw commandFailure(
+      `swipe from (${opts.fromX}, ${opts.fromY}) to (${opts.toX}, ${opts.toY})`,
+      args,
+      result,
+    );
+  }
+}
+
 export async function typeText(
   opts: AdbTargetOptions & { text: string },
 ): Promise<void> {
@@ -579,6 +651,14 @@ export async function getUiTree(opts: GetUiTreeOptions): Promise<string> {
     }
   }
   throw lastError;
+}
+
+/** Effective screen density in dpi, or null when the device does not say. */
+export async function getScreenDensity(
+  opts: AdbTargetOptions,
+): Promise<number | null> {
+  const result = await execAdb(opts, buildDensityArgs(opts.serial));
+  return result.ok ? parseWmDensity(result.stdout) : null;
 }
 
 export async function logcat(
