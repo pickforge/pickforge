@@ -13,6 +13,9 @@ use super::{is_flag, redact_secrets, ArtifactOrigin};
 const REDACTED: &str = "[REDACTED]";
 
 pub(super) fn redact_text_artifact(text: &str, origin: ArtifactOrigin) -> String {
+    // In a Lighthouse report a secret word in a key names an audit, such as
+    // `third-party-cookies`, so it only covers that key's own value.
+    let nested = origin != ArtifactOrigin::Lighthouse;
     let start = text.len()
         - text
             .trim_start_matches(['\u{feff}', ' ', '\t', '\r', '\n'])
@@ -21,18 +24,24 @@ pub(super) fn redact_text_artifact(text: &str, origin: ArtifactOrigin) -> String
     if matches!(body.as_bytes().first(), Some(b'{' | b'['))
         && serde_json::from_str::<IgnoredAny>(body).is_ok()
     {
-        return format!("{}{}", &text[..start], redact_json_text(body, false));
+        return format!(
+            "{}{}",
+            &text[..start],
+            redact_json_text(body, false, nested)
+        );
     }
     // Lighthouse HTML is stored as text: its script bodies are not markup.
     if body.starts_with('<') && origin != ArtifactOrigin::Lighthouse {
         return redact_markup(text);
     }
-    text.split_inclusive('\n').map(redact_fragment).collect()
+    text.split_inclusive('\n')
+        .map(|line| redact_fragment(line, nested))
+        .collect()
 }
 
 /// Redact one line or one decoded value. A JSON value that runs to the end, as in
 /// `D/app: {"password":1}`, is redacted as JSON; the text before it as plain text.
-fn redact_fragment(text: &str) -> String {
+fn redact_fragment(text: &str, nested: bool) -> String {
     let mut from = 0;
     while let Some(offset) = text[from..].find(['{', '[']) {
         let start = from + offset;
@@ -43,7 +52,7 @@ fn redact_fragment(text: &str) -> String {
             return format!(
                 "{}{}{}",
                 redact_secrets(prefix),
-                redact_json_text(json, assigns_secret(prefix)),
+                redact_json_text(json, assigns_secret(prefix), nested),
                 &text[end..]
             );
         }
@@ -80,7 +89,7 @@ enum Frame {
 /// Rewrite one valid JSON value. Under a secret key every string and number is replaced, in
 /// nested values too; booleans and "true" or "false" strings stay, because they are flags.
 /// Keys and other strings are redacted as text.
-fn redact_json_text(json: &str, secret: bool) -> String {
+fn redact_json_text(json: &str, secret: bool, nested: bool) -> String {
     let bytes = json.as_bytes();
     let mut frames: Vec<Frame> = Vec::new();
     let mut stored = String::with_capacity(json.len());
@@ -88,10 +97,10 @@ fn redact_json_text(json: &str, secret: bool) -> String {
     while index < bytes.len() {
         let inherited = inherited_secret(&frames, secret);
         index = match bytes[index] {
-            b'"' => push_string(json, index, inherited, &mut frames, &mut stored),
+            b'"' => push_string(json, index, (inherited, nested), &mut frames, &mut stored),
             b'-' | b'0'..=b'9' => push_number(json, index, inherited, &mut stored),
             byte => {
-                track_structure(byte, inherited, &mut frames);
+                track_structure(byte, inherited && nested, inherited, &mut frames);
                 // Outside strings, valid JSON is ASCII.
                 stored.push(char::from(byte));
                 index + 1
@@ -115,7 +124,7 @@ fn inherited_secret(frames: &[Frame], root: bool) -> bool {
 fn push_string(
     json: &str,
     start: usize,
-    inherited: bool,
+    (inherited, nested): (bool, bool),
     frames: &mut [Frame],
     stored: &mut String,
 ) -> usize {
@@ -129,9 +138,9 @@ fn push_string(
     {
         let name: String = serde_json::from_str(token).unwrap_or_default();
         *key_secret = secret_key(&name);
-        stored.push_str(&redact_json_string(token, false));
+        stored.push_str(&redact_json_string(token, false, nested));
     } else {
-        stored.push_str(&redact_json_string(token, inherited));
+        stored.push_str(&redact_json_string(token, inherited, nested));
     }
     end
 }
@@ -151,10 +160,12 @@ fn push_number(json: &str, start: usize, inherited: bool, stored: &mut String) -
     end
 }
 
-fn track_structure(byte: u8, inherited: bool, frames: &mut Vec<Frame>) {
+/// An object under a secret key inherits it only when `object_secret` says so; an array always
+/// does, because its items are that key's own value.
+fn track_structure(byte: u8, object_secret: bool, inherited: bool, frames: &mut Vec<Frame>) {
     match byte {
         b'{' => frames.push(Frame::Object {
-            secret: inherited,
+            secret: object_secret,
             key: true,
             key_secret: false,
         }),
@@ -183,12 +194,12 @@ fn string_end(bytes: &[u8], start: usize) -> usize {
     bytes.len()
 }
 
-fn redact_json_string(token: &str, secret: bool) -> String {
+fn redact_json_string(token: &str, secret: bool, nested: bool) -> String {
     let value: String = serde_json::from_str(token).unwrap_or_default();
     if secret && !is_flag(&value) {
         return format!("\"{REDACTED}\"");
     }
-    let redacted = redact_fragment(&value);
+    let redacted = redact_fragment(&value, nested);
     if redacted == value {
         token.to_owned()
     } else {
@@ -199,7 +210,12 @@ fn redact_json_string(token: &str, secret: bool) -> String {
 fn secret_key(key: &str) -> bool {
     static KEY: OnceLock<Regex> = OnceLock::new();
     KEY.get_or_init(|| {
-        Regex::new(r"(?i)api[_-]?key|token|secret|password|passwd|authorization|cookie").unwrap()
+        // After token, a separator, capital, digit or the end must follow, so max_tokens and
+        // tokenizer stay readable, as on the text path.
+        Regex::new(
+            r"(?i)api[_-]?key|secret|password|passwd|authorization|cookie|token(?:[_.-]|(?-i:[A-Z])|[0-9]|$)",
+        )
+        .unwrap()
     })
     .is_match(key)
 }
@@ -218,9 +234,15 @@ fn redact_markup(text: &str) -> String {
         let whole = found.get(0).map_or(0..0, |m| m.range());
         stored.push_str(&redact_markup_text(&text[last..whole.start]));
         if let Some(comment) = found.get(1) {
-            stored.push_str(&format!("<!--{}-->", redact_fragment(comment.as_str())));
+            stored.push_str(&format!(
+                "<!--{}-->",
+                redact_fragment(comment.as_str(), true)
+            ));
         } else if let Some(cdata) = found.get(2) {
-            stored.push_str(&format!("<![CDATA[{}]]>", redact_fragment(cdata.as_str())));
+            stored.push_str(&format!(
+                "<![CDATA[{}]]>",
+                redact_fragment(cdata.as_str(), true)
+            ));
         } else {
             stored.push_str(&redact_tag(&text[whole.clone()]));
         }
@@ -230,38 +252,49 @@ fn redact_markup(text: &str) -> String {
     stored
 }
 
+/// Redact one tag. Quoted attribute values are decoded first; the rest of the tag, such as a
+/// DOCTYPE string or an unquoted value, is redacted as plain text.
 fn redact_tag(tag: &str) -> String {
     static ATTRIBUTE: OnceLock<Regex> = OnceLock::new();
     let attribute = ATTRIBUTE
         .get_or_init(|| Regex::new(r#"([\w:.-]+)(\s*=\s*)(?:"([^"]*)"|'([^']*)')"#).unwrap());
-    attribute
-        .replace_all(tag, |captures: &regex::Captures<'_>| {
-            let (quote, raw) = match captures.get(3) {
-                Some(value) => ('"', value.as_str()),
-                None => ('\'', captures.get(4).map_or("", |value| value.as_str())),
-            };
-            let value = decode_xml(raw);
-            let redacted = if secret_key(&captures[1]) && !is_flag(&value) {
-                REDACTED.to_owned()
-            } else {
-                redact_fragment(&value)
-            };
-            if redacted == value {
-                return captures[0].to_owned();
-            }
-            let encoded = encode_xml(&redacted);
-            format!("{}{}{quote}{encoded}{quote}", &captures[1], &captures[2])
-        })
-        .into_owned()
+    let mut stored = String::with_capacity(tag.len());
+    let mut last = 0;
+    for captures in attribute.captures_iter(tag) {
+        let whole = captures.get(0).map_or(0..0, |found| found.range());
+        stored.push_str(&redact_secrets(&tag[last..whole.start]));
+        stored.push_str(&redact_attribute(&captures));
+        last = whole.end;
+    }
+    stored.push_str(&redact_secrets(&tag[last..]));
+    stored
+}
+
+fn redact_attribute(captures: &regex::Captures<'_>) -> String {
+    let (quote, raw) = match captures.get(3) {
+        Some(value) => ('"', value.as_str()),
+        None => ('\'', captures.get(4).map_or("", |value| value.as_str())),
+    };
+    let value = decode_xml(raw);
+    let redacted = if secret_key(&captures[1]) && !is_flag(&value) {
+        REDACTED.to_owned()
+    } else {
+        redact_fragment(&value, true)
+    };
+    if redacted == value {
+        return captures[0].to_owned();
+    }
+    let encoded = encode_xml(&redacted, true);
+    format!("{}{}{quote}{encoded}{quote}", &captures[1], &captures[2])
 }
 
 fn redact_markup_text(text: &str) -> String {
     let value = decode_xml(text);
-    let redacted = redact_fragment(&value);
+    let redacted = redact_fragment(&value, true);
     if redacted == value {
         text.to_owned()
     } else {
-        encode_xml(&redacted)
+        encode_xml(&redacted, false)
     }
 }
 
@@ -296,12 +329,28 @@ fn named_entity(name: &str) -> Option<char> {
     }
 }
 
-fn encode_xml(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+/// Encode markup characters. An entity that decoding did not know stays as written, and an
+/// attribute keeps its line breaks and tabs as character references.
+fn encode_xml(text: &str, attribute: bool) -> String {
+    static SPECIAL: OnceLock<Regex> = OnceLock::new();
+    let special =
+        SPECIAL.get_or_init(|| Regex::new(r#"&(?:[A-Za-z][A-Za-z0-9]*;)?|[<>"'\n\r\t]"#).unwrap());
+    special
+        .replace_all(text, |captures: &regex::Captures<'_>| {
+            match &captures[0] {
+                "&" => "&amp;",
+                "<" => "&lt;",
+                ">" => "&gt;",
+                "\"" => "&quot;",
+                "'" => "&apos;",
+                "\n" if attribute => "&#10;",
+                "\r" if attribute => "&#13;",
+                "\t" if attribute => "&#9;",
+                other => other,
+            }
+            .to_owned()
+        })
+        .into_owned()
 }
 
 #[cfg(test)]
@@ -399,6 +448,39 @@ mod tests {
             stored,
             "<hierarchy><!-- password=[REDACTED] --><![CDATA[a > password=[REDACTED]]]><node text=\"x\"/></hierarchy>"
         );
+    }
+
+    #[test]
+    fn lighthouse_audit_ids_and_token_counts_keep_their_values() {
+        let report = r#"{"audits":{"third-party-cookies":{"id":"third-party-cookies","score":1,"cookie":"sid=c1"}},"usage":{"max_tokens":9,"tokenizer":{"m":"x"}}}"#;
+        let stored = parse_json(&redact_text_artifact(report, ArtifactOrigin::Lighthouse));
+        let audit = &stored["audits"]["third-party-cookies"];
+        assert_eq!(audit["id"], "third-party-cookies");
+        assert_eq!(audit["score"], 1);
+        assert_eq!(audit["cookie"], REDACTED);
+        assert_eq!(stored["usage"]["max_tokens"], 9);
+        assert_eq!(stored["usage"]["tokenizer"]["m"], "x");
+        let console = r#"{"cookies":{"sid":"c1"},"accessToken":"t1"}"#;
+        let stored = parse_json(&redact_text_artifact(
+            console,
+            ArtifactOrigin::DevtoolsConsole,
+        ));
+        assert_eq!(stored["cookies"]["sid"], REDACTED);
+        assert_eq!(stored["accessToken"], REDACTED);
+    }
+
+    #[test]
+    fn markup_redacts_doctype_and_unquoted_text_and_keeps_line_breaks_encoded() {
+        let tree = "<!DOCTYPE h [ <!ENTITY s \"api_key=dtsecret1\"> ]><h><input value=x token=abc/><node text=\"line1&#10;token=t2\" desc=\"a&nbsp;b\"/></h>";
+        let stored = redact_text_artifact(tree, ArtifactOrigin::AtspiTree);
+        for secret in ["dtsecret1", "abc", "t2"] {
+            assert!(!stored.contains(secret), "{secret} in {stored}");
+        }
+        assert!(
+            stored.contains(r#"text="line1&#10;token=[REDACTED]""#),
+            "{stored}"
+        );
+        assert!(stored.contains(r#"desc="a&nbsp;b""#), "{stored}");
     }
 
     #[test]
