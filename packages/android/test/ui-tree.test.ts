@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { redactSecrets } from "@pickforge/lab-core";
 import {
   compactUiTree,
   limitRawUiTree,
@@ -168,6 +169,17 @@ describe("compactUiTree rules", () => {
     });
     expect(result.tree).toContain(`"${"x".repeat(200)}…"`);
     expect(result.tree).toContain('"token=[REDACTED]"');
+  });
+
+  it("redacts whole label values before the cut and the quoting", () => {
+    const token = `ghp_${"A".repeat(36)}`;
+    const xml = hierarchy(
+      node(`class="android.widget.TextView" text="${"x".repeat(185)}${token}" bounds="[0,0][1,1]"`) +
+        node('class="android.widget.TextView" text="token=&quot;alpha beta gamma&quot;" bounds="[0,0][1,1]"'),
+    );
+    const result = compactUiTree(xml, { redact: redactSecrets });
+    expect(result.tree).not.toContain("ghp_");
+    expect(result.tree).not.toMatch(/alpha|beta|gamma/);
   });
 
   it("rejects a maxChars outside its bounds", () => {

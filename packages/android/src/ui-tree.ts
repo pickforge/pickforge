@@ -139,16 +139,22 @@ function shortId(id: string, packageName: string | undefined): string {
     : id;
 }
 
-function labelParts(node: UiNode, parentPackage: string | undefined): string[] {
+function labelParts(
+  node: UiNode,
+  parentPackage: string | undefined,
+  redact: (value: string) => string,
+): string[] {
   const a = node.attrs;
   const parts: string[] = [];
   const text = a.text ?? "";
   const desc = a["content-desc"] ?? "";
   const hint = a.hint ?? "";
   const id = a["resource-id"] ?? "";
-  if (text !== "") parts.push(quote(text));
-  if (desc !== "" && desc !== text) parts.push(`desc=${quote(desc)}`);
-  if (hint !== "" && hint !== text && hint !== desc) parts.push(`hint=${quote(hint)}`);
+  // Redact whole decoded values before quoting and cutting, so neither the
+  // JSON escaping nor the cut can hide part of a secret from the patterns.
+  if (text !== "") parts.push(quote(redact(text)));
+  if (desc !== "" && desc !== text) parts.push(`desc=${quote(redact(desc))}`);
+  if (hint !== "" && hint !== text && hint !== desc) parts.push(`hint=${quote(redact(hint))}`);
   if (id !== "") parts.push(`id=${shortId(id, a.package)}`);
   if (a.package !== undefined && a.package !== parentPackage) parts.push(`pkg=${a.package}`);
   return parts;
@@ -170,11 +176,12 @@ function formatNode(
   node: UiNode,
   depth: number,
   parentPackage: string | undefined,
+  redact: (value: string) => string,
 ): string {
   const bounds = node.attrs.bounds === undefined ? [] : [node.attrs.bounds];
   const parts = [
     shortClass(node.attrs.class),
-    ...labelParts(node, parentPackage),
+    ...labelParts(node, parentPackage, redact),
     ...bounds,
     ...stateParts(node),
   ];
@@ -212,8 +219,8 @@ function collectLines(hierarchy: UiHierarchy): CompactLine[] {
 
 export interface CompactUiTreeOptions {
   maxChars?: number;
-  /** Applied to each line before it counts against the size limit. */
-  redact?: (line: string) => string;
+  /** Applied to each label value before quoting, then to each line. */
+  redact?: (value: string) => string;
 }
 
 export interface CompactUiTree {
@@ -272,7 +279,7 @@ export function compactUiTree(
     return { ...base, tree, nodes: 0, truncated: false, empty: true };
   }
   const formatted = lines.map((line) =>
-    redact(formatNode(line.node, line.depth, line.parentPackage)),
+    redact(formatNode(line.node, line.depth, line.parentPackage, redact)),
   );
   const full = formatted.join("\n");
   if (full.length <= maxChars) {
