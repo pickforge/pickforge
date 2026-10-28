@@ -460,6 +460,22 @@ export async function writeViewerLaunchRecord(
   );
 }
 
+async function removeNativeReadiness(directory: DirHandle, record: NativeViewerLaunchRecord): Promise<void> {
+  const json = await readViewerPrivateFile(directory, "host.json");
+  if (json === undefined) return;
+  const host = JSON.parse(json) as Record<string, unknown>;
+  const expected = { sessionId: record.sessionId, launchId: record.launchId, pid: record.hostPid, startTicks: record.hostStartTicks,
+    viewerPid: record.viewerPid, viewerStartTicks: record.viewerStartTicks };
+  if (!Object.entries(expected).every(([key, value]) => host[key] === value)) return;
+  const socket = await directory.lstatChild("host.sock");
+  if (socket !== undefined) {
+    const safe = [socket.isSocket(), socket.uid === process.getuid?.(), socket.ino === host.socketIno, socket.dev === host.socketDev];
+    if (!safe.every(Boolean)) throw new Error("Unsafe stale viewer socket");
+  }
+  await directory.unlinkChild("host.sock");
+  await directory.unlinkChild("host.json");
+}
+
 async function removeLaunchIn(
   directoryHandle: DirHandle,
   sessionId: string,
@@ -475,6 +491,7 @@ async function removeLaunchIn(
       }
       if (launchRecord.kind === "native") {
         if (nativeProcessesPresent(launchRecord)) throw new ViewerProcessesAliveError([launchRecord.hostPid, launchRecord.viewerPid], launchId);
+        await removeNativeReadiness(directoryHandle, launchRecord);
         return;
       }
       if (remainingViewerProcesses(launchRecord).length !== 0) {

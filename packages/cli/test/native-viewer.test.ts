@@ -10,7 +10,7 @@ import { createSession, updateSession, processIdentityMatches } from "@pickforge
 import {
   startXvfb, stopXvfb, findOnPath, startNativeViewerHost, findNativeViewerHost,
   stopNativeViewerHost, requestNativeViewerHost, sessionViewerDir, readViewerLaunchRecord,
-  stopSessionViewer, destroyDesktopSession, withViewerDir, writeViewerPrivateFile, validNativeViewerHost,
+  stopSessionViewer, destroyDesktopSession, prepareViewerLaunch, removeViewerLaunch, withViewerDir, writeViewerPrivateFile, validNativeViewerHost,
   type XvfbHandle, type NativeViewerHostIdentity,
 } from "@pickforge/lab-desktop-linux";
 import { ensureCliBuilt } from "./build-once.js";
@@ -96,8 +96,9 @@ describe.skipIf(!available)("native viewer host", () => {
     await requestNativeViewerHost(found, { op: "expand" });
     await requestNativeViewerHost(found, { op: "collapse" });
     await eventually(() => fakes.calls().filter((entry) => entry.cmd === "setMode").length === 2);
-    expect(fakes.calls().filter((entry) => entry.cmd === "setMode")).toMatchObject([
-      { mode: "expanded", width: 640, height: 512 }, { mode: "thumbnail", width: 384, height: 288 },
+    expect(fakes.calls().filter((entry) => entry.cmd === "setMode").map(({ cmd, mode, width, height }) => ({ cmd, mode, width, height }))).toEqual([
+      { cmd: "setMode", mode: "expanded", width: undefined, height: undefined },
+      { cmd: "setMode", mode: "thumbnail", width: undefined, height: undefined },
     ]);
     await requestNativeViewerHost(found, { op: "shutdown" });
     await eventually(() => !processIdentityMatches({ pid: found.viewerPid, startTicks: found.viewerStartTicks }));
@@ -155,7 +156,7 @@ describe.skipIf(!available)("native viewer host", () => {
     await destroyDesktopSession(sessionId, env);
     expect(processIdentityMatches({ pid: host!.pid, startTicks: host!.startTicks })).toBe(false);
     expect(processIdentityMatches({ pid: host!.viewerPid, startTicks: host!.viewerStartTicks })).toBe(false);
-    expect(fakes.calls().some((entry) => entry.cmd === "sessionEnded")).toBe(true);
+    expect(fakes.calls().some((entry) => entry.cmd === "status" && entry.code === "stopping")).toBe(true);
   }, 20_000);
 
   it("refuses stale readiness and socket identities, then stops by the saved launch record", async () => {
@@ -167,6 +168,27 @@ describe.skipIf(!available)("native viewer host", () => {
     await withViewerDir(sessionId, env, false, (directory) => writeViewerPrivateFile(directory, "host.json", JSON.stringify({ ...host, viewerStartTicks: host!.viewerStartTicks + 1 })));
     expect(await findNativeViewerHost(sessionId, env)).toBeUndefined();
     await expect(stopNativeViewerHost(sessionId, env)).rejects.toThrow("identity differs");
+  }, 20_000);
+
+  it.each(["prune", "missing-record"])("recovers dead readiness after %s without blocking the next native launch", async (cleanup) => {
+    const previous = await start();
+    await stopNativeViewerHost(sessionId, env);
+    expect(processIdentityMatches({ pid: previous.pid, startTicks: previous.startTicks })).toBe(false);
+    if (cleanup === "prune") {
+      await prepareViewerLaunch(sessionId, env);
+      expect(fs.existsSync(path.join(sessionViewerDir(sessionId, env), "host.json"))).toBe(false);
+      expect(fs.existsSync(previous.socket)).toBe(false);
+    } else {
+      // Reproduce readiness left after the browser fallback pruned the launch.
+      await withViewerDir(sessionId, env, false, (directory) => directory.unlinkChild("host.json"));
+      await removeViewerLaunch(sessionId, previous.launchId, env);
+      await withViewerDir(sessionId, env, false, (directory) => writeViewerPrivateFile(directory, "host.json", JSON.stringify(previous)));
+      await stopNativeViewerHost(sessionId, env);
+      expect(fs.existsSync(path.join(sessionViewerDir(sessionId, env), "host.json"))).toBe(false);
+      expect(fs.existsSync(previous.socket)).toBe(false);
+    }
+    const next = await start();
+    expect(next.launchId).not.toBe(previous.launchId);
   }, 20_000);
 
   it.each([{ readyPid: 1 }, { readyVersion: "0.0.0" }, { noReady: true }])("cleans failed readiness %j", async (behavior) => {

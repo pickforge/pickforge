@@ -76,6 +76,15 @@ describe.skipIf(!available)("native host source behavior", () => {
     expect(await running).toBe(0);
   }, 15_000);
 
+  it("sends stopping before a plain shutdown without reporting session end", async () => {
+    const host = await start();
+    await requestNativeViewerHost(host, { op: "shutdown" });
+    expect(await running).toBe(0);
+    expect(fakes.calls().filter((entry) => entry.cmd !== undefined).map(({ cmd, code }) => ({ cmd, code }))).toEqual([
+      { cmd: "status", code: "stopping" }, { cmd: "shutdown", code: undefined },
+    ]);
+  });
+
   it("handles host placement and the mode round trip through the Lua adapter", async () => {
     fakes.installHyprctl();
     fakes.setState({ status: { configProvider: "lua" }, monitors: [monitor()] });

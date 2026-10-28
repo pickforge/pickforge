@@ -90,6 +90,17 @@ export async function stopNativeViewerHost(sessionId: string, env: EnvLike = pro
     if (json === undefined) return;
     const host: unknown = JSON.parse(json);
     if (!validNativeViewerHost(host, sessionId, env)) throw new Error("Invalid viewer host readiness");
+    const hostAlive = processIdentityMatches({ pid: host.pid, startTicks: host.startTicks });
+    const viewerAlive = processIdentityMatches({ pid: host.viewerPid, startTicks: host.viewerStartTicks });
+    if (!hostAlive && !viewerAlive) {
+      const socket = await directory.lstatChild("host.sock");
+      if (socket !== undefined && (!socket.isSocket() || socket.uid !== process.getuid?.())) {
+        throw new Error("Unsafe stale viewer socket");
+      }
+      await directory.unlinkChild("host.sock");
+      await directory.unlinkChild("host.json");
+      return;
+    }
     const record = await readViewerLaunchRecord(sessionId, host.launchId, env);
     if (record?.kind !== "native" || record.hostPid !== host.pid || record.hostStartTicks !== host.startTicks) {
       throw new Error("Viewer launch identity differs from readiness");

@@ -65,3 +65,9 @@ fn run(_config: args::Config) -> i32 {
     eprintln!("pickforge-viewer: only Linux is supported");
     EXIT_NO_WINDOW_SYSTEM
 }
+
+#[cfg(all(test, target_os = "linux"))]
+extern crate self as pickforge_viewer;
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../tests/common/mod.rs"]
+mod test_common;

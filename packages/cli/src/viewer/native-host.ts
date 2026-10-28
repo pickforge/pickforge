@@ -101,11 +101,11 @@ class NativeHost {
   }
 
   private async setMode(next: NativeViewerMode): Promise<void> {
-    let size: ViewerWindowSize = this.record[next === "thumbnail" ? "thumbnail" : "expanded"];
+    let size: ViewerWindowSize | undefined;
     if (this.record.hyprland !== undefined && !await applyHyprlandWindowMode(this.record, next, (placed) => { size = placed; })) {
       throw new Error("Native viewer window could not be placed");
     }
-    this.send({ cmd: "setMode", mode: next, width: size.width, height: size.height });
+    this.send({ cmd: "setMode", mode: next, ...(size === undefined ? {} : { width: size.width, height: size.height }) });
     this.mode = next;
   }
 
@@ -207,7 +207,7 @@ class NativeHost {
       this.stopped = true;
       this.sessionMonitor.abort();
       if (this.timer !== undefined) clearInterval(this.timer);
-      this.send({ cmd: "sessionEnded" });
+      this.send({ cmd: "status", code: "stopping" });
       this.send({ cmd: "shutdown" });
       await Promise.race([this.exit, sleep(300)]);
       for (const signal of ["SIGTERM", "SIGKILL"] as const) {

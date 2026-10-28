@@ -278,6 +278,26 @@ fn has_extension(conn: &RustConnection, name: &'static str) -> Result<bool, Capt
     Ok(conn.extension_information(name)?.is_some())
 }
 
+fn select_xi2_motion(
+    conn: &RustConnection,
+    root: xproto::Window,
+    version: Result<xinput::XIQueryVersionReply, ReplyError>,
+) -> Result<bool, CaptureError> {
+    if !version.is_ok_and(|v| v.major_version >= 2) {
+        return Ok(false);
+    }
+    Ok(conn
+        .xinput_xi_select_events(
+            root,
+            &[xinput::EventMask {
+                deviceid: xinput::Device::ALL_MASTER.into(),
+                mask: vec![xinput::XIEventMask::RAW_MOTION],
+            }],
+        )?
+        .check()
+        .is_ok())
+}
+
 impl Capture {
     /// Connects and subscribes to damage and cursor changes.
     pub fn connect(display: u32) -> Result<Self, CaptureError> {
@@ -324,17 +344,7 @@ impl Capture {
         }
 
         let xi2 = has_extension(&conn, xinput::X11_EXTENSION_NAME)?
-            && conn.xinput_xi_query_version(2, 2)?.reply()?.major_version >= 2
-            && conn
-                .xinput_xi_select_events(
-                    root,
-                    &[xinput::EventMask {
-                        deviceid: xinput::Device::ALL_MASTER.into(),
-                        mask: vec![xinput::XIEventMask::RAW_MOTION],
-                    }],
-                )?
-                .check()
-                .is_ok();
+            && select_xi2_motion(&conn, root, conn.xinput_xi_query_version(2, 2)?.reply())?;
         if !xi2 {
             log("no XInput 2; polling the pointer position");
         }
@@ -373,8 +383,17 @@ impl Capture {
     /// Forces the GetImage path. Tests use it to cover the fallback.
     #[doc(hidden)]
     pub fn without_shm(mut self) -> Self {
-        self.shm = None;
+        self.detach_shm();
         self
+    }
+
+    fn detach_shm(&mut self) {
+        if let Some(segment) = self.shm.take() {
+            let _ = self
+                .conn
+                .shm_detach(segment.seg)
+                .map(|cookie| cookie.ignore_error());
+        }
     }
 
     /// Fetches `rect` of the root window and copies it into `frame`.
@@ -415,7 +434,7 @@ impl Capture {
                         "shared memory capture failed ({:?}); using GetImage",
                         e.error_kind
                     ));
-                    self.shm = None;
+                    self.detach_shm();
                 }
                 Err(e) => return Err(e.into()),
             }
@@ -574,15 +593,18 @@ impl Capture {
             return Ok(CaptureStep::Wait(timeout.min(due - now)));
         }
         state.last_fetch = Some(now);
-        let update = self.update(
-            shared,
-            state.pending.take(),
-            state.cursor_shape,
-            state.cursor_moved,
-        );
-        state.cursor_shape = false;
-        state.cursor_moved = false;
-        update.map(CaptureStep::Fetched)
+        let area = state.pending.take();
+        match self.update(shared, area, state.cursor_shape, state.cursor_moved) {
+            Ok(changed) => {
+                state.cursor_shape = false;
+                state.cursor_moved = false;
+                Ok(CaptureStep::Fetched(changed))
+            }
+            Err(error) => {
+                state.pending = area;
+                Err(error)
+            }
+        }
     }
 
     fn update(
@@ -711,3 +733,7 @@ fn wait_readable(fds: &[i32], timeout: Duration) {
 fn log(message: &str) {
     eprintln!("pickforge-viewer: {message}");
 }
+
+#[cfg(test)]
+#[path = "capture_tests.rs"]
+mod tests;
