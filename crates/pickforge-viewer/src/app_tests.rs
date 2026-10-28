@@ -11,6 +11,7 @@ fn app() -> App {
             class: "test".into(),
             thumbnail_width: 100,
             placement: Placement::SelfPlaced,
+            label: None,
         },
         (100, 100),
         Arc::new(Mutex::new(Shared::new(100, 100))),

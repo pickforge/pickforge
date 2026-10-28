@@ -692,7 +692,7 @@ describe("pickforge-lab session (desktop)", () => {
       const args = fs.readFileSync(viewerArgs, "utf8").trim().split("\n");
       expect(args[0]).toMatch(
         new RegExp(
-          `^--app=http://127\\.0\\.0\\.1:${watched.bridgePort}/viewer/${watched.launchId}#token=[A-Za-z0-9_-]+$`,
+          `^--app=http://127\\.0\\.0\\.1:${watched.bridgePort}/viewer/${watched.launchId}#token=[A-Za-z0-9_-]+&label=${created.id}%20%C2%B7%20[^&]+$`,
         ),
       );
       expect(args).toContain(`--class=pickforge-viewer-${watched.launchId}`);

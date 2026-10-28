@@ -233,6 +233,8 @@ struct App {
 
     controller: Controller<Injector>,
     banner: Option<Banner>,
+    /// The thumbnail's session label pill and its fitted text.
+    label_pill: Option<(Rect, String)>,
     ime_allowed: bool,
     modifiers: Modifiers,
     /// What each held physical key sent, so its release matches.
@@ -291,6 +293,7 @@ impl App {
             thumb_press: false,
             controller: Controller::new(injector),
             banner: None,
+            label_pill: None,
             ime_allowed: false,
             modifiers: Modifiers::default(),
             keys: HashMap::new(),
@@ -326,7 +329,7 @@ impl App {
         let (w, h) = self.thumbnail_logical();
         let class = self.config.class.clone();
         let attributes: WindowAttributes = Window::default_attributes()
-            .with_title("Pickforge viewer")
+            .with_title(args::window_title(self.config.label.as_deref()))
             .with_decorations(false)
             .with_resizable(true)
             .with_active(false)
@@ -423,6 +426,12 @@ impl App {
         let top = self.bar.as_ref().map_or(0, |b| b.rect.h).min(h);
         let content = Rect::new(0, top as i32, w, h - top);
         self.layout_banner(content);
+        self.label_pill = match &self.config.label {
+            Some(label) if self.mode == Mode::Thumbnail => {
+                ui::session_label(content, label, self.metrics, &mut self.text)
+            }
+            _ => None,
+        };
         let image = geometry::fit(self.session.0, self.session.1, content);
         if image != self.image || self.scaler.is_none() {
             self.image = image;
@@ -1019,6 +1028,7 @@ impl App {
         let clip = Rect::new(0, y0, w, (y1 - y0) as u32);
         let image = self.image;
         let status = self.status_text();
+        let label_pill = self.label_pill.take();
         let mut canvas = Canvas::new(&mut self.canvas, w, h, clip);
         canvas.fill(clip, palette::SURFACE);
         canvas.blit(image, &self.scaled, image.w as usize);
@@ -1032,6 +1042,9 @@ impl App {
             let area = Rect::new(0, top as i32, w, h.saturating_sub(top));
             let rect = ui::status_rect(area, label, self.metrics, &mut self.text);
             ui::draw_status(&mut canvas, rect, label, self.metrics, &mut self.text);
+        }
+        if let Some((rect, label)) = &label_pill {
+            ui::draw_status(&mut canvas, *rect, label, self.metrics, &mut self.text);
         }
         if let Some(banner) = &self.banner {
             banner.draw(
@@ -1051,6 +1064,7 @@ impl App {
                 self.pressed,
             );
         }
+        self.label_pill = label_pill;
     }
 }
 

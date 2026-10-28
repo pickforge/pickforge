@@ -92,7 +92,8 @@ describe.skipIf(!available)("native viewer host", () => {
     expect(call.wayland).toBeUndefined();
     expect(call.args).toEqual(["--display", display.display, "--xvfb-pid", String(display.pid),
       "--xvfb-start-ticks", String(display.startTimeTicks), "--width", "640", "--height", "480",
-      "--class", `pickforge-viewer-${found.launchId}`, "--thumbnail-width", "384", "--placement", "self"]);
+      "--class", `pickforge-viewer-${found.launchId}`, "--thumbnail-width", "384", "--placement", "self",
+      "--label", `${sessionId} \u00b7 ${path.basename(root)}`]);
     expect(fs.statSync(sessionViewerDir(sessionId, env)).mode & 0o777).toBe(0o700);
     expect(fs.statSync(found.socket).mode & 0o777).toBe(0o600);
     const record = await readViewerLaunchRecord(sessionId, found.launchId, env);

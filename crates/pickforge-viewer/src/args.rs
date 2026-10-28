@@ -26,6 +26,8 @@ pub struct Config {
     pub class: String,
     pub thumbnail_width: u32,
     pub placement: Placement,
+    /// Session id and project name for the title and the thumbnail.
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,11 +48,15 @@ impl fmt::Display for ArgError {
 }
 
 pub const USAGE: &str = "usage: pickforge-viewer --display :N --xvfb-pid P --xvfb-start-ticks T \
---width W --height H --class NAME [--thumbnail-width 384] [--placement host|self]
+--width W --height H --class NAME [--thumbnail-width 384] [--placement host|self] \
+[--label TEXT]
        pickforge-viewer --version
        pickforge-viewer --self-test";
 
 const DEFAULT_THUMBNAIL_WIDTH: u32 = 384;
+
+/// Longest `--label` in characters.
+pub const MAX_LABEL_CHARS: usize = 256;
 
 fn err(message: impl Into<String>) -> ArgError {
     ArgError(message.into())
@@ -85,6 +91,7 @@ where
     let mut class = None;
     let mut thumbnail = None;
     let mut placement = None;
+    let mut label = None;
 
     let mut iter = items.into_iter();
     while let Some(arg) = iter.next() {
@@ -101,6 +108,7 @@ where
             "--class" => &mut class,
             "--thumbnail-width" => &mut thumbnail,
             "--placement" => &mut placement,
+            "--label" => &mut label,
             "--version" | "--self-test" | "--help" => {
                 return Err(err(format!("{name} must be the only argument")))
             }
@@ -155,6 +163,7 @@ where
                 )))
             }
         },
+        label: label.as_deref().map(parse_label).transpose()?,
     };
     Ok(Invocation::Run(config))
 }
@@ -198,6 +207,58 @@ fn parse_class(value: &str) -> Result<String, ArgError> {
         ));
     }
     Ok(value.to_string())
+}
+
+fn parse_label(value: &str) -> Result<String, ArgError> {
+    let count = value.chars().count();
+    if count == 0 || count > MAX_LABEL_CHARS || value.trim().is_empty() {
+        return Err(err(format!(
+            "--label must be 1 to {MAX_LABEL_CHARS} characters"
+        )));
+    }
+    if value.chars().any(|c| c.is_control() || is_format(c)) {
+        return Err(err(
+            "--label must not contain control, format or bidi characters",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+/// Unicode format characters (category Cf), bidi controls and the line
+/// and paragraph separators. They can hide or reorder the visible text.
+fn is_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00ad}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061c}'
+            | '\u{06dd}'
+            | '\u{070f}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08e2}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{2028}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206f}'
+            | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{110bd}'
+            | '\u{110cd}'
+            | '\u{13430}'..='\u{1343f}'
+            | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0001}'
+            | '\u{e0020}'..='\u{e007f}'
+    )
+}
+
+/// The window title: the label first, so a short title keeps it.
+pub fn window_title(label: Option<&str>) -> String {
+    match label {
+        Some(label) => format!("{label} \u{b7} Pickforge viewer"),
+        None => "Pickforge viewer".into(),
+    }
 }
 
 /// The display number in a `DISPLAY` value such as `:0`, `:1.0` or
@@ -261,7 +322,62 @@ mod tests {
                 class: "pickforge-viewer-abc123".into(),
                 thumbnail_width: 384,
                 placement: Placement::Host,
+                label: None,
             }
+        );
+    }
+
+    #[test]
+    fn parses_and_validates_the_label() {
+        let parsed = |label: &str| match run(&with(&["--label", label])) {
+            Ok(Invocation::Run(config)) => Ok(config.label.unwrap()),
+            Ok(other) => panic!("{other:?}"),
+            Err(e) => Err(e),
+        };
+        assert_eq!(
+            parsed("desk-1a2b3c \u{b7} my-app").unwrap(),
+            "desk-1a2b3c \u{b7} my-app"
+        );
+        assert_eq!(
+            parsed("desk-1 \u{b7} Ação 日本").unwrap(),
+            "desk-1 \u{b7} Ação 日本"
+        );
+        let longest = "é".repeat(MAX_LABEL_CHARS);
+        assert_eq!(parsed(&longest).unwrap(), longest);
+        for bad in [
+            String::new(),
+            "   ".into(),
+            "é".repeat(MAX_LABEL_CHARS + 1),
+            "a\nb".into(),
+            "a\tb".into(),
+            "a\u{1b}[31mb".into(),
+            "a\u{7f}b".into(),
+            "a\u{202e}b".into(),
+            "a\u{2066}b".into(),
+            "a\u{200b}b".into(),
+            "a\u{feff}b".into(),
+            "a\u{2028}b".into(),
+            "a\u{e0041}b".into(),
+        ] {
+            assert!(parsed(&bad).is_err(), "{bad:?}");
+        }
+        assert!(
+            run(&with(&["--label", "a", "--label", "b"])).is_err(),
+            "duplicate label"
+        );
+        assert!(run(&with(&["--label"])).is_err(), "missing value");
+        let Invocation::Run(config) = run(BASE).unwrap() else {
+            panic!("expected run");
+        };
+        assert_eq!(config.label, None);
+    }
+
+    #[test]
+    fn title_shows_the_label() {
+        assert_eq!(window_title(None), "Pickforge viewer");
+        assert_eq!(
+            window_title(Some("desk-1a2b3c \u{b7} my-app")),
+            "desk-1a2b3c \u{b7} my-app \u{b7} Pickforge viewer"
         );
     }
 

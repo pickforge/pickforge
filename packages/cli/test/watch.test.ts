@@ -265,7 +265,8 @@ describe("watch command in process", () => {
       vncReused: false,
     });
     const url = String(result.data?.url);
-    expect(url).toMatch(new RegExp(`^http://127\\.0\\.0\\.1:${BRIDGE_PORT}/viewer/[0-9a-f]{32}#token=${TOKEN}$`));
+    const label = encodeURIComponent(`${id} \u00b7 ${path.basename(root)}`);
+    expect(url).toMatch(new RegExp(`^http://127\\.0\\.0\\.1:${BRIDGE_PORT}/viewer/[0-9a-f]{32}#token=${TOKEN}&label=${label}$`));
     const text = result.lines?.join("\n") ?? "";
     expect(text).toContain("viewer not opened");
     expect(text).toContain(url);
@@ -319,7 +320,8 @@ describe("watch command in process", () => {
     const record = writeViewerLaunchRecord.mock.calls[0]?.[0];
     expect(record).toMatchObject({ thumbnail: { width: 384, height: 216 }, expanded: { width: 1920, height: 1080 } });
     const browser = fakes.calls().find((call) => call.tool === "browser");
-    expect(browser?.args).toContain(`--app=http://127.0.0.1:${BRIDGE_PORT}/viewer/${LAUNCH_ID}#token=${TOKEN}`);
+    const label = encodeURIComponent(`${id} \u00b7 ${path.basename(root)}`);
+    expect(browser?.args).toContain(`--app=http://127.0.0.1:${BRIDGE_PORT}/viewer/${LAUNCH_ID}#token=${TOKEN}&label=${label}`);
   });
 
   it("returns right after spawn when not waiting, without the token", async () => {

@@ -35,6 +35,7 @@ vi.mock("@pickforge/lab-core", async (importOriginal) => {
 });
 
 import { viewerClassPattern } from "../src/viewer/hyprland.js";
+import { buildViewerUrl, viewerLabel, VIEWER_LABEL_MAX_CHARS } from "../src/viewer/contract.js";
 import {
   FIREFOX_USER_JS,
   buildChromiumViewerArgs,
@@ -73,7 +74,7 @@ beforeEach(() => {
   withSessionVncLock.mockImplementation(async (_id: string, _env: unknown, operation: () => Promise<unknown>) =>
     operation(),
   );
-  getSession.mockResolvedValue({ id: "desk-aaaaaa11", status: "running" });
+  getSession.mockResolvedValue({ id: "desk-aaaaaa11", status: "running", projectDir: "/work/my-app" });
 });
 
 afterEach(() => {
@@ -254,6 +255,40 @@ describe("window sizes and arguments", () => {
   });
 });
 
+describe("viewer label", () => {
+  it("joins the session id and the project folder name", () => {
+    expect(viewerLabel("desk-1a2b3c", "/work/my-app")).toBe("desk-1a2b3c \u00b7 my-app");
+    expect(viewerLabel("desk-1a2b3c", "/work/my-app/")).toBe("desk-1a2b3c \u00b7 my-app");
+    expect(viewerLabel("desk-1a2b3c", "/work/Ação 日本")).toBe("desk-1a2b3c \u00b7 Ação 日本");
+    expect(viewerLabel("desk-1a2b3c", "/")).toBe("desk-1a2b3c");
+  });
+
+  it("strips control, format and bidi characters", () => {
+    expect(viewerLabel("desk-1", "/w/a\u202eb\u2066c\u200bd\u0007e\nf\u2028g\ufeffh")).toBe("desk-1 \u00b7 abcdefgh");
+    expect(viewerLabel("desk-1", "/w/\u202e\u0007 ")).toBe("desk-1");
+  });
+
+  it("cuts a long project name with an ellipsis and stays within the viewer cap", () => {
+    const label = viewerLabel("desk-1a2b3c", `/w/${"é".repeat(400)}`);
+    expect(label).toBe(`desk-1a2b3c \u00b7 ${"é".repeat(127)}\u2026`);
+    expect([...label].length).toBeLessThanOrEqual(VIEWER_LABEL_MAX_CHARS);
+    expect(viewerLabel("desk-1a2b3c", `/w/${"a".repeat(128)}`)).toBe(`desk-1a2b3c \u00b7 ${"a".repeat(128)}`);
+  });
+
+  it("puts the label after the token in the URL fragment", () => {
+    expect(buildViewerUrl(1, "x", "t")).toBe("http://127.0.0.1:1/viewer/x#token=t");
+    expect(buildViewerUrl(1, "x", "t", "desk-1 \u00b7 a&b#c")).toBe(
+      "http://127.0.0.1:1/viewer/x#token=t&label=desk-1%20%C2%B7%20a%26b%23c",
+    );
+  });
+
+  it("sets the page label as text only", () => {
+    const page = fs.readFileSync(new URL("../src/viewer/page/viewer.js", import.meta.url), "utf8");
+    expect(page).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
+    expect(page).toContain('element("label").textContent = label;');
+  });
+});
+
 describe("launchViewerWindow", () => {
   it("records the launch before spawning and the browser identity right after", async () => {
     fakes.setBrowser({});
@@ -278,7 +313,7 @@ describe("launchViewerWindow", () => {
     const browser = fakes.calls().find((call) => call.tool === "browser");
     expect(browser?.args).toEqual(
       buildChromiumViewerArgs({
-        url: `http://127.0.0.1:43210/viewer/${LAUNCH_ID}#token=${TOKEN}`,
+        url: `http://127.0.0.1:43210/viewer/${LAUNCH_ID}#token=${TOKEN}&label=desk-aaaaaa11%20%C2%B7%20my-app`,
         profileDir,
         launchId: LAUNCH_ID,
         size: { width: 384, height: 216 },
@@ -478,7 +513,7 @@ describe("launchViewerWindow", () => {
     );
     getSession.mockImplementation(async () => {
       fs.appendFileSync(fakes.callsLog, `${JSON.stringify({ tool: "session" })}\n`);
-      return { status: "running" };
+      return { status: "running", projectDir: "/work/my-app" };
     });
     prepareViewerLaunch.mockImplementation(async () => {
       fs.appendFileSync(fakes.callsLog, `${JSON.stringify({ tool: "prepare" })}\n`);

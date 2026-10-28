@@ -798,6 +798,42 @@ pub fn status_rect(area: Rect, label: &str, metrics: Metrics, text: &mut Text) -
     Rect::new(area.x + margin, area.bottom() - margin - h as i32, w, h)
 }
 
+/// The session label pill in the top-left corner of `area`, with the text
+/// cut to fit and ending in an ellipsis. `None` when the area is too small
+/// for it beside the status pill.
+pub fn session_label(
+    area: Rect,
+    label: &str,
+    metrics: Metrics,
+    text: &mut Text,
+) -> Option<(Rect, String)> {
+    let font = metrics.font_px();
+    let pad = metrics.px(10.0);
+    let h = metrics.round(24.0);
+    let margin = metrics.round(8.0) as i32;
+    if (area.h as i32) < 2 * (h as i32 + margin) + margin {
+        return None;
+    }
+    let max_w = area.w as f32 - 2.0 * margin as f32 - 2.0 * pad;
+    if max_w < text.width(&format!("M{ELLIPSIS}"), font) {
+        return None;
+    }
+    let fitted = fit_line(label, max_w, |s| text.width(s, font));
+    let w = (text.width(&fitted, font) + 2.0 * pad).ceil() as u32;
+    Some((Rect::new(area.x + margin, area.y + margin, w, h), fitted))
+}
+
+/// `line` as is when it fits `max_w`, otherwise cut to end in an ellipsis.
+pub fn fit_line(line: &str, max_w: f32, mut measure: impl FnMut(&str) -> f32) -> String {
+    if measure(line) <= max_w {
+        return line.to_owned();
+    }
+    let mut lines = [line.to_owned()];
+    ellipsize(&mut lines, max_w, &mut measure);
+    let [fitted] = lines;
+    fitted
+}
+
 pub fn draw_status(
     canvas: &mut Canvas,
     rect: Rect,
@@ -952,6 +988,53 @@ mod tests {
             assert!(lines.len() <= 3);
             assert!(lines.last().unwrap().ends_with('\u{2026}'));
         }
+    }
+
+    #[test]
+    fn fit_line_keeps_short_text_and_cuts_long_text() {
+        let measure = |s: &str| s.chars().count() as f32;
+        assert_eq!(
+            fit_line("desk-1 \u{b7} app", 20.0, measure),
+            "desk-1 \u{b7} app"
+        );
+        assert_eq!(
+            fit_line("desk-1 \u{b7} app", 14.0, measure),
+            "desk-1 \u{b7} app"
+        );
+        assert_eq!(
+            fit_line("desk-1 \u{b7} application", 12.0, measure),
+            "desk-1 \u{b7} ap\u{2026}"
+        );
+        assert_eq!(
+            fit_line("desk-1 \u{b7} ação", 11.0, measure),
+            "desk-1 \u{b7} a\u{2026}"
+        );
+    }
+
+    #[test]
+    fn session_label_fits_the_thumbnail() {
+        let mut text = Text::new();
+        let long = format!(
+            "desk-1a2b3c \u{b7} {}",
+            "very-long-project-folder-name-".repeat(10)
+        );
+        for scale in [1.0, 1.25, 2.0] {
+            let metrics = Metrics { scale };
+            let font = metrics.font_px();
+            let area = Rect::new(0, 0, (384.0 * scale) as u32, (240.0 * scale) as u32);
+            let (rect, fitted) = session_label(area, &long, metrics, &mut text).unwrap();
+            assert_eq!(rect.intersect(&area), rect, "{scale}");
+            assert!(fitted.starts_with("desk-1a2b3c \u{b7} very"), "{fitted}");
+            assert!(fitted.ends_with('\u{2026}'), "{fitted}");
+            assert!(text.width(&fitted, font) <= rect.w as f32);
+            let status = status_rect(area, "Live", metrics, &mut text);
+            assert!(rect.bottom() < status.y, "{scale}");
+            let (_, short) = session_label(area, "desk-1 \u{b7} app", metrics, &mut text).unwrap();
+            assert_eq!(short, "desk-1 \u{b7} app");
+        }
+        let metrics = Metrics { scale: 1.0 };
+        assert!(session_label(Rect::new(0, 0, 384, 60), &long, metrics, &mut text).is_none());
+        assert!(session_label(Rect::new(0, 0, 30, 240), &long, metrics, &mut text).is_none());
     }
 
     #[test]
