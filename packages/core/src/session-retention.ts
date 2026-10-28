@@ -3,10 +3,11 @@ import path from "node:path";
 import { DirHandle, withDirHandle } from "./dir-handle.js";
 import { legacySessionsDirs, sessionsDir, type EnvLike } from "./paths.js";
 import { isPidAlive } from "./proc.js";
-import { sessionDataDir, type SessionRecord } from "./session.js";
+import { sessionDataDir, sessionInputClosedName, takeoverIdentityName, type SessionRecord } from "./session.js";
 
 const MARKER = "stopped.json";
 const SESSION_ID = /^(desk|andr|duo|brow)-[0-9a-f]{6,}$/;
+const SESSION_MARKER = /^\.((?:desk|andr|duo|brow)-[0-9a-f]{6,})\.(?:takeover-identity|input-closed)$/;
 const LOG_FILE = /^[^.].*\.log$/;
 // Lease staging names: the takeover.ts staging file, writeFileAtomic's temp
 // for it, and the temp a lease renewal leaves.
@@ -60,7 +61,23 @@ export function parseSessionRetentionDuration(value: string): number {
   return duration;
 }
 
-async function retainedAge(dir: DirHandle, id: string): Promise<number | undefined> {
+/**
+ * How long the input closure and takeover identity markers reserve an id after
+ * its last record. A command reads the record once and re-checks it at each
+ * permit. The longest command is a 300 s desktop wait or input action after
+ * up to 90 s for the session lock, so live references end within minutes. A
+ * day also covers a stopped or suspended caller. One that resumes later still
+ * fails closed on the missing record, unless createSession has drawn the same
+ * random 32-bit id again.
+ */
+export const SESSION_MARKER_HORIZON_MS = 86_400_000;
+
+/** The identity goes first: a closure marker left alone still refuses every caller. */
+function markerNames(id: string): string[] {
+  return [takeoverIdentityName(id), sessionInputClosedName(id)];
+}
+
+async function retainedStoppedAt(dir: DirHandle, id: string): Promise<number | undefined> {
   const stat = await dir.lstatChild(MARKER);
   if (stat?.isFile() !== true) return undefined;
   const file = await dir.openFile(MARKER, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
@@ -68,7 +85,7 @@ async function retainedAge(dir: DirHandle, id: string): Promise<number | undefin
     const marker = JSON.parse(await file.readFile("utf8"));
     if (marker.id !== id || typeof marker.stoppedAt !== "string") return undefined;
     const stoppedAt = Date.parse(marker.stoppedAt);
-    return Number.isFinite(stoppedAt) ? Date.now() - stoppedAt : undefined;
+    return Number.isFinite(stoppedAt) ? stoppedAt : undefined;
   } catch {
     return undefined;
   } finally {
@@ -88,11 +105,26 @@ async function registryHasSession(id: string, roots: string[]): Promise<boolean>
   return false;
 }
 
+// Teardown retains logs just before it removes the record, so stoppedAt is
+// when the id was last live. Markers keep that time once the directory goes.
+async function carryStoppedAt(root: DirHandle, id: string, stoppedAt: number): Promise<void> {
+  for (const name of markerNames(id)) {
+    const stat = await root.lstatChild(name);
+    if (stat?.isFile() !== true || stat.mtimeMs >= stoppedAt) continue;
+    const file = await root.openFile(name, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    try {
+      await file.utimes(stat.atime, new Date(stoppedAt));
+    } finally {
+      await file.close();
+    }
+  }
+}
+
 async function pruneDirectory(root: DirHandle, id: string, roots: string[], age: number): Promise<boolean> {
   if (await registryHasSession(id, roots)) return false;
   return withDirHandle(root.openChild(id), async (dir) => {
-    const elapsed = await retainedAge(dir, id);
-    if (elapsed === undefined || elapsed < age) return false;
+    const stoppedAt = await retainedStoppedAt(dir, id);
+    if (stoppedAt === undefined || Date.now() - stoppedAt < age) return false;
     const names = await dir.readEntryNames();
     // Unknown data is not ours to delete. Never traverse a child directory or link.
     for (const name of names) {
@@ -100,16 +132,54 @@ async function pruneDirectory(root: DirHandle, id: string, roots: string[], age:
       if ((await dir.lstatChild(name))?.isFile() !== true) return false;
     }
     if (await registryHasSession(id, roots)) return false;
+    await carryStoppedAt(root, id, stoppedAt);
     for (const name of names.filter((name) => name !== MARKER)) await dir.unlinkChild(name);
     await dir.unlinkChild(MARKER);
     await fs.promises.rmdir(root.resolve(id));
-    // The sibling takeover identity record stays: late callers for this id
+    // The sibling markers stay until the horizon: late callers for this id
     // keep failing closed, and createSession never reuses a reserved id.
     return true;
   });
 }
 
-/** Explicit only. Active/error records and unmarked legacy directories are kept. */
+async function sessionEntryExists(id: string, roots: string[]): Promise<boolean> {
+  for (const root of roots) {
+    for (const name of [`${id}.json`, id, `${id}.ensure-vnc.lock`]) {
+      try {
+        await fs.promises.lstat(path.join(root, name));
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+  }
+  return false;
+}
+
+// A record, a teardown lock or a data directory means teardown is pending,
+// interrupted or retained. The reaper finds interrupted work by its marker.
+async function pruneMarkers(root: DirHandle, id: string, roots: string[]): Promise<void> {
+  if (await sessionEntryExists(id, roots)) return;
+  const markers: Array<[string, fs.Stats]> = [];
+  for (const name of markerNames(id)) {
+    const stat = await root.lstatChild(name);
+    if (stat === undefined) continue;
+    if (!stat.isFile() || Date.now() - stat.mtimeMs < SESSION_MARKER_HORIZON_MS) return;
+    markers.push([name, stat]);
+  }
+  if (await sessionEntryExists(id, roots)) return;
+  for (const [name, stat] of markers) {
+    // A concurrent prune may have removed it first; a replaced entry still fails.
+    await root.unlinkOwnedFile(name, stat).catch(async (error: unknown) => {
+      if (await root.lstatChild(name) !== undefined) throw error;
+    });
+  }
+}
+
+/**
+ * Explicit only. Active/error records and unmarked legacy directories are kept.
+ * Markers of a gone session go once they are older than the horizon.
+ */
 export async function pruneSessionLogs(
   olderThanMs: number,
   env: EnvLike = process.env,
@@ -120,11 +190,15 @@ export async function pruneSessionLogs(
   for (const rootPath of roots) {
     if (!fs.existsSync(rootPath)) continue;
     await withDirHandle(DirHandle.open(rootPath), async (root) => {
-      for (const id of await root.readEntryNames()) {
+      const names = await root.readEntryNames();
+      for (const id of names) {
         if (!SESSION_ID.test(id)) continue;
         if ((await root.lstatChild(id))?.isDirectory() !== true) continue;
         if (await pruneDirectory(root, id, roots, olderThanMs)) pruned.push(id);
       }
+      // After the directories, so a pruned one has carried its teardown time.
+      const markerIds = new Set(names.flatMap((name) => SESSION_MARKER.exec(name)?.[1] ?? []));
+      for (const id of markerIds) await pruneMarkers(root, id, roots);
     });
   }
   return pruned;

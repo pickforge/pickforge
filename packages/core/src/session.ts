@@ -151,7 +151,7 @@ export function takeoverIdentityName(id: string): string {
   return `.${id}.takeover-identity`;
 }
 
-/** Irreversible sibling marker. Retention and pruning leave it in place. */
+/** Sibling marker that closes input for good. Only prune past the marker horizon removes it. */
 export function sessionInputClosedName(id: string): string {
   return `.${id}.input-closed`;
 }
@@ -179,7 +179,7 @@ export async function createSession(
       status: input.status ?? "starting",
       projectDir: input.projectDir,
     };
-    // Retained directories and unretired takeover bindings reserve IDs.
+    // Retained directories and markers inside their horizon reserve IDs.
     if (isSessionIdReserved(record.id, env)) continue;
     if (input.desktop !== undefined) record.desktop = input.desktop;
     if (input.android !== undefined) record.android = input.android;
