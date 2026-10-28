@@ -4,6 +4,10 @@
 
 use crate::geometry::Rect;
 use std::collections::HashMap;
+use swash::scale::{Render, ScaleContext, Source};
+use swash::shape::ShapeContext;
+use swash::zeno::Format;
+use swash::{FontRef, GlyphId};
 
 const FONT: &[u8] = include_bytes!("../assets/Geist-Medium.ttf");
 
@@ -199,50 +203,84 @@ fn rounded_distance(rect: Rect, radius: f32, px: f32, py: f32) -> f32 {
 const TRACKING: f32 = 0.02;
 
 struct Glyph {
-    metrics: fontdue::Metrics,
+    left: i32,
+    top: i32,
+    width: u32,
+    height: u32,
     coverage: Vec<u8>,
 }
 
 /// Lays out and draws one line of text with a glyph cache.
 pub struct Text {
-    font: fontdue::Font,
-    cache: HashMap<(char, u32), Glyph>,
+    font: FontRef<'static>,
+    scale: ScaleContext,
+    shape: ShapeContext,
+    cache: HashMap<(GlyphId, u32), Glyph>,
 }
 
-fn load_font() -> Result<fontdue::Font, String> {
-    fontdue::Font::from_bytes(FONT, fontdue::FontSettings::default())
-        .map_err(|e| format!("embedded font: {e}"))
+fn load_font() -> Result<FontRef<'static>, String> {
+    FontRef::from_index(FONT, 0).ok_or_else(|| "embedded font: invalid font data".to_string())
+}
+
+fn rasterize(scale: &mut ScaleContext, font: FontRef<'_>, id: GlyphId, px: f32) -> Glyph {
+    let mut scaler = scale.builder(font).size(px).build();
+    let image = Render::new(&[Source::Outline])
+        .format(Format::Alpha)
+        .render(&mut scaler, id);
+    match image {
+        Some(image) => Glyph {
+            left: image.placement.left,
+            top: image.placement.top,
+            width: image.placement.width,
+            height: image.placement.height,
+            coverage: image.data,
+        },
+        None => Glyph {
+            left: 0,
+            top: 0,
+            width: 0,
+            height: 0,
+            coverage: Vec::new(),
+        },
+    }
 }
 
 impl Text {
     pub fn new() -> Self {
         Self {
             font: load_font().expect("the embedded font is valid"),
+            scale: ScaleContext::new(),
+            shape: ShapeContext::new(),
             cache: HashMap::new(),
         }
     }
 
-    fn glyph(&mut self, c: char, px: f32) -> &Glyph {
-        let font = &self.font;
-        self.cache.entry((c, px.to_bits())).or_insert_with(|| {
-            let (metrics, coverage) = font.rasterize(c, px);
-            Glyph { metrics, coverage }
-        })
+    fn glyph(&mut self, id: GlyphId, px: f32) -> &Glyph {
+        let (font, scale) = (self.font, &mut self.scale);
+        self.cache
+            .entry((id, px.to_bits()))
+            .or_insert_with(|| rasterize(scale, font, id, px))
+    }
+
+    /// Shaped glyphs of `text` with kerning, as glyph id, pen offset and
+    /// advance, before [`TRACKING`].
+    fn layout(&mut self, text: &str, px: f32) -> Vec<(GlyphId, f32, f32)> {
+        let mut shaper = self.shape.builder(self.font).size(px).build();
+        shaper.add_str(text);
+        let mut glyphs = Vec::new();
+        shaper.shape_with(|cluster| {
+            for glyph in cluster.glyphs {
+                glyphs.push((glyph.id, glyph.x, glyph.advance));
+            }
+        });
+        glyphs
     }
 
     /// Advance width of `text` in pixels, with [`TRACKING`].
     pub fn width(&mut self, text: &str, px: f32) -> f32 {
-        let tracking = TRACKING;
-        let mut pen = 0.0;
-        let mut prev = None;
-        for c in text.chars() {
-            if let Some(p) = prev {
-                pen += self.font.horizontal_kern(p, c, px).unwrap_or(0.0);
-            }
-            pen += self.glyph(c, px).metrics.advance_width + tracking * px;
-            prev = Some(c);
-        }
-        (pen - tracking * px).max(0.0)
+        let glyphs = self.layout(text, px);
+        let advance: f32 = glyphs.iter().map(|&(_, _, advance)| advance).sum();
+        (advance + TRACKING * px * glyphs.len() as f32 - TRACKING * px).max(0.0)
     }
 
     /// Draws `text` from `x` with its cap height centered on `center_y`.
@@ -255,29 +293,21 @@ impl Text {
         px: f32,
         color: u32,
     ) {
-        let tracking = TRACKING;
-        let cap = self.glyph('H', px).metrics;
-        let baseline = (center_y + (cap.height as f32 + cap.ymin as f32) / 2.0).round();
+        let cap_id = self.font.charmap().map('H');
+        let cap_top = self.glyph(cap_id, px).top;
+        let baseline = (center_y + cap_top as f32 / 2.0).round() as i32;
         let mut pen = x;
-        let mut prev = None;
-        for c in text.chars() {
-            if let Some(p) = prev {
-                pen += self.font.horizontal_kern(p, c, px).unwrap_or(0.0);
-            }
-            let glyph = self.glyph(c, px);
-            let m = glyph.metrics;
-            let gx = (pen + m.xmin as f32).round() as i32;
-            let gy = baseline as i32 - m.height as i32 - m.ymin;
+        for (id, offset, advance) in self.layout(text, px) {
+            let glyph = self.glyph(id, px);
             canvas.mask(
-                gx,
-                gy,
-                m.width as u32,
-                m.height as u32,
+                (pen + offset).round() as i32 + glyph.left,
+                baseline - glyph.top,
+                glyph.width,
+                glyph.height,
                 &glyph.coverage,
                 color,
             );
-            pen += m.advance_width + tracking * px;
-            prev = Some(c);
+            pen += advance + TRACKING * px;
         }
     }
 }
@@ -285,9 +315,10 @@ impl Text {
 /// Checks that the embedded font loads and renders, for `--self-test`.
 pub fn font_check() -> Result<(), String> {
     let font = load_font()?;
+    let mut scale = ScaleContext::new();
     for c in ['C', 'S', 'F', '\u{d7}'] {
-        let (metrics, coverage) = font.rasterize(c, 24.0);
-        if metrics.width == 0 || coverage.iter().all(|&v| v == 0) {
+        let glyph = rasterize(&mut scale, font, font.charmap().map(c), 24.0);
+        if glyph.width == 0 || glyph.coverage.iter().all(|&v| v == 0) {
             return Err(format!("embedded font has no glyph for {c:?}"));
         }
     }
