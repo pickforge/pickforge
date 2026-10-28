@@ -154,15 +154,7 @@ where
             Some(value) => parse_number(&value, "--thumbnail-width", 64, 4096)? as u32,
             None => DEFAULT_THUMBNAIL_WIDTH,
         },
-        placement: match placement.as_deref() {
-            None | Some("self") => Placement::SelfPlaced,
-            Some("host") => Placement::Host,
-            Some(other) => {
-                return Err(err(format!(
-                    "--placement must be host or self, not {other:?}"
-                )))
-            }
-        },
+        placement: parse_placement(placement.as_deref())?,
         label: label.as_deref().map(parse_label).transpose()?,
     };
     Ok(Invocation::Run(config))
@@ -207,6 +199,16 @@ fn parse_class(value: &str) -> Result<String, ArgError> {
         ));
     }
     Ok(value.to_string())
+}
+
+fn parse_placement(value: Option<&str>) -> Result<Placement, ArgError> {
+    match value {
+        None | Some("self") => Ok(Placement::SelfPlaced),
+        Some("host") => Ok(Placement::Host),
+        Some(other) => Err(err(format!(
+            "--placement must be host or self, not {other:?}"
+        ))),
+    }
 }
 
 fn parse_label(value: &str) -> Result<String, ArgError> {
