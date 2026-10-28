@@ -66,6 +66,7 @@ const EXPECTED_TOOLS = [
   "desktop_wait",
   "desktop_windows",
   "evidence_outcome",
+  "profile_list",
   "request_user_input",
   "session_create",
   "session_destroy",

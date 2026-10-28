@@ -21,6 +21,7 @@ import {
 } from "./helpers.js";
 
 const EXPECTED_TOOLS = [
+  "profile_list",
   "session_create",
   "session_status",
   "session_destroy",

@@ -10,7 +10,6 @@ use std::time::SystemTime;
 use image::GenericImageView;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::{format_description, OffsetDateTime};
 
@@ -966,7 +965,7 @@ fn read_image(
         image_type(&bytes).ok_or_else(|| fail("source is not a PNG, JPEG, or WebP image"))?;
     let image = image::load_from_memory(&bytes)
         .map_err(|error| fail(&format!("could not decode image: {error}")))?;
-    let hash = format!("{:x}", Sha256::digest(&bytes));
+    let hash = project::sha256_hex(&bytes);
     Ok((bytes, media, ext, hash, image))
 }
 
@@ -1005,7 +1004,7 @@ fn make_preview(
             width: preview_width,
             height: preview_height,
             bytes: bytes.len() as u64,
-            sha256: format!("{:x}", Sha256::digest(&bytes)),
+            sha256: project::sha256_hex(&bytes),
         },
         bytes,
     )))

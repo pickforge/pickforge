@@ -25,10 +25,14 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::platform::wayland::{ActiveEventLoopExtWayland, WindowAttributesExtWayland};
 use winit::platform::x11::WindowAttributesExtX11;
+use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{CursorIcon, Fullscreen, Window, WindowAttributes, WindowId};
+use x11rb::protocol::xproto::{ConnectionExt as _, MapState};
+use x11rb::rust_connection::RustConnection;
 
-/// A redraw that waits longer than this for a frame callback means the
-/// compositor hides the window, so capture pauses.
+/// Refresh X11 mapping and iconic state even without window events.
+const X11_PAUSE_INTERVAL: Duration = Duration::from_millis(250);
+/// A redraw waiting this long for a frame callback means capture pauses.
 const HIDDEN_AFTER: Duration = Duration::from_millis(500);
 /// After stdin closes, the process exits by this deadline even if the
 /// event loop is stuck.
@@ -184,6 +188,8 @@ struct App {
     capture_pending: Arc<AtomicBool>,
 
     window: Option<Rc<Window>>,
+    x11_visibility: Option<X11Visibility>,
+    next_pause_check: Instant,
     surface: Option<Surface<Rc<Window>, Rc<Window>>>,
     backend: Backend,
     size: PhysicalSize<u32>,
@@ -236,6 +242,8 @@ impl App {
             control,
             capture_pending,
             window: None,
+            x11_visibility: None,
+            next_pause_check: Instant::now(),
             surface: None,
             backend: Backend::X11,
             size: PhysicalSize::new(0, 0),
@@ -315,6 +323,11 @@ impl App {
             scale: window.scale_factor(),
         };
         self.size = window.inner_size();
+        if let Ok(handle) = window.window_handle() {
+            if let RawWindowHandle::Xlib(handle) = handle.as_raw() {
+                self.x11_visibility = X11Visibility::connect(handle.window as u32);
+            }
+        }
         self.window = Some(window);
         self.surface = Some(surface);
         self.relayout();
@@ -398,8 +411,23 @@ impl App {
             .as_ref()
             .and_then(|w| w.is_minimized())
             .unwrap_or(false);
-        self.control
-            .set_paused(self.occluded || self.hidden || zero || minimized);
+        let x11_hidden = self
+            .x11_visibility
+            .as_ref()
+            .is_some_and(X11Visibility::is_hidden);
+        let paused = [self.occluded, self.hidden, zero, minimized, x11_hidden]
+            .into_iter()
+            .any(|paused| paused);
+        self.control.set_paused(paused);
+    }
+
+    fn refresh_x11_pause(&mut self, now: Instant) -> Option<Instant> {
+        self.x11_visibility.as_ref()?;
+        if now >= self.next_pause_check {
+            self.update_pause();
+            self.next_pause_check = now + X11_PAUSE_INTERVAL;
+        }
+        Some(self.next_pause_check)
     }
 
     fn set_status(&mut self, status: Option<StatusCode>) {
@@ -589,9 +617,14 @@ impl App {
             self.request_redraw();
         }
         if let Some((image, pos)) = cursor {
+            if let Some(rect) = self.cursor_drawn {
+                self.damage_rows(rect.y, rect.bottom());
+            }
             self.cursor = image;
             self.cursor_pos = pos;
-            self.request_redraw();
+            if let Some((rect, _)) = self.cursor_rect() {
+                self.damage_rows(rect.y, rect.bottom());
+            }
         }
         if let Some(reason) = ended {
             if !self.ended {
@@ -851,11 +884,62 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        match self.redraw_since {
-            Some(since) if !self.hidden => {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(since + HIDDEN_AFTER));
-            }
-            _ => event_loop.set_control_flow(ControlFlow::Wait),
+        let mut deadline = self
+            .redraw_since
+            .filter(|_| !self.hidden)
+            .map(|t| t + HIDDEN_AFTER);
+        if let Some(next) = self.refresh_x11_pause(Instant::now()) {
+            deadline = Some(deadline.map_or(next, |t| t.min(next)));
         }
+        event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 }
+
+// X11 can unmap or iconify without a winit resize or occlusion event.
+struct X11Visibility {
+    conn: RustConnection,
+    window: u32,
+    wm_state: u32,
+}
+
+impl X11Visibility {
+    fn connect(window: u32) -> Option<Self> {
+        let (conn, _) = x11rb::connect(None).ok()?;
+        Self::new(conn, window)
+    }
+
+    fn new(conn: RustConnection, window: u32) -> Option<Self> {
+        let wm_state = conn
+            .intern_atom(false, b"WM_STATE")
+            .ok()?
+            .reply()
+            .ok()?
+            .atom;
+        Some(Self {
+            conn,
+            window,
+            wm_state,
+        })
+    }
+
+    fn is_hidden(&self) -> bool {
+        let attrs = self
+            .conn
+            .get_window_attributes(self.window)
+            .ok()
+            .and_then(|c| c.reply().ok());
+        if attrs.is_some_and(|a| a.map_state != MapState::VIEWABLE) {
+            return true;
+        }
+        self.conn
+            .get_property(false, self.window, self.wm_state, self.wm_state, 0, 2)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .and_then(|p| p.value32().and_then(|mut values| values.next()))
+            == Some(3)
+    }
+}
+
+#[cfg(test)]
+#[path = "app_tests.rs"]
+mod tests;

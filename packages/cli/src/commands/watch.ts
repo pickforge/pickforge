@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { getSession, resolveDesktopCapableSession, type DesktopSessionInfo } from "@pickforge/lab-core";
 import {
   startNativeViewerHost,
+  findNativeViewerHost,
   stopNativeViewerHost,
   endHumanTakeover,
   ensureSessionVnc,
@@ -375,6 +376,17 @@ async function waitForNativeViewer(sessionId: string, host: NativeViewerHostIden
   } finally { process.off("SIGINT", stop); process.off("SIGTERM", stop); }
 }
 
+async function tryNativeViewer(sessionId: string, binary: string): Promise<NativeViewerHostIdentity | undefined> {
+  try {
+    const cliEntry = process.argv[1];
+    if (cliEntry === undefined) throw new Error("CLI entry point unavailable");
+    return await startNativeViewerHost({ sessionId, cliEntry, binary, version: nativeViewerVersion });
+  } catch (error) {
+    console.error(`Native viewer unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    return findNativeViewerHost(sessionId);
+  }
+}
+
 export async function watchDesktopSession(
   opts: WatchOptions,
 ): Promise<CommandResult> {
@@ -390,10 +402,8 @@ export async function watchDesktopSession(
     return watchWithControl(record.id, process.env, opts._spawnWatchdog ?? defaultSpawnWatchdog);
   }
   const binary = await detectNativeViewer();
-  if (binary !== null) {
-    const cliEntry = process.argv[1];
-    if (cliEntry === undefined) throw new Error("CLI entry point unavailable");
-    const host = await startNativeViewerHost({ sessionId: record.id, cliEntry, binary, version: nativeViewerVersion });
+  const host = binary === null ? undefined : await tryNativeViewer(record.id, binary);
+  if (host !== undefined) {
     const data = { sessionId: record.id, opened: true, viewer: "native", launchId: host.launchId,
       hostPid: host.pid, viewerPid: host.viewerPid };
     if (opts.waitForViewerExit !== false) {

@@ -256,12 +256,28 @@ Browser sessions launch real headed Chrome/Chromium inside a private Xvfb
 display. Pickforge hardens the launch, but v1 is for authorized, trusted
 development and QA — it is **not** a sandbox for hostile web pages.
 
+Named profiles store cookies, login tokens, history, local storage, and site
+settings. Pickforge always selects Chrome's basic store. Cookies are encrypted
+with a fixed key, so only file permissions protect them. Profile directories
+require mode 0700 and ownership by the current user. Symlinks and group or other permission bits
+are refused. Processes running as your user can still read them. Keep banking,
+payment, and main email accounts out of agent profiles.
+
+A profile has one session holder. Teardown releases the hold after process
+cleanup. Crash recovery checks the old owner before reclaiming the hold or
+clearing Chrome singleton entries. `profile list` shows size, last use, and
+holder. `profile delete <name>` refuses held profiles and requires `--yes`
+without a terminal. MCP exposes only read-only `profile_list`.
+
 What Pickforge does do:
 
-- Each session gets its own private Xvfb and its own **ephemeral** Chrome
+- By default, each session gets its own private Xvfb and an **ephemeral** Chrome
   profile under the session directory. Profiles are never borrowed from your
-  real browser and are deleted on destroy. Chrome's temporary files stay in
-  that directory too, reached through a short, private `/tmp` symlink so its
+  real browser. Ephemeral profiles are deleted on destroy. Named profiles
+  selected with `--profile` survive teardown and crash recovery under
+  `~/.pickforge/lab/profiles/<name>` (or the `PICKFORGE_HOME` override).
+  Chrome's temporary files stay in
+  the session directory, reached through a short, private `/tmp` symlink so its
   fixed Unix-socket path limit also works with deeply nested Pickforge homes;
   the symlink is identity-checked and removed on destroy.
 - Chrome starts from a **scrubbed environment** (`cleanEnv`): only the isolated

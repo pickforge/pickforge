@@ -5,10 +5,11 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { ensureViewerBridge, prepareViewerLaunch, writeViewerLaunchRecord, removeViewerLaunch, startNativeViewerHost } =
+const { ensureViewerBridge, prepareViewerLaunch, writeViewerLaunchRecord, removeViewerLaunch, startNativeViewerHost, findNativeViewerHost } =
   vi.hoisted(() => ({
     ensureViewerBridge: vi.fn(),
     startNativeViewerHost: vi.fn(),
+    findNativeViewerHost: vi.fn(),
     prepareViewerLaunch: vi.fn(),
     writeViewerLaunchRecord: vi.fn(),
     removeViewerLaunch: vi.fn(),
@@ -18,6 +19,7 @@ vi.mock("../src/viewer/bridge-daemon.js", () => ({ ensureViewerBridge }));
 vi.mock("@pickforge/lab-desktop-linux", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@pickforge/lab-desktop-linux")>()),
   startNativeViewerHost,
+  findNativeViewerHost,
   prepareViewerLaunch,
   writeViewerLaunchRecord,
   removeViewerLaunch,
@@ -173,6 +175,34 @@ describe("watch command in process", () => {
     expect(result.data).toMatchObject({ browser: "chromium", opened: true });
     expect(startNativeViewerHost).not.toHaveBeenCalled();
     expect(ensureViewerBridge).toHaveBeenCalledWith(id);
+  });
+
+  it.each(["no-window-system (exit 4)", "stale DISPLAY", "Viewer launch identity differs from readiness"])("falls back to the browser when native startup fails: %s", async (reason) => {
+    fakes.installViewer();
+    await installVnc();
+    fakes.installBrowser("chromium");
+    fakes.setBrowser({ exitAfterMs: 20 });
+    process.env.DISPLAY = ":45678";
+    const id = await createDesktop(syntheticDisplay());
+    startNativeViewerHost.mockRejectedValueOnce(new Error(reason));
+    findNativeViewerHost.mockResolvedValueOnce(undefined);
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const result = await watchDesktopSession({ session: id, projectDir: root });
+    expect(result.data).toMatchObject({ browser: "chromium", opened: true });
+    expect(stderr).toHaveBeenCalledWith(`Native viewer unavailable: ${reason}`);
+    expect(ensureViewerBridge).toHaveBeenCalledWith(id);
+  });
+
+  it("reuses a native host that became ready after startup reported failure", async () => {
+    fakes.installViewer();
+    process.env.DISPLAY = ":45678";
+    const id = await createDesktop(syntheticDisplay());
+    startNativeViewerHost.mockRejectedValueOnce(new Error("startup timed out"));
+    findNativeViewerHost.mockResolvedValueOnce({ pid: 100, viewerPid: 300, launchId: LAUNCH_ID });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const result = await watchDesktopSession({ session: id, projectDir: root, waitForViewerExit: false });
+    expect(result.data).toMatchObject({ viewer: "native", hostPid: 100 });
+    expect(ensureViewerBridge).not.toHaveBeenCalled();
   });
 
   it("reports an actionable JSON error when no session exists", async () => {

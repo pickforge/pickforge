@@ -7,6 +7,7 @@ import {
   applyHyprlandWindowMode,
   buildPlacementLua,
   buildRuleDisableLua,
+  buildOpacityRuleLua,
   buildRuleInstallLua,
   detectHyprland,
   disableViewerRule,
@@ -115,6 +116,9 @@ describe("class pattern and Lua literals", () => {
       'hl.window_rule({name="pickforge-viewer-x", match={class="^x$"}, float=true, pin=true, ' +
         'no_initial_focus=true, monitor="DP-1", size={384,240}, move={"(monitor_w-384-30)","(monitor_h-240-56)"}})',
     );
+    expect(buildOpacityRuleLua("pickforge-viewer-x", "^x$")).toBe(
+      'hl.window_rule({name="pickforge-viewer-x-opacity", match={class="^x$"}, opacity="1 override 1 override"})',
+    );
     expect(buildRuleDisableLua("pickforge-viewer-x")).toBe(
       'hl.window_rule({name="pickforge-viewer-x", enabled=false})',
     );
@@ -209,6 +213,7 @@ describe("rule lifecycle helpers", () => {
         right: 6,
         bottom: 32,
       }),
+      buildOpacityRuleLua("pickforge-viewer-x", "^x$"),
       buildRuleDisableLua("pickforge-viewer-x"),
     ]);
   });
