@@ -13,6 +13,7 @@ import {
   readProcessIdentity,
   readProcessGroupLeaderIdentity,
   readProcessGroupPresence,
+  stopProcessGroupVerified,
 } from "@pickforge/lab-core";
 import type { DesktopSessionInfo, EnvLike } from "@pickforge/lab-core";
 import { withSessionVncLock } from "./session.js";
@@ -49,7 +50,8 @@ export interface ViewerHyprlandLaunch {
   classPattern: string;
 }
 
-export interface ViewerLaunchRecord {
+export interface BrowserViewerLaunchRecord {
+  kind?: "browser";
   launchId: string;
   sessionId: string;
   createdAt: string;
@@ -67,6 +69,26 @@ export interface ViewerLaunchRecord {
   /** Present only when the Hyprland adapter placed the window. */
   hyprland?: ViewerHyprlandLaunch;
 }
+
+export interface NativeViewerLaunchRecord {
+  kind: "native";
+  launchId: string;
+  sessionId: string;
+  createdAt: string;
+  binary: string;
+  hostPid: number;
+  hostStartTicks: number;
+  viewerPid: number;
+  viewerStartTicks: number;
+  /** Alias used by the compositor adapter. */
+  pid: number;
+  startTicks: number;
+  thumbnail: ViewerWindowSize;
+  expanded: ViewerWindowSize;
+  hyprland?: ViewerHyprlandLaunch;
+}
+
+export type ViewerLaunchRecord = BrowserViewerLaunchRecord | NativeViewerLaunchRecord;
 
 export interface PreparedViewerLaunch {
   launchId: string;
@@ -280,7 +302,7 @@ function validHyprland(
   return validClassPattern(hyprland.classPattern);
 }
 
-function validBrowserIdentity(launchRecord: ViewerLaunchRecord): boolean {
+function validBrowserIdentity(launchRecord: BrowserViewerLaunchRecord): boolean {
   if (launchRecord.pid !== undefined && !positive(launchRecord.pid)) {
     return false;
   }
@@ -291,7 +313,7 @@ function validBrowserIdentity(launchRecord: ViewerLaunchRecord): boolean {
 }
 
 function validBrowser(
-  launchRecord: ViewerLaunchRecord,
+  launchRecord: BrowserViewerLaunchRecord,
   sessionId: string,
   launchId: string,
   registryEnv: EnvLike,
@@ -319,6 +341,15 @@ function validCreatedAt(value: unknown): boolean {
   return typeof value === "string" && Number.isFinite(Date.parse(value));
 }
 
+function validLaunchProcess(record: ViewerLaunchRecord, sessionId: string, launchId: string, env: EnvLike): boolean {
+  if (record.kind !== "native") {
+    return (record.kind === undefined || record.kind === "browser") && validBrowser(record, sessionId, launchId, env);
+  }
+  return absolutePath(record.binary) &&
+    [record.hostPid, record.hostStartTicks, record.viewerPid, record.viewerStartTicks].every(positive) &&
+    record.pid === record.viewerPid && record.startTicks === record.viewerStartTicks;
+}
+
 function validRecord(
   value: unknown,
   sessionId: string,
@@ -343,9 +374,7 @@ function validRecord(
   if (!validCreatedAt(launchRecord.createdAt)) {
     return false;
   }
-  if (!validBrowser(launchRecord, sessionId, launchId, registryEnv)) {
-    return false;
-  }
+  if (!validLaunchProcess(launchRecord, sessionId, launchId, registryEnv)) return false;
   if (!validSize(launchRecord.thumbnail) || !validSize(launchRecord.expanded)) {
     return false;
   }
@@ -431,6 +460,22 @@ export async function writeViewerLaunchRecord(
   );
 }
 
+async function removeNativeReadiness(directory: DirHandle, record: NativeViewerLaunchRecord): Promise<void> {
+  const json = await readViewerPrivateFile(directory, "host.json");
+  if (json === undefined) return;
+  const host = JSON.parse(json) as Record<string, unknown>;
+  const expected = { sessionId: record.sessionId, launchId: record.launchId, pid: record.hostPid, startTicks: record.hostStartTicks,
+    viewerPid: record.viewerPid, viewerStartTicks: record.viewerStartTicks };
+  if (!Object.entries(expected).every(([key, value]) => host[key] === value)) return;
+  const socket = await directory.lstatChild("host.sock");
+  if (socket !== undefined) {
+    const safe = [socket.isSocket(), socket.uid === process.getuid?.(), socket.ino === host.socketIno, socket.dev === host.socketDev];
+    if (!safe.every(Boolean)) throw new Error("Unsafe stale viewer socket");
+  }
+  await directory.unlinkChild("host.sock");
+  await directory.unlinkChild("host.json");
+}
+
 async function removeLaunchIn(
   directoryHandle: DirHandle,
   sessionId: string,
@@ -443,6 +488,11 @@ async function removeLaunchIn(
       const launchRecord: unknown = JSON.parse(recordJson);
       if (!validRecord(launchRecord, sessionId, launchId, registryEnv)) {
         throw new Error("Invalid viewer record prevents removal");
+      }
+      if (launchRecord.kind === "native") {
+        if (nativeProcessesPresent(launchRecord)) throw new ViewerProcessesAliveError([launchRecord.hostPid, launchRecord.viewerPid], launchId);
+        await removeNativeReadiness(directoryHandle, launchRecord);
+        return;
       }
       if (remainingViewerProcesses(launchRecord).length !== 0) {
         await waitForViewerGroupExit(launchRecord);
@@ -481,6 +531,10 @@ async function pruneLaunchEntry(
 ): Promise<void> {
   const stats = await launches.lstatChild(name);
   const record = await readViewerLaunchRecord(sessionId, name, registryEnv);
+  if (record?.kind === "native") {
+    if (!nativeProcessesPresent(record)) await removeLaunchIn(directoryHandle, sessionId, name, registryEnv);
+    return;
+  }
   const gone =
     record?.pid !== undefined &&
     !identityIsAlive(record.pid, record.startTicks);
@@ -787,6 +841,26 @@ async function stopViewerProcess(owner: ViewerProcessOwner): Promise<void> {
   }
 }
 
+function nativeProcessesPresent(record: NativeViewerLaunchRecord): boolean {
+  return processIdentityMatches({ pid: record.hostPid, startTicks: record.hostStartTicks }) ||
+    processIdentityMatches({ pid: record.viewerPid, startTicks: record.viewerStartTicks });
+}
+
+/** Stop the detached host group, then its child if the leader already exited. */
+export async function stopNativeViewerProcesses(record: NativeViewerLaunchRecord): Promise<void> {
+  await stopProcessGroupVerified({ pid: record.hostPid, startTicks: record.hostStartTicks }, { timeoutMs: 1_000 });
+  const viewer = { pid: record.viewerPid, startTicks: record.viewerStartTicks };
+  for (const signal of ["SIGTERM", "SIGKILL"] as const) {
+    if (!processIdentityMatches(viewer)) break;
+    signalViewerPid(viewer.pid, signal);
+    const deadline = Date.now() + 1_000;
+    while (processIdentityMatches(viewer) && Date.now() < deadline) await sleep(25);
+  }
+  if (processIdentityMatches(viewer) || processIdentityMatches({ pid: record.hostPid, startTicks: record.hostStartTicks })) {
+    throw new ViewerProcessesAliveError([record.hostPid, record.viewerPid], record.launchId);
+  }
+}
+
 /** Stop verified viewer processes and remove state only when cleanup succeeds. */
 export async function stopSessionViewer(
   sessionId: string,
@@ -850,7 +924,8 @@ export async function stopSessionViewer(
                   }
                 });
               } else {
-                await stopViewerProcess(record);
+                if (record.kind === "native") await stopNativeViewerProcesses(record);
+                else await stopViewerProcess(record);
               }
             },
             `Viewer cleanup failed for launch ${JSON.stringify(name)}`,

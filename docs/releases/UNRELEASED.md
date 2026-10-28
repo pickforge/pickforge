@@ -4,7 +4,25 @@
 
 ## Changes
 
-- `pickforge-lab watch` now opens a small live view in a browser instead of
+- `watch` and automatic session viewing prefer the matching native `pickforge-viewer` binary on graphical Linux hosts.
+  The native path reads the verified lab display without VNC, a bridge, or Chromium.
+  It opens a thumbnail with expand, fullscreen, collapse, and close controls.
+  Hyprland Lua placement keeps it pinned without initial focus.
+  Session destruction stops the detached host and viewer by process identity.
+  Linux x86_64 release assets and the installer include the viewer.
+  npm-only installs and mismatched binaries keep the noVNC fallback.
+  `watch --control` still uses the external VNC client. (#340)
+- Browser sessions accept `--profile <name>` or MCP `session_create`'s `profile`
+  argument to keep logins under `~/.pickforge/lab/profiles/<name>`. Private
+  directories survive teardown and crash recovery. One session can hold a
+  profile at a time. `profile list` shows size, last use, and holder;
+  `profile delete <name>` refuses held profiles and requires `--yes` without
+  a terminal. MCP provides read-only `profile_list`. Sessions without a
+  profile stay ephemeral. Keep banking, payment, and main email accounts out
+  of agent profiles. Chrome's Linux basic store relies on file permissions
+  for cookie protection when no keyring is available. (#339)
+
+- The noVNC fallback opens a small live view in a browser instead of
   an external VNC client. A loopback bridge serves a bundled noVNC page that
   shows the whole session scaled into a 384 pixel wide thumbnail. A click
   expands it to the session size; Collapse or Escape shrinks it again. The

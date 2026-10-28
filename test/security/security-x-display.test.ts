@@ -447,6 +447,7 @@ function scanRoots(): string[] {
   const roots = [
     path.join(repoRoot, "test"),
     path.join(repoRoot, "scripts"),
+    path.join(repoRoot, "crates"),
     path.join(repoRoot, ".github"),
   ];
   for (const entry of fs.readdirSync(packagesDir, { withFileTypes: true })) {

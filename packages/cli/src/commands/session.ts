@@ -45,6 +45,7 @@ import { watchDesktopSession } from "./watch.js";
 
 export interface SessionCreateOptions extends BaseCliOptions {
   type: LocalSessionRecipe;
+  profile?: string;
   width?: string;
   height?: string;
   vnc?: boolean;
@@ -81,6 +82,7 @@ function createRuntime(opts: SessionCreateOptions): LocalSessionCreateRuntime {
       create: () =>
         createBrowserSession({
           projectDir,
+          profile: opts.profile,
           width:
             opts.width === undefined
               ? undefined
@@ -145,43 +147,54 @@ function describeCreated(summary: LocalSessionSummary): string {
   return `created android session ${summary.id} (serial ${summary.serial})`;
 }
 
+async function sessionCreateSettings(opts: SessionCreateOptions): Promise<{ projectDir: string; viewerMode: string }> {
+  if (opts.profile !== undefined && opts.type !== "browser") {
+    throw new Error("--profile requires --type browser");
+  }
+  const projectDir = resolveProjectDir(opts);
+  const config = await loadConfig(projectDir);
+  const viewerMode = config.viewer?.mode ?? "manual";
+  if (viewerMode !== "manual" && viewerMode !== "auto") {
+    throw new Error(
+      `Invalid viewer.mode "${String(viewerMode)}": expected "manual" or "auto"`,
+    );
+  }
+  if (opts.viewer === true && opts.vncControl === true) {
+    throw new Error(
+      "--viewer cannot be combined with --vnc-control because watch is read-only",
+    );
+  }
+  if (opts.viewer === true && opts.type === "android") {
+    throw new Error("--viewer requires a desktop-capable session type");
+  }
+  return { projectDir, viewerMode };
+}
+
+function sessionViewerPolicy(opts: SessionCreateOptions, viewerMode: string): { autoViewerSuppressed: boolean; wantsViewer: boolean } {
+  const createsWatchable =
+    opts.type === "desktop" ||
+    opts.type === "desktop+android" ||
+    opts.type === "browser";
+  const createsWritableDesktop =
+    opts.type === "desktop" || opts.type === "desktop+android";
+  const autoViewerSuppressed =
+    createsWritableDesktop &&
+    opts.viewer === undefined &&
+    viewerMode === "auto" &&
+    opts.vncControl === true;
+  const autoViewerEnabled = viewerMode === "auto" &&
+    (!createsWritableDesktop || opts.vncControl !== true);
+  const wantsViewer = createsWatchable && (opts.viewer ?? autoViewerEnabled);
+
+  return { autoViewerSuppressed, wantsViewer };
+}
+
 export async function runSessionCreate(
   opts: SessionCreateOptions,
 ): Promise<number> {
-  // oxlint-disable-next-line complexity -- Legacy gate debt: pickforge/pickforge#60
   return runReported(opts, async () => {
-    const projectDir = resolveProjectDir(opts);
-    const config = await loadConfig(projectDir);
-    const viewerMode = config.viewer?.mode ?? "manual";
-    if (viewerMode !== "manual" && viewerMode !== "auto") {
-      throw new Error(
-        `Invalid viewer.mode "${String(viewerMode)}": expected "manual" or "auto"`,
-      );
-    }
-    if (opts.viewer === true && opts.vncControl === true) {
-      throw new Error(
-        "--viewer cannot be combined with --vnc-control because watch is read-only",
-      );
-    }
-    if (opts.viewer === true && opts.type === "android") {
-      throw new Error("--viewer requires a desktop-capable session type");
-    }
-    const createsWatchable =
-      opts.type === "desktop" ||
-      opts.type === "desktop+android" ||
-      opts.type === "browser";
-    const createsWritableDesktop =
-      opts.type === "desktop" || opts.type === "desktop+android";
-    const autoViewerSuppressed =
-      createsWritableDesktop &&
-      opts.viewer === undefined &&
-      viewerMode === "auto" &&
-      opts.vncControl === true;
-    const wantsViewer =
-      createsWatchable &&
-      (opts.viewer ??
-        (viewerMode === "auto" &&
-          (!createsWritableDesktop || opts.vncControl !== true)));
+    const { projectDir, viewerMode } = await sessionCreateSettings(opts);
+    const { autoViewerSuppressed, wantsViewer } = sessionViewerPolicy(opts, viewerMode);
 
     await reapDeadRunningSessions(process.env, reaperRuntime);
     const sessions = await createLocalSessions(opts.type, createRuntime(opts));

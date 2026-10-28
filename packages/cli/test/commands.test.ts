@@ -210,6 +210,8 @@ function makeEnv(opts: EnvOptions = {}): Record<string, string> {
   const bin = path.join(tmpDir, "bin");
   fs.mkdirSync(home, { recursive: true });
   fs.mkdirSync(bin, { recursive: true });
+  // These tests exercise the browser fallback, even when CI has the native binary.
+  writeScript(path.join(bin, "pickforge-viewer"), "exit 1");
   for (const [name, body] of Object.entries(opts.bins ?? {})) {
     writeScript(path.join(bin, name), body);
   }

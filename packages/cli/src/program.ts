@@ -27,6 +27,7 @@ import {
   runAgentsList,
   runAgentsUnlink,
 } from "./commands/agents.js";
+import { runProfileList, runProfileDelete } from "./commands/profile.js";
 import { runBrowserDevtoolsMcp } from "./commands/browser.js";
 import {
   runDesktopWindows,
@@ -56,6 +57,7 @@ import {
 import { runSetupAndroid } from "./commands/setup-android.js";
 import { runSetupLabUser } from "./commands/setup-lab-user.js";
 import { runTakeoverStatus, runTakeoverWatchdog } from "./commands/takeover.js";
+import { runViewerHost } from "./commands/viewer-host.js";
 import { runViewerBridge } from "./commands/viewer-bridge.js";
 import { runWatch } from "./commands/watch.js";
 
@@ -184,6 +186,7 @@ function registerSessionCommands(program: Command): void {
             .choices(SESSION_TYPES)
             .makeOptionMandatory(),
         )
+        .option("--profile <name>", "browser: persistent named login profile")
         .option("--width <pixels>", "desktop display width")
         .option("--height <pixels>", "desktop display height")
         .option("--inherit-home", "desktop: consent to caller HOME/XDG homes for this session (immutable); human takeover pauses agent actions")
@@ -237,6 +240,22 @@ function registerSessionCommands(program: Command): void {
   });
 }
 
+function registerProfileCommands(program: Command): void {
+  const profile = program.command("profile").description("Manage persistent browser login profiles");
+  withJson(profile.command("list").description("Show profile name, size, last use, and holding session"))
+    .action(async (opts) => {
+      process.exitCode = await runProfileList(opts);
+    });
+  withJson(
+    profile.command("delete")
+      .argument("<name>")
+      .description("Delete a profile and its stored logins")
+      .option("--yes", "confirm deletion without prompting"),
+  ).action(async (name, opts) => {
+    process.exitCode = await runProfileDelete(name, opts);
+  });
+}
+
 function registerWatchAndBrowserCommands(program: Command): void {
   withJson(
     withDesktopSession(
@@ -269,6 +288,13 @@ function registerWatchAndBrowserCommands(program: Command): void {
   // Internal, undocumented commands spawned by pickforge-lab itself — not a
   // supported public CLI surface.
   const internal = program.command("internal", { hidden: true });
+
+  internal
+    .command("viewer-host", { hidden: true })
+    .requiredOption("--session <id>", "session id")
+    .requiredOption("--binary <path>", "native viewer binary")
+    .requiredOption("--viewer-version <version>", "expected viewer version")
+    .action(async (opts) => { process.exitCode = await runViewerHost(opts); });
 
   internal
     .command("viewer-bridge", { hidden: true })
@@ -864,6 +890,7 @@ with the same values and one deprecation warning per process.
 
   registerProvisioningCommands(program);
   registerSessionCommands(program);
+  registerProfileCommands(program);
   registerWatchAndBrowserCommands(program);
   registerDesktopCommands(program);
   registerAndroidCommands(program);
