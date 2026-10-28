@@ -284,17 +284,38 @@ it.each(["changed", "stable", "window"] as const)("stops a running %s wait when 
   expect(checks).toBe(3);
 });
 
-it("ends a stalled sample before the takeover drain timeout, so the lease drains", async () => {
+it.each([
+  ["a stalled capture", () => "/bin/sleep 30"],
+  ["a capture that ignores SIGTERM and leaves a detached child on its output",
+    (pidFile: string) => `trap '' TERM\nsetsid /bin/sh -c 'echo $$ > "${pidFile}"; exec /bin/sleep 30' &\n/bin/sleep 30`],
+])("stops %s when a takeover starts, so the lease drains", async (_name, stall) => {
   const baseline = path.join(tmp, "base.png");
+  const pidFile = path.join(tmp, "detached.pid");
   fs.writeFileSync(baseline, encodePng(1, 1, rgb(3, 3, 3)));
-  const bin = writeCapture(`for a in "$@"; do out="$a"; done\n/bin/sleep 30\n/bin/cp "${baseline}" "$out"`);
+  const bin = writeCapture(`for a in "$@"; do out="$a"; done\n${stall(pidFile)}\n/bin/cp "${baseline}" "$out"`);
   const env = { ...toolEnv(bin), PICKFORGE_HOME: path.join(tmp, "home") };
   const { id } = await createSession({ type: "desktop", status: "running", projectDir: tmp }, env);
-  const waiting = desktopWait({ display: ":219", mode: { type: "changed", baselinePath: baseline }, timeoutMs: 60_000, env, sessionId: id });
-  const outcome = waiting.then(() => "resolved", (error: unknown) => error);
-  await new Promise((resolve) => setTimeout(resolve, 300));
-  const started = Date.now();
-  await acquireHumanLease(id, env);
-  expect(Date.now() - started).toBeLessThan(5_000);
-  expect(await outcome).toBeInstanceOf(HumanControlActiveError);
+  try {
+    const waiting = desktopWait({ display: ":219", mode: { type: "changed", baselinePath: baseline }, timeoutMs: 60_000, env, sessionId: id });
+    const outcome = waiting.then(() => "resolved", (error: unknown) => error);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const started = Date.now();
+    await acquireHumanLease(id, env);
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(await outcome).toBeInstanceOf(HumanControlActiveError);
+  } finally {
+    if (fs.existsSync(pidFile)) process.kill(Number(fs.readFileSync(pidFile, "utf8")), "SIGKILL");
+  }
+}, 20_000);
+
+it("keeps a slow capture that ends within the wait", async () => {
+  const baseline = path.join(tmp, "base.png");
+  const changed = path.join(tmp, "changed.png");
+  fs.writeFileSync(baseline, encodePng(1, 1, rgb(3, 3, 3)));
+  fs.writeFileSync(changed, encodePng(1, 1, rgb(9, 9, 9)));
+  const bin = writeCapture(`for a in "$@"; do out="$a"; done\n/bin/sleep 3.5\n/bin/cp "${changed}" "$out"`);
+  const env = { ...toolEnv(bin), PICKFORGE_HOME: path.join(tmp, "home") };
+  const { id } = await createSession({ type: "desktop", status: "running", projectDir: tmp }, env);
+  const result = await desktopWait({ display: ":219", mode: { type: "changed", baselinePath: baseline }, timeoutMs: 10_000, env, sessionId: id });
+  expect(result).toMatchObject({ reason: "changed", samples: 1 });
 }, 20_000);

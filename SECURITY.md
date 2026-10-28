@@ -148,8 +148,9 @@ MCP opens a missing viewer only with `viewer.mode: "auto"`, a matching native
 binary, and a graphical session. Without these, it returns a CLI command.
 
 MCP and CLI desktop screenshots and waits fail closed during a live human
-lease, like input. Waits recheck before each sample without holding an input
-permit. The internal capture primitive remains available for the resume shot.
+lease, like input. Each screenshot and wait capture holds an agent permit, so a
+takeover drains it. A takeover also stops a wait capture in flight, which then
+fails with busy. The internal capture primitive remains available for the resume shot.
 `request_takeover` and `takeover_wait` capture only after the lease is gone, through the same guarded
 observation path. Timeout or cancellation does not end human control or capture
 its pixels; the screenshot field stays null while control remains active.

@@ -1,4 +1,7 @@
-import { MAX_BASELINE_BYTES, ObservationTimeoutError, withAgentPermit, observationBudget, readBaselineFile, redactSecrets, type EnvLike } from "@pickforge/lab-core";
+import {
+  MAX_BASELINE_BYTES, ObservationTimeoutError, HumanControlActiveError, checkHumanLeaseBusy, withAgentPermit,
+  observationBudget, readBaselineFile, redactSecrets, type EnvLike, type HumanLease,
+} from "@pickforge/lab-core";
 import { listWindows, type WindowInfo } from "./apps.js";
 import { parseDisplayNumber } from "./display.js";
 import { pngPixelDigest } from "./png.js";
@@ -14,10 +17,11 @@ export const MAX_STABLE_MS = 60_000;
  * Filesystem and scheduling delays are additional, not covered by this allowance. */
 export const WAIT_SUBPROCESS_KILL_GRACE_MS = 4_000;
 const SAMPLE_GAP_MS = 100;
-// One sample ends before the human lease drain timeout, so a stalled capture
-// never holds its agent permit long enough to block a takeover.
-const SAMPLE_MS = 3_000;
-const WINDOW_QUERY_MS = SAMPLE_MS;
+const WINDOW_QUERY_MS = 5_000;
+const TAKEOVER_POLL_MS = 100;
+// SIGTERM, SIGKILL and forced settlement of a cancelled capture together stay
+// far below the human lease drain timeout.
+const CANCEL_KILL_GRACE_MS = 500;
 
 export type DesktopWaitReason = "changed" | "stable" | "window" | "timeout";
 
@@ -85,39 +89,56 @@ async function digestFile(
   return pngPixelDigest(filePath, { env, timeoutMs });
 }
 
-async function samplePixels(
-  display: string,
-  outPath: string,
-  deadline: number,
-  env: EnvLike | undefined,
-): Promise<string> {
-  const sampleDeadline = Math.min(deadline, Date.now() + SAMPLE_MS);
-  const timeoutMs = remainingMs(sampleDeadline);
-  observationBudget(sampleDeadline);
-  await screenshot({
-    display,
-    outPath,
-    env,
-    timeoutMs,
-    countWindows: false,
-  });
-  observationBudget(sampleDeadline);
-  return digestFile(outPath, sampleDeadline, env);
-}
-
-/** One pixel sample under its own permit, retried after a stalled capture until the wait deadline. */
+/** Captures under the sample permit, then digests the file outside it. */
 async function sampleDigest(opts: DesktopWaitOptions, samplePath: string, deadline: number): Promise<string> {
-  for (;;) {
-    try {
-      return await withSamplePermit(opts, () => samplePixels(opts.display, samplePath, deadline, opts.env));
-    } catch (error) {
-      if (!timedOutError(error) || remainingMs(deadline) <= 0) throw error;
-    }
-  }
+  await withSamplePermit(opts, (signal) => {
+    const timeoutMs = remainingMs(deadline);
+    observationBudget(deadline);
+    return screenshot({
+      display: opts.display, outPath: samplePath, env: opts.env, timeoutMs, countWindows: false,
+      signal, killGraceMs: CANCEL_KILL_GRACE_MS,
+    });
+  });
+  return digestFile(samplePath, deadline, opts.env);
 }
 
-function withSamplePermit<T>(opts: DesktopWaitOptions, sample: () => Promise<T>): Promise<T> {
-  return opts.sessionId === undefined ? sample() : withAgentPermit(opts.sessionId, opts.env ?? process.env, sample);
+function withSamplePermit<T>(opts: DesktopWaitOptions, sample: (signal?: AbortSignal) => Promise<T>): Promise<T> {
+  const { sessionId } = opts;
+  if (sessionId === undefined) return sample();
+  const env = opts.env ?? process.env;
+  return withAgentPermit(sessionId, env, () => stopOnTakeover(sessionId, env, sample));
+}
+
+/**
+ * A takeover publishes its lease before it drains permits. A sample that sees
+ * the lease stops its commands, so its permit drains well before the timeout.
+ */
+async function stopOnTakeover<T>(
+  sessionId: string,
+  env: EnvLike,
+  sample: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  let lease: HumanLease | undefined;
+  let checking = false;
+  const timer = setInterval(() => {
+    if (checking || controller.signal.aborted) return;
+    checking = true;
+    // A failed read leaves the drain timeout as the bound.
+    void checkHumanLeaseBusy(sessionId, env).then((found) => {
+      if (found === undefined) return;
+      lease = found;
+      controller.abort();
+    }, () => {}).finally(() => { checking = false; });
+  }, TAKEOVER_POLL_MS);
+  try {
+    return await sample(controller.signal);
+  } catch (error) {
+    if (lease !== undefined) throw new HumanControlActiveError(lease);
+    throw error;
+  } finally {
+    clearInterval(timer);
+  }
 }
 
 async function waitGap(deadline: number): Promise<void> {
@@ -222,10 +243,11 @@ async function waitForNamedWindow(
     let lastSeen: WindowInfo[];
     try {
       await opts.busyCheck?.();
-      lastSeen = await withSamplePermit(opts, () => listWindows(
+      lastSeen = await withSamplePermit(opts, (signal) => listWindows(
         opts.display,
         opts.env,
         Math.min(WINDOW_QUERY_MS, remaining),
+        { signal, killGraceMs: CANCEL_KILL_GRACE_MS },
       ));
     } catch (error) {
       if (timedOutError(error)) {
