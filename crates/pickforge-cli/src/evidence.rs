@@ -16,6 +16,7 @@ use time::{format_description, OffsetDateTime};
 use crate::{adapters::Harness, init::INIT_SCHEMA_VERSION, project, state, Environment};
 
 mod capture;
+mod text_redaction;
 use capture::{capture_from, captured_at, redact_capture, render_capture, Capture, CaptureInput};
 
 // Version 3 adds ordered intermediate steps and optional check-to-step references. Version 4
@@ -886,25 +887,29 @@ fn redact_secrets(value: &str) -> String {
     let patterns = PATTERNS.get_or_init(|| vec![
         // Each value may be quoted with escaped quotes inside a JSON string. An
         // unquoted value stops at a backslash, so that JSON string stays valid.
-        // Any scheme word (Bearer, Basic, Digest, ...) belongs to the credential.
-        Regex::new(r#"(?i)(\bauthorization\b[ \t]*[:=][ \t]*)(?:\\"(?:[^"\\]|\\[^"])*\\"|\"[^\"]*\"|'[^']*'|(?:[a-z][a-z0-9-]*[ \t]+)?[^\s,;\"'<>\\]+)"#).unwrap(),
+        // Any scheme word (Bearer, Basic, Digest, ...) belongs to the credential, and so do
+        // Digest's `name="value"` parameters.
+        Regex::new(r#"(?i)(\bauthorization\b[ \t]*[:=][ \t]*)(?:\\"(?:[^"\\]|\\[^"])*\\"|"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|(?:[a-z][a-z0-9-]*[ \t]+)?(?:[\w-]+=(?:"[^"\r\n]*"|[^\s,;"'<>\\]*)(?:[ \t]*,[ \t]*[\w-]+=(?:"[^"\r\n]*"|[^\s,;"'<>\\]*))*|[^\s,;"'<>\\]+))"#).unwrap(),
         // An unquoted cookie stops at quotes and angle brackets, so the rest of a
         // one-line XML tree or a JSON string survives.
-        Regex::new(r#"(?i)(\b(?:set-cookie|cookie)\b[ \t]*[:=][ \t]*)(?:\\"(?:[^"\\]|\\[^"])*\\"|\"[^\"]*\"|'[^']*'|[^\r\n\"'<>\\]+)"#).unwrap(),
+        Regex::new(r#"(?i)(\b(?:set-cookie|cookie)\b[ \t]*[:=][ \t]*)(?:\\"(?:[^"\\]|\\[^"])*\\"|"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[^\r\n"'<>\\]+)"#).unwrap(),
         // Prefixed keys such as access_token and suffixed keys such as SECRET_KEY or
         // passwordHash count too. A suffix starts with a separator or a capital, so
         // max_tokens and tokenizer stay readable.
-        Regex::new(r#"(?i)(\b[\w.-]*(?:api[_-]?key|token|secret|password|passwd)(?:[_.-][\w.-]*|(?-i:[A-Z])[\w.-]*)?[ \t]*[=:][ \t]*)(?:\\"(?:[^"\\]|\\[^"])*\\"|\"[^\"]*\"|'[^']*'|[^\s,;\"'<>\\]+)"#).unwrap(),
-        Regex::new(r#"(?i)(\bbearer[ \t]+)[^\s,;\"'<>\\]+"#).unwrap(),
-        // A JSON key that contains a secret word, with a value that may hold escaped quotes.
-        Regex::new(r#"(?i)(\"[^\"\r\n]*(?:api[_-]?key|token|secret|password|passwd|authorization|cookie)[^\"\r\n]*\"\s*:\s*\")(?:[^\"\\]|\\.)*(\")"#).unwrap(),
+        Regex::new(r#"(?i)(\b[\w.-]*(?:api[_-]?key|token|secret|password|passwd)(?:[_.-][\w.-]*|(?-i:[A-Z])[\w.-]*)?[ \t]*[=:][ \t]*)(?:\\"(?:[^"\\]|\\[^"])*\\"|"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[^\s,;"'<>\\]+)"#).unwrap(),
+        Regex::new(r#"(?i)(\bbearer[ \t]+)[^\s,;"'<>\\]+"#).unwrap(),
+        // A JSON key that contains a secret word, with a string value that may hold escaped
+        // quotes or a number. The value becomes a string, so the JSON stays valid.
+        Regex::new(r#"(?i)("[^"\r\n]*(?:api[_-]?key|token|secret|password|passwd|authorization|cookie)[^"\r\n]*"\s*:\s*)(?:"(?:[^"\\]|\\.)*"|-?[0-9][0-9.eE+-]*)"#).unwrap(),
         Regex::new(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b").unwrap(),
         Regex::new(r"\b(?:gh[pousr]_[A-Za-z0-9]{8,}|sk-[A-Za-z0-9_-]{8,}|AKIA[A-Z0-9]{16})\b").unwrap(),
     ]);
     let mut output = value.to_owned();
     for (index, pattern) in patterns.iter().enumerate() {
         output = if index == 4 {
-            pattern.replace_all(&output, "$1[REDACTED]$2").into_owned()
+            pattern
+                .replace_all(&output, "$1\"[REDACTED]\"")
+                .into_owned()
         } else if index < 4 {
             pattern
                 .replace_all(&output, |captures: &regex::Captures<'_>| {
@@ -1150,7 +1155,7 @@ impl ArtifactStore<'_> {
             path: source.into(),
             reason: "text artifact is not valid UTF-8".into(),
         })?;
-        let stored = redact_secrets(&text);
+        let stored = text_redaction::redact_text_artifact(&text, origin);
         // Redaction can lengthen the text, so the limit also holds for the stored bytes.
         if stored.len() as u64 > MAX_TEXT_ARTIFACT_BYTES {
             return Err(EvidenceError::Artifact {

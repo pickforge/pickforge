@@ -141,7 +141,12 @@ fn stores_trees_logs_and_reports_as_redacted_inert_text() {
     let tree = write(
         dir,
         "tree.xml",
-        r#"<?xml version="1.0"?><hierarchy><node text="Sign in" password="false" bounds="[0,0][96,96]"/><node text="api_key=treesecret1" bounds="[0,96][96,192]"/></hierarchy>"#,
+        r#"<?xml version="1.0"?><hierarchy><node text="Sign in" password="false" bounds="[0,0][96,96]"/><node text="api_key=treesecret1" bounds="[0,96][96,192]"/><node text="Password:" bounds="[0,192][96,288]"/></hierarchy>"#,
+    );
+    let console = write(
+        dir,
+        "console.json",
+        r#"[{"level":"info","text":"token=","password":123456},{"level":"warn","text":"password=\"a\\\"tailsecret\""}]"#,
     );
     let logcat = write(
         dir,
@@ -165,7 +170,8 @@ fn stores_trees_logs_and_reports_as_redacted_inert_text() {
     input["after"]["artifacts"] = json!([
         {"kind": "report", "origin": "lighthouse", "label": "<b>Lighthouse</b>", "source": lighthouse,
             "capturedAt": "2026-10-28T11:05:00Z"},
-        {"kind": "log", "origin": "android-logcat", "label": "Logcat again", "source": logcat}
+        {"kind": "log", "origin": "android-logcat", "label": "Logcat again", "source": logcat},
+        {"kind": "log", "origin": "devtools-console", "label": "Console", "source": console}
     ]);
     let recorded = record(&project, &env, &input).unwrap();
     let run = PathBuf::from(recorded["dir"].as_str().unwrap());
@@ -183,6 +189,10 @@ fn stores_trees_logs_and_reports_as_redacted_inert_text() {
     // The tree keeps its structure and its password flags after redaction, so a
     // rule check can still parse it.
     assert!(!stored_tree.contains("treesecret1"), "{stored_tree}");
+    assert!(
+        stored_tree.contains(r#"<node text="Password:" bounds="[0,192][96,288]"/>"#),
+        "{stored_tree}"
+    );
     assert!(
         stored_tree.contains(r#"password="false" bounds="[0,0][96,96]"/><node text="api_key=[REDACTED]" bounds="[0,96][96,192]"/>"#),
         "{stored_tree}"
@@ -214,6 +224,19 @@ fn stores_trees_logs_and_reports_as_redacted_inert_text() {
         let name = entry.unwrap().file_name().into_string().unwrap();
         assert!(name.ends_with(".txt"), "only inert text is stored: {name}");
     }
+
+    // JSON is redacted value by value, so the stored console stays parseable.
+    assert_eq!(after[2]["format"], "json");
+    let stored_console: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(run.join(after[2]["path"].as_str().unwrap())).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stored_console[0]["text"], "token=");
+    assert_eq!(stored_console[0]["password"], "[REDACTED]");
+    assert!(
+        !stored_console.to_string().contains("tailsecret"),
+        "{stored_console}"
+    );
 
     let report = recorded["report"].as_str().unwrap();
     for unsafe_text in ["<script", "onerror", "<b>", "logsecret123", "reasonsecret"] {
