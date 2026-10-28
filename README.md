@@ -588,7 +588,8 @@ pickforge-lab takeover status --session <id>   # check whether a session is unde
 The native viewer's Take control button pauses Pickforge-managed agent activity.
 Return control and closing the window release the lease. All keys, including
 Escape, go to the session during control. `pickforge-lab watch --control` starts
-the native viewer with control. Without a usable native viewer, it opens
+the native viewer with control. While a human already holds control, it fails
+and leaves the open viewer running. Without a usable native viewer, it opens
 `remote-viewer` or a TigerVNC-compatible `vncviewer` with a temporary writable VNC.
 
 While a human holds control, desktop input, launch, exec, screenshots, waits,

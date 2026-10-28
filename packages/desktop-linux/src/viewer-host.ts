@@ -3,8 +3,8 @@ import path from "node:path";
 import net from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
-  getSession, startDaemon, stopOwnedDaemonGroup, processIdentityMatches,
-  readProcessIdentity, sessionDataDir, type DirHandle, type EnvLike, type ProcessIdentity,
+  getSession, startDaemon, stopOwnedDaemonGroup, processIdentityMatches, checkHumanLeaseBusy,
+  HumanLeaseHeldError, readProcessIdentity, sessionDataDir, type DirHandle, type EnvLike, type ProcessIdentity,
 } from "@pickforge/lab-core";
 import { withSessionVncLock, recoverStaleTakeoverLocked, SESSION_VNC_LOCK_TIMEOUT_MS } from "./session.js";
 import { verifyOwnedDisplayTarget } from "./x11-target.js";
@@ -220,11 +220,14 @@ async function requireViewerDisplay(sessionId: string, env: EnvLike): Promise<vo
 /**
  * A `--control` host takes the lease before it publishes readiness, while the
  * caller still holds the session lock. Recovering a stale lease needs that
- * lock, so it happens here first.
+ * lock, so it happens here first. A live lease refuses the start before the
+ * previous host stops, so another human's control and the open viewer stay.
  */
-async function recoverStaleLeaseLocked(sessionId: string, env: EnvLike): Promise<void> {
+async function requireFreeLeaseLocked(sessionId: string, env: EnvLike): Promise<void> {
   const record = await getSession(sessionId, env);
   if (record !== undefined) await recoverStaleTakeoverLocked(sessionId, record, env);
+  const lease = await checkHumanLeaseBusy(sessionId, env);
+  if (lease !== undefined) throw new HumanLeaseHeldError(lease);
 }
 
 /** Start one detached host per session, using the caller's graphical environment. */
@@ -236,7 +239,7 @@ export async function startNativeViewerHost(options: {
   sessionViewerDir(options.sessionId, env);
   return withSessionVncLock(options.sessionId, env, async () => {
     await requireViewerDisplay(options.sessionId, env);
-    if (options.control === true) await recoverStaleLeaseLocked(options.sessionId, env);
+    if (options.control === true) await requireFreeLeaseLocked(options.sessionId, env);
     const previous = await findNativeViewerHost(options.sessionId, env);
     if (options.control !== true) {
       if (previous?.version === options.version) return previous;

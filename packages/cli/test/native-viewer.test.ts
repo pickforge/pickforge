@@ -6,7 +6,10 @@ import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createSession, updateSession, processIdentityMatches, withSessionVncLock, readHumanLease, sessionDataDir } from "@pickforge/lab-core";
+import {
+  createSession, updateSession, processIdentityMatches, withSessionVncLock, readHumanLease, sessionDataDir,
+  HumanLeaseHeldError, releaseHumanLease,
+} from "@pickforge/lab-core";
 import {
   startXvfb, stopXvfb, findOnPath, startNativeViewerHost, findNativeViewerHost,
   stopNativeViewerHost, requestNativeViewerHost, sessionViewerDir, readViewerLaunchRecord,
@@ -126,6 +129,28 @@ describe.skipIf(!available)("native viewer host", () => {
       .toMatchObject({ inputTransport: "viewer", ownerPid: host.pid });
     await stopNativeViewerHost(sessionId, env);
     expect(await readHumanLease(sessionId, env)).toBeUndefined();
+  }, 20_000);
+
+  it("refuses control while a live lease is held and keeps the open viewer", async () => {
+    const previous = await start();
+    const takeover = await startHumanTakeover(sessionId, { transport: "viewer", registryEnv: env, env });
+    const binary = fakes.installViewer({ version: nativeViewerVersion });
+    await expect(startNativeViewerHost({ sessionId, cliEntry, binary, version: nativeViewerVersion, env, control: true }))
+      .rejects.toBeInstanceOf(HumanLeaseHeldError);
+    expect(processIdentityMatches({ pid: previous.pid, startTicks: previous.startTicks })).toBe(true);
+    expect(await readHumanLease(sessionId, env)).toMatchObject({ leaseId: takeover.leaseId, ownerPid: process.pid });
+    await releaseHumanLease(sessionId, takeover.leaseId, env);
+  }, 20_000);
+
+  it("refuses a second control start while the first host holds control", async () => {
+    const binary = fakes.installViewer({ version: nativeViewerVersion });
+    const first = host = await startNativeViewerHost({ sessionId, cliEntry, binary, version: nativeViewerVersion, env, control: true });
+    await expect.poll(() => readHumanLease(sessionId, env), { timeout: 5_000 }).toMatchObject({ ownerPid: first.pid });
+    const lease = await readHumanLease(sessionId, env);
+    await expect(startNativeViewerHost({ sessionId, cliEntry, binary, version: nativeViewerVersion, env, control: true }))
+      .rejects.toBeInstanceOf(HumanLeaseHeldError);
+    expect(processIdentityMatches({ pid: first.pid, startTicks: first.startTicks })).toBe(true);
+    expect(await readHumanLease(sessionId, env)).toMatchObject({ leaseId: lease?.leaseId, ownerPid: first.pid });
   }, 20_000);
 
   it("replaces a live host from a different CLI version", async () => {
