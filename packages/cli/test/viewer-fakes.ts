@@ -1,5 +1,8 @@
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
+
+const { version: cliVersion } = createRequire(import.meta.url)("../package.json") as { version: string };
 
 /**
  * Fake `hyprctl` and browser executables for the viewer tests. Both append
@@ -124,7 +127,7 @@ const fs = require("node:fs");
 const [callsLog, stateFile, clientsFile, behaviorFile, viewerFile, cuesFile] = __PATHS__;
 const args = process.argv.slice(2);
 const behavior = JSON.parse(fs.readFileSync(viewerFile, "utf8"));
-const version = behavior.version ?? "0.6.0";
+const version = behavior.version ?? ${JSON.stringify(cliVersion)};
 if (args.includes("--version")) { console.log("pickforge-viewer " + version); process.exit(0); }
 if (behavior.ignoreSignals) process.on("SIGTERM", () => {});
 fs.appendFileSync(callsLog, JSON.stringify({ tool: "viewer", args, pid: process.pid, display: process.env.DISPLAY, wayland: process.env.WAYLAND_DISPLAY }) + "\\n");
