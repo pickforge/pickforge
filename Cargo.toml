@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/pickforge-cli"]
+members = ["crates/pickforge-cli", "crates/pickforge-viewer"]
 resolver = "2"
 
 [workspace.package]
