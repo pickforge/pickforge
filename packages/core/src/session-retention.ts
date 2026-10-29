@@ -249,16 +249,19 @@ async function pruneCoordinationDirectory(root: DirHandle, dir: DirHandle, id: s
   });
 }
 
+/** The files prune checked in a retained directory, and its teardown time. */
+type Retained = { files: string[]; stoppedAt: number };
+
 async function removeRetainedDirectory(
   root: DirHandle, dir: DirHandle, id: string, roots: string[],
-  names: string[], stoppedAt: number, permits?: [DirHandle, StaleFiles],
+  { files, stoppedAt }: Retained, permits?: [DirHandle, StaleFiles],
 ): Promise<boolean> {
   if (await registryHasSession(id, roots)) return false;
   const current = await root.lstatChild(id);
   if (current?.dev !== dir.stat.dev || current.ino !== dir.stat.ino) return false;
   if (permits !== undefined && !await removePermits(dir, ...permits)) return false;
   await carryStoppedAt(root, id, stoppedAt);
-  for (const name of names.filter((name) => name !== MARKER)) await dir.unlinkChild(name);
+  for (const name of files.filter((name) => name !== MARKER)) await dir.unlinkChild(name);
   await dir.unlinkChild(MARKER);
   // The sibling markers stay until the horizon: late callers for this id
   // keep failing closed, and createSession never reuses a reserved id.
@@ -278,14 +281,14 @@ async function pruneDirectory(root: DirHandle, id: string, roots: string[], age:
       if (name !== MARKER && !LOG_FILE.test(name)) return false;
       if ((await dir.lstatChild(name))?.isFile() !== true) return false;
     }
-    if (files.length === names.length) return removeRetainedDirectory(root, dir, id, roots, files, stoppedAt);
+    if (files.length === names.length) return removeRetainedDirectory(root, dir, id, roots, { files, stoppedAt });
     // A first permit caller that stalled only through teardown builds permits/
     // in the retained directory, then fails closed.
     if ((await dir.lstatChild("permits"))?.isDirectory() !== true) return false;
     return withDirHandle(dir.openChild("permits"), async (permits) => {
       const permitFiles = await stalePermitFiles(permits);
       return permitFiles !== undefined &&
-        removeRetainedDirectory(root, dir, id, roots, files, stoppedAt, [permits, permitFiles]);
+        removeRetainedDirectory(root, dir, id, roots, { files, stoppedAt }, [permits, permitFiles]);
     });
   });
 }
