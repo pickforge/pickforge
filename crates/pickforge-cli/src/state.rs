@@ -614,6 +614,10 @@ fn read_marker(dir: &PinnedDir) -> Result<Option<Vec<u8>>, LayoutError> {
     let deadline = std::time::Instant::now() + LINK_SETTLE_BUDGET;
     let mut planted = 0;
     loop {
+        // Read the clock before the marker, so a refusal at the deadline rests
+        // on a reading taken after it. A reader descheduled between a reading
+        // and this check then never refuses a publication that ended meanwhile.
+        let past_deadline = std::time::Instant::now() >= deadline;
         match read_marker_once(dir)? {
             MarkerRead::Absent => return Ok(None),
             MarkerRead::Bytes(bytes) => return Ok(Some(bytes)),
@@ -622,7 +626,7 @@ fn read_marker(dir: &PinnedDir) -> Result<Option<Vec<u8>>, LayoutError> {
                     Some(false) => planted + 1,
                     _ => 0,
                 };
-                if planted >= PLANTED_LINK_CONFIRMATIONS || std::time::Instant::now() >= deadline {
+                if planted >= PLANTED_LINK_CONFIRMATIONS || past_deadline {
                     return Err(LayoutError::Refused {
                         action: manual_action(
                             &dir.marker_display(),
