@@ -141,6 +141,7 @@ export {
 
 export {
   DesktopInputTargetError,
+  DesktopPointerOutOfBoundsError,
   verifyOwnedDisplayTarget,
   type OwnedDisplayIdentity,
 } from "./x11-target.js";

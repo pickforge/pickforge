@@ -26,6 +26,8 @@ export class FakeXServer {
   inputCalls = 0;
   fault?: ReplyFault;
   fragments = false;
+  /** The default screen size in the setup reply. */
+  screen = { width: 640, height: 480 };
   notify = true;
   collapseGroups = false;
   private readonly server: net.Server;
@@ -102,6 +104,8 @@ export class FakeXServer {
     reply[28] = 1;
     reply[34] = 8;
     reply[35] = 255;
+    reply.writeUInt16LE(this.screen.width, 60);
+    reply.writeUInt16LE(this.screen.height, 62);
     return reply;
   }
 
