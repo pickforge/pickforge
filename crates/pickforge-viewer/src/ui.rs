@@ -534,6 +534,8 @@ impl Text {
     /// `text` with each run of characters that no font on the host can
     /// draw replaced by one ellipsis. A mark that the font of its cluster
     /// lacks counts as such a character, so it never draws as an empty box.
+    /// The rest of its cluster goes into the ellipsis too, since a mark
+    /// after it would attach to the ellipsis in a font that may lack it.
     pub fn displayable(&mut self, text: &str) -> String {
         self.load_fallbacks(text);
         let mut out = String::with_capacity(text.len());
@@ -549,15 +551,19 @@ impl Text {
                 .then(|| self.font_of(&drawn))
                 .flatten()
                 .map(|i| self.font(i));
-            for c in cluster {
-                let draws = font.is_some_and(|font| font.charmap().map(c) != 0);
-                if c.category() == Category::Format || ignorable(c) || draws {
-                    out.push(c);
-                    missing = false;
-                } else if !missing {
-                    out.push_str(ELLIPSIS);
-                    missing = true;
-                }
+            let draws = |c: char| {
+                c.category() == Category::Format
+                    || ignorable(c)
+                    || font.is_some_and(|font| font.charmap().map(c) != 0)
+            };
+            let kept = cluster.iter().take_while(|&&c| draws(c)).count();
+            if kept > 0 {
+                out.extend(&cluster[..kept]);
+                missing = false;
+            }
+            if kept < cluster.len() && !missing {
+                out.push_str(ELLIPSIS);
+                missing = true;
             }
         }
         out
@@ -867,7 +873,7 @@ pub const BANNER_LINES: usize = 3;
 const ELLIPSIS: &str = "\u{2026}";
 
 /// Wraps `message` into at most `max_lines` lines no wider than `max_w`
-/// by `measure`. Words wider than a line break between characters.
+/// by `measure`. Words wider than a line break between clusters.
 pub fn wrap(
     message: &str,
     max_w: f32,
@@ -1435,16 +1441,23 @@ mod tests {
         // A character no font draws takes its marks into the ellipsis.
         assert_eq!(text.displayable("a\u{378}\u{301}b"), "a\u{2026}b");
         assert_eq!(text.displayable("a\u{1ab0}b"), "a\u{2026}b");
+        // A mark after the lost one goes too, or it would mark the ellipsis.
+        assert_eq!(text.displayable("e\u{1ab0}\u{301}x"), "e\u{2026}x");
         assert_eq!(text.displayable("e\u{301}"), "e\u{301}");
         std::fs::remove_dir_all(&dir).unwrap();
         // Host fonts may draw the mark only apart from its ideograph.
         let mut text = Text::new();
-        let sample = "\u{65e5}\u{1ab0}\u{672c}\u{1ab0}";
-        if sample.chars().all(host_has) {
-            let shown = text.displayable(sample);
-            let ids = glyph_ids(&mut text, &shown);
-            assert!(ids.iter().all(|&(_, id)| id != 0), "{shown:?} draws a box");
-            assert!(shown.starts_with('\u{65e5}'));
+        for sample in [
+            "\u{65e5}\u{1ab0}\u{672c}\u{1ab0}",
+            "\u{e01}\u{1ab0}\u{e31}",
+            "\u{628}\u{1ab0}\u{64e}",
+        ] {
+            if sample.chars().all(host_has) {
+                let shown = text.displayable(sample);
+                let ids = glyph_ids(&mut text, &shown);
+                assert!(ids.iter().all(|&(_, id)| id != 0), "{shown:?} draws a box");
+                assert!(shown.starts_with(sample.chars().next().unwrap()));
+            }
         }
     }
 
