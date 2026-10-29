@@ -5,6 +5,7 @@ use crate::args::{self, Config, Placement};
 use crate::capture::{Capture, Control, CursorImage, Shared};
 use crate::clipboard::{self, Refusal, Secret};
 use crate::control::{Controller, Effect, Note};
+use crate::data_device::DataDevice;
 use crate::geometry::{self, Rect};
 use crate::input::{self, InjectError, Injector};
 use crate::keysyms::{self, named};
@@ -281,6 +282,8 @@ struct App {
     paste_stop: Arc<AtomicBool>,
     /// The latest read's thread. A read that never answered keeps it.
     paste_worker: Option<thread::JoinHandle<()>>,
+    /// The window's data device, on Wayland without data-control.
+    data_device: Option<DataDevice>,
 
     status: Option<StatusCode>,
     ended: bool,
@@ -345,6 +348,7 @@ impl App {
             paste_reads: 0,
             paste_stop: Arc::new(AtomicBool::new(true)),
             paste_worker: None,
+            data_device: None,
             status: Some(StatusCode::Connecting),
             ended: false,
             have_frame: false,
@@ -407,6 +411,9 @@ impl App {
             if let RawWindowHandle::Xlib(handle) = handle.as_raw() {
                 self.x11_visibility = X11Visibility::connect(handle.window as u32);
             }
+        }
+        if self.backend == Backend::Wayland {
+            self.data_device = DataDevice::new(window.clone());
         }
         self.window = Some(window);
         self.surface = Some(surface);
@@ -731,6 +738,8 @@ impl App {
         let Some(proxy) = self.proxy.clone() else {
             return;
         };
+        let deadline = Instant::now() + clipboard::READ_TIMEOUT;
+        let pipe = self.data_device.as_mut().map(DataDevice::receive);
         self.paste_reads += 1;
         let id = self.paste_reads;
         self.paste = Some(Paste::Reading {
@@ -742,7 +751,10 @@ impl App {
         self.paste_stop = Arc::clone(&stop);
         let backend = self.backend;
         self.paste_worker = Some(thread::spawn(move || {
-            let result = clipboard::read(backend, &stop);
+            let result = match pipe {
+                Some(pipe) => pipe.and_then(|pipe| clipboard::read_pipe(pipe, deadline, &stop)),
+                None => clipboard::read(backend, &stop),
+            };
             let _ = proxy.send_event(UserEvent::Clipboard { id, result });
         }));
     }
@@ -1455,6 +1467,9 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(device) = &mut self.data_device {
+            device.track();
+        }
         let now = Instant::now();
         if self.controller.tick(now) {
             self.control_changed();

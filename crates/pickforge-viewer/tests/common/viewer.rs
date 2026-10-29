@@ -8,6 +8,7 @@ use super::common::{near, wait_until, Painter, Xvfb};
 use pickforge_viewer::capture::{connect_display, Capture, Frame};
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
@@ -26,6 +27,7 @@ pub const WHITE: u32 = 0x00ff_ffff;
 pub const RED: u32 = 0x00d0_2020;
 /// `--color-surface-1`, the bar.
 pub const BAR: u32 = 0x000f_0f11;
+pub const EMBER: u32 = 0x00ff_7a1a;
 pub const WAIT: Duration = Duration::from_secs(10);
 
 pub struct Viewer {
@@ -56,20 +58,45 @@ impl Viewer {
         scale: &str,
         extra: &[&str],
     ) -> Viewer {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_pickforge-viewer"))
-            .args(["--display", &format!(":{}", session.display)])
-            .args(["--xvfb-pid", &session.pid.to_string()])
-            .args(["--xvfb-start-ticks", &session.start_ticks.to_string()])
-            .args(["--width", "640", "--height", "480"])
-            .args(["--class", class, "--thumbnail-width", "384"])
-            .args(["--placement", placement])
+        let mut command = Viewer::command(session, class, placement);
+        command
             .args(extra)
             // The window goes to the second Xvfb, never to the host desktop.
             .env_remove("WAYLAND_DISPLAY")
             .env_remove("WAYLAND_SOCKET")
             .env("DISPLAY", format!(":{host_display}"))
             .env("XAUTHORITY", "/dev/null")
-            .env("WINIT_X11_SCALE_FACTOR", scale)
+            .env("WINIT_X11_SCALE_FACTOR", scale);
+        Viewer::start(command)
+    }
+
+    /// A viewer whose window goes to the Wayland compositor listening on
+    /// `socket` in `runtime_dir`, never to the host desktop.
+    pub fn spawn_wayland(session: &Xvfb, runtime_dir: &Path, socket: &str, class: &str) -> Viewer {
+        let mut command = Viewer::command(session, class, "self");
+        command
+            .env_remove("WAYLAND_SOCKET")
+            .env_remove("DISPLAY")
+            .env("XDG_RUNTIME_DIR", runtime_dir)
+            .env("WAYLAND_DISPLAY", socket)
+            .env("XAUTHORITY", "/dev/null");
+        Viewer::start(command)
+    }
+
+    fn command(session: &Xvfb, class: &str, placement: &str) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pickforge-viewer"));
+        command
+            .args(["--display", &format!(":{}", session.display)])
+            .args(["--xvfb-pid", &session.pid.to_string()])
+            .args(["--xvfb-start-ticks", &session.start_ticks.to_string()])
+            .args(["--width", "640", "--height", "480"])
+            .args(["--class", class, "--thumbnail-width", "384"])
+            .args(["--placement", placement]);
+        command
+    }
+
+    fn start(mut command: Command) -> Viewer {
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -327,6 +354,21 @@ impl Screen {
             .unwrap();
         self.conn.get_input_focus().unwrap().reply().unwrap();
     }
+}
+
+/// Paste in the control bar, relative to the window: the bar's middle
+/// row, just right of Return control's ember outline.
+pub fn paste_point(screen: &mut Screen, window: Placed) -> (u32, u32) {
+    let mut shot = screen.shot();
+    wait_until(WAIT, || {
+        shot = screen.shot();
+        near(at(&shot, window, 320, 31), EMBER, 12)
+    });
+    let right = (0..300)
+        .rev()
+        .find(|&x| near(at(&shot, window, x, 16), EMBER, 60))
+        .expect("Return control");
+    (right + 4 + 24, 16)
 }
 
 pub fn at(frame: &Frame, window: Placed, x: u32, y: u32) -> u32 {

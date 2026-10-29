@@ -19,6 +19,8 @@ pub mod capture;
 #[cfg(target_os = "linux")]
 pub mod clipboard;
 #[cfg(target_os = "linux")]
+pub mod data_device;
+#[cfg(target_os = "linux")]
 pub mod fallback;
 #[cfg(target_os = "linux")]
 pub mod input;

@@ -1464,6 +1464,7 @@ dependencies = [
  "softbuffer",
  "swash",
  "unicode-bidi",
+ "wayland-client",
  "winit",
  "wl-clipboard-rs",
  "x11rb",

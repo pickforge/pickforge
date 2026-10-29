@@ -10,14 +10,16 @@
 //! the app drops any result that arrives after the stop.
 //!
 //! The X11 reader connects to the caller's `DISPLAY` with normal
-//! authorization. The session display is never read or written here.
+//! authorization. The session display is never read or written here. On a
+//! Wayland compositor without data-control, `data_device` asks the
+//! selection for a pipe after the click, and `read_pipe` reads it.
 
 use crate::input::MAX_TEXT_CHARS;
 use crate::protocol::Backend;
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
@@ -33,8 +35,9 @@ pub const MAX_PASTE_BYTES: usize = 4 * MAX_TEXT_CHARS + 2;
 /// Longest one read may take, from the click to the last byte.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// The Wayland MIME types read as text. Their bytes must still be UTF-8.
-const TEXT_TYPES: [&str; 3] = ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain"];
+/// The Wayland MIME types read as text, most preferred first. Their bytes
+/// must still be UTF-8.
+pub(crate) const TEXT_TYPES: [&str; 3] = ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain"];
 
 /// Why a paste types nothing. It never holds clipboard content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,6 +203,18 @@ pub fn read_wayland(timeout: Duration, stopped: &AtomicBool) -> Result<Secret, R
     if !TEXT_TYPES.contains(&mime.as_str()) {
         return Err(Refusal::Empty);
     }
+    still_wanted(stopped)?;
+    let bytes = read_bounded(pipe.as_fd(), deadline, MAX_PASTE_BYTES)?;
+    finish(&bytes)
+}
+
+/// Reads the pipe a Wayland selection writes to, to its end before
+/// `deadline`. Once `stopped` is set, the pipe is closed unread.
+pub fn read_pipe(
+    pipe: OwnedFd,
+    deadline: Instant,
+    stopped: &AtomicBool,
+) -> Result<Secret, Refusal> {
     still_wanted(stopped)?;
     let bytes = read_bounded(pipe.as_fd(), deadline, MAX_PASTE_BYTES)?;
     finish(&bytes)
@@ -422,6 +437,27 @@ mod tests {
         assert!(matches!(result, Err(Refusal::TooLong)));
         drop(reader);
         feeder.join().unwrap();
+    }
+
+    #[test]
+    fn read_pipe_reads_only_while_the_paste_is_wanted() {
+        let fill = |bytes: &[u8]| {
+            let (mut writer, reader) = UnixStream::pair().unwrap();
+            writer.write_all(bytes).unwrap();
+            OwnedFd::from(reader)
+        };
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let running = AtomicBool::new(false);
+        let text = read_pipe(fill(b"hunter2\n"), deadline, &running).unwrap();
+        assert_eq!(text.as_str(), "hunter2");
+        let stopped = AtomicBool::new(true);
+        let refused = read_pipe(fill(b"hunter2"), deadline, &stopped);
+        assert!(matches!(refused, Err(Refusal::Unavailable)));
+        let over = vec![b'a'; MAX_PASTE_BYTES + 1];
+        let refused = read_pipe(fill(&over), deadline, &running);
+        assert!(matches!(refused, Err(Refusal::TooLong)));
+        let refused = read_pipe(fill(b"\x89PNG"), deadline, &running);
+        assert!(matches!(refused, Err(Refusal::Empty)));
     }
 
     #[test]

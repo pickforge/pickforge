@@ -24,7 +24,6 @@ use x11rb::protocol::Event;
 const SHIFT_L: u32 = 0xffe1;
 const KEY_A: u32 = 0x61;
 const KEY_B: u32 = 0x62;
-const EMBER: u32 = 0x00ff_7a1a;
 /// Clipboard text that must reach the session and nothing else.
 const MARKER: &str = "marker-5e2a";
 const LONG_MESSAGE: &str = "O agente precisa que você entre na conta do banco com a sua senha e confirme o código que chegou por SMS no seu celular. Depois volte o controle para o agente continuar a tarefa de conciliação das faturas abertas deste mês, sem fechar a janela do navegador nem trocar de aba enquanto a página carrega.";
@@ -136,20 +135,8 @@ impl Rig {
         assert!(presses.is_empty(), "input reached the session: {presses:?}");
     }
 
-    /// Paste in the control bar, relative to the window: the bar's middle
-    /// row, just right of Return control's ember outline.
     fn paste_point(&mut self) -> (u32, u32) {
-        let window = self.window;
-        let mut shot = self.screen.shot();
-        wait_until(WAIT, || {
-            shot = self.screen.shot();
-            near(at(&shot, window, 320, 31), EMBER, 12)
-        });
-        let right = (0..300)
-            .rev()
-            .find(|&x| near(at(&shot, window, x, 16), EMBER, 60))
-            .expect("Return control");
-        (right + 4 + 24, 16)
+        paste_point(&mut self.screen, self.window)
     }
 
     fn click_paste(&mut self) {

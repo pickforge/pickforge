@@ -19,7 +19,7 @@ use x11rb::rust_connection::RustConnection;
 const DISPLAY_MIN: u32 = 10000;
 const DISPLAY_MAX: u32 = 50000;
 
-fn on_path(program: &str) -> bool {
+pub fn on_path(program: &str) -> bool {
     std::env::var_os("PATH")
         .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
         .unwrap_or(false)
