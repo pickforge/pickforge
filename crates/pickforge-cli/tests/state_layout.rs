@@ -564,10 +564,10 @@ fn a_socket_marker_is_refused_instead_of_blocking() {
 /// 40 × 5 ms window (#104 R6).
 #[test]
 fn a_slow_publication_window_is_waited_out_rather_than_refused() {
-    // The reader waits a publication out for at most 1 s. A runner that
-    // stalls the publisher itself past that makes a refusal correct, so only
-    // that attempt runs again (#468). Refusing a publication that ended in
-    // time fails at once.
+    // The reader's 1 s settle budget starts after `began`, and it refuses only
+    // on a reading taken past that budget. A refusal is therefore correct only
+    // when the staging entry outlived 1 s, as on a runner that stalls the
+    // publisher itself (#468), and only that attempt runs again.
     for _ in 0..5 {
         // Stalled for 400 ms, twice the old window.
         let (read, published) = race_slow_publisher(std::time::Duration::from_millis(400));
@@ -576,11 +576,12 @@ fn a_slow_publication_window_is_waited_out_rather_than_refused() {
                 assert_eq!(version, Some(1));
                 return;
             }
-            Err(error) if published < std::time::Duration::from_millis(900) => panic!(
-                "refused a publication whose staging entry was gone {published:?} after the \
+            Err(state::LayoutError::Refused { .. })
+                if published > std::time::Duration::from_millis(1_000) => {}
+            Err(error) => panic!(
+                "the read failed although the staging entry was gone {published:?} after the \
                  read began: {error}"
             ),
-            Err(_) => {}
         }
     }
     panic!("the publisher overran the settle budget in all 5 attempts");
