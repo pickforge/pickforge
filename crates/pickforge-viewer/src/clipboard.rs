@@ -6,8 +6,9 @@
 //! not. Only UTF-8 text is read; other formats count as
 //! nothing to paste. A read is bounded in size and time, so a slow or huge
 //! clipboard cannot block typing or fill memory. A read whose paste was
-//! stopped, for example because control ended, starts no further step, and
-//! the app drops any result that arrives after the stop.
+//! stopped, for example because control ended, starts no further step and
+//! reads no further byte, and the app drops any result that arrives after
+//! the stop.
 //!
 //! The X11 reader connects to the caller's `DISPLAY` with normal
 //! authorization. The session display is never read or written here. On a
@@ -143,17 +144,20 @@ fn wait_readable(fd: BorrowedFd<'_>, deadline: Instant) -> Result<(), Refusal> {
 }
 
 /// Reads `fd` to its end, at most `max` bytes, before `deadline`. More
-/// bytes refuse the text without reading the rest.
+/// bytes refuse the text without reading the rest. Once `stopped` is set,
+/// no further byte is read.
 pub fn read_bounded(
     fd: BorrowedFd<'_>,
     deadline: Instant,
     max: usize,
+    stopped: &AtomicBool,
 ) -> Result<Zeroizing<Vec<u8>>, Refusal> {
     let mut file = File::from(fd.try_clone_to_owned().map_err(|_| Refusal::Unavailable)?);
     let mut buf = Zeroizing::new(vec![0u8; max + 1]);
     let mut len = 0;
     loop {
         wait_readable(fd, deadline)?;
+        still_wanted(stopped)?;
         match file.read(&mut buf[len..]) {
             Ok(0) => break,
             Ok(n) => len += n,
@@ -204,7 +208,7 @@ pub fn read_wayland(timeout: Duration, stopped: &AtomicBool) -> Result<Secret, R
         return Err(Refusal::Empty);
     }
     still_wanted(stopped)?;
-    let bytes = read_bounded(pipe.as_fd(), deadline, MAX_PASTE_BYTES)?;
+    let bytes = read_bounded(pipe.as_fd(), deadline, MAX_PASTE_BYTES, stopped)?;
     finish(&bytes)
 }
 
@@ -216,7 +220,7 @@ pub fn read_pipe(
     stopped: &AtomicBool,
 ) -> Result<Secret, Refusal> {
     still_wanted(stopped)?;
-    let bytes = read_bounded(pipe.as_fd(), deadline, MAX_PASTE_BYTES)?;
+    let bytes = read_bounded(pipe.as_fd(), deadline, MAX_PASTE_BYTES, stopped)?;
     finish(&bytes)
 }
 
@@ -421,7 +425,7 @@ mod tests {
         writer.write_all(b"one-time 123456").unwrap();
         drop(writer);
         let deadline = Instant::now() + Duration::from_secs(1);
-        let bytes = read_bounded(reader.as_fd(), deadline, 64).unwrap();
+        let bytes = read_bounded(reader.as_fd(), deadline, 64, &AtomicBool::new(false)).unwrap();
         assert_eq!(&bytes[..], b"one-time 123456");
     }
 
@@ -433,7 +437,7 @@ mod tests {
             let _ = writer.write_all(&vec![b'a'; 4 * 64 + 10]);
         });
         let deadline = Instant::now() + Duration::from_secs(1);
-        let result = read_bounded(reader.as_fd(), deadline, 64);
+        let result = read_bounded(reader.as_fd(), deadline, 64, &AtomicBool::new(false));
         assert!(matches!(result, Err(Refusal::TooLong)));
         drop(reader);
         feeder.join().unwrap();
@@ -461,11 +465,37 @@ mod tests {
     }
 
     #[test]
+    fn a_read_waiting_when_the_paste_stops_reads_no_byte() {
+        let (mut writer, reader) = UnixStream::pair().unwrap();
+        let peek = reader.try_clone().unwrap();
+        let stopped = AtomicBool::new(false);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let result = std::thread::scope(|scope| {
+            let read = scope.spawn(|| read_pipe(OwnedFd::from(reader), deadline, &stopped));
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(!read.is_finished(), "the read is not waiting");
+            stopped.store(true, Ordering::SeqCst);
+            writer.write_all(b"hunter2").unwrap();
+            drop(writer);
+            read.join().unwrap()
+        });
+        assert!(matches!(result, Err(Refusal::Unavailable)));
+        let mut unread = Vec::new();
+        (&peek).read_to_end(&mut unread).unwrap();
+        assert_eq!(unread, b"hunter2", "the stopped read took bytes");
+    }
+
+    #[test]
     fn read_bounded_gives_up_at_the_deadline() {
         let (mut writer, reader) = UnixStream::pair().unwrap();
         writer.write_all(b"partial").unwrap();
         let start = Instant::now();
-        let result = read_bounded(reader.as_fd(), start + Duration::from_millis(200), 64);
+        let result = read_bounded(
+            reader.as_fd(),
+            start + Duration::from_millis(200),
+            64,
+            &AtomicBool::new(false),
+        );
         assert!(matches!(result, Err(Refusal::Unavailable)));
         let took = start.elapsed();
         assert!(took >= Duration::from_millis(200) && took < Duration::from_secs(1));
