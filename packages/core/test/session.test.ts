@@ -109,7 +109,7 @@ describe("session registry", () => {
       { type: "desktop", projectDir: "/proj" },
       env,
     );
-    expect(session.id).toMatch(/^desk-[0-9a-f]{8}$/);
+    expect(session.id).toMatch(/^desk-[0-9a-f]{16}$/);
     expect(session.status).toBe("starting");
     expect(session.projectDir).toBe("/proj");
     expect(
@@ -135,7 +135,7 @@ describe("session registry", () => {
       },
       env,
     );
-    expect(created.id).toMatch(/^brow-[0-9a-f]{8}$/);
+    expect(created.id).toMatch(/^brow-[0-9a-f]{16}$/);
     const loaded = await getSession(created.id, env);
     expect(loaded).toEqual(created);
     expect(loaded?.browser?.profileMode).toBe("ephemeral");
@@ -170,6 +170,33 @@ describe("session registry", () => {
     const loadedLegacy = await getSession(legacy.id, env);
     expect(loadedLegacy?.desktop?.width).toBeUndefined();
     expect(loadedLegacy?.desktop?.height).toBeUndefined();
+  });
+
+  it("draws 16 hex id characters and still serves 8-hex records", async () => {
+    for (const [type, prefix] of [
+      ["desktop", "desk"],
+      ["android", "andr"],
+      ["desktop+android", "duo"],
+      ["browser", "brow"],
+    ] as const) {
+      const created = await createSession({ type, projectDir: "/proj" }, env);
+      expect(created.id).toMatch(new RegExp(`^${prefix}-[0-9a-f]{16}$`));
+    }
+    const sessions = path.join(home, "sessions");
+    const legacy = {
+      id: "desk-1a2b3c4d",
+      type: "desktop",
+      status: "running",
+      projectDir: "/proj",
+      createdAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(path.join(sessions, `${legacy.id}.json`), `${JSON.stringify(legacy)}\n`);
+    expect((await getSession(legacy.id, env))?.status).toBe("running");
+    const updated = await updateSession(legacy.id, { status: "stopped" }, env);
+    expect(updated.id).toBe(legacy.id);
+    expect((await getSession(legacy.id, env))?.status).toBe("stopped");
+    await destroySessionRecord(legacy.id, env);
+    expect(await getSession(legacy.id, env)).toBeUndefined();
   });
 
   it("round-trips through getSession", async () => {

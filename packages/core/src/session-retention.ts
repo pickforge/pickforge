@@ -73,8 +73,8 @@ export function parseSessionRetentionDuration(value: string): number {
  * permit. The longest command is a 300 s desktop wait or input action after
  * up to 90 s for the session lock, so live references end within minutes. A
  * day also covers a stopped or suspended caller. One that resumes later still
- * fails closed on the missing record, unless createSession has drawn the same
- * random 32-bit id again.
+ * fails closed on the missing record. Ids carry 64 random bits, so a new
+ * session drawing the same id again is negligible (#413).
  */
 export const SESSION_MARKER_HORIZON_MS = 86_400_000;
 

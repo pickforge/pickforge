@@ -414,3 +414,30 @@ describe.skipIf(!available)("native host click pulse", () => {
     expect(Date.now() - started).toBeLessThan(300);
   });
 });
+
+describe.skipIf(!available)("native host under a long session home", () => {
+  it("serves a request, a subscription and a pulse when the socket path passes the limit", async () => {
+    // The host binds through a descriptor path; clients must connect the same way (#413).
+    const shortSocket = path.join(sessionViewerDir(sessionId), "host.sock");
+    const home = path.join(root, "h".repeat(Math.max(1, 115 - Buffer.byteLength(shortSocket))));
+    fs.mkdirSync(home, { mode: 0o700 });
+    vi.stubEnv("PICKFORGE_HOME", home);
+    sessionId = (await createSession({ type: "desktop", projectDir: root, status: "running", desktop: {
+      display: display.display, xvfbPid: display.pid, xvfbStartTimeTicks: display.startTimeTicks, width: 640, height: 480, homePolicy: "private",
+    } })).id;
+    const host = await start();
+    expect(Buffer.byteLength(host.socket)).toBeGreaterThan(107);
+    const response = await requestNativeViewerHost(host, { op: "requestTakeover", message: "Help", timeoutMs: 5_000 });
+    if (!response.ok || response.requestId === undefined) throw new Error("Request failed");
+    const controller = new AbortController();
+    let ready = false;
+    const pending = followNativeViewerRequest(host, response.requestId, { signal: controller.signal, timeoutMs: 5_000, onReady: () => { ready = true; } });
+    await until(() => ready);
+    controller.abort();
+    expect(await pending).toBe("cancelled");
+    await pulseNativeViewer(sessionId, { display: display.display, pid: display.pid, startTicks: display.startTimeTicks }, { x: 7, y: 8 });
+    await until(() => fakes.calls().some((entry) => entry.cmd === "pulse" && entry.x === 7 && entry.y === 8));
+    await requestNativeViewerHost(host, { op: "shutdown" });
+    await running;
+  });
+});

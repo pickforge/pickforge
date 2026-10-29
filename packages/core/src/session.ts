@@ -121,8 +121,10 @@ function invalidSessionIdError(id: string): Error {
   );
 }
 
+// 8 random bytes, so a new session practically never draws an id freed by
+// prune and a stalled caller cannot act on a new session by its old id (#413).
 function newSessionId(type: SessionType): string {
-  return `${ID_PREFIXES[type]}-${randomBytes(4).toString("hex")}`;
+  return `${ID_PREFIXES[type]}-${randomBytes(8).toString("hex")}`;
 }
 
 function sessionPath(id: string, env: EnvLike): string {
