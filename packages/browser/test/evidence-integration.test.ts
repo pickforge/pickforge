@@ -78,7 +78,7 @@ function session(sessionId: string): LiveBrowserSession {
       cdpPort: 9222,
     },
   };
-  return { record, cdpPort: 9222, browserUrl: "http://127.0.0.1:9222" };
+  return { record, cdpPort: 9222, browserEndpoint: "ws://127.0.0.1:9222/devtools/browser/fake-guid" };
 }
 
 function executable(script: string): DevtoolsMcpExecutable {

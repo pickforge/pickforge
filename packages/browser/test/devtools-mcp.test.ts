@@ -8,14 +8,22 @@ import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   acquireHumanLease,
+  createSession,
+  destroySessionRecord,
+  readProcessIdentity,
   releaseHumanLease,
+  stopSessionAgentInput,
+  updateSession,
   type SessionRecord,
 } from "@pickforge/lab-core";
 import {
   createDeferred,
   CHROME_DEVTOOLS_MCP_BIN,
   CHROME_DEVTOOLS_MCP_VERSION,
+  SESSION_CHECK_FAILED_ERROR_CODE,
+  SESSION_ENDED_ERROR_CODE,
   TAKEOVER_BUSY_ERROR_CODE,
+  createSessionEndedIntercept,
   createTakeoverBusyIntercept,
   resolveDevtoolsMcpExecutable,
   resolveLiveBrowserSession,
@@ -131,7 +139,7 @@ function fakeExecutable(scriptPath: string): DevtoolsMcpExecutable {
 
 function fakeSession(): LiveBrowserSession {
   const record = browserRecord("brow-abcdef12", "/project");
-  return { record, cdpPort: 9333, browserUrl: "http://127.0.0.1:9333" };
+  return { record, cdpPort: 9333, browserEndpoint: "ws://127.0.0.1:9333/devtools/browser/fake-guid" };
 }
 
 class Signals extends EventEmitter implements RelaySignalSource {
@@ -184,8 +192,11 @@ describe("resolveDevtoolsMcpExecutable", () => {
   });
 });
 
+const fakeEndpoint = async (record: SessionRecord, cdpPort: number): Promise<URL> =>
+  new URL(`ws://127.0.0.1:${cdpPort}/devtools/browser/guid-${record.id}`);
+
 describe("resolveLiveBrowserSession", () => {
-  it("resolves exactly one live project-local browser and derives loopback URL", async () => {
+  it("resolves exactly one live project-local browser and pins its browser endpoint", async () => {
     const project = path.resolve("/wanted");
     const wanted = browserRecord("brow-aaaaaa11", project);
     const other = browserRecord("brow-bbbbbb22", "/other");
@@ -195,9 +206,33 @@ describe("resolveLiveBrowserSession", () => {
       env: {},
       list: async () => [other, dead, wanted],
       status: async (id) => browserStatus(id === wanted.id ? wanted : dead, id === wanted.id, 9444),
+      endpoint: fakeEndpoint,
     });
     expect(resolved.record.id).toBe(wanted.id);
-    expect(resolved.browserUrl).toBe("http://127.0.0.1:9444");
+    expect(resolved.browserEndpoint).toBe(
+      "ws://127.0.0.1:9444/devtools/browser/guid-brow-aaaaaa11",
+    );
+  });
+
+  it("fails closed when the session's own browser endpoint is unreadable", async () => {
+    const project = path.resolve("/wanted");
+    const one = browserRecord("brow-aaaaaa11", project);
+    for (const endpoint of [
+      async () => undefined,
+      async () => {
+        throw new Error("ENOENT");
+      },
+    ]) {
+      await expect(
+        resolveLiveBrowserSession({
+          projectDir: project,
+          env: {},
+          list: async () => [one],
+          status: async () => browserStatus(one, true),
+          endpoint,
+        }),
+      ).rejects.toThrow("No live browser session for this project");
+    }
   });
 
   it("fails closed for dead, other-project, missing-port, and ambiguous sessions", async () => {
@@ -211,6 +246,7 @@ describe("resolveLiveBrowserSession", () => {
         env: {},
         list: async () => [one, other],
         status: async (id) => browserStatus(id === one.id ? one : other, false),
+        endpoint: fakeEndpoint,
       }),
     ).rejects.toThrow("No live browser session for this project");
     await expect(
@@ -219,6 +255,7 @@ describe("resolveLiveBrowserSession", () => {
         env: {},
         list: async () => [one],
         status: async () => browserStatus(one, true, 0),
+        endpoint: fakeEndpoint,
       }),
     ).rejects.toThrow("No live browser session for this project");
     await expect(
@@ -227,6 +264,7 @@ describe("resolveLiveBrowserSession", () => {
         env: {},
         list: async () => [one, two],
         status: async (id) => browserStatus(id === one.id ? one : two, true),
+        endpoint: fakeEndpoint,
       }),
     ).rejects.toThrow(`Multiple live browser sessions for this project (${one.id}, ${two.id})`);
   });
@@ -274,6 +312,137 @@ describe("createTakeoverBusyIntercept", () => {
   });
 });
 
+describe("createSessionEndedIntercept", () => {
+  async function liveSession(env: { PICKFORGE_HOME: string }): Promise<LiveBrowserSession> {
+    const identity = readProcessIdentity(process.pid);
+    if (identity?.startTicks === undefined) throw new Error("own process identity is unavailable");
+    const record = await createSession(
+      {
+        type: "browser",
+        projectDir: "/project",
+        status: "running",
+        browser: {
+          browserPid: process.pid,
+          browserStartTimeTicks: identity.startTicks,
+          binaryPath: "/chrome",
+          profileMode: "ephemeral",
+          profileDir: "/profile",
+          cdpPort: 9222,
+        },
+      },
+      env,
+    );
+    return {
+      record,
+      cdpPort: 9222,
+      browserEndpoint: "ws://127.0.0.1:9222/devtools/browser/fake-guid",
+    };
+  }
+
+  const ended = (id: number) => ({
+    jsonrpc: "2.0",
+    id,
+    error: {
+      code: SESSION_ENDED_ERROR_CODE,
+      message:
+        "Pickforge: the browser session has ended; create a new session and restart the DevTools relay",
+    },
+  });
+
+  function registryEnv(): { PICKFORGE_HOME: string } {
+    return { PICKFORGE_HOME: path.join(temporaryDirectory(), "home") };
+  }
+
+  it("passes tool calls while the session and its Chrome are live", async () => {
+    const env = registryEnv();
+    const intercept = createSessionEndedIntercept(await liveSession(env), env);
+    expect(await intercept({ jsonrpc: "2.0", id: 1, method: "tools/call" })).toBeUndefined();
+  });
+
+  it("blocks every later tool call once the session record is destroyed", async () => {
+    const env = registryEnv();
+    const session = await liveSession(env);
+    const intercept = createSessionEndedIntercept(session, env);
+    await destroySessionRecord(session.record.id, env);
+    expect(await intercept({ jsonrpc: "2.0", id: 2, method: "tools/call" })).toEqual(ended(2));
+    // Notifications and non-tool requests still pass, so the client can shut down.
+    expect(await intercept({ jsonrpc: "2.0", id: "x", method: "tools/list" })).toBeUndefined();
+    expect(await intercept({ jsonrpc: "2.0", method: "notifications/cancelled" })).toBeUndefined();
+  });
+
+  it("blocks once teardown closes session input, before the record is removed", async () => {
+    const env = registryEnv();
+    const session = await liveSession(env);
+    const intercept = createSessionEndedIntercept(session, env);
+    await stopSessionAgentInput(session.record.id, env);
+    expect(await intercept({ jsonrpc: "2.0", id: 3, method: "tools/call" })).toEqual(ended(3));
+  });
+
+  it("stays closed after the session leaves running, even if the record returns", async () => {
+    const env = registryEnv();
+    const session = await liveSession(env);
+    const intercept = createSessionEndedIntercept(session, env);
+    await updateSession(session.record.id, { status: "error" }, env);
+    expect(await intercept({ jsonrpc: "2.0", id: 4, method: "tools/call" })).toEqual(ended(4));
+    await updateSession(session.record.id, { status: "running" }, env);
+    expect(await intercept({ jsonrpc: "2.0", id: 5, method: "tools/call" })).toEqual(ended(5));
+  });
+
+  // Root reads the record despite its mode, so the check cannot fail there.
+  it.skipIf(process.getuid?.() === 0)("refuses only the call whose session check cannot read the record", async () => {
+    const env = registryEnv();
+    const session = await liveSession(env);
+    const intercept = createSessionEndedIntercept(session, env);
+    const record = path.join(env.PICKFORGE_HOME, "sessions", `${session.record.id}.json`);
+    fs.chmodSync(record, 0);
+    try {
+      expect(await intercept({ jsonrpc: "2.0", id: 8, method: "tools/call" })).toEqual({
+        jsonrpc: "2.0",
+        id: 8,
+        error: {
+          code: SESSION_CHECK_FAILED_ERROR_CODE,
+          message: "Pickforge: could not check the browser session; try the call again",
+        },
+      });
+    } finally {
+      fs.chmodSync(record, 0o600);
+    }
+    expect(await intercept({ jsonrpc: "2.0", id: 9, method: "tools/call" })).toBeUndefined();
+  });
+
+  it("blocks when the session's Chrome is no longer the pinned live process", async () => {
+    const env = registryEnv();
+    const session = await liveSession(env);
+    const pinned = session.record.browser;
+    if (pinned === undefined) throw new Error("missing browser leg");
+    const moved = createSessionEndedIntercept(session, env);
+    await updateSession(
+      session.record.id,
+      { browser: { ...pinned, browserStartTimeTicks: pinned.browserStartTimeTicks + 1 } },
+      env,
+    );
+    expect(await moved({ jsonrpc: "2.0", id: 6, method: "tools/call" })).toEqual(ended(6));
+
+    const other = await liveSession(env);
+    const dead = createSessionEndedIntercept(
+      {
+        ...other,
+        record: {
+          ...other.record,
+          browser: { ...pinned, browserStartTimeTicks: pinned.browserStartTimeTicks + 1 },
+        },
+      },
+      env,
+    );
+    await updateSession(
+      other.record.id,
+      { browser: { ...pinned, browserStartTimeTicks: pinned.browserStartTimeTicks + 1 } },
+      env,
+    );
+    expect(await dead({ jsonrpc: "2.0", id: 7, method: "tools/call" })).toEqual(ended(7));
+  });
+});
+
 describe("runDevtoolsMcpRelay", () => {
   it("spawns Node with exact argv/env, relays protocol only, and redacts stderr", async () => {
     const dir = temporaryDirectory();
@@ -315,8 +484,8 @@ describe("runDevtoolsMcpRelay", () => {
     expect(spawnedCommand).toBe(process.execPath);
     expect(spawnedArgs).toEqual([
       script,
-      "--browser-url",
-      "http://127.0.0.1:9333",
+      "--wsEndpoint",
+      "ws://127.0.0.1:9333/devtools/browser/fake-guid",
     ]);
     expect(spawnedOptions).toMatchObject({
       cwd: dir,
@@ -330,7 +499,7 @@ describe("runDevtoolsMcpRelay", () => {
     expect(diagnosticText).not.toContain("super-secret-token");
     const observed: unknown = JSON.parse(fs.readFileSync(recordPath, "utf8"));
     expect(observed).toMatchObject({
-      argv: ["--browser-url", "http://127.0.0.1:9333"],
+      argv: ["--wsEndpoint", "ws://127.0.0.1:9333/devtools/browser/fake-guid"],
       env: {
         CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS: "true",
         CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS: "true",
