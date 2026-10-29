@@ -187,6 +187,14 @@ describe.skipIf(!hasDesktopStack)("desktop flow (real Xvfb)", () => {
       );
       expect(key.ok).toBe(true);
 
+      const marker = "pf409-private-key-marker";
+      const refused = await lab.client.callTool({
+        name: "desktop_key",
+        arguments: { key: `${marker}\u0000Tab` },
+      });
+      expect(refused.isError).toBe(true);
+      expect(JSON.stringify(refused)).not.toContain(marker);
+
       const destroyed = parseToolJson(
         await lab.client.callTool({
           name: "session_destroy",
@@ -209,11 +217,11 @@ describe.skipIf(!hasDesktopStack)("desktop flow (real Xvfb)", () => {
           manifest!.runId,
         ),
       );
-      expect(
-        actions.find(
-          (action) => "tool" in action && action.tool === "desktop_key",
-        ),
-      ).toMatchObject({
+      const keyActions = actions.filter(
+        (action) => "tool" in action && action.tool === "desktop_key",
+      );
+      expect(keyActions).toHaveLength(1);
+      expect(keyActions[0]).toMatchObject({
         target: { length: 6, inputType: "other" },
       });
       expect(

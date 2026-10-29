@@ -30,4 +30,6 @@ regexes = [
   '''^api_key=abc123$''',
   # RFC 6455 sample Sec-WebSocket-Key, "the sample nonce" (viewer bridge security tests)
   '''^dGhlIHNhbXBsZSBub25jZQ==$''',
+  # key name marker that key dispatch errors must not echo (desktop-linux pointer tests)
+  '''^pf409-private-key-marker$''',
 ]

@@ -8,7 +8,7 @@ vi.mock("@pickforge/lab-core", async (original) => {
   const actual = await original<typeof import("@pickforge/lab-core")>();
   return { ...actual, runCommand: vi.fn() };
 });
-import { createSession, runCommand, updateSession, type EnvLike } from "@pickforge/lab-core";
+import { CommandError, createSession, runCommand, updateSession, type EnvLike } from "@pickforge/lab-core";
 import { click, doubleClick, drag, move, pressKey, scroll } from "../src/input.js";
 import { DesktopInputTargetError, DesktopPointerOutOfBoundsError, verifyOwnedDisplayTarget } from "../src/x11-target.js";
 import { X11_SETUP_MS } from "../src/x11-wire.js";
@@ -237,6 +237,32 @@ it.each(Object.keys(inputs))("%s dispatches only to the verified owned Xvfb", as
     fs.writeFileSync(processStat, stat);
     files.forEach((content, index) => writeProc(index + 1, content));
   }
+});
+
+it.each([
+  [{ code: 2, signal: null, timedOut: false }, "Desktop key dispatch failed (exited with code 2)"],
+  [{ code: null, signal: "SIGTERM" as const, timedOut: true }, "Desktop key dispatch failed (killed with signal SIGTERM, timed out)"],
+])("a failed key dispatch never echoes the key: %o", async (exit, message) => {
+  const key = "pf409-private-key-marker";
+  const result = { ok: false, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, ...exit };
+  vi.mocked(runCommand).mockImplementation(async (cmd, args) => { throw new CommandError(cmd, args ?? [], result); });
+  const error = await pressKey({ sessionId, display: desktop.display, env, key }).catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(Error);
+  expect((error as Error).message).toBe(message);
+  expect(vi.mocked(runCommand).mock.calls[0]![1]).toContain(key);
+});
+
+it("any other key dispatch error never echoes the key", async () => {
+  const key = "pf409-private-key-marker";
+  vi.mocked(runCommand).mockRejectedValue(new TypeError(`spawn failed for xdotool key -- ${key}`));
+  await expect(pressKey({ sessionId, display: desktop.display, env, key })).rejects.toThrow(/^Desktop key dispatch failed$/);
+});
+
+it("refuses a key with a NUL character before any dispatch", async () => {
+  const key = "pf409-private-key-marker\0Tab";
+  const error = await pressKey({ sessionId, display: desktop.display, env, key }).catch((caught: unknown) => caught);
+  expect((error as Error).message).toBe("Invalid key: expected a non-empty string without NUL characters");
+  expect(runCommand).not.toHaveBeenCalled();
 });
 
 const at = () => ({ sessionId, display: desktop.display, env });
