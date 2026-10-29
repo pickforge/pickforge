@@ -3,8 +3,9 @@
 
 use crate::args::{self, Config, Placement};
 use crate::capture::{Capture, Control, CursorImage, Shared};
-use crate::clipboard::{self, Refusal, Secret};
+use crate::clipboard::{self, PasteStop, Refusal, Secret};
 use crate::control::{Controller, Effect, Note};
+use crate::data_device::DataDevice;
 use crate::geometry::{self, Rect};
 use crate::input::{self, InjectError, Injector};
 use crate::keysyms::{self, named};
@@ -278,9 +279,14 @@ struct App {
     paste_reads: u64,
     /// Set when the paste of the latest read stops, so that read asks for
     /// no more content.
-    paste_stop: Arc<AtomicBool>,
+    paste_stop: Arc<PasteStop>,
     /// The latest read's thread. A read that never answered keeps it.
     paste_worker: Option<thread::JoinHandle<()>>,
+    /// The window's data device, on Wayland without data-control.
+    data_device: Option<DataDevice>,
+    /// True while the window has keyboard focus, as of the last window
+    /// event.
+    focused: bool,
 
     status: Option<StatusCode>,
     ended: bool,
@@ -343,8 +349,10 @@ impl App {
             keys: HashMap::new(),
             paste: None,
             paste_reads: 0,
-            paste_stop: Arc::new(AtomicBool::new(true)),
+            paste_stop: Arc::new(PasteStop::stopped()),
             paste_worker: None,
+            data_device: None,
+            focused: false,
             status: Some(StatusCode::Connecting),
             ended: false,
             have_frame: false,
@@ -407,6 +415,9 @@ impl App {
             if let RawWindowHandle::Xlib(handle) = handle.as_raw() {
                 self.x11_visibility = X11Visibility::connect(handle.window as u32);
             }
+        }
+        if self.backend == Backend::Wayland {
+            self.data_device = DataDevice::new(window.clone());
         }
         self.window = Some(window);
         self.surface = Some(surface);
@@ -731,6 +742,17 @@ impl App {
         let Some(proxy) = self.proxy.clone() else {
             return;
         };
+        let deadline = Instant::now() + clipboard::READ_TIMEOUT;
+        // A data device offer is valid only while the window has keyboard
+        // focus, so a click that ends after focus went reads nothing.
+        let focused = self.focused;
+        let pipe = self.data_device.as_mut().map(|device| {
+            if focused {
+                device.receive()
+            } else {
+                Err(Refusal::Unavailable)
+            }
+        });
         self.paste_reads += 1;
         let id = self.paste_reads;
         self.paste = Some(Paste::Reading {
@@ -738,11 +760,14 @@ impl App {
             lease,
             until: Instant::now() + PASTE_READ_LIMIT,
         });
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(PasteStop::default());
         self.paste_stop = Arc::clone(&stop);
         let backend = self.backend;
         self.paste_worker = Some(thread::spawn(move || {
-            let result = clipboard::read(backend, &stop);
+            let result = match pipe {
+                Some(pipe) => pipe.and_then(|pipe| clipboard::read_pipe(pipe, deadline, &stop)),
+                None => clipboard::read(backend, &stop),
+            };
             let _ = proxy.send_event(UserEvent::Clipboard { id, result });
         }));
     }
@@ -750,7 +775,7 @@ impl App {
     /// Ends the paste. A read that still runs asks for no more content.
     fn stop_paste(&mut self) {
         self.paste = None;
-        self.paste_stop.store(true, Ordering::SeqCst);
+        self.paste_stop.stop();
     }
 
     /// True while the paste under `lease` may type.
@@ -1423,7 +1448,12 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseInput { state, button, .. } => self.on_mouse(state, button),
             WindowEvent::MouseWheel { delta, .. } => self.on_wheel(delta),
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers,
-            WindowEvent::Focused(false) => self.on_focus_lost(),
+            WindowEvent::Focused(focused) => {
+                self.focused = focused;
+                if !focused {
+                    self.on_focus_lost();
+                }
+            }
             WindowEvent::Ime(Ime::Commit(text)) => {
                 if is_text(&text) {
                     self.forward(|i| i.type_text(&text));
@@ -1455,6 +1485,9 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(device) = &mut self.data_device {
+            device.track();
+        }
         let now = Instant::now();
         if self.controller.tick(now) {
             self.control_changed();

@@ -3,8 +3,7 @@
 
 #![cfg(target_os = "linux")]
 
-use pickforge_viewer::clipboard::{read_wayland, wayland_refusal, Refusal};
-use std::sync::atomic::AtomicBool;
+use pickforge_viewer::clipboard::{read_wayland, wayland_refusal, PasteStop, Refusal};
 use std::time::{Duration, Instant};
 use wl_clipboard_rs::paste::Error;
 
@@ -16,7 +15,7 @@ fn a_missing_compositor_or_protocol_means_paste_unavailable() {
     std::env::remove_var("WAYLAND_SOCKET");
     let start = Instant::now();
     assert_eq!(
-        read_wayland(Duration::from_secs(1), &AtomicBool::new(false)).unwrap_err(),
+        read_wayland(Duration::from_secs(1), &PasteStop::default()).unwrap_err(),
         Refusal::Unavailable
     );
     assert!(start.elapsed() < Duration::from_secs(1));

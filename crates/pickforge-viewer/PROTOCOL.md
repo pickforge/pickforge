@@ -136,9 +136,18 @@ Error codes in the `error` event: `display-refused`, `xvfb-mismatch`,
   break, so text never triggers a shortcut. It types 32 characters per
   step and checks control before each step, so a revoke, an expired grant,
   Return control, collapse, close, stdin end of file or session end stops it
-  within one step. A read still running starts no further step, and its
-  result is dropped. On Wayland, a stop during the library's setup can still
-  let the source write into a pipe that the viewer closes unread. A click while a paste runs does
+  within one step. A read still running starts no further step and reads no
+  further byte, and its result is dropped. On Wayland, a stop after the viewer asked the source for
+  the text can still let the source write into a pipe that the viewer closes
+  unread. On Wayland the viewer uses data-control where the compositor
+  offers it. Without it, such as on GNOME, it reads the selection that the
+  compositor sends to the focused viewer window: it notes each selection's
+  text types and asks for the text only after the click, preferring
+  `text/plain;charset=utf-8`, then `UTF8_STRING`, then `text/plain`. It
+  drops the selection when the window loses keyboard focus, and a click
+  that ends without focus shows "Paste unavailable". A compositor with
+  neither shows "Paste unavailable", and stderr names the setup step that
+  failed. A click while a paste runs does
   nothing, and while a read that never answered still runs, a click shows
   "Paste unavailable". Paste sends no event, and the text never crosses
   stdio.

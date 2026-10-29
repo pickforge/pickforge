@@ -421,7 +421,7 @@ fn stopping_a_paste_stops_its_read() {
     }
     let display = Xvfb::start("640x480x24");
     let mut app = controlling(display.display);
-    let stop = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(PasteStop::default());
     app.paste_stop = Arc::clone(&stop);
     reading(&mut app, 1, "L1");
     app.on_command(Command::Revoke {
@@ -429,10 +429,7 @@ fn stopping_a_paste_stops_its_read() {
         reason: RevokeReason::LeaseLost,
     });
     assert!(app.paste.is_none());
-    assert!(
-        stop.load(Ordering::SeqCst),
-        "the read asks for no more content"
-    );
+    assert!(stop.is_stopped(), "the read asks for no more content");
 }
 
 #[test]

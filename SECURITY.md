@@ -105,9 +105,10 @@ The socket accepts only status, expand, collapse, and shutdown. It cannot grant 
 Teardown checks process identities before stopping the host and viewer, and uses SIGKILL if SIGTERM fails.
 
 Paste in the native viewer types host clipboard text into the session during control.
-The viewer reads the clipboard only after a click on Paste while a grant is live. A read whose paste stopped starts no further step, and its result is dropped; on Wayland a stop during setup can still let the source write into a pipe that the viewer closes unread. A read that never answers blocks further reads instead of starting new ones.
+The viewer reads the clipboard only after a click on Paste while a grant is live. A read whose paste stopped starts no further step and reads no further byte, and its result is dropped; on Wayland a stop can still let the source write into a pipe that the viewer closes unread. A read that never answers blocks further reads instead of starting new ones.
 On X11 it connects to the caller's `DISPLAY` with normal authorization. The empty-authorization rule above is for the session display.
-On Wayland it uses the data-control protocol. Compositors without it, such as GNOME, show "Paste unavailable".
+On Wayland it uses the data-control protocol where the compositor offers it.
+Without data-control, such as on GNOME, it uses the `wl_data_device` of the viewer window's own Wayland connection. The compositor sends that device the selection while the window has keyboard focus. The viewer notes the text types of each selection but asks the source for the text only after the click. It drops the selection when the window loses keyboard focus, and a click that ends without focus shows "Paste unavailable". A second `wl_keyboard` on the same queue reports that focus in order with the selection; its key events are ignored. A compositor with neither shows "Paste unavailable".
 It asks for UTF-8 text only and reads at most 16 KiB within one second. It refuses INCR transfers, other formats, and text over 4096 characters.
 The text never crosses the host channel. It never enters logs, errors, protocol events, or evidence records.
 The viewer owns no selection on the session display, so no session process can read the text from a clipboard.
