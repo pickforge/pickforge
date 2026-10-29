@@ -623,6 +623,12 @@ unchanged. The screenshot stays null while human control remains active.
 The viewer input transport uses the same lease and permit drain without
 starting writable VNC or changing an existing read-only VNC server.
 Returning control releases held keys and buttons before the resume screenshot.
+
+During control, Paste in the native viewer types the host clipboard text into
+the session, for example a password or a one-time code. It reads only UTF-8
+text of at most 4096 characters and drops one trailing line break. The text
+never enters logs or evidence, and the session clipboard stays empty. The VNC
+fallback has no paste.
 Recovery stops the stale viewer owner's verified process group before releasing
 input. The external VNC control path keeps its existing VNC mode switches.
 
@@ -899,7 +905,7 @@ The native window starts as a 384 pixel wide thumbnail.
 A click expands it without sending input to the session.
 The expanded watch bar has Take control, Fullscreen, Collapse, and Close. Escape collapses in watch mode.
 The viewer keeps its last frame and shows the session-ended status when capture ends.
-During control, the bar has Return control and Fullscreen. Escape goes to the session.
+During control, the bar has Return control, Paste, and Fullscreen. Escape goes to the session.
 
 On Hyprland with a Lua or hyprlang config, the window floats and stays pinned in the bottom-right corner without taking initial focus.
 Pickforge installs a rule for this launch's exact class and disables it after mapping.

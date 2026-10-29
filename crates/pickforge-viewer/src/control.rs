@@ -6,7 +6,7 @@
 use crate::protocol::{AckState, Command, Event, Mode, ReturnReason, RevokeReason};
 use std::time::{Duration, Instant};
 
-/// How long "Control unavailable" and "Control ended" stay.
+/// How long a note such as "Control ended" stays.
 pub const NOTE_FOR: Duration = Duration::from_secs(4);
 /// A Take control press waits this long for the host's answer before
 /// another press sends a new request.
@@ -27,6 +27,9 @@ pub trait Sink {
 pub enum Note {
     Unavailable,
     Ended,
+    NothingToPaste,
+    PasteTooLong,
+    PasteUnavailable,
 }
 
 impl Note {
@@ -34,6 +37,9 @@ impl Note {
         match self {
             Note::Unavailable => "Control unavailable",
             Note::Ended => "Control ended",
+            Note::NothingToPaste => "Nothing to paste",
+            Note::PasteTooLong => "Too long to paste",
+            Note::PasteUnavailable => "Paste unavailable",
         }
     }
 }
@@ -101,6 +107,16 @@ impl<S: Sink> Controller<S> {
         self.note.map(|(note, _)| note)
     }
 
+    /// Shows `note` for `NOTE_FOR`.
+    pub fn show(&mut self, note: Note, now: Instant) {
+        self.note = Some((note, now + NOTE_FOR));
+    }
+
+    /// The lease of the live grant.
+    pub fn lease_id(&self) -> Option<&str> {
+        self.grant.as_ref().map(|(id, _)| id.as_str())
+    }
+
     /// Handles `attention`, `clearAttention` and `control`. Other commands
     /// return nothing.
     pub fn on_command(&mut self, command: &Command, mode: Mode, now: Instant) -> Vec<Effect> {
@@ -128,10 +144,13 @@ impl<S: Sink> Controller<S> {
         if let Err(e) = sink.grant(lease_id, until) {
             eprintln!("pickforge-viewer: control grant: {e}");
         }
+        // A renewal keeps a paste note; a new grant clears old notes.
+        if self.lease_id() != Some(lease_id) {
+            self.note = None;
+        }
         self.grant = Some((lease_id.to_owned(), until));
         self.attention = None;
         self.take_sent = None;
-        self.note = None;
         let mut effects = vec![Effect::Emit(Event::ControlAck {
             lease_id: lease_id.to_owned(),
             state: AckState::Granted,
@@ -389,6 +408,25 @@ mod tests {
         assert_eq!(Note::Unavailable.text(), "Control unavailable");
         assert_eq!(Note::Ended.text(), "Control ended");
         assert_eq!(c.take(now), Some(Event::TakeRequested), "may ask again");
+    }
+
+    #[test]
+    fn paste_notes_show_for_a_while() {
+        let (mut c, _sink) = controller();
+        let now = Instant::now();
+        assert_eq!(c.lease_id(), None);
+        c.on_command(&grant("L1", 10_000), Mode::Expanded, now);
+        assert_eq!(c.lease_id(), Some("L1"));
+        c.show(Note::PasteTooLong, now);
+        c.on_command(&grant("L1", 10_000), Mode::Expanded, now);
+        assert_eq!(c.note(), Some(Note::PasteTooLong), "a renewal keeps it");
+        assert_eq!(c.deadline(), Some(now + NOTE_FOR));
+        assert!(c.tick(now + NOTE_FOR));
+        assert_eq!(c.note(), None);
+        assert!(c.controlling(), "a note leaves control alone");
+        assert_eq!(Note::NothingToPaste.text(), "Nothing to paste");
+        assert_eq!(Note::PasteTooLong.text(), "Too long to paste");
+        assert_eq!(Note::PasteUnavailable.text(), "Paste unavailable");
     }
 
     #[test]

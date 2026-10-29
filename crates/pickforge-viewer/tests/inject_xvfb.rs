@@ -149,6 +149,42 @@ fn held_modifiers_are_reconciled_and_lock_keys_dropped() {
     injector.type_text("a").unwrap();
     let presses = listener.key_presses(1);
     assert_eq!(listener.decode(&presses), "a");
+
+    // Text is never a shortcut, even with Control held.
+    let control = read_keyboard(&listener.conn)
+        .unwrap()
+        .find_keysym(0, named::CONTROL_L)
+        .unwrap()
+        .code;
+    listener.take_quiet();
+    injector.key(named::CONTROL_L, true).unwrap();
+    injector.type_text("a\tb\nc").unwrap();
+    let presses = listener.key_presses(6);
+    assert_eq!(
+        listener.decode(&presses),
+        "a<Tab>b<Return>c",
+        "no Control+A, Control+Tab or Control+Return"
+    );
+    assert!(
+        presses
+            .iter()
+            .filter(|&&(code, _)| code != control)
+            .all(|&(_, state)| state & 0x04 == 0),
+        "no text key goes with Control"
+    );
+    assert_eq!(listener.down_keys(), vec![control], "Control is held again");
+    injector.key(named::CONTROL_L, false).unwrap();
+
+    // Nor is a Tab in text a Shift+Tab.
+    listener.take_quiet();
+    injector.key(named::SHIFT_L, true).unwrap();
+    injector.type_text("\t").unwrap();
+    let presses = listener.key_presses(2);
+    assert_eq!(listener.decode(&presses), "<Tab>");
+    let tab = presses.iter().find(|&&(code, _)| code != shift).unwrap();
+    assert_eq!(tab.1 & 0x01, 0, "Shift is released for the Tab");
+    assert_eq!(listener.down_keys(), vec![shift], "Shift is held again");
+    injector.key(named::SHIFT_L, false).unwrap();
 }
 
 #[test]

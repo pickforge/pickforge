@@ -4,7 +4,9 @@ import path from "node:path";
 import net from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createSession, readHumanLease } from "@pickforge/lab-core";
+import {
+  createSession, readActions, readHumanLease, recordTakeoverEvidence, resolveActivePointer, resolveRunStorage,
+} from "@pickforge/lab-core";
 import { findNativeViewerHost, findOnPath, startXvfb, stopXvfb, type XvfbHandle } from "@pickforge/lab-desktop-linux";
 import { runNativeViewerHost } from "../../packages/cli/src/viewer/native-host.js";
 import { createViewerFakes } from "../../packages/cli/test/viewer-fakes.js";
@@ -67,7 +69,9 @@ describe.skipIf(findOnPath("Xvfb") === null)("native socket lease boundary", () 
     const response = await request({ op: "requestTakeover", message: "Help", timeoutMs: 500 });
     expect(response.ok).toBe(true);
     expect((await request({ op: "cancelRequest", requestId: response.requestId })).ok).toBe(true);
-    for (const op of ["grant", "control", "takeControl", "takeRequested", "key", "pointer", "input"]) {
+    // Pasted text stays in the viewer, so no socket operation carries it.
+    for (const op of ["grant", "control", "takeControl", "takeRequested", "key", "pointer", "input",
+      "paste", "pasteText", "clipboard", "type", "typeText", "text"]) {
       expect(await request({ op })).toMatchObject({ ok: false, error: "unknown-operation" });
     }
     await request({ op: "shutdown" });
@@ -76,4 +80,24 @@ describe.skipIf(findOnPath("Xvfb") === null)("native socket lease boundary", () 
     expect(acquire).not.toHaveBeenCalled();
     expect(await readHumanLease(session.id)).toBeUndefined();
   }, 15_000);
+});
+
+describe("takeover evidence", () => {
+  it("records only allowlisted keys, so pasted text has no field to enter", async () => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "pf-paste-evidence-"));
+    const project = path.join(root, "project");
+    fs.mkdirSync(project);
+    const env = { PICKFORGE_HOME: path.join(root, "home"), PICKFORGE_STORAGE_MODE: "project-local" };
+    await recordTakeoverEvidence(project, "desk-paste0", "takeover_start", { env });
+    await recordTakeoverEvidence(project, "desk-paste0", "takeover_return", { env, artifacts: ["screenshots/a.png"] });
+    const pointer = await resolveActivePointer(project, "desk-paste0", env);
+    if (pointer.status !== "active") throw new Error(`no active run: ${pointer.status}`);
+    const { runsDir } = await resolveRunStorage(project, env);
+    const records = await readActions(path.join(runsDir, pointer.pointer.runId));
+    expect(records.map((record) => (record as { tool?: string }).tool)).toEqual(["takeover_start", "takeover_return"]);
+    const allowed = ["actionId", "source", "tool", "sessionId", "startedAt", "status", "artifacts"];
+    for (const record of records) {
+      expect(Object.keys(record).filter((key) => !allowed.includes(key))).toEqual([]);
+    }
+  });
 });

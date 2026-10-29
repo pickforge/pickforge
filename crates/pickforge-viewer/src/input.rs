@@ -39,6 +39,10 @@ pub const MAX_BINDINGS: usize = 64;
 pub const MAX_TEXT_CHARS: usize = 4096;
 /// Longest a drop waits for the server to apply its releases.
 const CLOSE_SYNC: Duration = Duration::from_secs(1);
+/// The Control, Mod1 (Alt) and Mod4 (Super) state bits.
+const SHORTCUT_MASK: u8 = 0x04 | 0x08 | 0x40;
+/// The Shift state bit.
+const SHIFT_MASK: u8 = 0x01;
 
 #[derive(Debug)]
 pub enum InjectError {
@@ -500,6 +504,22 @@ impl<C: Clock> Injector<C> {
     /// conflict are released for that character and pressed again.
     pub fn type_text(&mut self, text: &str) -> Result<(), InjectError> {
         let strokes = strokes(text)?;
+        self.bind_strokes(&strokes)?;
+        for stroke in strokes {
+            self.check()?;
+            self.type_stroke(stroke)?;
+        }
+        Ok(())
+    }
+
+    /// Binds every character of `text` that the map lacks and types
+    /// nothing. A paste calls it first, so text over `MAX_BINDINGS` is
+    /// refused before any of it is typed.
+    pub fn bind_text(&mut self, text: &str) -> Result<(), InjectError> {
+        self.bind_strokes(&strokes(text)?)
+    }
+
+    fn bind_strokes(&mut self, strokes: &[Stroke]) -> Result<(), InjectError> {
         self.check()?;
         self.refresh()?;
         let points: Vec<u32> = strokes
@@ -509,12 +529,7 @@ impl<C: Clock> Injector<C> {
                 Stroke::Key(_) => None,
             })
             .collect();
-        self.bind_codepoints(&points)?;
-        for stroke in strokes {
-            self.check()?;
-            self.type_stroke(stroke)?;
-        }
-        Ok(())
+        self.bind_codepoints(&points)
     }
 
     /// Releases every key and button this injector holds. It sends only
@@ -708,10 +723,30 @@ impl<C: Clock> Injector<C> {
         match stroke {
             Stroke::Key(keysym) => {
                 let code = self.code_for(keysym, |kb, group| kb.find_keysym(group, keysym))?;
-                self.tap(code)
+                // A Tab or line break in text is never a shortcut or a
+                // Shift+Tab either.
+                let held = self.down_keycodes()?;
+                let release = self.state()? as u8
+                    & self.releasable_mask(&held)
+                    & (SHORTCUT_MASK | SHIFT_MASK);
+                let changes = self.modifier_changes(0, release, &held);
+                self.tap_with(code, &changes)
             }
             Stroke::Char(cp) => self.type_codepoint(cp),
         }
+    }
+
+    /// Taps `code` with modifier `changes` applied, then undoes them.
+    fn tap_with(&mut self, code: u8, changes: &[(u8, bool)]) -> Result<(), InjectError> {
+        for &(code, pressed) in changes {
+            self.send_key(code, pressed)?;
+        }
+        self.tap(code)?;
+        for &(code, pressed) in changes.iter().rev() {
+            self.send_key(code, !pressed)?;
+        }
+        self.conn.flush()?;
+        Ok(())
     }
 
     fn tap(&mut self, code: u8) -> Result<(), InjectError> {
@@ -736,7 +771,7 @@ impl<C: Clock> Injector<C> {
             .ok_or(InjectError::Unmappable)?;
         let held = self.down_keycodes()?;
         let releasable = self.releasable_mask(&held);
-        let plan = reconcile(
+        let mut plan = reconcile(
             key_type,
             found.level,
             state as u8,
@@ -744,16 +779,11 @@ impl<C: Clock> Injector<C> {
             releasable,
         )
         .ok_or(InjectError::Unmappable)?;
+        // Text is never a shortcut: a held Control, Alt or Super that the
+        // level does not use is released for the character.
+        plan.release |= state as u8 & releasable & SHORTCUT_MASK & !key_type.mask;
         let changes = self.modifier_changes(plan.press, plan.release, &held);
-        for &(code, pressed) in &changes {
-            self.send_key(code, pressed)?;
-        }
-        self.tap(found.code)?;
-        for &(code, pressed) in changes.iter().rev() {
-            self.send_key(code, !pressed)?;
-        }
-        self.conn.flush()?;
-        Ok(())
+        self.tap_with(found.code, &changes)
     }
 
     /// Keycodes the server reports down now.

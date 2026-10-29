@@ -104,6 +104,18 @@ Readiness records include verified host and viewer process identities and the so
 The socket accepts only status, expand, collapse, and shutdown. It cannot grant control or inject input.
 Teardown checks process identities before stopping the host and viewer, and uses SIGKILL if SIGTERM fails.
 
+Paste in the native viewer types host clipboard text into the session during control.
+The viewer reads the clipboard only after a click on Paste while a grant is live. A read whose paste stopped starts no further step, and its result is dropped; on Wayland a stop during setup can still let the source write into a pipe that the viewer closes unread. A read that never answers blocks further reads instead of starting new ones.
+On X11 it connects to the caller's `DISPLAY` with normal authorization. The empty-authorization rule above is for the session display.
+On Wayland it uses the data-control protocol. Compositors without it, such as GNOME, show "Paste unavailable".
+It asks for UTF-8 text only and reads at most 16 KiB within one second. It refuses INCR transfers, other formats, and text over 4096 characters.
+The text never crosses the host channel. It never enters logs, errors, protocol events, or evidence records.
+The viewer owns no selection on the session display, so no session process can read the text from a clipboard.
+Session processes receive the typed keys like any keyboard input, and a resume screenshot shows what the session displays.
+Characters missing from the session keyboard map are bound to spare keycodes, which stay bound. The map then shows which of those characters were typed, but not their order.
+The viewer zeroes its text buffers after typing, but the X11 client library and the typing code keep short-lived copies that are not zeroed. A core dump of a crashed viewer can hold the text, as its frame buffer holds the screen.
+The VNC fallback has no paste.
+
 ## VNC binds to loopback (SEC-01 — mitigated)
 
 The desktop VNC server (`x11vnc`) is started with `-localhost`, so it listens on

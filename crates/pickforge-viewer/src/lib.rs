@@ -17,6 +17,8 @@ mod app;
 #[cfg(target_os = "linux")]
 pub mod capture;
 #[cfg(target_os = "linux")]
+pub mod clipboard;
+#[cfg(target_os = "linux")]
 pub mod input;
 #[cfg(target_os = "linux")]
 mod ui;

@@ -119,6 +119,7 @@ impl Listener {
             }
             let name = match keysym {
                 named::RETURN => Some("<Return>"),
+                named::TAB => Some("<Tab>"),
                 named::LEFT => Some("<Left>"),
                 named::RIGHT => Some("<Right>"),
                 named::UP => Some("<Up>"),
