@@ -87,6 +87,12 @@ export {
 } from "./devtools-mcp.js";
 
 export {
+  DEVTOOLS_PERMIT_WATCH_MS,
+  createDevtoolsPermitGate,
+  type DevtoolsPermitGate,
+} from "./devtools-permits.js";
+
+export {
   BROWSER_PROFILE_NAME,
   browserProfileDir,
   claimBrowserProfile,

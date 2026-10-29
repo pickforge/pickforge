@@ -21,9 +21,17 @@ import {
 } from "@pickforge/lab-core";
 import { createDeferred } from "./deferred.js";
 import {
+  SESSION_CHECK_FAILED_ERROR_CODE,
+  SESSION_ENDED_ERROR_CODE,
+  TAKEOVER_BUSY_ERROR_CODE,
+  jsonRpcRequestId,
+  relayErrorResponse,
+} from "./devtools-errors.js";
+import {
   createDevtoolsEvidenceRecorder,
   type DevtoolsEvidenceRecorder,
 } from "./devtools-evidence.js";
+import { createDevtoolsPermitGate, type DevtoolsPermitGate } from "./devtools-permits.js";
 import { browserRuntimeLayout } from "./env.js";
 import { namedProfileBrowserEndpoint, profileBrowserEndpoint } from "./profiles.js";
 import {
@@ -35,22 +43,17 @@ import {
   JsonRpcProtocolError,
   createJsonRpcWriteQueue,
   pumpJsonRpcNdjson,
+  serializeJsonRpcMessage,
   writeWithBackpressure,
   type JsonRpcHook,
   type JsonRpcIntercept,
-  type JsonRpcMessage,
 } from "./ndjson.js";
 
-/** JSON-RPC error code for the stable "human control is active" busy response. */
-export const TAKEOVER_BUSY_ERROR_CODE = -32050;
-const TAKEOVER_BUSY_MESSAGE =
-  "Pickforge: human control is active; agent input is paused until control returns";
-
-function jsonRpcRequestId(message: JsonRpcMessage): string | number | undefined {
-  return typeof message.id === "string" || typeof message.id === "number"
-    ? message.id
-    : undefined;
-}
+export {
+  SESSION_CHECK_FAILED_ERROR_CODE,
+  SESSION_ENDED_ERROR_CODE,
+  TAKEOVER_BUSY_ERROR_CODE,
+} from "./devtools-errors.js";
 
 /**
  * Fail-closed human-takeover gate for the DevTools relay
@@ -78,22 +81,9 @@ export function createTakeoverBusyIntercept(
     if (id === undefined) return undefined;
     const lease = await checkHumanLeaseBusy(sessionId, env);
     if (lease === undefined) return undefined;
-    return {
-      jsonrpc: "2.0",
-      id,
-      error: { code: TAKEOVER_BUSY_ERROR_CODE, message: TAKEOVER_BUSY_MESSAGE },
-    };
+    return relayErrorResponse(id, TAKEOVER_BUSY_ERROR_CODE);
   };
 }
-
-/** JSON-RPC error code for the stable "browser session has ended" response. */
-export const SESSION_ENDED_ERROR_CODE = -32051;
-const SESSION_ENDED_MESSAGE =
-  "Pickforge: the browser session has ended; create a new session and restart the DevTools relay";
-/** JSON-RPC error code for a call refused because the session check failed. */
-export const SESSION_CHECK_FAILED_ERROR_CODE = -32052;
-const SESSION_CHECK_FAILED_MESSAGE =
-  "Pickforge: could not check the browser session; try the call again";
 
 type BrowserLeg = NonNullable<SessionRecord["browser"]>;
 
@@ -144,20 +134,12 @@ export function createSessionEndedIntercept(
         current = await isRelaySessionCurrent(session, env);
       } catch {
         // A read error refuses only this call; it does not prove the end.
-        return {
-          jsonrpc: "2.0",
-          id,
-          error: { code: SESSION_CHECK_FAILED_ERROR_CODE, message: SESSION_CHECK_FAILED_MESSAGE },
-        };
+        return relayErrorResponse(id, SESSION_CHECK_FAILED_ERROR_CODE);
       }
       ended = !current;
     }
     if (!ended) return undefined;
-    return {
-      jsonrpc: "2.0",
-      id,
-      error: { code: SESSION_ENDED_ERROR_CODE, message: SESSION_ENDED_MESSAGE },
-    };
+    return relayErrorResponse(id, SESSION_ENDED_ERROR_CODE);
   };
 }
 
@@ -354,6 +336,23 @@ export interface RelayHooks {
   intercept?: JsonRpcIntercept;
 }
 
+/** Hold a permit for each forwarded call: the gate's intercept runs last. */
+function composePermitHooks(
+  hooks: RelayHooks | undefined,
+  permits: DevtoolsPermitGate | undefined,
+): RelayHooks | undefined {
+  if (permits === undefined) return hooks;
+  return {
+    beforeForward: hooks?.beforeForward,
+    intercept: async (message) =>
+      (await hooks?.intercept?.(message)) ?? (await permits.intercept(message)),
+    afterResponse: async (message) => {
+      await permits.release(message);
+      return hooks?.afterResponse?.(message);
+    },
+  };
+}
+
 function composeEvidenceHooks(
   hooks: RelayHooks | undefined,
   evidence: DevtoolsEvidenceRecorder | undefined,
@@ -410,6 +409,8 @@ export interface RunDevtoolsMcpRelayOptions {
   env?: EnvLike;
   cwd?: string;
   hooks?: RelayHooks;
+  /** Agent permits for forwarded calls; see `createDevtoolsPermitGate`. */
+  permits?: DevtoolsPermitGate;
   spawnProcess?: DevtoolsSpawn;
   signalSource?: RelaySignalSource;
   shutdownTimeoutMs?: number;
@@ -643,12 +644,14 @@ function detachRelaySignalHandlers(termination: RelayTermination): void {
 
 type RelayRace =
   | { kind: "exit"; value: RelayExit }
+  | { kind: "input-closed"; permits: DevtoolsPermitGate }
   | { kind: "child-error"; error: unknown }
   | { kind: "error"; error: unknown };
 
 async function raceRelayOutcome(
   exit: Promise<RelayExit>,
   pumps: RelayPumps,
+  permits: DevtoolsPermitGate | undefined,
 ): Promise<RelayRace> {
   const failedPump = Promise.race([
     pendingAfterSuccess(pumps.inputPump),
@@ -661,6 +664,9 @@ async function raceRelayOutcome(
       (error: unknown) => ({ kind: "child-error" as const, error }),
     ),
     failedPump.catch((error: unknown) => ({ kind: "error" as const, error })),
+    ...(permits === undefined
+      ? []
+      : [permits.inputClosed.then(() => ({ kind: "input-closed" as const, permits }))]),
   ]);
 }
 
@@ -756,6 +762,30 @@ function throwIfRelayPumpsFailed(
   }
 }
 
+/**
+ * Teardown closed session input while forwarded calls were unanswered: stop
+ * the child, release the permits once it exited and so no call can reach
+ * Chrome, then answer each unanswered call after the child's output settled,
+ * so no late child response can follow that answer.
+ */
+async function endRelayForClosedInput(
+  child: RelayChild,
+  pumps: RelayPumps,
+  exited: Promise<RelayExit>,
+  timeoutMs: number,
+  permits: DevtoolsPermitGate,
+  output: Writable,
+): Promise<RelayExit> {
+  pumps.inputAbort.abort();
+  const stopped = await stopChild(child, exited, timeoutMs);
+  await permits.close();
+  await settleRelayPumps(pumps);
+  for (const message of permits.takeUnanswered()) {
+    await writeWithBackpressure(output, serializeJsonRpcMessage(message)).catch(() => {});
+  }
+  return stopped;
+}
+
 async function finishRelayExit(
   outcome: Extract<RelayRace, { kind: "exit" }>,
   pumps: RelayPumps,
@@ -778,7 +808,11 @@ export async function runDevtoolsMcpRelay(
   const timeoutMs = opts.shutdownTimeoutMs ?? 1_000;
   const child = spawnDevtoolsRelayChild(opts);
   const { outcome: exit, exited } = observeChildExit(child);
-  const pumps = startRelayPumps(child, opts, input, output, diagnostics);
+  // Once the child is gone, no held call can reach Chrome. Release at once,
+  // so an output that cannot drain never holds up a teardown drain.
+  void exited.then(() => opts.permits?.close());
+  const hooks = composePermitHooks(opts.hooks, opts.permits);
+  const pumps = startRelayPumps(child, { ...opts, hooks }, input, output, diagnostics);
   const termination: RelayTermination = {
     requested: false,
     handlers: new Map(),
@@ -787,7 +821,18 @@ export async function runDevtoolsMcpRelay(
   armRelayEofShutdown(pumps, child, exited, timeoutMs, termination);
   attachRelaySignalHandlers(child, timeoutMs, termination);
   try {
-    const outcome = await raceRelayOutcome(exit, pumps);
+    const outcome = await raceRelayOutcome(exit, pumps, opts.permits);
+    if (outcome.kind === "input-closed") {
+      termination.requested = true;
+      return await endRelayForClosedInput(
+        child,
+        pumps,
+        exited,
+        timeoutMs,
+        outcome.permits,
+        output,
+      );
+    }
     if (outcome.kind === "child-error") {
       return await failOnRelayChildError(
         outcome,
@@ -811,6 +856,12 @@ export async function runDevtoolsMcpRelay(
     return await finishRelayExit(outcome, pumps, termination);
   } finally {
     detachRelaySignalHandlers(termination);
+    // Every path settled the input pump, so nothing reads the input any more.
+    // An open one, such as the client's stdin, would keep the relay alive.
+    input.destroy();
+    // Every exit releases the held permits. A relay killed outright leaves
+    // files whose dead owner the next drain sweeps.
+    await opts.permits?.close();
   }
 }
 
@@ -885,6 +936,7 @@ export async function runProjectDevtoolsMcp(
       env: opts.env,
       cwd: path.resolve(opts.projectDir),
       hooks: composeEvidenceHooks(hooksWithTakeoverGate, evidence),
+      permits: createDevtoolsPermitGate(session.record.id, opts.env),
       shutdownTimeoutMs: opts.shutdownTimeoutMs,
       maxRecordBytes: opts.maxRecordBytes,
       maxDiagnosticLineBytes: opts.maxDiagnosticLineBytes,
