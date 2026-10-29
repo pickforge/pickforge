@@ -21,6 +21,7 @@ use std::fmt;
 use std::fs::File;
 use std::io::Read;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
@@ -184,36 +185,44 @@ pub fn read(backend: Backend, stopped: &PasteStop) -> Result<Secret, Refusal> {
     }
 }
 
-/// Set once the paste that asked for a read stops. A read holds the lock
-/// from its check to the end of its `read` call, so no byte is read after
-/// `stop` returns.
+/// Set once the paste that asked for a read stops. A read step runs under
+/// the lock and only while no stop is asked for, and a stop asks first and
+/// then takes the lock. So a stop waits for at most the step under way, and
+/// no step runs after it returns.
 #[derive(Debug, Default)]
-pub struct PasteStop(Mutex<bool>);
+pub struct PasteStop {
+    asked: AtomicBool,
+    step: Mutex<()>,
+}
 
 impl PasteStop {
     /// A stop that is already set, for when no paste runs.
     pub fn stopped() -> PasteStop {
-        PasteStop(Mutex::new(true))
+        PasteStop {
+            asked: AtomicBool::new(true),
+            step: Mutex::new(()),
+        }
     }
 
-    /// Stops the paste. Waits for a `read` call under way to end.
+    /// Stops the paste. Waits for a step under way to end.
     pub fn stop(&self) {
-        *self.lock() = true;
+        self.asked.store(true, Ordering::SeqCst);
+        drop(self.lock());
     }
 
     pub fn is_stopped(&self) -> bool {
-        *self.lock()
+        self.asked.load(Ordering::SeqCst)
     }
 
-    fn lock(&self) -> MutexGuard<'_, bool> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock(&self) -> MutexGuard<'_, ()> {
+        self.step.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Runs `step` unless the paste has stopped, and keeps it from
-    /// stopping until `step` ends.
+    /// Runs `step` unless the paste has stopped, and keeps a stop from
+    /// returning until `step` ends.
     fn while_wanted<T>(&self, step: impl FnOnce() -> T) -> Result<T, Refusal> {
-        let stopped = self.lock();
-        if *stopped {
+        let _step = self.lock();
+        if self.is_stopped() {
             return Err(Refusal::Unavailable);
         }
         Ok(step())
@@ -357,14 +366,16 @@ fn convert(
     .map_err(unavailable)?;
     conn.flush().map_err(unavailable)?;
     wait_notify(conn, window, deadline)?;
-    still_wanted(stopped)?;
     let long_length = (MAX_PASTE_BYTES / 4 + 1) as u32;
     // Read without deleting: deleting an INCR property would start the
-    // transfer.
-    let reply = conn
-        .get_property(false, window, atoms.property, AtomEnum::ANY, 0, long_length)
-        .map_err(unavailable)?
-        .reply()
+    // transfer. The reply carries the text, so the request and its reply
+    // are one step. A stop waits for that round trip to the X server the
+    // window itself runs on.
+    let reply = stopped
+        .while_wanted(|| {
+            conn.get_property(false, window, atoms.property, AtomEnum::ANY, 0, long_length)?
+                .reply()
+        })?
         .map_err(unavailable)?;
     let value = Zeroizing::new(reply.value);
     if reply.type_ == NONE {
@@ -514,20 +525,27 @@ mod tests {
     }
 
     #[test]
-    fn stopping_waits_for_a_read_under_way() {
+    fn a_stop_waits_for_the_step_under_way_and_refuses_the_next() {
         let stop = PasteStop::default();
         std::thread::scope(|scope| {
             let stopper = stop
                 .while_wanted(|| {
                     let stopper = scope.spawn(|| stop.stop());
-                    std::thread::sleep(Duration::from_millis(100));
-                    assert!(!stopper.is_finished(), "the stop did not wait for the read");
+                    while !stop.is_stopped() {
+                        std::thread::yield_now();
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                    assert!(!stopper.is_finished(), "the stop did not wait for the step");
                     stopper
                 })
                 .unwrap();
+            // Whether or not the stop has taken the lock yet, no step runs.
+            assert!(matches!(
+                stop.while_wanted(|| ()),
+                Err(Refusal::Unavailable)
+            ));
             stopper.join().unwrap();
         });
-        assert!(stop.is_stopped());
         assert!(matches!(
             stop.while_wanted(|| ()),
             Err(Refusal::Unavailable)

@@ -9,6 +9,11 @@
 //! so it is dropped when focus goes. A click asks the selection's owner to
 //! write into a pipe, which `clipboard::read_pipe` reads with the usual
 //! bounds.
+//!
+//! The device's own `wl_keyboard` reports that focus. Its enter and leave
+//! events share this queue with the selection, so they are handled in the
+//! order the compositor sent them, however winit's reads split the stream.
+//! Its key events are ignored.
 
 use crate::clipboard::{Refusal, TEXT_TYPES};
 use std::os::fd::{AsFd, OwnedFd};
@@ -19,8 +24,9 @@ use wayland_client::globals::{registry_queue_init, GlobalListContents};
 use wayland_client::protocol::wl_data_device::{self, WlDataDevice};
 use wayland_client::protocol::wl_data_device_manager::WlDataDeviceManager;
 use wayland_client::protocol::wl_data_offer::{self, WlDataOffer};
+use wayland_client::protocol::wl_keyboard::{self, WlKeyboard};
 use wayland_client::protocol::wl_registry::WlRegistry;
-use wayland_client::protocol::wl_seat::WlSeat;
+use wayland_client::protocol::wl_seat::{self, WlSeat};
 use wayland_client::{event_created_child, Connection, Dispatch, EventQueue, Proxy, QueueHandle};
 use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 use winit::window::Window;
@@ -72,6 +78,10 @@ struct State {
     selection: Option<WlDataOffer>,
     /// A drag over the window. It is never accepted.
     drag: Option<WlDataOffer>,
+    /// Asked for once the seat reports a keyboard.
+    keyboard: Option<WlKeyboard>,
+    /// True between the keyboard's enter and leave.
+    focused: bool,
 }
 
 /// The data device of the viewer window's seat.
@@ -81,7 +91,7 @@ pub struct DataDevice {
     device: WlDataDevice,
     conn: Connection,
     /// Keeps winit's connection open while the device uses it.
-    window: Rc<Window>,
+    _window: Rc<Window>,
 }
 
 impl DataDevice {
@@ -110,7 +120,7 @@ impl DataDevice {
             .map_err(|e| failed("bind wl_data_device_manager", e))
             .ok()?;
         let seat: WlSeat = globals
-            .bind(&qh, 1..=1, ())
+            .bind(&qh, 1..=3, ())
             .map_err(|e| failed("bind wl_seat", e))
             .ok()?;
         let device = manager.get_data_device(&seat, &qh, ());
@@ -122,38 +132,14 @@ impl DataDevice {
             state: State::default(),
             device,
             conn,
-            window,
+            _window: window,
         })
     }
 
-    /// Notes the offers that arrived since the last call, and drops the
-    /// selection while the window has no keyboard focus. Nothing is read.
+    /// Notes the offers and focus changes that arrived since the last
+    /// call. Nothing is read.
     pub fn track(&mut self) {
         let _ = self.queue.dispatch_pending(&mut self.state);
-        self.drop_unfocused();
-    }
-
-    /// Drops the selection unless the window has keyboard focus, and
-    /// returns whether it has.
-    ///
-    /// winit reads the socket for both queues before it hands out the
-    /// window events of a loop turn, and this queue is dispatched only
-    /// between reads. So after a dispatch, the selection and `has_focus`
-    /// describe the same point of the stream. The compositor sends a
-    /// selection only to the focused client or with a keyboard enter: the
-    /// protocol puts it right before the enter, and weston and Mutter send
-    /// it right after. An offer held without focus therefore came before
-    /// the loss and is dropped. An offer sent with a later enter is read
-    /// with that enter and kept. A read that splits the selection from an
-    /// enter that follows it drops that offer, so Paste finds nothing until
-    /// the next copy or focus change. That loses an offer but never keeps
-    /// a stale one.
-    fn drop_unfocused(&mut self) -> bool {
-        if self.window.has_focus() {
-            return true;
-        }
-        replace(&mut self.state.selection, None);
-        false
     }
 
     /// Asks the current selection for text and returns the pipe it is
@@ -163,7 +149,7 @@ impl DataDevice {
         self.queue
             .dispatch_pending(&mut self.state)
             .map_err(|_| Refusal::Unavailable)?;
-        if !self.drop_unfocused() {
+        if !self.state.focused {
             return Err(Refusal::Unavailable);
         }
         let Some(offer) = &self.state.selection else {
@@ -191,6 +177,11 @@ impl Drop for DataDevice {
             .flatten()
         {
             offer.destroy();
+        }
+        if let Some(keyboard) = self.state.keyboard.take() {
+            if keyboard.version() >= 3 {
+                keyboard.release();
+            }
         }
         if self.device.version() >= 2 {
             self.device.release();
@@ -241,13 +232,45 @@ impl Dispatch<WlDataDeviceManager, ()> for State {
 
 impl Dispatch<WlSeat, ()> for State {
     fn event(
-        _: &mut Self,
-        _: &WlSeat,
-        _: <WlSeat as Proxy>::Event,
+        state: &mut Self,
+        seat: &WlSeat,
+        event: wl_seat::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_seat::Event::Capabilities {
+            capabilities: wayland_client::WEnum::Value(caps),
+        } = event
+        {
+            if caps.contains(wl_seat::Capability::Keyboard) && state.keyboard.is_none() {
+                state.keyboard = Some(seat.get_keyboard(qh, ()));
+            }
+        }
+    }
+}
+
+impl Dispatch<WlKeyboard, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &WlKeyboard,
+        event: wl_keyboard::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        match event {
+            wl_keyboard::Event::Enter { .. } => state.focused = true,
+            // The selection is valid only until focus goes. The next enter
+            // brings a fresh one.
+            wl_keyboard::Event::Leave { .. } => {
+                state.focused = false;
+                replace(&mut state.selection, None);
+            }
+            // The keymap descriptor closes when the event drops. Keys are
+            // winit's to handle.
+            _ => {}
+        }
     }
 }
 

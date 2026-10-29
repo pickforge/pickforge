@@ -1066,9 +1066,6 @@ impl App {
     }
 
     fn on_focus_lost(&mut self) {
-        if let Some(device) = &mut self.data_device {
-            device.track();
-        }
         self.keys.clear();
         if self.controller.controlling() {
             self.controller.release_held();
