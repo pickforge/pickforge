@@ -506,6 +506,8 @@ impl Text {
             clusters.reverse();
         }
         let tracking = if run.font == 0 { TRACKING * px } else { 0.0 };
+        // Whole-pixel advances space glyphs evenly. Glyphs draw at whole
+        // pixels, and a fractional advance left an empty column now and then.
         for (id, x, y, advance) in clusters.into_iter().flatten() {
             out.push(Placed {
                 font: run.font,
@@ -513,7 +515,7 @@ impl Text {
                 x: *pen + x,
                 y,
             });
-            *pen += advance + tracking;
+            *pen += (advance + tracking).round();
         }
     }
 
@@ -1539,6 +1541,48 @@ mod tests {
     }
 
     /// Glyph ids of `text` in visual order, with their fonts.
+    #[test]
+    fn a_long_word_draws_with_even_spacing() {
+        let mut text = Text::new();
+        for px in [12.0, 18.0, 24.0] {
+            for word in ["e\u{301}".repeat(80), "\u{e9}".repeat(80)] {
+                let (glyphs, _) = text.layout(&word, px);
+                let steps: Vec<f32> = glyphs.windows(2).map(|w| w[1].x - w[0].x).collect();
+                assert!(
+                    steps.iter().all(|&s| s == steps[0] && s.fract() == 0.0),
+                    "{px}: {steps:?}"
+                );
+            }
+        }
+        // Rounding a fractional advance once left an empty column about
+        // every 31 glyphs.
+        let (w, h) = (800, 30);
+        let mut buf = vec![0u32; w * h];
+        let mut canvas = Canvas::new(
+            &mut buf,
+            w as u32,
+            h as u32,
+            Rect::new(0, 0, w as u32, h as u32),
+        );
+        text.draw(
+            &mut canvas,
+            &"e\u{301}".repeat(80),
+            10.0,
+            15.0,
+            12.0,
+            0xffffff,
+        );
+        let ink: Vec<bool> = (0..w)
+            .map(|x| (0..h).any(|y| buf[y * w + x] != 0))
+            .collect();
+        let first = ink.iter().position(|&i| i).unwrap();
+        let last = ink.iter().rposition(|&i| i).unwrap();
+        assert!(
+            ink[first..=last].iter().all(|&i| i),
+            "an empty column inside the word"
+        );
+    }
+
     fn glyph_ids(text: &mut Text, s: &str) -> Vec<(usize, GlyphId)> {
         text.layout(s, 12.0)
             .0
