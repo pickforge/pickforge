@@ -190,6 +190,26 @@ describe("explicit session log pruning", () => {
     expect(fs.readFileSync(outside, "utf8")).toBe("unrelated");
   });
 
+  it.each(["xvfb.log", "stopped.json"])("keeps a retained %s that is replaced after its check", async (name) => {
+    const { record, dir } = await stopped();
+    const unlink = DirHandle.prototype.unlinkOwnedFile;
+    vi.spyOn(DirHandle.prototype, "unlinkOwnedFile").mockImplementation(async function (this: DirHandle, target, stat) {
+      if (target === name) {
+        // Created before the swap, so ext4 cannot hand back the old inode.
+        const file = path.join(dir, name);
+        fs.writeFileSync(`${file}.new`, "replacement");
+        fs.renameSync(`${file}.new`, file);
+      }
+      return unlink.call(this, target, stat);
+    });
+    await expect(pruneSessionLogs(0, env)).rejects.toThrow("replaced");
+    expect(fs.readFileSync(path.join(dir, name), "utf8")).toBe("replacement");
+    vi.restoreAllMocks();
+    // A later prune checks the replacement again, and still removes only checked files.
+    fs.writeFileSync(path.join(dir, "stopped.json"), JSON.stringify({ id: record.id, stoppedAt: new Date(0).toISOString() }));
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+  });
+
   it.each(["not json", "{}", JSON.stringify({ id: "desk-000000", stoppedAt: "invalid" })])("keeps malformed retention metadata %s", async (marker) => {
     const { dir } = await stopped();
     fs.writeFileSync(path.join(dir, "stopped.json"), marker);
