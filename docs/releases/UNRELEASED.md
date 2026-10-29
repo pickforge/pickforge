@@ -20,6 +20,9 @@
 - New session ids have 16 hex characters, so a new session does not reuse a pruned id. Sessions with older 8-character ids still work. The native viewer now also opens when the Pickforge home path is long. (#413, #376)
 - `session prune` now also removes a session directory left without `stopped.json`, a `permits/` folder left in a retained directory, and takeover identity staging files that a killed process left. (#414, #434, #431)
 - The browser DevTools relay refuses a call once its session has ended or its browser was replaced, so a call cannot reach another Chrome on the old debugging port. When it cannot check the session, it refuses only that call. (#444)
+- The native viewer spaces a long word evenly. Before, a long word in the attention banner showed an empty column about every 31 letters. (#450)
+- Two `session prune` runs at the same time no longer make the slower one fail. Each pruned session is reported once. (#453)
+- Session teardown now waits for DevTools relay calls in flight before it stops Chrome. The relay ends those calls with the session-ended error and exits. (#454)
 
 ## Validation
 
