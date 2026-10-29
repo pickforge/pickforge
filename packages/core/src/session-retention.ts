@@ -87,10 +87,19 @@ function markerNames(id: string): string[] {
   return [takeoverIdentityName(id), sessionInputClosedName(id)];
 }
 
+/** Opens a file prune just lstat'ed, or undefined when a concurrent prune removed it. */
+async function openIfPresent(dir: DirHandle, name: string): Promise<fs.promises.FileHandle | undefined> {
+  return dir.openFile(name, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error;
+    return undefined;
+  });
+}
+
 async function retainedStoppedAt(dir: DirHandle, id: string): Promise<number | undefined> {
   const stat = await dir.lstatChild(MARKER);
   if (stat?.isFile() !== true) return undefined;
-  const file = await dir.openFile(MARKER, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  const file = await openIfPresent(dir, MARKER);
+  if (file === undefined) return undefined;
   try {
     const marker = JSON.parse(await file.readFile("utf8"));
     if (marker.id !== id || typeof marker.stoppedAt !== "string") return undefined;
@@ -121,10 +130,7 @@ async function carryStoppedAt(root: DirHandle, id: string, stoppedAt: number): P
   for (const name of markerNames(id)) {
     const stat = await root.lstatChild(name);
     if (stat?.isFile() !== true || stat.mtimeMs >= stoppedAt) continue;
-    const file = await root.openFile(name, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW).catch((error: NodeJS.ErrnoException) => {
-      // A concurrent prune removed it after the lstat, and its run carries on.
-      if (error.code !== "ENOENT") throw error;
-    });
+    const file = await openIfPresent(root, name);
     if (file === undefined) continue;
     try {
       await file.utimes(stat.atime, new Date(stoppedAt));
@@ -161,7 +167,8 @@ async function staleCoordinationFile(dir: DirHandle, name: string, records: RegE
   const pid = temps.exec(name)?.[1];
   if (pid !== undefined) return isPidAlive(Number(pid)) ? undefined : stat;
   if (!records.test(name)) return undefined;
-  const file = await dir.openFile(name, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  const file = await openIfPresent(dir, name);
+  if (file === undefined) return undefined;
   try {
     return ownerIsGone(await file.readFile("utf8")) ? stat : undefined;
   } finally {

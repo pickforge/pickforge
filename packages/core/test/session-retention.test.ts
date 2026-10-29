@@ -336,19 +336,28 @@ describe("session marker horizon", () => {
     expect((await createSession({ type: "desktop", projectDir: home }, env)).id).toBe(record.id);
   });
 
-  it("finishes a prune whose markers a concurrent prune removed", async () => {
+  /** Runs a whole second prune when the first one opens `name`, after its lstat. */
+  function pruneConcurrentlyAt(name: string) {
+    const open = DirHandle.prototype.openFile;
+    let other: Promise<string[]> | undefined;
+    vi.spyOn(DirHandle.prototype, "openFile").mockImplementation(async function (this: DirHandle, ...args: Parameters<DirHandle["openFile"]>) {
+      if (other === undefined && args[0] === name) await (other = pruneSessionLogs(0, env));
+      return open.apply(this, args);
+    });
+    return () => other;
+  }
+
+  it.each([
+    ["the teardown time", () => "stopped.json"],
+    ["a marker", (id: string) => takeoverIdentityName(id)],
+  ])("finishes a prune when a concurrent prune removed %s first", async (_, name) => {
     const record = await closed();
     setStoppedAt(record.id, past());
     // Markers older than teardown, so prune opens them to carry its time.
     backdate(markers(record.id), new Date(Date.now() - 2 * SESSION_MARKER_HORIZON_MS));
-    const open = DirHandle.prototype.openFile;
-    let other: Promise<string[]> | undefined;
-    vi.spyOn(DirHandle.prototype, "openFile").mockImplementation(async function (this: DirHandle, ...args: Parameters<DirHandle["openFile"]>) {
-      if (other === undefined && args[0] === takeoverIdentityName(record.id)) await (other = pruneSessionLogs(0, env));
-      return open.apply(this, args);
-    });
+    const other = pruneConcurrentlyAt(name(record.id));
     expect(await pruneSessionLogs(0, env)).toEqual([]);
-    expect(await other).toEqual([record.id]);
+    expect(await other()).toEqual([record.id]);
     expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
   });
 
@@ -731,6 +740,17 @@ describe("session marker horizon", () => {
     expect(await pruneSessionLogs(0, env)).toEqual([]);
     expect(fs.readFileSync(file, "utf8")).toBe("mine");
     expect(exist(markers(id))).toEqual([true, false]);
+  });
+
+  it("finishes a prune when a concurrent prune removed a stranded permit first", async () => {
+    const { id, dir, permits } = await strandedDirectory();
+    const name = `${crypto.randomUUID()}.json`;
+    fs.writeFileSync(path.join(permits, name), permitRecord(id, deadPid()));
+    backdate([path.join(permits, name), permits, dir, markers(id)[0]!]);
+    const other = pruneConcurrentlyAt(name);
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(await other()).toEqual([id]);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
   });
 
   it("keeps a stranded directory while a coordination file is young", async () => {
