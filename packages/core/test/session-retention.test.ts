@@ -456,6 +456,67 @@ describe("session marker horizon", () => {
     expect(exist(files)).toEqual([false, false]);
   });
 
+  it("finishes a prune that stopped between the stopped.json unlink and rmdir", async () => {
+    const record = await closed();
+    const dir = sessionDataDir(record.id, env);
+    setStoppedAt(record.id, past());
+    backdate(markers(record.id));
+    vi.spyOn(fs.promises, "rmdir").mockRejectedValueOnce(new Error("crash"));
+    await expect(pruneSessionLogs(0, env)).rejects.toThrow("crash");
+    expect(fs.readdirSync(dir)).toEqual([]);
+    // Young: the directory and its markers stay, and late input still fails closed.
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(exist([dir, ...markers(record.id)])).toEqual([true, true, true]);
+    await lateInput(record.id);
+    backdate([dir]);
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+    forcedIds.push(record.id.slice("desk-".length));
+    expect((await createSession({ type: "desktop", projectDir: home }, env)).id).toBe(record.id);
+  });
+
+  it.each([
+    ["a file", (dir: string) => fs.writeFileSync(path.join(dir, "notes.txt"), "mine")],
+    ["a hidden file", (dir: string) => fs.writeFileSync(path.join(dir, ".stopped.json.tmp-1-1"), "")],
+    ["a directory", (dir: string) => fs.mkdirSync(path.join(dir, "permits"))],
+  ])("keeps an old session directory without stopped.json that holds %s", async (_, add) => {
+    const files = orphanMarkers("desk-0badc0de");
+    const dir = path.join(sessionsDir(env), "desk-0badc0de");
+    fs.mkdirSync(dir);
+    add(dir);
+    backdate([dir]);
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(fs.readdirSync(dir)).toHaveLength(1);
+    expect(exist(files)).toEqual([true, true]);
+  });
+
+  it.each([
+    ["a starting record", async (id: string) => fs.writeFileSync(path.join(sessionsDir(env), `${id}.json`), JSON.stringify({ id, status: "starting" }))],
+    ["a running record", async (id: string) => fs.writeFileSync(path.join(sessionsDir(env), `${id}.json`), JSON.stringify({ id, status: "running" }))],
+    ["the session lock", async (id: string) => fs.writeFileSync(path.join(sessionsDir(env), `${id}.ensure-vnc.lock`), "{}")],
+  ])("keeps an old empty session directory with %s", async (_, add) => {
+    const files = orphanMarkers("desk-0badc0de");
+    const dir = path.join(sessionsDir(env), "desk-0badc0de");
+    fs.mkdirSync(dir);
+    backdate([dir]);
+    await add("desk-0badc0de");
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(exist([dir, ...files])).toEqual([true, true, true]);
+  });
+
+  it("keeps an empty session directory that gains an entry before rmdir", async () => {
+    const dir = path.join(sessionsDir(env), "desk-0badc0de");
+    fs.mkdirSync(dir, { recursive: true });
+    backdate([dir]);
+    const rmdir = fs.promises.rmdir;
+    vi.spyOn(fs.promises, "rmdir").mockImplementation(async (target, options) => {
+      fs.writeFileSync(path.join(dir, "xvfb.log"), "late");
+      return rmdir(target, options);
+    });
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(fs.readFileSync(path.join(dir, "xvfb.log"), "utf8")).toBe("late");
+  });
+
   it("keeps markers when prune stops after carrying the teardown time", async () => {
     const record = await closed();
     backdate(markers(record.id));

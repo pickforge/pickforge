@@ -120,11 +120,32 @@ async function carryStoppedAt(root: DirHandle, id: string, stoppedAt: number): P
   }
 }
 
+// A prune that stopped between the stopped.json unlink and rmdir leaves an
+// empty directory. That unlink set its mtime after teardown, and any later
+// entry change resets it. rmdir refuses a directory that gained an entry, so
+// this removes only an empty directory, never data.
+async function pruneEmptyDirectory(root: DirHandle, dir: DirHandle, id: string, roots: string[]): Promise<boolean> {
+  if (Date.now() - dir.stat.mtimeMs < SESSION_MARKER_HORIZON_MS) return false;
+  if ((await dir.readEntryNames()).length > 0) return false;
+  if (await registryHasSession(id, roots)) return false;
+  const current = await root.lstatChild(id);
+  if (current?.dev !== dir.stat.dev || current.ino !== dir.stat.ino) return false;
+  try {
+    await fs.promises.rmdir(root.resolve(id));
+  } catch (error) {
+    // A concurrent prune removed it, or a writer added an entry first.
+    if (!["ENOENT", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+    return false;
+  }
+  return true;
+}
+
 async function pruneDirectory(root: DirHandle, id: string, roots: string[], age: number): Promise<boolean> {
   if (await registryHasSession(id, roots)) return false;
   return withDirHandle(root.openChild(id), async (dir) => {
     const stoppedAt = await retainedStoppedAt(dir, id);
-    if (stoppedAt === undefined || Date.now() - stoppedAt < age) return false;
+    if (stoppedAt === undefined) return pruneEmptyDirectory(root, dir, id, roots);
+    if (Date.now() - stoppedAt < age) return false;
     const names = await dir.readEntryNames();
     // Unknown data is not ours to delete. Never traverse a child directory or link.
     for (const name of names) {
@@ -178,6 +199,7 @@ async function pruneMarkers(root: DirHandle, id: string, roots: string[]): Promi
 
 /**
  * Explicit only. Active/error records and unmarked legacy directories are kept.
+ * An empty directory left by an interrupted prune goes after the horizon.
  * Markers of a gone session go once they are older than the horizon.
  */
 export async function pruneSessionLogs(
