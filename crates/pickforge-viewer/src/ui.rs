@@ -396,9 +396,15 @@ impl Text {
     /// first character.
     fn font_of(&mut self, cluster: &[char]) -> Option<usize> {
         let charmap = self.font.charmap();
-        if cluster.iter().all(|&c| charmap.map(c) != 0) {
+        let others: Vec<char> = cluster
+            .iter()
+            .copied()
+            .filter(|&c| charmap.map(c) == 0)
+            .collect();
+        if others.is_empty() {
             return Some(0);
         }
+        self.fallback.find_all(&others);
         if let Some(i) = self.fallback.find_cluster(cluster) {
             return Some(i + 1);
         }
@@ -1313,6 +1319,29 @@ mod tests {
     }
 
     #[test]
+    fn uncovered_clusters_scan_host_fonts_once() {
+        let dir = std::env::temp_dir().join(format!("pickforge-clusters-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("copy.ttf"), FONT).unwrap();
+        let mut text = Text {
+            fallback: Fallback::from_dir(&dir),
+            ..Text::new()
+        };
+        // Distinct clusters with a mark that no font draws.
+        let message: String = ('a'..='z')
+            .chain('A'..='Z')
+            .flat_map(|c| [c, '\u{1ab0}'])
+            .collect();
+        assert!(text.width(&message, 12.0) > 0.0);
+        assert!(
+            text.fallback.scans() <= 1,
+            "{} scans",
+            text.fallback.scans()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn displayable_marks_text_no_font_can_draw() {
         let mut text = Text::new();
         let latin = "desk-1 \u{b7} A\u{e7}\u{e3}o \u{41f}\u{440}\u{438}\u{432}\u{435}\u{442}";
@@ -1490,8 +1519,7 @@ mod tests {
         assert!(!crate::fallback::covers(geist, '\u{20d7}'));
         if host_has('\u{20d7}') {
             let ids = glyph_ids(&mut text, "a\u{20d7}");
-            assert!(!ids.contains(&(0, 0)), "{ids:?}");
-            assert!(ids.iter().all(|&(font, _)| font > 0), "{ids:?}");
+            assert!(ids.iter().all(|&(font, id)| font > 0 && id != 0), "{ids:?}");
         }
         // Marks the embedded font has stay with it.
         assert!(glyph_ids(&mut text, "e\u{301}x")

@@ -24,8 +24,9 @@ pub struct Fallback {
     /// The loaded font for each character looked up, or `None` when no
     /// host font has it.
     chars: HashMap<char, Option<usize>>,
-    /// The loaded font for each cluster of several characters looked up.
-    clusters: HashMap<Vec<char>, Option<usize>>,
+    /// Scans of the host faces, for tests.
+    #[cfg(test)]
+    scans: usize,
 }
 
 impl Fallback {
@@ -48,35 +49,13 @@ impl Fallback {
         self.chars[&c]
     }
 
-    /// The index into [`Self::font`] of the first host font that draws
-    /// every character of `cluster`.
-    pub fn find_cluster(&mut self, cluster: &[char]) -> Option<usize> {
-        if let [c] = cluster {
-            return self.find(*c);
-        }
-        if let Some(&found) = self.clusters.get(cluster) {
-            return found;
-        }
-        let all = |font: FontRef<'_>| cluster.iter().all(|&c| covers(font, c));
-        let mut found = self.fonts.iter().position(|&f| all(f));
-        if found.is_none() {
-            for id in self.faces() {
-                let covered = self
-                    .db
-                    .with_face_data(id, |data, index| {
-                        FontRef::from_index(data, index as usize).is_some_and(all)
-                    })
-                    .unwrap_or(false);
-                if covered {
-                    found = self.retain(id).filter(|&i| all(self.fonts[i]));
-                    if found.is_some() {
-                        break;
-                    }
-                }
-            }
-        }
-        self.clusters.insert(cluster.to_vec(), found);
-        found
+    /// The index into [`Self::font`] of the first loaded font that draws
+    /// every character of `cluster`. It reads no host font; look up the
+    /// characters with [`Self::find_all`] first.
+    pub fn find_cluster(&self, cluster: &[char]) -> Option<usize> {
+        self.fonts
+            .iter()
+            .position(|&font| cluster.iter().all(|&c| covers(font, c)))
     }
 
     /// Looks up every character of `chars` with at most one scan of the
@@ -112,8 +91,18 @@ impl Fallback {
         self.faces.is_some()
     }
 
+    /// Scans of the host faces so far.
+    #[cfg(test)]
+    pub fn scans(&self) -> usize {
+        self.scans
+    }
+
     /// Host faces in preference order, scanned on first use.
     fn faces(&mut self) -> Vec<fontdb::ID> {
+        #[cfg(test)]
+        {
+            self.scans += 1;
+        }
         if self.faces.is_none() {
             self.db.load_system_fonts();
             let region = locale_region(|name| std::env::var(name).ok());
