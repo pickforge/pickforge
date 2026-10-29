@@ -284,6 +284,9 @@ struct App {
     paste_worker: Option<thread::JoinHandle<()>>,
     /// The window's data device, on Wayland without data-control.
     data_device: Option<DataDevice>,
+    /// True while the window has keyboard focus, as of the last window
+    /// event.
+    focused: bool,
 
     status: Option<StatusCode>,
     ended: bool,
@@ -349,6 +352,7 @@ impl App {
             paste_stop: Arc::new(AtomicBool::new(true)),
             paste_worker: None,
             data_device: None,
+            focused: false,
             status: Some(StatusCode::Connecting),
             ended: false,
             have_frame: false,
@@ -739,7 +743,16 @@ impl App {
             return;
         };
         let deadline = Instant::now() + clipboard::READ_TIMEOUT;
-        let pipe = self.data_device.as_mut().map(DataDevice::receive);
+        // A data device offer is valid only while the window has keyboard
+        // focus, so a click that ends after focus went reads nothing.
+        let focused = self.focused;
+        let pipe = self.data_device.as_mut().map(|device| {
+            if focused {
+                device.receive()
+            } else {
+                Err(Refusal::Unavailable)
+            }
+        });
         self.paste_reads += 1;
         let id = self.paste_reads;
         self.paste = Some(Paste::Reading {
@@ -1053,6 +1066,9 @@ impl App {
     }
 
     fn on_focus_lost(&mut self) {
+        if let Some(device) = &mut self.data_device {
+            device.track();
+        }
         self.keys.clear();
         if self.controller.controlling() {
             self.controller.release_held();
@@ -1435,7 +1451,12 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseInput { state, button, .. } => self.on_mouse(state, button),
             WindowEvent::MouseWheel { delta, .. } => self.on_wheel(delta),
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers,
-            WindowEvent::Focused(false) => self.on_focus_lost(),
+            WindowEvent::Focused(focused) => {
+                self.focused = focused;
+                if !focused {
+                    self.on_focus_lost();
+                }
+            }
             WindowEvent::Ime(Ime::Commit(text)) => {
                 if is_text(&text) {
                     self.forward(|i| i.type_text(&text));

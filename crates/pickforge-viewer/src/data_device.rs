@@ -5,8 +5,10 @@
 //! compositor sends it the selection when the viewer window gets keyboard
 //! focus, as a click on Paste gives it. Selection offers are only tracked
 //! until the click: their text types are noted, and no offer is received
-//! before it. A click asks the selection's owner to write into a pipe,
-//! which `clipboard::read_pipe` reads with the usual bounds.
+//! before it. An offer is valid only while the window has keyboard focus,
+//! so it is dropped when focus goes. A click asks the selection's owner to
+//! write into a pipe, which `clipboard::read_pipe` reads with the usual
+//! bounds.
 
 use crate::clipboard::{Refusal, TEXT_TYPES};
 use std::os::fd::{AsFd, OwnedFd};
@@ -79,7 +81,7 @@ pub struct DataDevice {
     device: WlDataDevice,
     conn: Connection,
     /// Keeps winit's connection open while the device uses it.
-    _window: Rc<Window>,
+    window: Rc<Window>,
 }
 
 impl DataDevice {
@@ -90,10 +92,12 @@ impl DataDevice {
             return None;
         };
         // SAFETY: the pointer is winit's live `wl_display`, which outlives
-        // this connection because `_window` keeps it open.
+        // this connection because `window` keeps it open.
         let backend = unsafe { Backend::from_foreign_display(handle.display.as_ptr().cast()) };
         let conn = Connection::from_backend(backend);
-        let (globals, queue) = registry_queue_init::<State>(&conn).ok()?;
+        let (globals, queue) = registry_queue_init::<State>(&conn)
+            .map_err(|e| failed("list the Wayland globals", e))
+            .ok()?;
         let control = globals
             .contents()
             .with_list(|list| has_data_control(list.iter().map(|g| g.interface.as_str())));
@@ -101,30 +105,64 @@ impl DataDevice {
             return None;
         }
         let qh = queue.handle();
-        let manager: WlDataDeviceManager = globals.bind(&qh, 1..=3, ()).ok()?;
-        let seat: WlSeat = globals.bind(&qh, 1..=1, ()).ok()?;
+        let manager: WlDataDeviceManager = globals
+            .bind(&qh, 1..=3, ())
+            .map_err(|e| failed("bind wl_data_device_manager", e))
+            .ok()?;
+        let seat: WlSeat = globals
+            .bind(&qh, 1..=1, ())
+            .map_err(|e| failed("bind wl_seat", e))
+            .ok()?;
         let device = manager.get_data_device(&seat, &qh, ());
-        conn.flush().ok()?;
+        conn.flush()
+            .map_err(|e| failed("create the data device", e))
+            .ok()?;
         Some(DataDevice {
             queue,
             state: State::default(),
             device,
             conn,
-            _window: window,
+            window,
         })
     }
 
-    /// Notes the offers that arrived since the last call. Nothing is read.
+    /// Notes the offers that arrived since the last call, and drops the
+    /// selection while the window has no keyboard focus. Nothing is read.
     pub fn track(&mut self) {
         let _ = self.queue.dispatch_pending(&mut self.state);
+        self.drop_unfocused();
+    }
+
+    /// Drops the selection unless the window has keyboard focus, and
+    /// returns whether it has.
+    ///
+    /// winit reads the socket for both queues before it hands out the
+    /// window events of a loop turn, and this queue is dispatched only
+    /// between reads. So after a dispatch, the selection and `has_focus`
+    /// describe the same point of the stream. The compositor sends a
+    /// selection only to the focused client or right before a keyboard
+    /// enter. An offer held without focus therefore came before the loss
+    /// and is dropped. An offer sent before a later enter is read with
+    /// that enter and kept. A read that splits the two drops that offer,
+    /// so Paste finds nothing until the next copy or focus change.
+    fn drop_unfocused(&mut self) -> bool {
+        if self.window.has_focus() {
+            return true;
+        }
+        replace(&mut self.state.selection, None);
+        false
     }
 
     /// Asks the current selection for text and returns the pipe it is
-    /// written to. Call only after a click on Paste.
+    /// written to. Call only after a click on Paste while the window has
+    /// keyboard focus.
     pub fn receive(&mut self) -> Result<OwnedFd, Refusal> {
         self.queue
             .dispatch_pending(&mut self.state)
             .map_err(|_| Refusal::Unavailable)?;
+        if !self.drop_unfocused() {
+            return Err(Refusal::Unavailable);
+        }
         let Some(offer) = &self.state.selection else {
             return Err(Refusal::Empty);
         };
@@ -156,6 +194,12 @@ impl Drop for DataDevice {
         }
         let _ = self.conn.flush();
     }
+}
+
+/// Notes on stderr why Paste cannot read the clipboard. Setup holds no
+/// clipboard content, so the line names only the step and its error.
+fn failed(step: &str, error: impl std::fmt::Display) {
+    eprintln!("pickforge-viewer: paste is unavailable: cannot {step}: {error}");
 }
 
 /// Destroys the offer in `slot` unless it stays, and keeps `offer`.
