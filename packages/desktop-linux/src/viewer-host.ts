@@ -4,13 +4,13 @@ import net from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   getSession, startDaemon, stopOwnedDaemonGroup, processIdentityMatches, checkHumanLeaseBusy,
-  HumanLeaseHeldError, readProcessIdentity, sessionDataDir, type EnvLike, type ProcessIdentity,
+  HumanLeaseHeldError, readProcessIdentity, sessionDataDir, type DirHandle, type EnvLike, type ProcessIdentity,
 } from "@pickforge/lab-core";
 import { withSessionVncLock, recoverStaleTakeoverLocked, SESSION_VNC_LOCK_TIMEOUT_MS } from "./session.js";
 import { verifyOwnedDisplayTarget, type OwnedDisplayIdentity } from "./x11-target.js";
 import {
   withViewerDir, readViewerPrivateFile, sessionViewerDir, readViewerLaunchRecord,
-  stopNativeViewerProcesses, lstatViewerSocket, sameViewerSocket, removeDeadViewerReadiness,
+  stopNativeViewerProcesses, lstatViewerSocket, sameViewerSocket, removeDeadViewerReadiness, openViewerSocketDir,
 } from "./viewer-state.js";
 import {
   VIEWER_MESSAGE_MAX_BYTES, type NativeViewerHostIdentity, type ViewerHostRequest,
@@ -38,21 +38,43 @@ function sameHost(actual: NativeViewerHostIdentity, expected: NativeViewerHostId
   return keys.every((key) => actual[key] === expected[key]);
 }
 
-async function assertHostSocket(host: NativeViewerHostIdentity): Promise<void> {
+/**
+ * Check the recorded socket through one verified viewer directory descriptor.
+ * The caller connects through the same descriptor, whose path stays within
+ * the socket path limit for any session home (#413).
+ */
+async function openHostSocketDir(host: NativeViewerHostIdentity): Promise<DirHandle> {
   if (!processIdentityMatches({ pid: host.pid, startTicks: host.startTicks }) ||
       !processIdentityMatches({ pid: host.viewerPid, startTicks: host.viewerStartTicks })) {
     throw new Error("Native viewer identity changed");
   }
-  const stats = await lstatViewerSocket(host.socket);
-  if (stats === undefined) throw new Error("Viewer socket unavailable");
-  // Readiness without a ctime came from a host before #404 and cannot prove its socket.
-  if (!sameViewerSocket(stats, { ...host }) || (stats.mode & 0o777n) !== 0o600n) throw new Error("Unsafe viewer socket");
+  const directory = await openViewerSocketDir(host.socket);
+  try {
+    const stats = await lstatViewerSocket(directory.resolve("host.sock"));
+    if (stats === undefined) throw new Error("Viewer socket unavailable");
+    // Readiness without a ctime came from a host before #404 and cannot prove its socket.
+    if (!sameViewerSocket(stats, { ...host }) || (stats.mode & 0o777n) !== 0o600n) throw new Error("Unsafe viewer socket");
+    return directory;
+  } catch (error) {
+    await directory.close();
+    throw error;
+  }
+}
+
+/** Connect through the checked descriptor and keep it open until the connect ends. */
+function connectHostSocket(directory: DirHandle): net.Socket {
+  const socket = net.connect(directory.resolve("host.sock"));
+  const release = (): void => {
+    socket.off("connect", release).off("close", release);
+    void directory.close().catch(() => {});
+  };
+  return socket.once("connect", release).once("close", release);
 }
 
 export async function requestNativeViewerHost(host: NativeViewerHostIdentity, request: ViewerHostRequest): Promise<ViewerHostResponse> {
-  await assertHostSocket(host);
+  const directory = await openHostSocketDir(host);
   return new Promise((resolve, reject) => {
-    const socket = net.connect(host.socket);
+    const socket = connectHostSocket(directory);
     let pending = Buffer.alloc(0);
     const timer = setTimeout(() => socket.destroy(new Error("Viewer host request timed out")), 2_000);
     socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
@@ -79,9 +101,9 @@ export async function requestNativeViewerHost(host: NativeViewerHostIdentity, re
 export async function followNativeViewerRequest(host: NativeViewerHostIdentity, requestId: string | undefined, options: {
   signal: AbortSignal; timeoutMs: number; onTaken?: () => void; onReturned?: () => void; onReady?: () => void;
 }): Promise<ViewerRequestOutcome> {
-  await assertHostSocket(host);
+  const directory = await openHostSocketDir(host);
   return new Promise((resolve) => {
-    const socket = net.connect(host.socket);
+    const socket = connectHostSocket(directory);
     let settled = false;
     let cancellation: "cancelled" | "timeout" | undefined;
     let ready = false;
@@ -167,9 +189,9 @@ export async function pulseNativeViewer(
   try {
     const host = await readNativeViewerHost(sessionId, env);
     if (host === undefined) return;
-    await assertHostSocket(host);
+    const directory = await openHostSocketDir(host);
     await new Promise<void>((resolve) => {
-      const socket = net.connect(host.socket);
+      const socket = connectHostSocket(directory);
       const done = (): void => { socket.destroy(); resolve(); };
       socket.setTimeout(VIEWER_PULSE_TIMEOUT_MS, done);
       socket.once("error", done);
