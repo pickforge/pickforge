@@ -174,6 +174,9 @@ class PermitGate implements DevtoolsPermitGate {
   private async checkSession(): Promise<void> {
     if (this.closed) return;
     if (await isSessionInputClosed(this.sessionId, this.env)) {
+      // With no call unanswered, the relay stays and the session-ended check
+      // answers later calls. The last check can run after the last answer.
+      if (this.calls.size === 0) return;
       this.ended = true;
       this.inputWasClosed = true;
       this.closedInput.resolve();

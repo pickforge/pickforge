@@ -26,6 +26,7 @@ import {
   SESSION_ENDED_ERROR_CODE,
   TAKEOVER_BUSY_ERROR_CODE,
   createDevtoolsPermitGate,
+  DEVTOOLS_PERMIT_WATCH_MS,
   createSessionEndedIntercept,
   createTakeoverBusyIntercept,
   resolveDevtoolsMcpExecutable,
@@ -960,6 +961,7 @@ describe("DevTools relay agent permits", () => {
     child: HeldCallChild,
     input: Readable,
     output: Buffer[] | Writable,
+    watchMs = DEVTOOLS_PERMIT_WATCH_MS,
   ): Promise<unknown> {
     const ended = createSessionEndedIntercept(session, env);
     const busy = createTakeoverBusyIntercept(session.record.id, env);
@@ -973,7 +975,7 @@ describe("DevTools relay agent permits", () => {
       signalSource: new Signals(),
       shutdownTimeoutMs: 500,
       hooks: { intercept: async (message) => (await ended(message)) ?? (await busy(message)) },
-      permits: createDevtoolsPermitGate(session.record.id, env),
+      permits: createDevtoolsPermitGate(session.record.id, env, watchMs),
     });
   }
 
@@ -1017,6 +1019,26 @@ describe("DevTools relay agent permits", () => {
       },
     ]);
     expect(permitCount(session.record.id, env)).toBe(0);
+  });
+
+  it("keeps the relay when teardown closes input after the last call was answered", async () => {
+    const env = registryEnv();
+    const session = await liveSession(env);
+    const child = heldCallChild(env);
+    const input = new PassThrough();
+    const output: Buffer[] = [];
+    // A long watch interval puts its last check after teardown.
+    const run = runGatedRelay(session, env, child, input, output, 1_000);
+    input.write(call(1));
+    await expect.poll(() => responses(output).length).toBe(1);
+    await stopSessionAgentInput(session.record.id, env, 5_000);
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    expect(input.destroyed).toBe(false);
+    input.write(call(2));
+    await expect.poll(() => responses(output).length).toBe(2);
+    expect(responses(output)[1]).toMatchObject({ id: 2, error: { code: SESSION_ENDED_ERROR_CODE } });
+    input.end();
+    await run;
   });
 
   it("lets takeover drain while a call is in flight and still forwards its response", async () => {
