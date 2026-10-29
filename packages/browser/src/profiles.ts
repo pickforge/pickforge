@@ -121,16 +121,30 @@ export async function namedProfileBrowserEndpoint(name: string, port: number, en
   try {
     const dir = await openProfile(root, name, false);
     try {
-      const content = await readBoundedFileIn(dir, "DevToolsActivePort", Date.now() + 3_000, { maxBytes: 1024 });
-      const [recordedPort, browserPath] = content.toString("utf8").trimEnd().split("\n");
-      if (recordedPort !== String(port) || !/^\/devtools\/browser\/[a-zA-Z0-9-]+$/.test(browserPath ?? "")) return undefined;
-      return new URL(`ws://127.0.0.1:${port}${browserPath}`);
+      return await readBrowserEndpointIn(dir, port);
     } finally {
       await dir.close();
     }
   } finally {
     await root.close();
   }
+}
+
+/** Read the launch-specific CDP capability from a session-owned profile directory. */
+export async function profileBrowserEndpoint(profileDir: string, port: number): Promise<URL | undefined> {
+  const dir = await DirHandle.open(profileDir);
+  try {
+    return await readBrowserEndpointIn(dir, port);
+  } finally {
+    await dir.close();
+  }
+}
+
+async function readBrowserEndpointIn(dir: DirHandle, port: number): Promise<URL | undefined> {
+  const content = await readBoundedFileIn(dir, "DevToolsActivePort", Date.now() + 3_000, { maxBytes: 1024 });
+  const [recordedPort, browserPath] = content.toString("utf8").trimEnd().split("\n");
+  if (recordedPort !== String(port) || !/^\/devtools\/browser\/[a-zA-Z0-9-]+$/.test(browserPath ?? "")) return undefined;
+  return new URL(`ws://127.0.0.1:${port}${browserPath}`);
 }
 
 const lockName = (name: string): string => `.${name}.lock`;

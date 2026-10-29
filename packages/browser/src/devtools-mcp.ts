@@ -10,7 +10,10 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { Readable, Writable } from "node:stream";
 import {
   checkHumanLeaseBusy,
+  getSession,
+  isSessionInputClosed,
   listSessions,
+  processIdentityMatches,
   redactSecrets,
   sanitizeErrorText,
   type EnvLike,
@@ -21,7 +24,13 @@ import {
   createDevtoolsEvidenceRecorder,
   type DevtoolsEvidenceRecorder,
 } from "./devtools-evidence.js";
-import { getBrowserSessionStatus, type BrowserSessionStatus } from "./session.js";
+import { browserRuntimeLayout } from "./env.js";
+import { namedProfileBrowserEndpoint, profileBrowserEndpoint } from "./profiles.js";
+import {
+  browserSessionLogDir,
+  getBrowserSessionStatus,
+  type BrowserSessionStatus,
+} from "./session.js";
 import {
   JsonRpcProtocolError,
   createJsonRpcWriteQueue,
@@ -73,6 +82,61 @@ export function createTakeoverBusyIntercept(
       jsonrpc: "2.0",
       id,
       error: { code: TAKEOVER_BUSY_ERROR_CODE, message: TAKEOVER_BUSY_MESSAGE },
+    };
+  };
+}
+
+/** JSON-RPC error code for the stable "browser session has ended" response. */
+export const SESSION_ENDED_ERROR_CODE = -32051;
+const SESSION_ENDED_MESSAGE =
+  "Pickforge: the browser session has ended; create a new session and restart the DevTools relay";
+
+async function isRelaySessionCurrent(
+  session: LiveBrowserSession,
+  env: EnvLike,
+): Promise<boolean> {
+  const pinned = session.record.browser;
+  const record = await getSession(session.record.id, env);
+  const browser = record?.browser;
+  return (
+    pinned !== undefined &&
+    record?.status === "running" &&
+    browser?.browserPid === pinned.browserPid &&
+    browser.browserStartTimeTicks === pinned.browserStartTimeTicks &&
+    !(await isSessionInputClosed(record.id, env)) &&
+    processIdentityMatches({
+      pid: pinned.browserPid,
+      startTicks: pinned.browserStartTimeTicks,
+    })
+  );
+}
+
+/**
+ * Session-end gate for the DevTools relay (pickforge/pickforge#444): before
+ * each `tools/call`, recheck that the relay's session is still running with
+ * open agent input and the same live Chrome. Once that fails, every later
+ * `tools/call` is answered with a stable error and never reaches the child.
+ * A call that passes just before teardown cannot reach another browser: the
+ * child is pinned to this Chrome's per-launch WebSocket endpoint, which a new
+ * Chrome on the same port does not serve.
+ */
+export function createSessionEndedIntercept(
+  session: LiveBrowserSession,
+  env: EnvLike = process.env,
+): JsonRpcIntercept {
+  let ended = false;
+  return async (message) => {
+    if (message.method !== "tools/call") return undefined;
+    const id = jsonRpcRequestId(message);
+    if (id === undefined) return undefined;
+    if (!ended) {
+      ended = !(await isRelaySessionCurrent(session, env).catch(() => false));
+    }
+    if (!ended) return undefined;
+    return {
+      jsonrpc: "2.0",
+      id,
+      error: { code: SESSION_ENDED_ERROR_CODE, message: SESSION_ENDED_MESSAGE },
     };
   };
 }
@@ -167,7 +231,12 @@ export async function resolveDevtoolsMcpExecutable(
 export interface LiveBrowserSession {
   record: SessionRecord;
   cdpPort: number;
-  browserUrl: string;
+  /**
+   * This Chrome's per-launch browser WebSocket endpoint. Unlike a bare
+   * `http://127.0.0.1:<port>`, another Chrome that later listens on the same
+   * port does not serve it.
+   */
+  browserEndpoint: string;
 }
 
 export interface ResolveLiveBrowserSessionOptions {
@@ -175,6 +244,31 @@ export interface ResolveLiveBrowserSessionOptions {
   env?: EnvLike;
   list?: (env: EnvLike) => Promise<SessionRecord[]>;
   status?: (id: string, env: EnvLike) => Promise<BrowserSessionStatus>;
+  endpoint?: (
+    record: SessionRecord,
+    cdpPort: number,
+    env: EnvLike,
+  ) => Promise<URL | undefined>;
+}
+
+/** Read the endpoint the session's own Chrome wrote into its private profile. */
+async function readSessionBrowserEndpoint(
+  record: SessionRecord,
+  cdpPort: number,
+  env: EnvLike,
+): Promise<URL | undefined> {
+  const browser = record.browser;
+  if (browser === undefined) return undefined;
+  const profileName = browser.profileName ?? record.meta?.browserProfile;
+  if (browser.profileMode === "named" || profileName !== undefined) {
+    return typeof profileName === "string"
+      ? namedProfileBrowserEndpoint(profileName, cdpPort, env)
+      : undefined;
+  }
+  return profileBrowserEndpoint(
+    browserRuntimeLayout(browserSessionLogDir(record.id, env)).profileDir,
+    cdpPort,
+  );
 }
 
 export async function resolveLiveBrowserSession(
@@ -207,11 +301,13 @@ export async function resolveLiveBrowserSession(
     ) {
       continue;
     }
-    live.push({
+    const endpoint = await (opts.endpoint ?? readSessionBrowserEndpoint)(
       record,
       cdpPort,
-      browserUrl: `http://127.0.0.1:${cdpPort}`,
-    });
+      env,
+    ).catch(() => undefined);
+    if (endpoint === undefined) continue;
+    live.push({ record, cdpPort, browserEndpoint: endpoint.href });
   }
   if (live.length === 0) {
     throw new Error(
@@ -409,7 +505,7 @@ function spawnDevtoolsRelayChild(opts: RunDevtoolsMcpRelayOptions): RelayChild {
   };
   const child = (opts.spawnProcess ?? spawn)(
     process.execPath,
-    [opts.executable.binPath, "--browser-url", opts.session.browserUrl],
+    [opts.executable.binPath, "--wsEndpoint", opts.session.browserEndpoint],
     {
       cwd: opts.cwd,
       env: childEnv,
@@ -748,12 +844,15 @@ export async function runProjectDevtoolsMcp(
   } catch (error) {
     reportEvidenceFailure(error);
   }
+  const sessionEndedIntercept = createSessionEndedIntercept(session, opts.env);
   const takeoverIntercept = createTakeoverBusyIntercept(session.record.id, opts.env);
   const hooksWithTakeoverGate: RelayHooks = {
     ...opts.hooks,
     intercept: async (message) => {
-      const busy = await takeoverIntercept(message);
-      return busy ?? (await opts.hooks?.intercept?.(message));
+      const blocked =
+        (await sessionEndedIntercept(message)) ??
+        (await takeoverIntercept(message));
+      return blocked ?? (await opts.hooks?.intercept?.(message));
     },
   };
   try {

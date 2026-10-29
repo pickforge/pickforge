@@ -324,8 +324,8 @@ describe.skipIf(!hasXvfb)("createBrowserSession (fake binaries)", () => {
       });
       expect(recreated.record.id).toBe(second.id);
       expect(recreated.cdpPort).toBe(second.cdpPort);
-      expect(recreated.browserUrl).toBe(
-        `http://127.0.0.1:${second.cdpPort}`,
+      expect(recreated.browserEndpoint).toBe(
+        `ws://127.0.0.1:${second.cdpPort}/devtools/browser/fake-guid-deadbeef`,
       );
       expect(recreated.record.id).not.toBe(initial.record.id);
     } finally {
@@ -1290,6 +1290,9 @@ describe.skipIf(!hasXvfb)("named browser profile lifecycle", () => {
       const argv = JSON.parse(fs.readFileSync(path.join(first.profileDir, "fake-chrome-argv.json"), "utf8"));
       expect(argv).toContain(`--user-data-dir=${first.profileDir}`);
       fs.writeFileSync(path.join(first.profileDir, "Cookies"), "persist");
+      await expect(resolveLiveBrowserSession({ projectDir, env: registryEnv })).resolves.toMatchObject({
+        browserEndpoint: `ws://127.0.0.1:${first.cdpPort}/devtools/browser/fake-guid-deadbeef`,
+      });
       await expect(createBrowserSession(opts)).rejects.toThrow(first.id);
     } finally {
       await destroyBrowserSession(first.id, registryEnv);

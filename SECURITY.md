@@ -312,9 +312,10 @@ What Pickforge does do:
   (`--remote-debugging-port=0` plus an explicit `127.0.0.1` address). It is not
   reachable off-host.
 - The DevTools websocket path is a capability URL: whoever holds it controls the
-  browser. Pickforge reads only the port from `DevToolsActivePort` and **never**
-  persists the websocket path/GUID in session records or diagnostics.
-- `pickforge-lab browser devtools-mcp` resolves only a live browser session owned by the current project and derives `http://127.0.0.1:<port>` in memory. It accepts no arbitrary browser URL and stores no CDP endpoint or websocket GUID.
+  browser. Pickforge **never** persists the websocket path/GUID in session
+  records or diagnostics.
+- `pickforge-lab browser devtools-mcp` resolves only a live browser session owned by the current project and reads that Chrome's websocket endpoint from its own profile in memory. It accepts no arbitrary browser URL and stores no CDP endpoint or websocket GUID. The upstream child gets the endpoint as `--wsEndpoint`, so it is on that child's command line; local processes can already read it from the loopback `/json/version` endpoint.
+- The relay is bound to the Chrome it started with. The per-launch GUID means a later Chrome on the same port cannot be reached. Before each tool call the relay rechecks that the session is running, its input is open and its Chrome is the same live process; after that check fails once, every tool call returns a stable session-ended error.
 - The relay validates the installed `chrome-devtools-mcp` package name, exact `1.5.0` version, declared bin, and confined real path before starting it directly with Node (`shell: false`). Runtime `npx`, upstream update checks, and upstream usage statistics are disabled.
 - Relay stdout contains only validated LF-delimited JSON-RPC records, with pending records capped at 16 MiB. Upstream stderr lines are capped at 64 KiB, redacted, and forwarded only to stderr; over-limit lines are dropped with a safe notice. Malformed or incomplete protocol input fails closed and terminates the upstream process.
 - On destroy or reap, the whole Chrome **process group** is terminated and
