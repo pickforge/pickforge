@@ -8,10 +8,9 @@ mod selection;
 
 use common::{xvfb_ready, Xvfb};
 use pickforge_viewer::capture::connect_display;
-use pickforge_viewer::clipboard::{read_x11, Refusal, Secret, MAX_PASTE_BYTES};
+use pickforge_viewer::clipboard::{read_x11, PasteStop, Refusal, Secret, MAX_PASTE_BYTES};
 use pickforge_viewer::input::MAX_TEXT_CHARS;
 use selection::{Owner, Serve};
-use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::ConnectionExt as _;
@@ -24,7 +23,12 @@ fn read(display: u32) -> Result<Secret, Refusal> {
 
 fn read_unless(display: u32, stopped: bool) -> Result<Secret, Refusal> {
     let conn = connect_display(display).unwrap();
-    let result = read_x11(&conn, 0, TIMEOUT, &AtomicBool::new(stopped));
+    let stop = if stopped {
+        PasteStop::stopped()
+    } else {
+        PasteStop::default()
+    };
+    let result = read_x11(&conn, 0, TIMEOUT, &stop);
     // The reader leaves no window of its own behind.
     let root = conn.setup().roots[0].root;
     let windows = conn.query_tree(root).unwrap().reply().unwrap().children;

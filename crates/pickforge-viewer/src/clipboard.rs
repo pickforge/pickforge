@@ -21,7 +21,7 @@ use std::fmt;
 use std::fs::File;
 use std::io::Read;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _, CreateWindowAux, WindowClass};
@@ -150,15 +150,14 @@ pub fn read_bounded(
     fd: BorrowedFd<'_>,
     deadline: Instant,
     max: usize,
-    stopped: &AtomicBool,
+    stopped: &PasteStop,
 ) -> Result<Zeroizing<Vec<u8>>, Refusal> {
     let mut file = File::from(fd.try_clone_to_owned().map_err(|_| Refusal::Unavailable)?);
     let mut buf = Zeroizing::new(vec![0u8; max + 1]);
     let mut len = 0;
     loop {
         wait_readable(fd, deadline)?;
-        still_wanted(stopped)?;
-        match file.read(&mut buf[len..]) {
+        match stopped.while_wanted(|| file.read(&mut buf[len..]))? {
             Ok(0) => break,
             Ok(n) => len += n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
@@ -175,7 +174,7 @@ pub fn read_bounded(
 
 /// Reads the clipboard of the host window system the viewer runs on. Once
 /// `stopped` is set, the read starts no further step.
-pub fn read(backend: Backend, stopped: &AtomicBool) -> Result<Secret, Refusal> {
+pub fn read(backend: Backend, stopped: &PasteStop) -> Result<Secret, Refusal> {
     match backend {
         Backend::Wayland => read_wayland(READ_TIMEOUT, stopped),
         Backend::X11 => {
@@ -185,16 +184,49 @@ pub fn read(backend: Backend, stopped: &AtomicBool) -> Result<Secret, Refusal> {
     }
 }
 
-/// Refuses to go on once the paste that asked for the read has stopped.
-fn still_wanted(stopped: &AtomicBool) -> Result<(), Refusal> {
-    if stopped.load(Ordering::SeqCst) {
-        return Err(Refusal::Unavailable);
+/// Set once the paste that asked for a read stops. A read holds the lock
+/// from its check to the end of its `read` call, so no byte is read after
+/// `stop` returns.
+#[derive(Debug, Default)]
+pub struct PasteStop(Mutex<bool>);
+
+impl PasteStop {
+    /// A stop that is already set, for when no paste runs.
+    pub fn stopped() -> PasteStop {
+        PasteStop(Mutex::new(true))
     }
-    Ok(())
+
+    /// Stops the paste. Waits for a `read` call under way to end.
+    pub fn stop(&self) {
+        *self.lock() = true;
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        *self.lock()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, bool> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Runs `step` unless the paste has stopped, and keeps it from
+    /// stopping until `step` ends.
+    fn while_wanted<T>(&self, step: impl FnOnce() -> T) -> Result<T, Refusal> {
+        let stopped = self.lock();
+        if *stopped {
+            return Err(Refusal::Unavailable);
+        }
+        Ok(step())
+    }
+}
+
+/// Refuses to go on once the paste that asked for the read has stopped.
+fn still_wanted(stopped: &PasteStop) -> Result<(), Refusal> {
+    stopped.while_wanted(|| ())
 }
 
 /// Reads the Wayland clipboard through the data-control protocol.
-pub fn read_wayland(timeout: Duration, stopped: &AtomicBool) -> Result<Secret, Refusal> {
+pub fn read_wayland(timeout: Duration, stopped: &PasteStop) -> Result<Secret, Refusal> {
     use wl_clipboard_rs::paste::{get_contents, ClipboardType, MimeType, Seat};
     let deadline = Instant::now() + timeout;
     still_wanted(stopped)?;
@@ -214,11 +246,7 @@ pub fn read_wayland(timeout: Duration, stopped: &AtomicBool) -> Result<Secret, R
 
 /// Reads the pipe a Wayland selection writes to, to its end before
 /// `deadline`. Once `stopped` is set, the pipe is closed unread.
-pub fn read_pipe(
-    pipe: OwnedFd,
-    deadline: Instant,
-    stopped: &AtomicBool,
-) -> Result<Secret, Refusal> {
+pub fn read_pipe(pipe: OwnedFd, deadline: Instant, stopped: &PasteStop) -> Result<Secret, Refusal> {
     still_wanted(stopped)?;
     let bytes = read_bounded(pipe.as_fd(), deadline, MAX_PASTE_BYTES, stopped)?;
     finish(&bytes)
@@ -280,7 +308,7 @@ pub fn read_x11(
     conn: &RustConnection,
     screen: usize,
     timeout: Duration,
-    stopped: &AtomicBool,
+    stopped: &PasteStop,
 ) -> Result<Secret, Refusal> {
     let deadline = Instant::now() + timeout;
     let atoms = Atoms::intern(conn)?;
@@ -316,7 +344,7 @@ fn convert(
     window: u32,
     atoms: &Atoms,
     deadline: Instant,
-    stopped: &AtomicBool,
+    stopped: &PasteStop,
 ) -> Result<Secret, Refusal> {
     still_wanted(stopped)?;
     conn.convert_selection(
@@ -425,7 +453,7 @@ mod tests {
         writer.write_all(b"one-time 123456").unwrap();
         drop(writer);
         let deadline = Instant::now() + Duration::from_secs(1);
-        let bytes = read_bounded(reader.as_fd(), deadline, 64, &AtomicBool::new(false)).unwrap();
+        let bytes = read_bounded(reader.as_fd(), deadline, 64, &PasteStop::default()).unwrap();
         assert_eq!(&bytes[..], b"one-time 123456");
     }
 
@@ -437,7 +465,7 @@ mod tests {
             let _ = writer.write_all(&vec![b'a'; 4 * 64 + 10]);
         });
         let deadline = Instant::now() + Duration::from_secs(1);
-        let result = read_bounded(reader.as_fd(), deadline, 64, &AtomicBool::new(false));
+        let result = read_bounded(reader.as_fd(), deadline, 64, &PasteStop::default());
         assert!(matches!(result, Err(Refusal::TooLong)));
         drop(reader);
         feeder.join().unwrap();
@@ -451,10 +479,10 @@ mod tests {
             OwnedFd::from(reader)
         };
         let deadline = Instant::now() + Duration::from_secs(1);
-        let running = AtomicBool::new(false);
+        let running = PasteStop::default();
         let text = read_pipe(fill(b"hunter2\n"), deadline, &running).unwrap();
         assert_eq!(text.as_str(), "hunter2");
-        let stopped = AtomicBool::new(true);
+        let stopped = PasteStop::stopped();
         let refused = read_pipe(fill(b"hunter2"), deadline, &stopped);
         assert!(matches!(refused, Err(Refusal::Unavailable)));
         let over = vec![b'a'; MAX_PASTE_BYTES + 1];
@@ -468,13 +496,13 @@ mod tests {
     fn a_read_waiting_when_the_paste_stops_reads_no_byte() {
         let (mut writer, reader) = UnixStream::pair().unwrap();
         let peek = reader.try_clone().unwrap();
-        let stopped = AtomicBool::new(false);
+        let stopped = PasteStop::default();
         let deadline = Instant::now() + Duration::from_secs(5);
         let result = std::thread::scope(|scope| {
             let read = scope.spawn(|| read_pipe(OwnedFd::from(reader), deadline, &stopped));
             std::thread::sleep(Duration::from_millis(100));
             assert!(!read.is_finished(), "the read is not waiting");
-            stopped.store(true, Ordering::SeqCst);
+            stopped.stop();
             writer.write_all(b"hunter2").unwrap();
             drop(writer);
             read.join().unwrap()
@@ -486,6 +514,27 @@ mod tests {
     }
 
     #[test]
+    fn stopping_waits_for_a_read_under_way() {
+        let stop = PasteStop::default();
+        std::thread::scope(|scope| {
+            let stopper = stop
+                .while_wanted(|| {
+                    let stopper = scope.spawn(|| stop.stop());
+                    std::thread::sleep(Duration::from_millis(100));
+                    assert!(!stopper.is_finished(), "the stop did not wait for the read");
+                    stopper
+                })
+                .unwrap();
+            stopper.join().unwrap();
+        });
+        assert!(stop.is_stopped());
+        assert!(matches!(
+            stop.while_wanted(|| ()),
+            Err(Refusal::Unavailable)
+        ));
+    }
+
+    #[test]
     fn read_bounded_gives_up_at_the_deadline() {
         let (mut writer, reader) = UnixStream::pair().unwrap();
         writer.write_all(b"partial").unwrap();
@@ -494,7 +543,7 @@ mod tests {
             reader.as_fd(),
             start + Duration::from_millis(200),
             64,
-            &AtomicBool::new(false),
+            &PasteStop::default(),
         );
         assert!(matches!(result, Err(Refusal::Unavailable)));
         let took = start.elapsed();

@@ -140,11 +140,14 @@ impl DataDevice {
     /// window events of a loop turn, and this queue is dispatched only
     /// between reads. So after a dispatch, the selection and `has_focus`
     /// describe the same point of the stream. The compositor sends a
-    /// selection only to the focused client or right before a keyboard
-    /// enter. An offer held without focus therefore came before the loss
-    /// and is dropped. An offer sent before a later enter is read with
-    /// that enter and kept. A read that splits the two drops that offer,
-    /// so Paste finds nothing until the next copy or focus change.
+    /// selection only to the focused client or with a keyboard enter: the
+    /// protocol puts it right before the enter, and weston and Mutter send
+    /// it right after. An offer held without focus therefore came before
+    /// the loss and is dropped. An offer sent with a later enter is read
+    /// with that enter and kept. A read that splits the selection from an
+    /// enter that follows it drops that offer, so Paste finds nothing until
+    /// the next copy or focus change. That loses an offer but never keeps
+    /// a stale one.
     fn drop_unfocused(&mut self) -> bool {
         if self.window.has_focus() {
             return true;

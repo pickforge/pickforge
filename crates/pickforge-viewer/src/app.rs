@@ -3,7 +3,7 @@
 
 use crate::args::{self, Config, Placement};
 use crate::capture::{Capture, Control, CursorImage, Shared};
-use crate::clipboard::{self, Refusal, Secret};
+use crate::clipboard::{self, PasteStop, Refusal, Secret};
 use crate::control::{Controller, Effect, Note};
 use crate::data_device::DataDevice;
 use crate::geometry::{self, Rect};
@@ -279,7 +279,7 @@ struct App {
     paste_reads: u64,
     /// Set when the paste of the latest read stops, so that read asks for
     /// no more content.
-    paste_stop: Arc<AtomicBool>,
+    paste_stop: Arc<PasteStop>,
     /// The latest read's thread. A read that never answered keeps it.
     paste_worker: Option<thread::JoinHandle<()>>,
     /// The window's data device, on Wayland without data-control.
@@ -349,7 +349,7 @@ impl App {
             keys: HashMap::new(),
             paste: None,
             paste_reads: 0,
-            paste_stop: Arc::new(AtomicBool::new(true)),
+            paste_stop: Arc::new(PasteStop::stopped()),
             paste_worker: None,
             data_device: None,
             focused: false,
@@ -760,7 +760,7 @@ impl App {
             lease,
             until: Instant::now() + PASTE_READ_LIMIT,
         });
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(PasteStop::default());
         self.paste_stop = Arc::clone(&stop);
         let backend = self.backend;
         self.paste_worker = Some(thread::spawn(move || {
@@ -775,7 +775,7 @@ impl App {
     /// Ends the paste. A read that still runs asks for no more content.
     fn stop_paste(&mut self) {
         self.paste = None;
-        self.paste_stop.store(true, Ordering::SeqCst);
+        self.paste_stop.stop();
     }
 
     /// True while the paste under `lease` may type.
