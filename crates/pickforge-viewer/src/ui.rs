@@ -392,8 +392,9 @@ impl Text {
     }
 
     /// The font that draws all of `cluster`: the embedded font, else the
-    /// first host font that has it all, else the font that draws its
-    /// first character.
+    /// first loaded host font that has it all, else the font that draws its
+    /// first character. Only loaded fonts are tried for a whole cluster, so
+    /// a message of many clusters never costs one host scan per cluster.
     fn font_of(&mut self, cluster: &[char]) -> Option<usize> {
         let charmap = self.font.charmap();
         let others: Vec<char> = cluster
@@ -442,6 +443,7 @@ impl Text {
             self.shape_run(text, &run, false, px, &mut pen, &mut glyphs);
             return (glyphs, pen);
         }
+        self.load_fallbacks(text);
         let bidi = ParagraphBidiInfo::new(text, None);
         let (levels, visual) = bidi.visual_runs(0..text.len());
         for range in visual {
@@ -515,15 +517,21 @@ impl Text {
         }
     }
 
-    /// `text` with each run of characters that no font on the host can
-    /// draw replaced by one ellipsis.
-    pub fn displayable(&mut self, text: &str) -> String {
+    /// Looks up, with at most one scan of the host fonts, every character
+    /// of `text` that the embedded font lacks.
+    fn load_fallbacks(&mut self, text: &str) {
         let charmap = self.font.charmap();
         let others: Vec<char> = text
             .chars()
             .filter(|&c| charmap.map(c) == 0 && !ignorable(c))
             .collect();
         self.fallback.find_all(&others);
+    }
+
+    /// `text` with each run of characters that no font on the host can
+    /// draw replaced by one ellipsis.
+    pub fn displayable(&mut self, text: &str) -> String {
+        self.load_fallbacks(text);
         let mut out = String::with_capacity(text.len());
         let mut missing = false;
         for c in text.chars() {
@@ -1327,9 +1335,11 @@ mod tests {
             fallback: Fallback::from_dir(&dir),
             ..Text::new()
         };
-        // Distinct clusters with a mark that no font draws.
+        // Distinct clusters with a mark that no font draws, on Latin bases
+        // and on distinct bases that no font draws either.
         let message: String = ('a'..='z')
             .chain('A'..='Z')
+            .chain('\u{e000}'..='\u{e033}')
             .flat_map(|c| [c, '\u{1ab0}'])
             .collect();
         assert!(text.width(&message, 12.0) > 0.0);
