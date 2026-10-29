@@ -209,7 +209,7 @@ async function inputWithEvidence(
     action.durationMs = Date.now() - startedAt.getTime();
     if (enabled) {
       const target = { ...evidence.target, ...(focus === undefined ? {} : { focus }) };
-      await recordInputAction(opts, action, sessionId, display, before, target, evidence.typedValue);
+      await recordInputAction(opts, action, { sessionId, display }, before, target, evidence.typedValue);
     }
   }
 }
@@ -225,7 +225,7 @@ async function inputEvidenceEnabled(opts: DesktopCommandOptions, tool: string): 
 
 /** Marks the target as root pixels only when the same owned display survived the input. */
 async function recordInputAction(
-  opts: DesktopCommandOptions, action: EvidenceAction, sessionId: string, display: string,
+  opts: DesktopCommandOptions, action: EvidenceAction, { sessionId, display }: { sessionId: string; display: string },
   before: Awaited<ReturnType<typeof ownedDisplay>>, target: Record<string, unknown>,
   typedValue: InputEvidence["typedValue"],
 ): Promise<void> {

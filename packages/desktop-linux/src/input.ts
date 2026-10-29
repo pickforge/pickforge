@@ -274,8 +274,8 @@ export function buildTypeArgs(text: string): string[] {
 }
 
 export function buildKeyArgs(key: string): string[] {
-  if (key === "") {
-    throw new Error("Invalid key: expected a non-empty string");
+  if (key === "" || key.includes("\0")) {
+    throw new Error("Invalid key: expected a non-empty string without NUL characters");
   }
   return ["key", "--", key];
 }
@@ -443,15 +443,19 @@ export async function typeText(opts: TypeTextOptions): Promise<void> {
 }
 
 export async function pressKey(opts: PressKeyOptions): Promise<void> {
+  const args = buildKeyArgs(opts.key);
   await withAgentPermit(opts.sessionId, opts.env ?? process.env, async () => {
     try {
-      await runXdotool(opts.sessionId, opts.display, opts.env ?? process.env, buildKeyArgs(opts.key), INPUT_TIMEOUT_MS);
+      await runXdotool(opts.sessionId, opts.display, opts.env ?? process.env, args, INPUT_TIMEOUT_MS);
     } catch (error) {
-      if (!(error instanceof CommandError)) throw error;
+      if (error instanceof DesktopInputTargetError) throw error;
       // Evidence keeps a key only as its length, so the error never echoes the argv.
-      const { code, signal, timedOut } = error.result;
-      const reason = code !== null ? `exited with code ${code}` : `killed with signal ${signal ?? "unknown"}`;
-      throw new Error(`Desktop key dispatch failed (${reason}${timedOut ? ", timed out" : ""})`);
+      throw new Error(`Desktop key dispatch failed${error instanceof CommandError ? ` (${commandFailure(error)})` : ""}`);
     }
   });
+}
+
+function commandFailure({ result: { code, signal, timedOut } }: CommandError): string {
+  const reason = code !== null ? `exited with code ${code}` : `killed with signal ${signal ?? "unknown"}`;
+  return reason + (timedOut ? ", timed out" : "");
 }

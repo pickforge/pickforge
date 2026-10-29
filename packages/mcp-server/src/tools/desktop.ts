@@ -875,7 +875,7 @@ function registerKeyTool(server: McpServer, ctx: ServerContext): void {
       inputSchema: {
         ...sessionArg,
         ...captureArg,
-        key: z.string().min(1).describe("Key or chord to press"),
+        key: z.string().min(1).refine((key) => !key.includes("\0"), "Key must not contain NUL characters").describe("Key or chord to press"),
       },
     },
     (args) =>

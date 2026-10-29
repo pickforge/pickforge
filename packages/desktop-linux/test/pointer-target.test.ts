@@ -252,6 +252,19 @@ it.each([
   expect(vi.mocked(runCommand).mock.calls[0]![1]).toContain(key);
 });
 
+it("any other key dispatch error never echoes the key", async () => {
+  const key = "pf409-private-key-marker";
+  vi.mocked(runCommand).mockRejectedValue(new TypeError(`spawn failed for xdotool key -- ${key}`));
+  await expect(pressKey({ sessionId, display: desktop.display, env, key })).rejects.toThrow(/^Desktop key dispatch failed$/);
+});
+
+it("refuses a key with a NUL character before any dispatch", async () => {
+  const key = "pf409-private-key-marker\0Tab";
+  const error = await pressKey({ sessionId, display: desktop.display, env, key }).catch((caught: unknown) => caught);
+  expect((error as Error).message).toBe("Invalid key: expected a non-empty string without NUL characters");
+  expect(runCommand).not.toHaveBeenCalled();
+});
+
 it("resolves undefined when a procfs read throws", async () => {
   vi.spyOn(fs, "readSync").mockImplementation(() => { throw new Error("private procfs failure"); });
   await expect(verify()).resolves.toBeUndefined();
