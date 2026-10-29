@@ -810,6 +810,9 @@ export async function runDevtoolsMcpRelay(
   const timeoutMs = opts.shutdownTimeoutMs ?? 1_000;
   const child = spawnDevtoolsRelayChild(opts);
   const { outcome: exit, exited } = observeChildExit(child);
+  // Once the child is gone, no held call can reach Chrome. Release at once,
+  // so an output that cannot drain never holds up a teardown drain.
+  void exited.then(() => opts.permits?.close());
   const hooks = composePermitHooks(opts.hooks, opts.permits);
   const pumps = startRelayPumps(child, { ...opts, hooks }, input, output, diagnostics);
   const termination: RelayTermination = {

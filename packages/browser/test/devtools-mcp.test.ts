@@ -902,13 +902,14 @@ describe("DevTools relay agent permits", () => {
         'import fs from "node:fs";',
         'import readline from "node:readline";',
         "fs.writeFileSync(process.env.PID_PATH, String(process.pid));",
-        "const answer = (id) =>",
-        '  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result: { content: [] } }) + "\\n");',
+        "const answer = (id, done) =>",
+        '  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result: { content: [] } }) + "\\n", done);',
         'readline.createInterface({ input: process.stdin }).on("line", (line) => {',
         "  const message = JSON.parse(line);",
         '  if (message.method !== "tools/call") return;',
         '  fs.appendFileSync(process.env.SEEN_PATH, JSON.stringify(message.id) + "\\n");',
         "  if (message.params?.exit) process.exit(3);",
+        '  if (message.params?.answerOnTerm) process.once("SIGTERM", () => answer(message.id, () => process.exit(0)));',
         "  if (!message.params?.hold) return answer(message.id);",
         "  const timer = setInterval(() => {",
         "    if (!fs.existsSync(process.env.RELEASE_PATH)) return;",
@@ -958,7 +959,7 @@ describe("DevTools relay agent permits", () => {
     env: { PICKFORGE_HOME: string },
     child: HeldCallChild,
     input: Readable,
-    output: Buffer[],
+    output: Buffer[] | Writable,
   ): Promise<unknown> {
     const ended = createSessionEndedIntercept(session, env);
     const busy = createTakeoverBusyIntercept(session.record.id, env);
@@ -966,7 +967,7 @@ describe("DevTools relay agent permits", () => {
       session,
       executable: fakeExecutable(child.script),
       input,
-      output: collect(output),
+      output: Array.isArray(output) ? collect(output) : output,
       diagnostics: collect([]),
       env: child.env,
       signalSource: new Signals(),
@@ -1160,6 +1161,39 @@ describe("DevTools relay agent permits", () => {
     expect(permitCount(session.record.id, env)).toBe(2);
     input.write(call(3, { exit: true }));
     await expect(run).resolves.toEqual({ code: 3, signal: null });
+    expect(permitCount(session.record.id, env)).toBe(0);
+  });
+
+  it("releases every permit once the child exits, even when the output cannot drain", async () => {
+    const env = registryEnv();
+    const session = await liveSession(env);
+    const child = heldCallChild(env);
+    const input = new PassThrough();
+    // A client that stopped reading: no write to it ever completes.
+    const output = new Writable({ highWaterMark: 1, write() {} });
+    const run = runGatedRelay(session, env, child, input, output);
+    input.write(call(1));
+    input.write(call(2, { hold: true }));
+    await waitForSeen(child, 2);
+    await expect.poll(() => permitCount(session.record.id, env)).toBe(1);
+    input.write(call(3, { exit: true }));
+    await expect.poll(() => permitCount(session.record.id, env), { timeout: 1_000 }).toBe(0);
+    output.destroy();
+    await run.catch(() => {});
+  });
+
+  it("forwards a response the child sends while teardown stops it, with no end error", async () => {
+    const env = registryEnv();
+    const session = await liveSession(env);
+    const child = heldCallChild(env);
+    const input = new PassThrough();
+    const output: Buffer[] = [];
+    const run = runGatedRelay(session, env, child, input, output);
+    input.write(call(1, { hold: true, answerOnTerm: true }));
+    await waitForSeen(child, 1);
+    await stopSessionAgentInput(session.record.id, env, 5_000);
+    await run;
+    expect(responses(output)).toEqual([{ jsonrpc: "2.0", id: 1, result: { content: [] } }]);
     expect(permitCount(session.record.id, env)).toBe(0);
   });
 

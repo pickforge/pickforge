@@ -38,6 +38,9 @@ interface ForwardedCall {
  * closes input, `inputClosed` resolves and the relay stops its child. When a
  * human lease appears, the gate releases its permits at once so takeover can
  * drain. That call can still finish during human control, as before.
+ *
+ * A call the client cancels gets no response, but the child may still run it,
+ * so it keeps its permit until the relay ends, input closes or a lease appears.
  */
 export interface DevtoolsPermitGate {
   /** Run last, after every other intercept: a pass forwards the call. */
@@ -48,7 +51,7 @@ export interface DevtoolsPermitGate {
   readonly inputClosed: Promise<void>;
   /** Session-ended errors for every unanswered call. Call after the child's output settled. */
   takeUnanswered(): JsonRpcMessage[];
-  /** Release every held permit and stop watching. Idempotent. */
+  /** Release every held permit and stop watching. Idempotent; resolves once every release finished. */
   close(): Promise<void>;
 }
 
@@ -65,6 +68,8 @@ class PermitGate implements DevtoolsPermitGate {
   private inputWasClosed = false;
   private closed = false;
   private watching = false;
+  /** Every release of held permits started so far. */
+  private releases: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly sessionId: string,
@@ -105,6 +110,8 @@ class PermitGate implements DevtoolsPermitGate {
   async close(): Promise<void> {
     this.closed = true;
     await this.releaseHeld();
+    // An earlier close or a lease may still be releasing; wait for them too.
+    await this.releases;
   }
 
   private async admit(id: RequestId): Promise<RelayErrorCode | undefined> {
@@ -193,7 +200,9 @@ class PermitGate implements DevtoolsPermitGate {
         call.permit = undefined;
       }
     }
-    await Promise.all(held.map((permit) => releaseAgentPermit(permit).catch(() => {})));
+    const done = Promise.all(held.map((permit) => releaseAgentPermit(permit).catch(() => {})));
+    this.releases = Promise.all([this.releases, done]);
+    await done;
   }
 }
 
