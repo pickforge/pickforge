@@ -508,6 +508,7 @@ impl Text {
         let tracking = if run.font == 0 { TRACKING * px } else { 0.0 };
         // Whole-pixel advances space glyphs evenly. Glyphs draw at whole
         // pixels, and a fractional advance left an empty column now and then.
+        // Marks advance nothing, so they take no tracking either.
         for (id, x, y, advance) in clusters.into_iter().flatten() {
             out.push(Placed {
                 font: run.font,
@@ -515,7 +516,9 @@ impl Text {
                 x: *pen + x,
                 y,
             });
-            *pen += (advance + tracking).round();
+            if advance != 0.0 {
+                *pen += (advance + tracking).round();
+            }
         }
     }
 
@@ -1540,7 +1543,6 @@ mod tests {
         );
     }
 
-    /// Glyph ids of `text` in visual order, with their fonts.
     #[test]
     fn a_long_word_draws_with_even_spacing() {
         let mut text = Text::new();
@@ -1553,6 +1555,11 @@ mod tests {
                     "{px}: {steps:?}"
                 );
             }
+        }
+        // Marks advance nothing, so they take no tracking at any size.
+        for px in [12.0, 24.0, 36.0] {
+            let plain = text.layout("ab", px).1;
+            assert_eq!(text.layout("a\u{301}\u{302}b", px).1, plain, "{px}");
         }
         // Rounding a fractional advance once left an empty column about
         // every 31 glyphs.
@@ -1583,6 +1590,7 @@ mod tests {
         );
     }
 
+    /// Glyph ids of `text` in visual order, with their fonts.
     fn glyph_ids(text: &mut Text, s: &str) -> Vec<(usize, GlyphId)> {
         text.layout(s, 12.0)
             .0
