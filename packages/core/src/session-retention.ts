@@ -202,6 +202,11 @@ async function restoreTimes(dir: DirHandle): Promise<void> {
   await fs.promises.utimes(dir.resolve(), dir.stat.atime, dir.stat.mtime);
 }
 
+/**
+ * Removes a file that prune checked, unless it was replaced since. The check
+ * and the unlink by name are two syscalls, and POSIX has no unlink by inode,
+ * so a replacement made between them is still removed.
+ */
 async function unlinkStaleFile(dir: DirHandle, name: string, stat: fs.Stats): Promise<void> {
   // A concurrent prune may have removed it first; a replaced entry still fails.
   await dir.unlinkOwnedFile(name, stat).catch(async (error: unknown) => {
@@ -209,6 +214,12 @@ async function unlinkStaleFile(dir: DirHandle, name: string, stat: fs.Stats): Pr
   });
 }
 
+/**
+ * Removes the directory by name: POSIX has no rmdir by inode. If a concurrent
+ * prune removed it and a stalled first permit caller then made an empty one
+ * with the same id, this removes that one too. The caller fails closed on its
+ * next step, so no data is lost and no input is delivered.
+ */
 async function rmdirIfEmpty(target: string): Promise<boolean> {
   try {
     await fs.promises.rmdir(target);
@@ -284,7 +295,7 @@ async function pruneCoordinationDirectory(root: DirHandle, dir: DirHandle, id: s
 }
 
 /** The files prune checked in a retained directory, and its teardown time. */
-type Retained = { files: string[]; stoppedAt: number };
+type Retained = { files: StaleFiles; stoppedAt: number };
 
 async function removeRetainedDirectory(
   root: DirHandle, dir: DirHandle, id: string, roots: string[],
@@ -295,8 +306,10 @@ async function removeRetainedDirectory(
   if (current?.dev !== dir.stat.dev || current.ino !== dir.stat.ino) return false;
   if (permits !== undefined && !await removePermits(dir, ...permits)) return false;
   await carryStoppedAt(root, id, stoppedAt);
-  for (const name of files.filter((name) => name !== MARKER)) await dir.unlinkChild(name);
-  await dir.unlinkChild(MARKER);
+  // stopped.json goes last, so a prune that stops midway leaves the next one
+  // the teardown time. A file replaced since its check is not removed.
+  const marker = files.filter(([name]) => name === MARKER);
+  for (const [name, stat] of [...files.filter(([name]) => name !== MARKER), ...marker]) await unlinkStaleFile(dir, name, stat);
   // The sibling markers stay until the horizon: late callers for this id
   // keep failing closed, and createSession never reuses a reserved id.
   return rmdirIfEmpty(root.resolve(id));
@@ -310,11 +323,13 @@ async function pruneDirectory(root: DirHandle, id: string, roots: string[], age:
     if (Date.now() - stoppedAt < age) return false;
     const names = await entriesIfPresent(dir);
     if (names === undefined) return false;
-    const files = names.filter((name) => name !== "permits");
+    const files: StaleFiles = [];
     // Unknown data is not ours to delete. Never traverse a child directory or link.
-    for (const name of files) {
+    for (const name of names.filter((name) => name !== "permits")) {
       if (name !== MARKER && !LOG_FILE.test(name)) return false;
-      if ((await dir.lstatChild(name))?.isFile() !== true) return false;
+      const stat = await dir.lstatChild(name);
+      if (stat?.isFile() !== true) return false;
+      files.push([name, stat]);
     }
     if (files.length === names.length) return removeRetainedDirectory(root, dir, id, roots, { files, stoppedAt });
     // A first permit caller that stalled only through teardown builds permits/
