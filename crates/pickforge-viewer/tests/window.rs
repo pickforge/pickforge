@@ -47,8 +47,7 @@ fn watches_a_session_then_shows_session_end() {
     screen.click(thumb.x + 300, thumb.y + 100);
     assert_eq!(viewer.expect("mode")["mode"], "expanded");
     let expanded = screen.wait_size(class, 640, 512);
-    let shot = screen.shot();
-    assert_eq!(at(&shot, expanded, 4, 4), BAR, "bar color");
+    let shot = screen.wait_color(expanded, 4, 4, BAR);
     assert_near(&shot, expanded, 320, 32 + 100, BLUE, "image below the bar");
     assert_near(&shot, expanded, 450, 32 + 350, RED, "live content");
 
@@ -176,8 +175,7 @@ fn scales_with_the_host_scale_factor() {
     screen.click(thumb.x + 600, thumb.y + 200);
     viewer.expect("mode");
     let expanded = screen.wait_size(class, 1280, 1024);
-    let shot = screen.shot();
-    assert_eq!(at(&shot, expanded, 8, 8), BAR, "bar color");
+    let shot = screen.wait_color(expanded, 8, 8, BAR);
     assert_eq!(at(&shot, expanded, 8, 60), BAR, "bar is 64 px");
     assert_near(&shot, expanded, 8, 66, BLUE, "image starts below the bar");
     assert_near(&shot, expanded, 640, 64 + 200, BLUE, "upscaled image");
