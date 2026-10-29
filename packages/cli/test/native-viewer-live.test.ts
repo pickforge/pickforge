@@ -64,6 +64,8 @@ it.skipIf(binary === null && !required)("real viewer draws the watched frame on 
     if (!mapped) await new Promise((resolve) => setTimeout(resolve, 25));
   }
   expect(mapped, "Fixture must map on the watched lab display").toBe(true);
+  // A mapped window may not have painted yet (#456).
+  expect(await paints(watched.display, "#179ac3", env), "Fixture must paint on the watched lab display").toBe(true);
   child = spawn("env", ["-u", "WAYLAND_DISPLAY", `DISPLAY=${host.display}`, binary!,
     "--display", watched.display, "--xvfb-pid", String(watched.pid), "--xvfb-start-ticks", String(watched.startTimeTicks),
     "--width", "640", "--height", "480", "--class", "pickforge-viewer-00112233445566778899aabbccddeeff",
@@ -172,6 +174,23 @@ it.skipIf(binary === null && !required)("two viewers expand, collapse and close 
   expect(alive(b!)).toBe(false);
   expect((await getSession(sessions[1]!.id, env))?.status).toBe("running");
 }, 60_000);
+
+/** True once a screenshot of `display` holds `color`, within ten seconds. */
+async function paints(display: string, color: string, env: NodeJS.ProcessEnv): Promise<boolean> {
+  const file = path.join(root!, "fixture.png");
+  const deadline = Date.now() + 10_000;
+  const left = () => deadline - Date.now();
+  // Each wait gets only the time left, and a command is killed at once, so a
+  // slow one cannot outlast the deadline.
+  while (left() > 0) {
+    await screenshot({ display, outPath: file, env, countWindows: false, timeoutMs: left(), killGraceMs: 0 });
+    if (left() <= 0) break;
+    const pixels = await runCommand(imageCommand!, [file, "-format", "%c", "histogram:info:"], { env, timeoutMs: left(), killGraceMs: 0 });
+    if (pixels.ok && pixels.stdout.toLowerCase().includes(color)) return true;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(50, Math.max(0, left()))));
+  }
+  return false;
+}
 
 /** True when the PNG holds an ember pixel, at any opacity over the black session. */
 async function hasEmber(file: string, env: NodeJS.ProcessEnv): Promise<boolean> {

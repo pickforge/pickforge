@@ -68,6 +68,17 @@ const BOOTING_ADB_SCRIPT = [
 ].join("\n");
 
 /**
+ * An adb that reports a finished boot only after the fake emulator wrote
+ * `marker`, so a start that returns has run the emulator script.
+ */
+function bootingAfterMarkerAdbScript(marker: string): string {
+  return BOOTING_ADB_SCRIPT.replace(
+    "  *getprop*) echo 1 ;;",
+    `  *getprop*) if [ -e ${JSON.stringify(marker)} ]; then echo 1; else echo 0; fi ;;`,
+  );
+}
+
+/**
  * An adb that never reports a finished boot. Start failures must be observed
  * through the emulator process dying, not through a boot that the fake adb
  * reports at the same moment, so tests that assert a failure use this script.
@@ -500,7 +511,7 @@ describe("AVD pre-flight checks", () => {
   it("refuses a writable start while a live emulator holds the AVD lock", async () => {
     const marker = path.join(tmpRoot, "spawned-locked-avd.txt");
     const sdk = makeFakeSdk(
-      BOOTING_ADB_SCRIPT,
+      bootingAfterMarkerAdbScript(marker),
       `#!/bin/sh\nPATH=/usr/bin:/bin\n: > ${JSON.stringify(marker)}\nexec sleep 60\n`,
     );
     const registryEnv = makeRegistryEnv();
