@@ -5,13 +5,15 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import { PassThrough, Readable, Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  AGENT_PERMITS_DIR,
   acquireHumanLease,
   createSession,
   destroySessionRecord,
   readProcessIdentity,
   releaseHumanLease,
+  sessionDataDir,
   stopSessionAgentInput,
   updateSession,
   type SessionRecord,
@@ -23,6 +25,8 @@ import {
   SESSION_CHECK_FAILED_ERROR_CODE,
   SESSION_ENDED_ERROR_CODE,
   TAKEOVER_BUSY_ERROR_CODE,
+  createDevtoolsPermitGate,
+  DEVTOOLS_PERMIT_WATCH_MS,
   createSessionEndedIntercept,
   createTakeoverBusyIntercept,
   resolveDevtoolsMcpExecutable,
@@ -34,9 +38,24 @@ import {
   type RelaySignalSource,
 } from "../src/index.js";
 
+// A test can pause a lease check of the relay right after its read.
+const leaseRead = vi.hoisted(() => ({ after: undefined as ((lease: unknown) => Promise<void>) | undefined }));
+vi.mock("@pickforge/lab-core", async (importOriginal) => {
+  const core = await importOriginal<typeof import("@pickforge/lab-core")>();
+  return {
+    ...core,
+    checkHumanLeaseBusy: async (...args: Parameters<typeof core.checkHumanLeaseBusy>) => {
+      const lease = await core.checkHumanLeaseBusy(...args);
+      await leaseRead.after?.(lease);
+      return lease;
+    },
+  };
+});
+
 const temporaryDirectories: string[] = [];
 
 afterEach(() => {
+  leaseRead.after = undefined;
   for (const dir of temporaryDirectories.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -312,33 +331,37 @@ describe("createTakeoverBusyIntercept", () => {
   });
 });
 
-describe("createSessionEndedIntercept", () => {
-  async function liveSession(env: { PICKFORGE_HOME: string }): Promise<LiveBrowserSession> {
-    const identity = readProcessIdentity(process.pid);
-    if (identity?.startTicks === undefined) throw new Error("own process identity is unavailable");
-    const record = await createSession(
-      {
-        type: "browser",
-        projectDir: "/project",
-        status: "running",
-        browser: {
-          browserPid: process.pid,
-          browserStartTimeTicks: identity.startTicks,
-          binaryPath: "/chrome",
-          profileMode: "ephemeral",
-          profileDir: "/profile",
-          cdpPort: 9222,
-        },
+async function liveSession(env: { PICKFORGE_HOME: string }): Promise<LiveBrowserSession> {
+  const identity = readProcessIdentity(process.pid);
+  if (identity?.startTicks === undefined) throw new Error("own process identity is unavailable");
+  const record = await createSession(
+    {
+      type: "browser",
+      projectDir: "/project",
+      status: "running",
+      browser: {
+        browserPid: process.pid,
+        browserStartTimeTicks: identity.startTicks,
+        binaryPath: "/chrome",
+        profileMode: "ephemeral",
+        profileDir: "/profile",
+        cdpPort: 9222,
       },
-      env,
-    );
-    return {
-      record,
-      cdpPort: 9222,
-      browserEndpoint: "ws://127.0.0.1:9222/devtools/browser/fake-guid",
-    };
-  }
+    },
+    env,
+  );
+  return {
+    record,
+    cdpPort: 9222,
+    browserEndpoint: "ws://127.0.0.1:9222/devtools/browser/fake-guid",
+  };
+}
 
+function registryEnv(): { PICKFORGE_HOME: string } {
+  return { PICKFORGE_HOME: path.join(temporaryDirectory(), "home") };
+}
+
+describe("createSessionEndedIntercept", () => {
   const ended = (id: number) => ({
     jsonrpc: "2.0",
     id,
@@ -348,10 +371,6 @@ describe("createSessionEndedIntercept", () => {
         "Pickforge: the browser session has ended; create a new session and restart the DevTools relay",
     },
   });
-
-  function registryEnv(): { PICKFORGE_HOME: string } {
-    return { PICKFORGE_HOME: path.join(temporaryDirectory(), "home") };
-  }
 
   it("passes tool calls while the session and its Chrome are live", async () => {
     const env = registryEnv();
@@ -876,5 +895,386 @@ describe("runDevtoolsMcpRelay", () => {
     await waitForFile(readyPath);
     signals.emit("SIGTERM");
     await expect(run).resolves.toEqual({ code: null, signal: "SIGKILL" });
+  });
+});
+
+describe("DevTools relay agent permits", () => {
+  interface HeldCallChild {
+    script: string;
+    env: Record<string, string | undefined>;
+    seen: string;
+    release: string;
+    pid: string;
+  }
+
+  // Records each tools/call id. Answers at once, holds the call until the
+  // release file exists ("hold"), or exits ("exit").
+  function heldCallChild(env: { PICKFORGE_HOME: string }): HeldCallChild {
+    const dir = temporaryDirectory();
+    const script = path.join(dir, "held-call-upstream.mjs");
+    fs.writeFileSync(
+      script,
+      [
+        'import fs from "node:fs";',
+        'import readline from "node:readline";',
+        "fs.writeFileSync(process.env.PID_PATH, String(process.pid));",
+        "const answer = (id, done) =>",
+        '  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result: { content: [] } }) + "\\n", done);',
+        'readline.createInterface({ input: process.stdin }).on("line", (line) => {',
+        "  const message = JSON.parse(line);",
+        '  if (message.method !== "tools/call") return;',
+        '  fs.appendFileSync(process.env.SEEN_PATH, JSON.stringify(message.id) + "\\n");',
+        "  if (message.params?.exit) process.exit(3);",
+        '  if (message.params?.answerOnTerm) process.once("SIGTERM", () => answer(message.id, () => process.exit(0)));',
+        "  if (!message.params?.hold) return answer(message.id);",
+        "  const timer = setInterval(() => {",
+        "    if (!fs.existsSync(process.env.RELEASE_PATH)) return;",
+        "    clearInterval(timer);",
+        "    answer(message.id);",
+        "  }, 10);",
+        "});",
+      ].join("\n"),
+    );
+    const seen = path.join(dir, "seen");
+    const release = path.join(dir, "release");
+    const pid = path.join(dir, "pid");
+    return {
+      script,
+      seen,
+      release,
+      pid,
+      env: { ...env, PATH: process.env.PATH, SEEN_PATH: seen, RELEASE_PATH: release, PID_PATH: pid },
+    };
+  }
+
+  function permitCount(id: string, env: { PICKFORGE_HOME: string }): number {
+    const dir = path.join(sessionDataDir(id, env), AGENT_PERMITS_DIR);
+    if (!fs.existsSync(dir)) return 0;
+    return fs.readdirSync(dir).filter((name) => name.endsWith(".json")).length;
+  }
+
+  function seenIds(child: HeldCallChild): unknown[] {
+    if (!fs.existsSync(child.seen)) return [];
+    return fs.readFileSync(child.seen, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  }
+
+  function responses(output: Buffer[]): Record<string, unknown>[] {
+    return Buffer.concat(output)
+      .toString()
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  }
+
+  const call = (id: number | string, params: Record<string, unknown> = {}): string =>
+    `${JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params })}\n`;
+
+  // The same gates `runProjectDevtoolsMcp` composes, with the permit gate last.
+  function runGatedRelay(
+    session: LiveBrowserSession,
+    env: { PICKFORGE_HOME: string },
+    child: HeldCallChild,
+    input: Readable,
+    output: Buffer[] | Writable,
+    watchMs = DEVTOOLS_PERMIT_WATCH_MS,
+  ): Promise<unknown> {
+    const ended = createSessionEndedIntercept(session, env);
+    const busy = createTakeoverBusyIntercept(session.record.id, env);
+    return runDevtoolsMcpRelay({
+      session,
+      executable: fakeExecutable(child.script),
+      input,
+      output: Array.isArray(output) ? collect(output) : output,
+      diagnostics: collect([]),
+      env: child.env,
+      signalSource: new Signals(),
+      shutdownTimeoutMs: 500,
+      hooks: { intercept: async (message) => (await ended(message)) ?? (await busy(message)) },
+      permits: createDevtoolsPermitGate(session.record.id, env, watchMs),
+    });
+  }
+
+  async function waitForSeen(child: HeldCallChild, count: number): Promise<void> {
+    await expect.poll(() => seenIds(child).length).toBe(count);
+  }
+
+  it("holds a permit for an in-flight call and ends it when teardown closes input", async () => {
+    const env = registryEnv();
+    const session = await liveSession(env);
+    const child = heldCallChild(env);
+    const input = new PassThrough();
+    const output: Buffer[] = [];
+    let relayExited = false;
+    const run = runGatedRelay(session, env, child, input, output).finally(() => {
+      relayExited = true;
+    });
+    input.write(call(1, { hold: true }));
+    await waitForSeen(child, 1);
+    expect(permitCount(session.record.id, env)).toBe(1);
+
+    const started = Date.now();
+    await stopSessionAgentInput(session.record.id, env, 5_000);
+    // The drain waited for the child, so the forwarded call can no longer reach Chrome.
+    const childPid = Number(fs.readFileSync(child.pid, "utf8"));
+    expect(() => process.kill(childPid, 0)).toThrow();
+    expect(Date.now() - started).toBeLessThan(3_000);
+    await run;
+    expect(relayExited).toBe(true);
+    // Nothing reads the input any more; an open one would keep the process alive.
+    expect(input.destroyed).toBe(true);
+    expect(responses(output)).toEqual([
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        error: {
+          code: SESSION_ENDED_ERROR_CODE,
+          message:
+            "Pickforge: the browser session has ended; create a new session and restart the DevTools relay",
+        },
+      },
+    ]);
+    expect(permitCount(session.record.id, env)).toBe(0);
+  });
+
+  it("keeps the relay when teardown closes input after the last call was answered", async () => {
+    const env = registryEnv();
+    const session = await liveSession(env);
+    const child = heldCallChild(env);
+    const input = new PassThrough();
+    const output: Buffer[] = [];
+    // A long watch interval puts its last check after teardown.
+    const run = runGatedRelay(session, env, child, input, output, 1_000);
+    input.write(call(1));
+    await expect.poll(() => responses(output).length).toBe(1);
+    await stopSessionAgentInput(session.record.id, env, 5_000);
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    expect(input.destroyed).toBe(false);
+    input.write(call(2));
+    await expect.poll(() => responses(output).length).toBe(2);
+    expect(responses(output)[1]).toMatchObject({ id: 2, error: { code: SESSION_ENDED_ERROR_CODE } });
+    input.end();
+    await run;
+  });
+
+  it("lets takeover drain while a call is in flight and still forwards its response", async () => {
+    const env = registryEnv();
+    const session = await liveSession(env);
+    const child = heldCallChild(env);
+    const input = new PassThrough();
+    const output: Buffer[] = [];
+    const run = runGatedRelay(session, env, child, input, output);
+    input.write(call(1, { hold: true }));
+    await waitForSeen(child, 1);
+    expect(permitCount(session.record.id, env)).toBe(1);
+
+    const lease = await acquireHumanLease(session.record.id, env);
+    expect(permitCount(session.record.id, env)).toBe(0);
+    fs.writeFileSync(child.release, "");
+    await expect.poll(() => responses(output).length).toBe(1);
+    expect(responses(output)[0]).toEqual({ jsonrpc: "2.0", id: 1, result: { content: [] } });
+
+    input.write(call(2));
+    await expect.poll(() => responses(output).length).toBe(2);
+    expect(responses(output)[1]).toMatchObject({ id: 2, error: { code: TAKEOVER_BUSY_ERROR_CODE } });
+    expect(seenIds(child)).toEqual([1]);
+
+    await releaseHumanLease(session.record.id, lease.leaseId, env);
+    input.end();
+    await run;
+    expect(permitCount(session.record.id, env)).toBe(0);
+  });
+
+  it("refuses calls with stable errors, holds no permit, and forwards nothing", async () => {
+    const env = registryEnv();
+    const session = await liveSession(env);
+    const child = heldCallChild(env);
+    const input = new PassThrough();
+    const output: Buffer[] = [];
+    // The permit gate alone, without the earlier intercepts, refuses the call.
+    const run = runDevtoolsMcpRelay({
+      session,
+      executable: fakeExecutable(child.script),
+      input,
+      output: collect(output),
+      diagnostics: collect([]),
+      env: child.env,
+      signalSource: new Signals(),
+      shutdownTimeoutMs: 500,
+      permits: createDevtoolsPermitGate(session.record.id, env),
+    });
+    const lease = await acquireHumanLease(session.record.id, env);
+    input.write(call(1));
+    await expect.poll(() => responses(output).length).toBe(1);
+    await releaseHumanLease(session.record.id, lease.leaseId, env);
+    await stopSessionAgentInput(session.record.id, env);
+    input.write(call(2));
+    await expect.poll(() => responses(output).length).toBe(2);
+    input.end();
+    await run;
+    expect(responses(output)).toMatchObject([
+      { id: 1, error: { code: TAKEOVER_BUSY_ERROR_CODE } },
+      { id: 2, error: { code: SESSION_ENDED_ERROR_CODE } },
+    ]);
+    expect(seenIds(child)).toEqual([]);
+    expect(permitCount(session.record.id, env)).toBe(0);
+  });
+
+  it("latches the end for a session that left running and passes other messages", async () => {
+    const env = registryEnv();
+    const session = await liveSession(env);
+    const gate = createDevtoolsPermitGate(session.record.id, env);
+    expect(await gate.intercept({ jsonrpc: "2.0", id: "x", method: "tools/list" })).toBeUndefined();
+    expect(await gate.intercept({ jsonrpc: "2.0", method: "notifications/cancelled" })).toBeUndefined();
+    expect(permitCount(session.record.id, env)).toBe(0);
+    await updateSession(session.record.id, { status: "error" }, env);
+    expect(await gate.intercept({ jsonrpc: "2.0", id: 1, method: "tools/call" })).toMatchObject({
+      id: 1,
+      error: { code: SESSION_ENDED_ERROR_CODE },
+    });
+    await updateSession(session.record.id, { status: "running" }, env);
+    expect(await gate.intercept({ jsonrpc: "2.0", id: 2, method: "tools/call" })).toMatchObject({
+      id: 2,
+      error: { code: SESSION_ENDED_ERROR_CODE },
+    });
+    expect(permitCount(session.record.id, env)).toBe(0);
+    await gate.close();
+  });
+
+  // Root reads the record despite its mode, so the check cannot fail there.
+  it.skipIf(process.getuid?.() === 0)("refuses only the call whose permit check cannot read the session", async () => {
+    const env = registryEnv();
+    const session = await liveSession(env);
+    const gate = createDevtoolsPermitGate(session.record.id, env);
+    const record = path.join(env.PICKFORGE_HOME, "sessions", `${session.record.id}.json`);
+    fs.chmodSync(record, 0);
+    try {
+      expect(await gate.intercept({ jsonrpc: "2.0", id: 1, method: "tools/call" })).toEqual({
+        jsonrpc: "2.0",
+        id: 1,
+        error: {
+          code: SESSION_CHECK_FAILED_ERROR_CODE,
+          message: "Pickforge: could not check the browser session; try the call again",
+        },
+      });
+    } finally {
+      fs.chmodSync(record, 0o600);
+    }
+    expect(permitCount(session.record.id, env)).toBe(0);
+    expect(await gate.intercept({ jsonrpc: "2.0", id: 2, method: "tools/call" })).toBeUndefined();
+    expect(permitCount(session.record.id, env)).toBe(1);
+    await gate.close();
+    expect(permitCount(session.record.id, env)).toBe(0);
+  });
+
+  it("releases one permit per response for a reused id", async () => {
+    const env = registryEnv();
+    const session = await liveSession(env);
+    const gate = createDevtoolsPermitGate(session.record.id, env);
+    expect(await gate.intercept({ jsonrpc: "2.0", id: 5, method: "tools/call" })).toBeUndefined();
+    expect(await gate.intercept({ jsonrpc: "2.0", id: 5, method: "tools/call" })).toBeUndefined();
+    expect(permitCount(session.record.id, env)).toBe(2);
+    // A request from the child with the same id is not a response.
+    await gate.release({ jsonrpc: "2.0", id: 5, method: "roots/list" });
+    await gate.release({ jsonrpc: "2.0", id: "5", result: {} });
+    expect(permitCount(session.record.id, env)).toBe(2);
+    await gate.release({ jsonrpc: "2.0", id: 5, result: {} });
+    expect(permitCount(session.record.id, env)).toBe(1);
+    await gate.release({ jsonrpc: "2.0", id: 5, error: { code: 1, message: "failed" } });
+    expect(permitCount(session.record.id, env)).toBe(0);
+    await gate.release({ jsonrpc: "2.0", id: 5, result: {} });
+    expect(gate.takeUnanswered()).toEqual([]);
+    await gate.close();
+  });
+
+  it("keeps the permit of a call admitted after a lease the watcher read has ended", async () => {
+    const env = registryEnv();
+    const id = (await liveSession(env)).record.id;
+    const gate = createDevtoolsPermitGate(id, env, 10);
+    expect(await gate.intercept({ jsonrpc: "2.0", id: 1, method: "tools/call" })).toBeUndefined();
+    // The watcher reads the lease, then waits while the call is answered,
+    // takeover ends and a new call is admitted.
+    const read = createDeferred<void>();
+    const resume = createDeferred<void>();
+    leaseRead.after = async (lease) => {
+      if (lease === undefined) return;
+      leaseRead.after = undefined;
+      read.resolve();
+      await resume.promise;
+    };
+    const leased = acquireHumanLease(id, env);
+    await read.promise;
+    await gate.release({ jsonrpc: "2.0", id: 1, result: {} });
+    await releaseHumanLease(id, (await leased).leaseId, env);
+    expect(await gate.intercept({ jsonrpc: "2.0", id: 2, method: "tools/call" })).toBeUndefined();
+    expect(permitCount(id, env)).toBe(1);
+    resume.resolve();
+    await delay(50);
+    expect(permitCount(id, env)).toBe(1);
+    await gate.close();
+    expect(permitCount(id, env)).toBe(0);
+  });
+
+  it("releases every permit when the child exits with calls unanswered", async () => {
+    const env = registryEnv();
+    const session = await liveSession(env);
+    const child = heldCallChild(env);
+    const input = new PassThrough();
+    const run = runGatedRelay(session, env, child, input, []);
+    input.write(call(1, { hold: true }));
+    input.write(call(2, { hold: true }));
+    await waitForSeen(child, 2);
+    expect(permitCount(session.record.id, env)).toBe(2);
+    input.write(call(3, { exit: true }));
+    await expect(run).resolves.toEqual({ code: 3, signal: null });
+    expect(permitCount(session.record.id, env)).toBe(0);
+    // The client still holds the input open; the relay lets go so it can exit.
+    expect(input.destroyed).toBe(true);
+  });
+
+  it("releases every permit once the child exits, even when the output cannot drain", async () => {
+    const env = registryEnv();
+    const session = await liveSession(env);
+    const child = heldCallChild(env);
+    const input = new PassThrough();
+    // A client that stopped reading: no write to it ever completes.
+    const output = new Writable({ highWaterMark: 1, write() {} });
+    const run = runGatedRelay(session, env, child, input, output);
+    input.write(call(1));
+    input.write(call(2, { hold: true }));
+    await waitForSeen(child, 2);
+    await expect.poll(() => permitCount(session.record.id, env)).toBe(1);
+    input.write(call(3, { exit: true }));
+    await expect.poll(() => permitCount(session.record.id, env), { timeout: 1_000 }).toBe(0);
+    output.destroy();
+    await run.catch(() => {});
+  });
+
+  it("forwards a response the child sends while teardown stops it, with no end error", async () => {
+    const env = registryEnv();
+    const session = await liveSession(env);
+    const child = heldCallChild(env);
+    const input = new PassThrough();
+    const output: Buffer[] = [];
+    const run = runGatedRelay(session, env, child, input, output);
+    input.write(call(1, { hold: true, answerOnTerm: true }));
+    await waitForSeen(child, 1);
+    await stopSessionAgentInput(session.record.id, env, 5_000);
+    await run;
+    expect(responses(output)).toEqual([{ jsonrpc: "2.0", id: 1, result: { content: [] } }]);
+    expect(permitCount(session.record.id, env)).toBe(0);
+  });
+
+  it("releases every permit when the relay input ends with a call unanswered", async () => {
+    const env = registryEnv();
+    const session = await liveSession(env);
+    const child = heldCallChild(env);
+    const input = new PassThrough();
+    const run = runGatedRelay(session, env, child, input, []);
+    input.write(call(1, { hold: true }));
+    await waitForSeen(child, 1);
+    expect(permitCount(session.record.id, env)).toBe(1);
+    input.end();
+    await run;
+    expect(permitCount(session.record.id, env)).toBe(0);
   });
 });
