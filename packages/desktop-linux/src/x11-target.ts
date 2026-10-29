@@ -82,10 +82,15 @@ function processOwnsTarget(pid: number, display: string, socketPath: string, dea
   if (lock !== String(pid) || !ownsSocket(pid, socketPath, deadline)) throw typingFailure();
 }
 
+function recordedScreen(width: number | undefined, height: number | undefined): OwnedDisplayScreen | undefined {
+  if (!Number.isSafeInteger(width) || width! <= 0 || !Number.isSafeInteger(height) || height! <= 0) return undefined;
+  return { width: width!, height: height! };
+}
+
 /** Linux procfs, UID, lock and socket-owner checks, not SO_PEERCRED or a
  * cryptographic peer identity. Never consult XAUTHORITY or home configuration.
  */
-async function validateOwnedTarget(sessionId: string, display: string, env: EnvLike, deadline: number): Promise<{ path: string; alive: () => boolean; identity: OwnedDisplayIdentity }> {
+async function validateOwnedTarget(sessionId: string, display: string, env: EnvLike, deadline: number): Promise<{ path: string; alive: () => boolean; identity: OwnedDisplayIdentity; screen?: OwnedDisplayScreen }> {
   try {
     remaining(deadline);
     if (!/^:(0|[1-9]\d{0,5})$/.test(display)) throw typingFailure();
@@ -105,7 +110,8 @@ async function validateOwnedTarget(sessionId: string, display: string, env: EnvL
     processOwnsTarget(pid!, display, socketPath, deadline);
     if (!alive()) throw typingFailure();
     remaining(deadline);
-    return { path: socketPath, alive, identity: { display, ...identity } };
+    const screen = recordedScreen(desktop.width, desktop.height);
+    return { path: socketPath, alive, identity: { display, ...identity }, ...(screen === undefined ? {} : { screen }) };
   } catch {
     throw typingFailure();
   }
@@ -123,12 +129,27 @@ export interface OwnedDisplayIdentity {
   startTicks: number;
 }
 
+/** The Xvfb screen size recorded with the session that created it. */
+export interface OwnedDisplayScreen {
+  width: number;
+  height: number;
+}
+
 /** Desktop input refused before dispatch, because the display is not the session's owned Xvfb. */
 export class DesktopInputTargetError extends Error {
   override name = "DesktopInputTargetError";
-  constructor() {
-    super("Desktop input refused: the display is not the session's verified Xvfb; no input was sent");
+  constructor(message = "Desktop input refused: the display is not the session's verified Xvfb; no input was sent") {
+    super(message);
   }
+}
+
+/**
+ * Pointer input refused before dispatch, because a point is outside the
+ * session's screen (pickforge/pickforge#424). X would clamp it to the edge, or
+ * wrap it past 32767, and act on a different point than the one requested.
+ */
+export class DesktopPointerOutOfBoundsError extends DesktopInputTargetError {
+  override name = "DesktopPointerOutOfBoundsError";
 }
 
 /**
@@ -142,9 +163,21 @@ export async function verifyOwnedDisplayTarget(
   display: string,
   env: EnvLike,
 ): Promise<OwnedDisplayIdentity | undefined> {
+  return (await verifyOwnedPointerTarget(sessionId, display, env))?.identity;
+}
+
+/**
+ * The owned display check above, with the screen size from the same session
+ * record read. `screen` is absent when the record has no valid size.
+ */
+export async function verifyOwnedPointerTarget(
+  sessionId: string,
+  display: string,
+  env: EnvLike,
+): Promise<{ identity: OwnedDisplayIdentity; screen?: OwnedDisplayScreen } | undefined> {
   try {
-    const target = await validateOwnedTarget(sessionId, display, env, performance.now() + X11_SETUP_MS);
-    return target.identity;
+    const { identity, screen } = await validateOwnedTarget(sessionId, display, env, performance.now() + X11_SETUP_MS);
+    return screen === undefined ? { identity } : { identity, screen };
   } catch {
     return undefined;
   }

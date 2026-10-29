@@ -10,7 +10,7 @@ vi.mock("@pickforge/lab-core", async (original) => {
 });
 import { createSession, runCommand, updateSession, type EnvLike } from "@pickforge/lab-core";
 import { click, doubleClick, drag, move, pressKey, scroll } from "../src/input.js";
-import { DesktopInputTargetError, verifyOwnedDisplayTarget } from "../src/x11-target.js";
+import { DesktopInputTargetError, DesktopPointerOutOfBoundsError, verifyOwnedDisplayTarget } from "../src/x11-target.js";
 import { X11_SETUP_MS } from "../src/x11-wire.js";
 
 let root: string;
@@ -19,7 +19,7 @@ let env: EnvLike;
 let sessionId: string;
 let processStat: string;
 const identity = { display: ":190", pid: 777, startTicks: 123 };
-const desktop = { display: identity.display, xvfbPid: identity.pid, xvfbStartTimeTicks: identity.startTicks };
+const desktop = { display: identity.display, xvfbPid: identity.pid, xvfbStartTimeTicks: identity.startTicks, width: 640, height: 480 };
 const verify = () => verifyOwnedDisplayTarget(sessionId, identity.display, env);
 
 beforeEach(async () => {
@@ -222,6 +222,54 @@ it.each(Object.keys(inputs))("%s dispatches only to the verified owned Xvfb", as
     fs.writeFileSync(processStat, stat);
     files.forEach((content, index) => writeProc(index + 1, content));
   }
+});
+
+const at = () => ({ sessionId, display: desktop.display, env });
+const pointers: Record<string, (x: number, y: number) => Promise<void>> = {
+  click: (x, y) => click({ ...at(), x, y }),
+  doubleClick: (x, y) => doubleClick({ ...at(), x, y }),
+  move: (x, y) => move({ ...at(), x, y }),
+  scroll: (x, y) => scroll({ ...at(), deltaX: 0, deltaY: 1, x, y }),
+  "drag start": (x, y) => drag({ ...at(), fromX: x, fromY: y, toX: 1, toY: 1, durationMs: 0 }),
+  "drag end": (x, y) => drag({ ...at(), fromX: 1, fromY: 1, toX: x, toY: y, durationMs: 0 }),
+};
+const outside: Array<[number, number, string]> = [
+  [640, 0, "640"], [0, 480, "480"], [32768, 100, "32768"], [100, 32768, "32768"], [65537, 0, "65537"], [0, 65537, "65537"],
+];
+
+it.each(Object.keys(pointers))("%s accepts the last pixel and refuses points past the screen", async (name) => {
+  const input = pointers[name]!;
+  await input(639, 479);
+  expect(runCommand).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(runCommand).mock.calls[0]![1].join(" ")).toContain("639 479");
+  for (const [x, y, value] of outside) {
+    vi.mocked(runCommand).mockClear();
+    const error = await input(x, y).catch((caught: unknown) => caught);
+    expect(error, `${x},${y}`).toBeInstanceOf(DesktopPointerOutOfBoundsError);
+    expect(error).toBeInstanceOf(DesktopInputTargetError);
+    expect((error as Error).message).toMatch(new RegExp(`(x|y|X|Y) ${value} is outside the 640x480 screen \\(x 0-639, y 0-479\\); no input was sent$`));
+    expect(runCommand, `${x},${y}`).not.toHaveBeenCalled();
+  }
+});
+
+it("names the drag end that is off screen", async () => {
+  await expect(pointers["drag end"]!(640, 1)).rejects.toThrow("toX 640 is outside");
+  await expect(pointers["drag start"]!(1, 480)).rejects.toThrow("fromY 480 is outside");
+});
+
+it.each([
+  ["missing size", { width: undefined, height: undefined }],
+  ["zero width", { width: 0 }],
+  ["fractional height", { height: 479.5 }],
+])("refuses every pointer point when the record has %s", async (_name, size) => {
+  await updateSession(sessionId, { desktop: { ...desktop, ...size } }, env);
+  for (const [name, input] of Object.entries(pointers)) {
+    await expect(input(0, 0), name).rejects.toThrow("the session record has no screen size; no input was sent");
+  }
+  expect(runCommand).not.toHaveBeenCalled();
+  await scroll({ sessionId, display: desktop.display, env, deltaX: 0, deltaY: 1 });
+  await pressKey({ sessionId, display: desktop.display, env, key: "Return" });
+  expect(runCommand).toHaveBeenCalledTimes(2);
 });
 
 it("resolves undefined when a procfs read throws", async () => {

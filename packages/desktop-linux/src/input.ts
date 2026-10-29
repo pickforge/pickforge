@@ -4,7 +4,8 @@ import { performance } from "node:perf_hooks";
 import { prepareText, typingEnvironment } from "./x11-prebind.js";
 import { DesktopTextPreparationError, remaining } from "./x11-wire.js";
 import {
-  DesktopInputTargetError, validateTypingTarget, verifyOwnedDisplayTarget, type OwnedDisplayIdentity,
+  DesktopInputTargetError, DesktopPointerOutOfBoundsError, validateTypingTarget,
+  verifyOwnedPointerTarget, type OwnedDisplayIdentity, type OwnedDisplayScreen,
 } from "./x11-target.js";
 import { pulseNativeViewer } from "./viewer-host.js";
 
@@ -280,11 +281,47 @@ export function buildKeyArgs(key: string): string[] {
   return ["key", "--", key];
 }
 
+/** A pointer coordinate pair, named as the caller passed it. */
+interface PointerPoint {
+  x: number;
+  y: number;
+  xLabel: string;
+  yLabel: string;
+}
+
+const point = (x: number, y: number, xLabel = "x", yLabel = "y"): PointerPoint => ({ x, y, xLabel, yLabel });
+
+/**
+ * Refuses a point outside the screen. X moves a point past an edge to that
+ * edge and wraps a value above 32767, so the input would land elsewhere.
+ * A record without a size cannot prove any point is on screen.
+ */
+function assertOnScreen(points: PointerPoint[], screen: OwnedDisplayScreen | undefined): void {
+  if (points.length === 0) return;
+  if (screen === undefined) {
+    throw new DesktopPointerOutOfBoundsError(
+      "Desktop pointer input refused: the session record has no screen size; no input was sent",
+    );
+  }
+  const range = `x 0-${screen.width - 1}, y 0-${screen.height - 1}`;
+  for (const { x, y, xLabel, yLabel } of points) {
+    for (const [label, value, limit] of [[xLabel, x, screen.width], [yLabel, y, screen.height]] as const) {
+      if (value >= limit) {
+        throw new DesktopPointerOutOfBoundsError(
+          `Desktop pointer input refused: ${label} ${value} is outside the ` +
+            `${screen.width}x${screen.height} screen (${range}); no input was sent`,
+        );
+      }
+    }
+  }
+}
+
 /**
  * Runs xdotool only when the display verifies as the session's owned Xvfb,
- * with the check typing uses (pickforge/pickforge#219). xdotool connects by
- * display number, so a server that replaces the owned Xvfb between the check
- * and that connection, a few milliseconds, can still receive the input.
+ * with the check typing uses (pickforge/pickforge#219), and every pointer
+ * point is on that session's screen. xdotool connects by display number, so a
+ * server that replaces the owned Xvfb between the check and that connection,
+ * a few milliseconds, can still receive the input.
  */
 async function runXdotool(
   sessionId: string,
@@ -292,18 +329,20 @@ async function runXdotool(
   env: EnvLike,
   args: string[],
   timeoutMs: number,
+  points: PointerPoint[] = [],
 ): Promise<OwnedDisplayIdentity> {
   parseDisplayNumber(display);
-  const target = await verifyOwnedDisplayTarget(sessionId, display, env);
+  const target = await verifyOwnedPointerTarget(sessionId, display, env);
   if (target === undefined) {
     throw new DesktopInputTargetError();
   }
+  assertOnScreen(points, target.screen);
   await runCommand("xdotool", args, {
     env: { DISPLAY: display },
     timeoutMs,
     check: true,
   });
-  return target;
+  return target.identity;
 }
 
 /**
@@ -329,6 +368,7 @@ export async function click(opts: ClickOptions): Promise<void> {
       env,
       buildClickArgs({ x: opts.x, y: opts.y, button: opts.button }),
       INPUT_TIMEOUT_MS,
+      [point(opts.x, opts.y)],
     ),
   );
   await pulseNativeViewer(opts.sessionId, target, opts, env);
@@ -342,6 +382,7 @@ export async function move(opts: MoveOptions): Promise<void> {
       opts.env ?? process.env,
       buildMoveArgs({ x: opts.x, y: opts.y }),
       INPUT_TIMEOUT_MS,
+      [point(opts.x, opts.y)],
     ),
   );
 }
@@ -359,6 +400,7 @@ export async function scroll(opts: ScrollOptions): Promise<void> {
         y: opts.y,
       }),
       INPUT_TIMEOUT_MS,
+      opts.x === undefined || opts.y === undefined ? [] : [point(opts.x, opts.y)],
     ),
   );
 }
@@ -378,6 +420,7 @@ export async function drag(opts: DragOptions): Promise<void> {
         durationMs: opts.durationMs,
       }),
       INPUT_TIMEOUT_MS + MAX_DRAG_DURATION_MS,
+      [point(opts.fromX, opts.fromY, "fromX", "fromY"), point(opts.toX, opts.toY, "toX", "toY")],
     ),
   );
 }
@@ -396,6 +439,7 @@ export async function doubleClick(opts: DoubleClickOptions): Promise<void> {
         intervalMs: opts.intervalMs,
       }),
       INPUT_TIMEOUT_MS + MAX_DOUBLE_CLICK_INTERVAL_MS,
+      [point(opts.x, opts.y)],
     ),
   );
   await pulseNativeViewer(opts.sessionId, target, opts, env);
