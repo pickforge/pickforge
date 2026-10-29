@@ -93,8 +93,10 @@ async function translateOpenError(
     );
   }
   if (code === "ENOENT") {
+    // The cause lets a caller that expects a concurrent removal tell it apart.
     return new RunStorageAccessError(
       `Run storage path disappeared while being verified: ${dir}`,
+      { cause: error },
     );
   }
   return error;

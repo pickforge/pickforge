@@ -87,10 +87,39 @@ function markerNames(id: string): string[] {
   return [takeoverIdentityName(id), sessionInputClosedName(id)];
 }
 
+/** Opens a file prune just lstat'ed, or undefined when a concurrent prune removed it. */
+async function openIfPresent(dir: DirHandle, name: string): Promise<fs.promises.FileHandle | undefined> {
+  return dir.openFile(name, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return undefined;
+  });
+}
+
+/** Lists a directory prune opened, or undefined when a concurrent prune removed it. */
+async function entriesIfPresent(dir: DirHandle): Promise<string[] | undefined> {
+  return dir.readEntryNames().catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return undefined;
+  });
+}
+
+/** Runs `fn` on a directory prune just lstat'ed; false when a concurrent prune removed it. */
+async function withChildIfPresent(dir: DirHandle, name: string, fn: (child: DirHandle) => Promise<boolean>): Promise<boolean> {
+  const child = await dir.openChild(name).catch((error: unknown) => {
+    // openChild reports a gone entry as a storage error caused by ENOENT, or as
+    // a plain ENOENT when the entry goes after the open, while it is verified.
+    const cause = (error as Error | undefined)?.cause as NodeJS.ErrnoException | undefined;
+    if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT" && cause?.code !== "ENOENT") throw error;
+    return undefined;
+  });
+  return child !== undefined && withDirHandle(child, fn);
+}
+
 async function retainedStoppedAt(dir: DirHandle, id: string): Promise<number | undefined> {
   const stat = await dir.lstatChild(MARKER);
   if (stat?.isFile() !== true) return undefined;
-  const file = await dir.openFile(MARKER, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  const file = await openIfPresent(dir, MARKER);
+  if (file === undefined) return undefined;
   try {
     const marker = JSON.parse(await file.readFile("utf8"));
     if (marker.id !== id || typeof marker.stoppedAt !== "string") return undefined;
@@ -121,7 +150,8 @@ async function carryStoppedAt(root: DirHandle, id: string, stoppedAt: number): P
   for (const name of markerNames(id)) {
     const stat = await root.lstatChild(name);
     if (stat?.isFile() !== true || stat.mtimeMs >= stoppedAt) continue;
-    const file = await root.openFile(name, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const file = await openIfPresent(root, name);
+    if (file === undefined) continue;
     try {
       await file.utimes(stat.atime, new Date(stoppedAt));
     } finally {
@@ -157,7 +187,8 @@ async function staleCoordinationFile(dir: DirHandle, name: string, records: RegE
   const pid = temps.exec(name)?.[1];
   if (pid !== undefined) return isPidAlive(Number(pid)) ? undefined : stat;
   if (!records.test(name)) return undefined;
-  const file = await dir.openFile(name, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  const file = await openIfPresent(dir, name);
+  if (file === undefined) return undefined;
   try {
     return ownerIsGone(await file.readFile("utf8")) ? stat : undefined;
   } finally {
@@ -191,8 +222,10 @@ async function rmdirIfEmpty(target: string): Promise<boolean> {
 
 async function stalePermitFiles(permits: DirHandle): Promise<StaleFiles | undefined> {
   if (!isOld(permits.stat)) return undefined;
+  const names = await entriesIfPresent(permits);
+  if (names === undefined) return undefined;
   const files: StaleFiles = [];
-  for (const name of await permits.readEntryNames()) {
+  for (const name of names) {
     const stat = await staleCoordinationFile(permits, name, PERMIT_RECORD, PERMIT_TEMP);
     if (stat === undefined) return undefined;
     files.push([name, stat]);
@@ -234,7 +267,8 @@ async function removeCoordinationDirectory(
  */
 async function pruneCoordinationDirectory(root: DirHandle, dir: DirHandle, id: string, roots: string[]): Promise<boolean> {
   if (!isOld(dir.stat)) return false;
-  const names = await dir.readEntryNames();
+  const names = await entriesIfPresent(dir);
+  if (names === undefined) return false;
   const files: StaleFiles = [];
   for (const name of names.filter((name) => name !== "permits")) {
     const stat = await staleCoordinationFile(dir, name, LEASE_RECORD, LEASE_TEMP);
@@ -243,7 +277,7 @@ async function pruneCoordinationDirectory(root: DirHandle, dir: DirHandle, id: s
   }
   if (!names.includes("permits")) return removeCoordinationDirectory(root, dir, id, roots, files);
   if ((await dir.lstatChild("permits"))?.isDirectory() !== true) return false;
-  return withDirHandle(dir.openChild("permits"), async (permits) => {
+  return withChildIfPresent(dir, "permits", async (permits) => {
     const permitFiles = await stalePermitFiles(permits);
     return permitFiles !== undefined && removeCoordinationDirectory(root, dir, id, roots, files, [permits, permitFiles]);
   });
@@ -270,11 +304,12 @@ async function removeRetainedDirectory(
 
 async function pruneDirectory(root: DirHandle, id: string, roots: string[], age: number): Promise<boolean> {
   if (await registryHasSession(id, roots)) return false;
-  return withDirHandle(root.openChild(id), async (dir) => {
+  return withChildIfPresent(root, id, async (dir) => {
     const stoppedAt = await retainedStoppedAt(dir, id);
     if (stoppedAt === undefined) return pruneCoordinationDirectory(root, dir, id, roots);
     if (Date.now() - stoppedAt < age) return false;
-    const names = await dir.readEntryNames();
+    const names = await entriesIfPresent(dir);
+    if (names === undefined) return false;
     const files = names.filter((name) => name !== "permits");
     // Unknown data is not ours to delete. Never traverse a child directory or link.
     for (const name of files) {
@@ -285,7 +320,7 @@ async function pruneDirectory(root: DirHandle, id: string, roots: string[], age:
     // A first permit caller that stalled only through teardown builds permits/
     // in the retained directory, then fails closed.
     if ((await dir.lstatChild("permits"))?.isDirectory() !== true) return false;
-    return withDirHandle(dir.openChild("permits"), async (permits) => {
+    return withChildIfPresent(dir, "permits", async (permits) => {
       const permitFiles = await stalePermitFiles(permits);
       return permitFiles !== undefined &&
         removeRetainedDirectory(root, dir, id, roots, { files, stoppedAt }, [permits, permitFiles]);

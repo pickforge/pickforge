@@ -336,6 +336,79 @@ describe("session marker horizon", () => {
     expect((await createSession({ type: "desktop", projectDir: home }, env)).id).toBe(record.id);
   });
 
+  type PruneStep = "openFile" | "openChild" | "readEntryNames";
+
+  /**
+   * Runs a whole second prune when the first one, after its lstat, opens the
+   * entry `name` or lists the directory `name`. A removed directory then fails
+   * to list, as under Bun; Node lists it empty. With `failure`, that open then
+   * fails with it instead.
+   */
+  function pruneConcurrentlyAt(name: string, step: PruneStep = "openFile", failure?: Error) {
+    let other: Promise<string[]> | undefined;
+    const runAt = (target: unknown) => other === undefined && target === name ? (other = pruneSessionLogs(0, env)) : undefined;
+    const list = DirHandle.prototype.readEntryNames;
+    vi.spyOn(DirHandle.prototype, "readEntryNames").mockImplementation(async function (this: DirHandle) {
+      if (step === "readEntryNames") await runAt(path.basename(this.dir));
+      if (!fs.existsSync(this.dir)) throw Object.assign(new Error(`ENOENT: ${this.dir}`), { code: "ENOENT" });
+      return list.apply(this);
+    });
+    if (step === "readEntryNames") return () => other;
+    const open = DirHandle.prototype[step] as (this: DirHandle, ...args: unknown[]) => Promise<unknown>;
+    vi.spyOn(DirHandle.prototype, step).mockImplementation(async function (this: DirHandle, ...args: unknown[]) {
+      const hooked = other === undefined && args[0] === name;
+      await runAt(args[0]);
+      if (hooked && failure !== undefined) throw failure;
+      return open.apply(this, args);
+    } as never);
+    return () => other;
+  }
+
+  it.each([
+    ["the teardown time read", () => "stopped.json", "openFile"],
+    ["the marker carry", (id: string) => takeoverIdentityName(id), "openFile"],
+    ["the directory open", (id: string) => id, "openChild"],
+    ["the directory listing", (id: string) => id, "readEntryNames"],
+  ] as const)("finishes a prune when another prune runs first at %s", async (_, name, step) => {
+    const record = await closed();
+    setStoppedAt(record.id, past());
+    // Markers older than teardown, so prune opens them to carry its time. An
+    // old directory sends a prune that misses stopped.json to its listing.
+    backdate([...markers(record.id), sessionDataDir(record.id, env)], new Date(Date.now() - 2 * SESSION_MARKER_HORIZON_MS));
+    const other = pruneConcurrentlyAt(name(record.id), step);
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(await other()).toEqual([record.id]);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+  });
+
+  it("still fails on a directory open error other than a concurrent removal", async () => {
+    const record = await closed();
+    setStoppedAt(record.id, past());
+    const failure = Object.assign(new Error("EIO: i/o error"), { code: "EIO" });
+    const other = pruneConcurrentlyAt(record.id, "openChild", failure);
+    await expect(pruneSessionLogs(0, env)).rejects.toBe(failure);
+    expect(await other()).toEqual([record.id]);
+  });
+
+  it("finishes a prune when another prune runs first while its directory open is verified", async () => {
+    const record = await closed();
+    setStoppedAt(record.id, past());
+    backdate([...markers(record.id), sessionDataDir(record.id, env)], new Date(Date.now() - 2 * SESSION_MARKER_HORIZON_MS));
+    const dir = fs.realpathSync(sessionDataDir(record.id, env));
+    let other: Promise<string[]> | undefined;
+    // DirHandle.open resolves the open descriptor's path after the open succeeds.
+    const realpath = fs.promises.realpath;
+    vi.spyOn(fs.promises, "realpath").mockImplementation((async (target: string, ...args: never[]) => {
+      if (other === undefined && target.startsWith("/proc/self/fd/") && fs.readlinkSync(target) === dir) {
+        await (other = pruneSessionLogs(0, env));
+      }
+      return realpath(target, ...args);
+    }) as never);
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(await other).toEqual([record.id]);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+  });
+
   it("removes old markers whose directory is already gone and keeps other files", async () => {
     const old = orphanMarkers("desk-0badc0de");
     const fresh = orphanMarkers("brow-0badf00d");
@@ -582,6 +655,15 @@ describe("session marker horizon", () => {
     expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
   });
 
+  it("finishes a retained prune when another prune runs first at the permits/ open", async () => {
+    const { id, permits } = await retainedWithPermits();
+    backdate([permits, ...markers(id)]);
+    const other = pruneConcurrentlyAt("permits", "openChild");
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(await other()).toEqual([id]);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+  });
+
   it("removes stale permit files with gone owners from permits/ in a retained directory", async () => {
     const { id, dir, permits } = await retainedWithPermits();
     const dead = deadPid();
@@ -715,6 +797,21 @@ describe("session marker horizon", () => {
     expect(await pruneSessionLogs(0, env)).toEqual([]);
     expect(fs.readFileSync(file, "utf8")).toBe("mine");
     expect(exist(markers(id))).toEqual([true, false]);
+  });
+
+  it.each([
+    ["a permit read", "openFile"],
+    ["the permits/ open", "openChild"],
+    ["the permits/ listing", "readEntryNames"],
+  ] as const)("finishes a stranded prune when another prune runs first at %s", async (_, step) => {
+    const { id, dir, permits } = await strandedDirectory();
+    const name = `${crypto.randomUUID()}.json`;
+    fs.writeFileSync(path.join(permits, name), permitRecord(id, deadPid()));
+    backdate([path.join(permits, name), permits, dir, markers(id)[0]!]);
+    const other = pruneConcurrentlyAt(step === "openFile" ? name : "permits", step);
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(await other()).toEqual([id]);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
   });
 
   it("keeps a stranded directory while a coordination file is young", async () => {
