@@ -44,6 +44,18 @@ impl Viewer {
         placement: &str,
         scale: &str,
     ) -> Viewer {
+        Viewer::spawn_with(session, host_display, class, placement, scale, &[])
+    }
+
+    /// [`Viewer::spawn`] with more arguments, such as `--label`.
+    pub fn spawn_with(
+        session: &Xvfb,
+        host_display: u32,
+        class: &str,
+        placement: &str,
+        scale: &str,
+        extra: &[&str],
+    ) -> Viewer {
         let mut child = Command::new(env!("CARGO_BIN_EXE_pickforge-viewer"))
             .args(["--display", &format!(":{}", session.display)])
             .args(["--xvfb-pid", &session.pid.to_string()])
@@ -51,6 +63,7 @@ impl Viewer {
             .args(["--width", "640", "--height", "480"])
             .args(["--class", class, "--thumbnail-width", "384"])
             .args(["--placement", placement])
+            .args(extra)
             // The window goes to the second Xvfb, never to the host desktop.
             .env_remove("WAYLAND_DISPLAY")
             .env_remove("WAYLAND_SOCKET")
