@@ -294,13 +294,13 @@ const point = (x: number, y: number, xLabel = "x", yLabel = "y"): PointerPoint =
 /**
  * Refuses a point outside the screen. X moves a point past an edge to that
  * edge and wraps a value above 32767, so the input would land elsewhere.
- * A record without a size cannot prove any point is on screen.
+ * Without the current screen size, no point is proven on screen.
  */
 function assertOnScreen(points: PointerPoint[], screen: OwnedDisplayScreen | undefined): void {
   if (points.length === 0) return;
   if (screen === undefined) {
     throw new DesktopPointerOutOfBoundsError(
-      "Desktop pointer input refused: the session record has no screen size; no input was sent",
+      "Desktop pointer input refused: the screen size could not be read; no input was sent",
     );
   }
   const range = `x 0-${screen.width - 1}, y 0-${screen.height - 1}`;
@@ -319,9 +319,9 @@ function assertOnScreen(points: PointerPoint[], screen: OwnedDisplayScreen | und
 /**
  * Runs xdotool only when the display verifies as the session's owned Xvfb,
  * with the check typing uses (pickforge/pickforge#219), and every pointer
- * point is on that session's screen. xdotool connects by display number, so a
- * server that replaces the owned Xvfb between the check and that connection,
- * a few milliseconds, can still receive the input.
+ * point is on that server's current screen. xdotool connects by display
+ * number, so a server that replaces the owned Xvfb between the check and that
+ * connection, a few milliseconds, can still receive the input.
  */
 async function runXdotool(
   sessionId: string,
@@ -332,7 +332,7 @@ async function runXdotool(
   points: PointerPoint[] = [],
 ): Promise<OwnedDisplayIdentity> {
   parseDisplayNumber(display);
-  const target = await verifyOwnedPointerTarget(sessionId, display, env);
+  const target = await verifyOwnedPointerTarget(sessionId, display, env, points.length > 0);
   if (target === undefined) {
     throw new DesktopInputTargetError();
   }

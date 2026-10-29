@@ -257,19 +257,50 @@ it("names the drag end that is off screen", async () => {
   await expect(pointers["drag start"]!(1, 480)).rejects.toThrow("fromY 480 is outside");
 });
 
-it.each([
-  ["missing size", { width: undefined, height: undefined }],
-  ["zero width", { width: 0 }],
-  ["fractional height", { height: 479.5 }],
-])("refuses every pointer point when the record has %s", async (_name, size) => {
-  await updateSession(sessionId, { desktop: { ...desktop, ...size } }, env);
-  for (const [name, input] of Object.entries(pointers)) {
-    await expect(input(0, 0), name).rejects.toThrow("the session record has no screen size; no input was sent");
+it("bounds points by the server's current screen, not the session record", async () => {
+  server.screen = { width: 320, height: 240 };
+  await expect(pointers.click!(320, 100)).rejects.toThrow("x 320 is outside the 320x240 screen (x 0-319, y 0-239); no input was sent");
+  await updateSession(sessionId, { desktop: { ...desktop, width: 40000, height: 40000 } }, env);
+  await expect(pointers.click!(32768, 100)).rejects.toThrow("x 32768 is outside the 320x240 screen");
+  await expect(pointers.move!(100, 240)).rejects.toThrow("y 240 is outside the 320x240 screen");
+  expect(runCommand).not.toHaveBeenCalled();
+  await pointers.click!(319, 239);
+  expect(vi.mocked(runCommand).mock.calls[0]![1].join(" ")).toContain("319 239");
+});
+
+const unreadable: Record<string, () => void> = {
+  "a zero width": () => { server.screen = { width: 0, height: 480 }; },
+  "a refused setup": () => { server.fault = (opcode, reply) => opcode === -1 ? Object.assign(Buffer.from(reply), { 0: 0 }) : reply; },
+  "a closed connection": () => { server.fault = (opcode, reply, client) => opcode === -1 ? void client.destroy() : reply; },
+};
+
+it.each(Object.keys(unreadable))("refuses every pointer point when the screen size has %s", async (name) => {
+  unreadable[name]!();
+  for (const [input, run] of Object.entries(pointers)) {
+    const error = await run(0, 0).catch((caught: unknown) => caught);
+    expect(error, input).toBeInstanceOf(DesktopPointerOutOfBoundsError);
+    expect((error as Error).message).toBe("Desktop pointer input refused: the screen size could not be read; no input was sent");
   }
   expect(runCommand).not.toHaveBeenCalled();
   await scroll({ sessionId, display: desktop.display, env, deltaX: 0, deltaY: 1 });
   await pressKey({ sessionId, display: desktop.display, env, key: "Return" });
   expect(runCommand).toHaveBeenCalledTimes(2);
+});
+
+it("reads the screen size within the ownership budget, and only for pointer points", async () => {
+  await verify();
+  await pressKey({ sessionId, display: desktop.display, env, key: "Return" });
+  expect(server.connections).toBe(0);
+  await pointers.click!(1, 1);
+  expect(server.connections).toBe(1);
+  let now = performance.now();
+  const start = now;
+  vi.spyOn(performance, "now").mockImplementation(() => now);
+  server.fault = (opcode, reply) => {
+    if (opcode === -1) now = start + X11_SETUP_MS + 1;
+    return reply;
+  };
+  await expect(pointers.click!(1, 1)).rejects.toThrow("the screen size could not be read");
 });
 
 it("resolves undefined when a procfs read throws", async () => {
