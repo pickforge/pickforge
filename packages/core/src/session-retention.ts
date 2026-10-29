@@ -254,14 +254,15 @@ async function removeRetainedDirectory(
   names: string[], stoppedAt: number, permits?: [DirHandle, StaleFiles],
 ): Promise<boolean> {
   if (await registryHasSession(id, roots)) return false;
+  const current = await root.lstatChild(id);
+  if (current?.dev !== dir.stat.dev || current.ino !== dir.stat.ino) return false;
   if (permits !== undefined && !await removePermits(dir, ...permits)) return false;
   await carryStoppedAt(root, id, stoppedAt);
   for (const name of names.filter((name) => name !== MARKER)) await dir.unlinkChild(name);
   await dir.unlinkChild(MARKER);
-  await fs.promises.rmdir(root.resolve(id));
   // The sibling markers stay until the horizon: late callers for this id
   // keep failing closed, and createSession never reuses a reserved id.
-  return true;
+  return rmdirIfEmpty(root.resolve(id));
 }
 
 async function pruneDirectory(root: DirHandle, id: string, roots: string[], age: number): Promise<boolean> {

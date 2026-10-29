@@ -611,6 +611,34 @@ describe("session marker horizon", () => {
     expect(fs.readdirSync(dir).sort()).toEqual(["permits", "stopped.json", "xvfb.log"]);
   });
 
+  it("keeps a retained directory that is replaced after its permits are listed", async () => {
+    const { dir, permits } = await retainedWithPermits();
+    backdate([permits]);
+    const moved = path.join(home, "moved");
+    const read = DirHandle.prototype.readEntryNames;
+    vi.spyOn(DirHandle.prototype, "readEntryNames").mockImplementation(async function (this: DirHandle) {
+      const names = await read.call(this);
+      if (this.dir === permits) { fs.renameSync(dir, moved); fs.mkdirSync(dir); }
+      return names;
+    });
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(fs.readdirSync(moved).sort()).toEqual(["permits", "stopped.json", "xvfb.log"]);
+    expect(fs.readdirSync(dir)).toEqual([]);
+  });
+
+  it("keeps a retained directory that gains an entry before rmdir", async () => {
+    const record = await closed();
+    const dir = sessionDataDir(record.id, env);
+    setStoppedAt(record.id, past());
+    const rmdir = fs.promises.rmdir;
+    vi.spyOn(fs.promises, "rmdir").mockImplementation(async (target, options) => {
+      if (String(target).endsWith(record.id)) fs.mkdirSync(path.join(dir, "permits"));
+      return rmdir(target, options);
+    });
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(fs.readdirSync(dir)).toEqual(["permits"]);
+  });
+
   it("keeps a retained directory whose permits is a symlink", async () => {
     const { dir, permits } = await retainedWithPermits();
     const target = fs.mkdtempSync(path.join(home, "target-"));
