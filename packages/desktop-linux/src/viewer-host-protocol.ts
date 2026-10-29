@@ -50,6 +50,8 @@ export interface NativeViewerHostIdentity {
   socket: string;
   socketIno: number;
   socketDev: number;
+  /** Missing in readiness from a host before #404, which no request trusts. */
+  socketCtimeNs?: string;
 }
 export type ViewerHostResponse =
   | { ok: true; host: NativeViewerHostIdentity; mode: NativeViewerMode | "fullscreen"; sessionEnded: boolean; requestId?: string; requestState?: ViewerControlEvent }
