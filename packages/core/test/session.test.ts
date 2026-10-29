@@ -277,6 +277,36 @@ describe("session registry", () => {
     expect(result).toBe(`Session record at ${file} is not a regular file`);
   });
 
+  it("getSession refuses a record swapped for a FIFO holding valid JSON as it opens", async () => {
+    const record = await createSession({ type: "desktop", status: "running", projectDir: "/proj" }, env);
+    const file = path.join(home, "sessions", `${record.id}.json`);
+    const json = await fs.promises.readFile(file, "utf8");
+    let writer: number | undefined;
+    // Swap after a check of the path, or right before the open.
+    const swap = (target: unknown) => {
+      if (writer !== undefined || String(target) !== file) return;
+      fs.rmSync(file);
+      expect(spawnSync("mkfifo", [file]).status).toBe(0);
+      writer = fs.openSync(file, fs.constants.O_RDWR);
+      fs.writeSync(writer, json);
+    };
+    const { open, stat } = fs.promises;
+    vi.spyOn(fs.promises, "stat").mockImplementation((async (...args: Parameters<typeof stat>) => {
+      const stats = await stat(...args);
+      swap(args[0]);
+      return stats;
+    }) as typeof stat);
+    vi.spyOn(fs.promises, "open").mockImplementation(async (...args) => {
+      swap(args[0]);
+      return open(...args);
+    });
+    try {
+      await expect(getSession(record.id, env)).rejects.toThrow(`Session record at ${file} is not a regular file`);
+    } finally {
+      if (writer !== undefined) fs.closeSync(writer);
+    }
+  });
+
   it("updateSession cannot change id, type, or createdAt", async () => {
     const created = await createSession(
       { type: "desktop", projectDir: "/proj" },
