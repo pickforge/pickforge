@@ -181,7 +181,9 @@ export class X11Wire {
     pending.resolve(packet);
   }
 
-  async hello(): Promise<{ min: number; max: number }> {
+  /** `width` and `height` are the default screen's current size, which a new
+   * connection sees after a RandR resize. */
+  async hello(): Promise<{ min: number; max: number; width: number; height: number }> {
     const hello = Buffer.alloc(12);
     hello[0] = 0x6c; // The wire byte order, regardless of image/bitmap order.
     hello.writeUInt16LE(11, 2);
@@ -193,12 +195,14 @@ export class X11Wire {
     const max = reply[35]!;
     if (min < 8 || max < min || reply[28] === 0) throw typingFailure();
     if (reply.readUInt16LE(26) < 7 || reply[30]! > 1 || reply[31]! > 1) throw typingFailure();
-    this.validateSetupLayout(reply);
-    return { min, max };
+    const screen = this.validateSetupLayout(reply);
+    return { min, max, width: reply.readUInt16LE(screen + 20), height: reply.readUInt16LE(screen + 22) };
   }
 
-  private validateSetupLayout(reply: Buffer): void {
-    let offset = 40 + ((reply.readUInt16LE(24) + 3) & ~3) + reply[29]! * 8;
+  /** Returns the offset of the first screen, which is the default for `:N`. */
+  private validateSetupLayout(reply: Buffer): number {
+    const first = 40 + ((reply.readUInt16LE(24) + 3) & ~3) + reply[29]! * 8;
+    let offset = first;
     for (let screen = 0; screen < reply[28]!; screen++) {
       this.check();
       if (offset + 40 > reply.length) throw typingFailure();
@@ -213,6 +217,7 @@ export class X11Wire {
       }
     }
     if (offset !== reply.length) throw typingFailure();
+    return first;
   }
 
   private active(): void {
