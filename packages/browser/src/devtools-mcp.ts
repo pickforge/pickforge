@@ -109,9 +109,9 @@ async function isRelaySessionCurrent(
   env: EnvLike,
 ): Promise<boolean> {
   const pinned = session.record.browser;
-  if (pinned === undefined) return false;
   const record = await getSession(session.record.id, env);
-  if (record?.status !== "running" || !sameBrowser(record.browser, pinned)) return false;
+  if (pinned === undefined || record?.status !== "running") return false;
+  if (!sameBrowser(record.browser, pinned)) return false;
   if (await isSessionInputClosed(record.id, env)) return false;
   return processIdentityMatches({
     pid: pinned.browserPid,
