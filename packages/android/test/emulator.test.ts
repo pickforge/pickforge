@@ -608,6 +608,36 @@ describe("AVD pre-flight checks", () => {
       fs.rmSync(lockPath, { force: true });
     }
   }, 20_000);
+  it("treats a lock whose owner only mentions an emulator in its arguments as stale", async () => {
+    const sdk = makeFakeSdk(BOOTING_ADB_SCRIPT);
+    const registryEnv = makeRegistryEnv();
+    const lockPath = avdLockPath("pickforge-avd", toolEnv);
+    // A live process that is not an emulator, with emulator paths in its arguments.
+    const holder: ChildProcess = spawn(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)", "/opt/android/emulator/qemu/linux-x86_64/qemu-system-x86_64"],
+      { stdio: "ignore" },
+    );
+    await new Promise((resolve) => holder.once("spawn", resolve));
+    try {
+      await waitForCmdline(holder.pid as number, /qemu-system/);
+      fs.writeFileSync(lockPath, `${holder.pid}\0`);
+      const handle = await startEmulator({
+        avdName: "pickforge-avd",
+        sdk,
+        port: 5584,
+        logDir: path.join(tmpRoot, "emu-argument-lock"),
+        env: toolEnv,
+        registryEnv,
+        bootTimeoutMs: 5_000,
+        bootPollIntervalMs: 20,
+      });
+      await stop(handle, sdk, registryEnv);
+    } finally {
+      fs.rmSync(lockPath, { force: true });
+      holder.kill("SIGKILL");
+    }
+  }, 20_000);
 });
 
 describe("start failure diagnostics", () => {
