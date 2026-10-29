@@ -506,16 +506,22 @@ impl Text {
             clusters.reverse();
         }
         let tracking = if run.font == 0 { TRACKING * px } else { 0.0 };
-        // Whole-pixel advances space glyphs evenly. Glyphs draw at whole
-        // pixels, and a fractional advance left an empty column now and then.
-        // Marks advance nothing, so they take no tracking either.
-        for (id, x, y, advance) in clusters.into_iter().flatten() {
-            out.push(Placed {
-                font: run.font,
-                id,
-                x: *pen + x,
-                y,
-            });
+        // Whole-pixel cluster advances space glyphs evenly. Glyphs draw at
+        // whole pixels, and a fractional pen left an empty column now and
+        // then. Inside a cluster, glyphs keep their shaped places, so a mark
+        // stays where the font puts it on its base. A cluster that advances
+        // nothing, such as a lone mark, takes no tracking either.
+        for cluster in clusters {
+            let mut advance = 0.0;
+            for (id, x, y, glyph_advance) in cluster {
+                out.push(Placed {
+                    font: run.font,
+                    id,
+                    x: *pen + advance + x,
+                    y,
+                });
+                advance += glyph_advance;
+            }
             if advance != 0.0 {
                 *pen += (advance + tracking).round();
             }
@@ -1588,6 +1594,26 @@ mod tests {
             ink[first..=last].iter().all(|&i| i),
             "an empty column inside the word"
         );
+    }
+
+    #[test]
+    fn a_mark_keeps_its_place_on_its_base() {
+        let mut text = Text::new();
+        for px in [12.0, 18.0, 26.0, 36.0] {
+            let mut shaper = text.shape.builder(text.font).size(px).build();
+            shaper.add_str("x\u{301}");
+            let mut shaped = Vec::new();
+            shaper.shape_with(|c| shaped.extend(c.glyphs.iter().map(|g| (g.x, g.advance))));
+            let [(base, advance), (mark, _)] = shaped[..] else {
+                panic!("{px}: {shaped:?}");
+            };
+            let (glyphs, _) = text.layout("x\u{301}", px);
+            let placed = glyphs[1].x - glyphs[0].x;
+            assert!(
+                (placed - (advance + mark - base)).abs() < 1e-3,
+                "{px}: {placed}"
+            );
+        }
     }
 
     /// Glyph ids of `text` in visual order, with their fonts.
