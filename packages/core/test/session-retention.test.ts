@@ -336,6 +336,22 @@ describe("session marker horizon", () => {
     expect((await createSession({ type: "desktop", projectDir: home }, env)).id).toBe(record.id);
   });
 
+  it("finishes a prune whose markers a concurrent prune removed", async () => {
+    const record = await closed();
+    setStoppedAt(record.id, past());
+    // Markers older than teardown, so prune opens them to carry its time.
+    backdate(markers(record.id), new Date(Date.now() - 2 * SESSION_MARKER_HORIZON_MS));
+    const open = DirHandle.prototype.openFile;
+    let other: Promise<string[]> | undefined;
+    vi.spyOn(DirHandle.prototype, "openFile").mockImplementation(async function (this: DirHandle, ...args: Parameters<DirHandle["openFile"]>) {
+      if (other === undefined && args[0] === takeoverIdentityName(record.id)) await (other = pruneSessionLogs(0, env));
+      return open.apply(this, args);
+    });
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(await other).toEqual([record.id]);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+  });
+
   it("removes old markers whose directory is already gone and keeps other files", async () => {
     const old = orphanMarkers("desk-0badc0de");
     const fresh = orphanMarkers("brow-0badf00d");

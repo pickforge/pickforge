@@ -121,7 +121,11 @@ async function carryStoppedAt(root: DirHandle, id: string, stoppedAt: number): P
   for (const name of markerNames(id)) {
     const stat = await root.lstatChild(name);
     if (stat?.isFile() !== true || stat.mtimeMs >= stoppedAt) continue;
-    const file = await root.openFile(name, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const file = await root.openFile(name, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW).catch((error: NodeJS.ErrnoException) => {
+      // A concurrent prune removed it after the lstat, and its run carries on.
+      if (error.code !== "ENOENT") throw error;
+    });
+    if (file === undefined) continue;
     try {
       await file.utimes(stat.atime, new Date(stoppedAt));
     } finally {
