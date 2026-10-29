@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createSession, destroySessionRecord, sessionDataDir, sessionInputClosedName, takeoverIdentityName, updateSession } from "../src/session.js";
+import { createSession, destroySessionRecord, sessionDataDir, sessionInputClosedName, takeoverIdentityName, updateSession, type SessionRecord } from "../src/session.js";
 import { DirHandle } from "../src/dir-handle.js";
 import { sessionsDir } from "../src/paths.js";
 import { parseSessionRetentionDuration, pruneSessionLogs, retainSessionLogs, SESSION_MARKER_HORIZON_MS } from "../src/session-retention.js";
@@ -520,9 +520,8 @@ describe("session marker horizon", () => {
   });
 
   // A first permit caller re-reads the record, then stalls before it creates the
-  // session directory, through teardown and prune.
-  async function stalledFirstCaller() {
-    const record = await createSession({ type: "desktop", status: "running", projectDir: home }, env);
+  // session directory, through teardown.
+  async function callerStalledThroughTeardown(record: SessionRecord) {
     const ensure = DirHandle.prototype.ensureChildDir;
     let paused!: () => void;
     let resume!: () => void;
@@ -539,14 +538,116 @@ describe("session marker horizon", () => {
     await stopSessionAgentInput(record.id, env, 0);
     await retainSessionLogs(record, env);
     await destroySessionRecord(record.id, env);
-    setStoppedAt(record.id, past());
-    backdate([markers(record.id)[1]!]);
-    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
-    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
     const dir = sessionDataDir(record.id, env);
     const permits = path.join(dir, "permits");
     return { id: record.id, dir, permits, late, resume, delivered: () => delivered };
   }
+
+  // The same caller, still stalled after prune.
+  async function stalledFirstCaller() {
+    const record = await createSession({ type: "desktop", status: "running", projectDir: home }, env);
+    const caller = await callerStalledThroughTeardown(record);
+    setStoppedAt(record.id, past());
+    backdate([markers(record.id)[1]!]);
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+    return caller;
+  }
+
+  // It resumes before prune and builds permits/ inside the retained directory.
+  async function retainedWithPermits() {
+    const record = await createSession({ type: "desktop", status: "running", projectDir: home }, env);
+    fs.mkdirSync(sessionDataDir(record.id, env), { recursive: true });
+    fs.writeFileSync(path.join(sessionDataDir(record.id, env), "xvfb.log"), "diagnostics");
+    const caller = await callerStalledThroughTeardown(record);
+    caller.resume();
+    await expect(caller.late).rejects.toThrow(AgentPermitUnavailableError);
+    expect(caller.delivered()).toBe(false);
+    expect(fs.readdirSync(caller.dir).sort()).toEqual(["permits", "stopped.json", "xvfb.log"]);
+    expect(fs.readdirSync(caller.permits)).toEqual([]);
+    expect(exist(markers(caller.id))).toEqual([true, true]);
+    setStoppedAt(caller.id, past());
+    return caller;
+  }
+
+  it("removes permits/ that a caller stalled only through teardown left in a retained directory", async () => {
+    const { id, dir, permits } = await retainedWithPermits();
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(fs.existsSync(permits)).toBe(true);
+    backdate([permits, ...markers(id)]);
+    expect(await pruneSessionLogs(0, env)).toEqual([id]);
+    expect(fs.existsSync(dir)).toBe(false);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+    await lateInput(id);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+  });
+
+  it("removes stale permit files with gone owners from permits/ in a retained directory", async () => {
+    const { id, dir, permits } = await retainedWithPermits();
+    const dead = deadPid();
+    const files = [
+      [`${crypto.randomUUID()}.json`, permitRecord(id, dead)],
+      [`.agent-permit-${crypto.randomUUID()}`, permitRecord(id, dead)],
+      [`..agent-permit-${crypto.randomUUID()}.tmp-${dead}-1`, ""],
+    ].map(([name, content]) => { const file = path.join(permits, name!); fs.writeFileSync(file, content!); return file; });
+    backdate([...files, permits]);
+    expect(await pruneSessionLogs(0, env)).toEqual([id]);
+    expect(fs.existsSync(dir)).toBe(false);
+  });
+
+  it.each([
+    ["a young permit with a gone owner", (id: string) => [`${crypto.randomUUID()}.json`, permitRecord(id, deadPid())], false],
+    ["an old permit whose owner is alive", (id: string) => [`${crypto.randomUUID()}.json`, permitRecord(id, process.pid)], true],
+    ["an old permit temp whose writer is alive", () => [`..agent-permit-${crypto.randomUUID()}.tmp-${process.pid}-1`, ""], true],
+    ["an unknown file", () => ["notes.txt", "mine"], true],
+  ])("keeps a retained directory whose permits/ holds %s", async (_, entry, old) => {
+    const { id, dir, permits } = await retainedWithPermits();
+    const [name, content] = entry(id) as [string, string];
+    const file = path.join(permits, name);
+    fs.writeFileSync(file, content);
+    backdate(old ? [file, permits] : [permits]);
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(fs.readFileSync(file, "utf8")).toBe(content);
+    expect(fs.readdirSync(dir).sort()).toEqual(["permits", "stopped.json", "xvfb.log"]);
+  });
+
+  it("keeps a retained directory that is replaced after its permits are listed", async () => {
+    const { dir, permits } = await retainedWithPermits();
+    backdate([permits]);
+    const moved = path.join(home, "moved");
+    const read = DirHandle.prototype.readEntryNames;
+    vi.spyOn(DirHandle.prototype, "readEntryNames").mockImplementation(async function (this: DirHandle) {
+      const names = await read.call(this);
+      if (this.dir === permits) { fs.renameSync(dir, moved); fs.mkdirSync(dir); }
+      return names;
+    });
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(fs.readdirSync(moved).sort()).toEqual(["permits", "stopped.json", "xvfb.log"]);
+    expect(fs.readdirSync(dir)).toEqual([]);
+  });
+
+  it("keeps a retained directory that gains an entry before rmdir", async () => {
+    const record = await closed();
+    const dir = sessionDataDir(record.id, env);
+    setStoppedAt(record.id, past());
+    const rmdir = fs.promises.rmdir;
+    vi.spyOn(fs.promises, "rmdir").mockImplementation(async (target, options) => {
+      if (String(target).endsWith(record.id)) fs.mkdirSync(path.join(dir, "permits"));
+      return rmdir(target, options);
+    });
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(fs.readdirSync(dir)).toEqual(["permits"]);
+  });
+
+  it("keeps a retained directory whose permits is a symlink", async () => {
+    const { dir, permits } = await retainedWithPermits();
+    const target = fs.mkdtempSync(path.join(home, "target-"));
+    fs.rmdirSync(permits);
+    fs.symlinkSync(target, permits);
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(fs.existsSync(target)).toBe(true);
+    expect(fs.readdirSync(dir).sort()).toEqual(["permits", "stopped.json", "xvfb.log"]);
+  });
 
   async function strandedDirectory() {
     const caller = await stalledFirstCaller();
@@ -683,5 +784,84 @@ describe("session marker horizon", () => {
     expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
     expect(exist(markers(record.id))).toEqual([true, true]);
     await lateInput(record.id);
+  });
+
+  // A first permit caller killed after it links the takeover identity, before
+  // it unlinks the staging file, and another killed inside writeFileAtomic.
+  async function identityStaging() {
+    const record = await createSession({ type: "desktop", status: "running", projectDir: home }, env);
+    const unlink = DirHandle.prototype.unlinkChild;
+    vi.spyOn(DirHandle.prototype, "unlinkChild").mockImplementation(async function (this: DirHandle, name) {
+      if (name.startsWith(".takeover-identity-")) throw new Error("killed");
+      return unlink.call(this, name);
+    });
+    await expect(withAgentPermit(record.id, env, async () => {})).rejects.toThrow();
+    vi.restoreAllMocks();
+    const root = sessionsDir(env);
+    const staging = fs.readdirSync(root).filter((name) => name.startsWith(".takeover-identity-"));
+    expect(staging).toHaveLength(1);
+    const temp = path.join(root, `..takeover-identity-${crypto.randomUUID()}.tmp-${deadPid()}-1`);
+    fs.writeFileSync(temp, "[0,0,null]");
+    return { record, files: [path.join(root, staging[0]!), temp] };
+  }
+
+  it("removes takeover identity staging files that a killed writer left", async () => {
+    const { record, files } = await identityStaging();
+    backdate(files);
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(exist(files)).toEqual([false, false]);
+    expect(fs.existsSync(markers(record.id)[0]!)).toBe(true);
+    await withAgentPermit(record.id, env, async () => {});
+  });
+
+  it("keeps takeover identity staging files inside the horizon", async () => {
+    const { files } = await identityStaging();
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(exist(files)).toEqual([true, true]);
+  });
+
+  it.each([
+    ["a temp whose writer is alive", () => `..takeover-identity-${crypto.randomUUID()}.tmp-${process.pid}-1`, "file"],
+    ["a staging name that is a symlink", () => `.takeover-identity-${crypto.randomUUID()}`, "symlink"],
+    ["a staging name that is a directory", () => `.takeover-identity-${crypto.randomUUID()}`, "directory"],
+    ["a near-miss name", () => `.takeover-identity-${crypto.randomUUID()}.bak`, "file"],
+  ])("keeps %s in the sessions root", async (_, name, kind) => {
+    const root = sessionsDir(env);
+    fs.mkdirSync(root, { recursive: true });
+    const target = path.join(home, "target");
+    fs.writeFileSync(target, "mine");
+    const file = path.join(root, name());
+    if (kind === "file") fs.writeFileSync(file, "mine");
+    else if (kind === "symlink") fs.symlinkSync(target, file);
+    else fs.mkdirSync(file);
+    backdate([file, target]);
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(fs.lstatSync(file)).toBeDefined();
+    expect(fs.readFileSync(target, "utf8")).toBe("mine");
+  });
+
+  it("fails closed for a writer that stalls past the horizon before it links the identity", async () => {
+    const record = await createSession({ type: "desktop", status: "running", projectDir: home }, env);
+    const link = DirHandle.prototype.linkChild;
+    let paused!: () => void;
+    let resume!: () => void;
+    const reached = new Promise<void>((resolve) => { paused = resolve; });
+    const gate = new Promise<void>((resolve) => { resume = resolve; });
+    vi.spyOn(DirHandle.prototype, "linkChild").mockImplementation(async function (this: DirHandle, from, to) {
+      if (from.startsWith(".takeover-identity-")) { paused(); await gate; }
+      return link.call(this, from, to);
+    });
+    let delivered = false;
+    const late = withAgentPermit(record.id, env, async () => { delivered = true; });
+    await reached;
+    const root = sessionsDir(env);
+    const staging = fs.readdirSync(root).filter((name) => name.startsWith(".takeover-identity-"));
+    backdate(staging.map((name) => path.join(root, name)));
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(fs.readdirSync(root).filter((name) => name.startsWith(".takeover-identity-"))).toEqual([]);
+    resume();
+    await expect(late).rejects.toThrow();
+    expect(delivered).toBe(false);
+    expect(fs.existsSync(markers(record.id)[0]!)).toBe(false);
   });
 });
