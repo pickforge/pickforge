@@ -8,9 +8,9 @@ vi.mock("@pickforge/lab-core", async (original) => {
   const actual = await original<typeof import("@pickforge/lab-core")>();
   return { ...actual, runCommand: vi.fn() };
 });
-import { createSession, runCommand, updateSession, type EnvLike } from "@pickforge/lab-core";
+import { CommandError, createSession, runCommand, updateSession, type EnvLike } from "@pickforge/lab-core";
 import { click, doubleClick, drag, move, pressKey, scroll } from "../src/input.js";
-import { DesktopInputTargetError, verifyOwnedDisplayTarget } from "../src/x11-target.js";
+import { DesktopInputTargetError, DesktopPointerOutOfBoundsError, verifyOwnedDisplayTarget } from "../src/x11-target.js";
 import { X11_SETUP_MS } from "../src/x11-wire.js";
 
 let root: string;
@@ -19,7 +19,7 @@ let env: EnvLike;
 let sessionId: string;
 let processStat: string;
 const identity = { display: ":190", pid: 777, startTicks: 123 };
-const desktop = { display: identity.display, xvfbPid: identity.pid, xvfbStartTimeTicks: identity.startTicks };
+const desktop = { display: identity.display, xvfbPid: identity.pid, xvfbStartTimeTicks: identity.startTicks, width: 640, height: 480 };
 const verify = () => verifyOwnedDisplayTarget(sessionId, identity.display, env);
 
 beforeEach(async () => {
@@ -237,6 +237,111 @@ it.each(Object.keys(inputs))("%s dispatches only to the verified owned Xvfb", as
     fs.writeFileSync(processStat, stat);
     files.forEach((content, index) => writeProc(index + 1, content));
   }
+});
+
+it.each([
+  [{ code: 2, signal: null, timedOut: false }, "Desktop key dispatch failed (exited with code 2)"],
+  [{ code: null, signal: "SIGTERM" as const, timedOut: true }, "Desktop key dispatch failed (killed with signal SIGTERM, timed out)"],
+])("a failed key dispatch never echoes the key: %o", async (exit, message) => {
+  const key = "pf409-private-key-marker";
+  const result = { ok: false, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, ...exit };
+  vi.mocked(runCommand).mockImplementation(async (cmd, args) => { throw new CommandError(cmd, args ?? [], result); });
+  const error = await pressKey({ sessionId, display: desktop.display, env, key }).catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(Error);
+  expect((error as Error).message).toBe(message);
+  expect(vi.mocked(runCommand).mock.calls[0]![1]).toContain(key);
+});
+
+it("any other key dispatch error never echoes the key", async () => {
+  const key = "pf409-private-key-marker";
+  vi.mocked(runCommand).mockRejectedValue(new TypeError(`spawn failed for xdotool key -- ${key}`));
+  await expect(pressKey({ sessionId, display: desktop.display, env, key })).rejects.toThrow(/^Desktop key dispatch failed$/);
+});
+
+it("refuses a key with a NUL character before any dispatch", async () => {
+  const key = "pf409-private-key-marker\0Tab";
+  const error = await pressKey({ sessionId, display: desktop.display, env, key }).catch((caught: unknown) => caught);
+  expect((error as Error).message).toBe("Invalid key: expected a non-empty string without NUL characters");
+  expect(runCommand).not.toHaveBeenCalled();
+});
+
+const at = () => ({ sessionId, display: desktop.display, env });
+const pointers: Record<string, (x: number, y: number) => Promise<void>> = {
+  click: (x, y) => click({ ...at(), x, y }),
+  doubleClick: (x, y) => doubleClick({ ...at(), x, y }),
+  move: (x, y) => move({ ...at(), x, y }),
+  scroll: (x, y) => scroll({ ...at(), deltaX: 0, deltaY: 1, x, y }),
+  "drag start": (x, y) => drag({ ...at(), fromX: x, fromY: y, toX: 1, toY: 1, durationMs: 0 }),
+  "drag end": (x, y) => drag({ ...at(), fromX: 1, fromY: 1, toX: x, toY: y, durationMs: 0 }),
+};
+const outside: Array<[number, number, string]> = [
+  [640, 0, "640"], [0, 480, "480"], [32768, 100, "32768"], [100, 32768, "32768"], [65537, 0, "65537"], [0, 65537, "65537"],
+];
+
+it.each(Object.keys(pointers))("%s accepts the last pixel and refuses points past the screen", async (name) => {
+  const input = pointers[name]!;
+  await input(639, 479);
+  expect(runCommand).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(runCommand).mock.calls[0]![1].join(" ")).toContain("639 479");
+  for (const [x, y, value] of outside) {
+    vi.mocked(runCommand).mockClear();
+    const error = await input(x, y).catch((caught: unknown) => caught);
+    expect(error, `${x},${y}`).toBeInstanceOf(DesktopPointerOutOfBoundsError);
+    expect(error).toBeInstanceOf(DesktopInputTargetError);
+    expect((error as Error).message).toMatch(new RegExp(`(x|y|X|Y) ${value} is outside the 640x480 screen \\(x 0-639, y 0-479\\); no input was sent$`));
+    expect(runCommand, `${x},${y}`).not.toHaveBeenCalled();
+  }
+});
+
+it("names the drag end that is off screen", async () => {
+  await expect(pointers["drag end"]!(640, 1)).rejects.toThrow("toX 640 is outside");
+  await expect(pointers["drag start"]!(1, 480)).rejects.toThrow("fromY 480 is outside");
+});
+
+it("bounds points by the server's current screen, not the session record", async () => {
+  server.screen = { width: 320, height: 240 };
+  await expect(pointers.click!(320, 100)).rejects.toThrow("x 320 is outside the 320x240 screen (x 0-319, y 0-239); no input was sent");
+  await updateSession(sessionId, { desktop: { ...desktop, width: 40000, height: 40000 } }, env);
+  await expect(pointers.click!(32768, 100)).rejects.toThrow("x 32768 is outside the 320x240 screen");
+  await expect(pointers.move!(100, 240)).rejects.toThrow("y 240 is outside the 320x240 screen");
+  expect(runCommand).not.toHaveBeenCalled();
+  await pointers.click!(319, 239);
+  expect(vi.mocked(runCommand).mock.calls[0]![1].join(" ")).toContain("319 239");
+});
+
+const unreadable: Record<string, () => void> = {
+  "a zero width": () => { server.screen = { width: 0, height: 480 }; },
+  "a refused setup": () => { server.fault = (opcode, reply) => opcode === -1 ? Object.assign(Buffer.from(reply), { 0: 0 }) : reply; },
+  "a closed connection": () => { server.fault = (opcode, reply, client) => opcode === -1 ? void client.destroy() : reply; },
+};
+
+it.each(Object.keys(unreadable))("refuses every pointer point when the screen size has %s", async (name) => {
+  unreadable[name]!();
+  for (const [input, run] of Object.entries(pointers)) {
+    const error = await run(0, 0).catch((caught: unknown) => caught);
+    expect(error, input).toBeInstanceOf(DesktopPointerOutOfBoundsError);
+    expect((error as Error).message).toBe("Desktop pointer input refused: the screen size could not be read; no input was sent");
+  }
+  expect(runCommand).not.toHaveBeenCalled();
+  await scroll({ sessionId, display: desktop.display, env, deltaX: 0, deltaY: 1 });
+  await pressKey({ sessionId, display: desktop.display, env, key: "Return" });
+  expect(runCommand).toHaveBeenCalledTimes(2);
+});
+
+it("reads the screen size within the ownership budget, and only for pointer points", async () => {
+  await verify();
+  await pressKey({ sessionId, display: desktop.display, env, key: "Return" });
+  expect(server.connections).toBe(0);
+  await pointers.click!(1, 1);
+  expect(server.connections).toBe(1);
+  let now = performance.now();
+  const start = now;
+  vi.spyOn(performance, "now").mockImplementation(() => now);
+  server.fault = (opcode, reply) => {
+    if (opcode === -1) now = start + X11_SETUP_MS + 1;
+    return reply;
+  };
+  await expect(pointers.click!(1, 1)).rejects.toThrow("the screen size could not be read");
 });
 
 it("resolves undefined when a procfs read throws", async () => {

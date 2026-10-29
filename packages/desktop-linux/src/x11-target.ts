@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { getSession, processIdentityMatches, type EnvLike } from "@pickforge/lab-core";
-import { remaining, typingFailure, X11_SETUP_MS } from "./x11-wire.js";
+import { remaining, typingFailure, X11_SETUP_MS, X11Wire } from "./x11-wire.js";
 
 function boundedRead(file: string, limit: number, deadline: number): string {
   remaining(deadline);
@@ -123,12 +123,27 @@ export interface OwnedDisplayIdentity {
   startTicks: number;
 }
 
+/** The owned Xvfb's current default screen size, read from the server. */
+export interface OwnedDisplayScreen {
+  width: number;
+  height: number;
+}
+
 /** Desktop input refused before dispatch, because the display is not the session's owned Xvfb. */
 export class DesktopInputTargetError extends Error {
   override name = "DesktopInputTargetError";
-  constructor() {
-    super("Desktop input refused: the display is not the session's verified Xvfb; no input was sent");
+  constructor(message = "Desktop input refused: the display is not the session's verified Xvfb; no input was sent") {
+    super(message);
   }
+}
+
+/**
+ * Pointer input refused before dispatch, because a point is outside the
+ * session's screen (pickforge/pickforge#424). X would clamp it to the edge, or
+ * wrap it past 32767, and act on a different point than the one requested.
+ */
+export class DesktopPointerOutOfBoundsError extends DesktopInputTargetError {
+  override name = "DesktopPointerOutOfBoundsError";
 }
 
 /**
@@ -142,10 +157,43 @@ export async function verifyOwnedDisplayTarget(
   display: string,
   env: EnvLike,
 ): Promise<OwnedDisplayIdentity | undefined> {
+  return (await verifyOwnedPointerTarget(sessionId, display, env, false))?.identity;
+}
+
+/**
+ * The owned display check above. With `readScreen`, it then reads the current
+ * screen size over the verified socket, within the same deadline. The session
+ * record's size is only the size at creation; RandR can change the screen
+ * after that, and the record is not proof of it. `screen` is absent when the
+ * size cannot be read.
+ */
+export async function verifyOwnedPointerTarget(
+  sessionId: string,
+  display: string,
+  env: EnvLike,
+  readScreen = true,
+): Promise<{ identity: OwnedDisplayIdentity; screen?: OwnedDisplayScreen } | undefined> {
+  const deadline = performance.now() + X11_SETUP_MS;
+  let target: Awaited<ReturnType<typeof validateOwnedTarget>>;
   try {
-    const target = await validateOwnedTarget(sessionId, display, env, performance.now() + X11_SETUP_MS);
-    return target.identity;
+    target = await validateOwnedTarget(sessionId, display, env, deadline);
   } catch {
     return undefined;
+  }
+  const screen = readScreen ? await currentScreen(target.path, target.alive, deadline) : undefined;
+  return screen === undefined ? { identity: target.identity } : { identity: target.identity, screen };
+}
+
+async function currentScreen(socketPath: string, alive: () => boolean, deadline: number): Promise<OwnedDisplayScreen | undefined> {
+  let wire: X11Wire | undefined;
+  try {
+    wire = new X11Wire(socketPath, deadline, alive, deadline);
+    const { width, height } = await wire.hello();
+    wire.check();
+    return width > 0 && height > 0 ? { width, height } : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    wire?.close();
   }
 }

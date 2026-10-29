@@ -1,16 +1,18 @@
 import path from "node:path";
 import {
   AgentPermitUnavailableError, HumanControlActiveError, checkHumanLeaseBusy, appendAction, beginEvidenceRun, isEvidenceEnabled, loadConfig, ObservationTimeoutError,
-  sanitizeActionTarget, sanitizeErrorText, setRunCaptureGeometry, withAgentPermit,
+  sanitizeActionTarget, sanitizeErrorText, sanitizeTypedValue, setRunCaptureGeometry, withAgentPermit,
   type EvidenceAction, type RunHandle, type SessionType,
 } from "@pickforge/lab-core";
 import {
   click,
   DEFAULT_DESKTOP_WAIT_TIMEOUT_MS,
   DesktopInputTargetError,
+  DesktopTextPreparationError,
   desktopWait,
   desktopWindows,
   focusWindow,
+  focusedWindowGeometry,
   selectDesktopWindow,
   MAX_FOCUS_TIMEOUT_MS,
   type WindowInfo,
@@ -154,16 +156,42 @@ function reportEvidenceFailure(tool: string, error: unknown): void {
   process.stderr.write(`[pickforge-lab evidence] ${tool}: ${detail}\n`);
 }
 
+/** Evidence-only focused window rect; any failure leaves it out. */
+async function focusEvidence(display: string): Promise<Awaited<ReturnType<typeof focusedWindowGeometry>>> {
+  try {
+    return await focusedWindowGeometry(display, process.env);
+  } catch {
+    return undefined;
+  }
+}
+
+interface InputEvidence {
+  target?: Record<string, number>;
+  /** Kept only as its length and input type. */
+  typedValue?: { value: string; inputType?: string };
+  /** Marks the target as root pixels when the owned display is verified around the input. */
+  owned?: boolean;
+  /** Records the focused window rect taken before the input. */
+  focus?: boolean;
+}
+
+/** Thrown before anything was sent: the input never reached the display. */
+function noInputSent(error: unknown): boolean {
+  return error instanceof HumanControlActiveError || error instanceof AgentPermitUnavailableError ||
+    error instanceof DesktopInputTargetError || error instanceof DesktopTextPreparationError;
+}
+
 /**
  * Evidence is best effort: its failures never block the input or change the command result.
- * Only the config read and the bounded ownership check run before the input; the run claim waits.
+ * Only the config read and the bounded evidence checks run before the input; the run claim waits.
  */
-async function pointerWithEvidence(
-  opts: DesktopCommandOptions, tool: "desktop_click" | "desktop_drag",
-  sessionId: string, display: string, target: Record<string, number>, input: () => Promise<void>,
+async function inputWithEvidence(
+  opts: DesktopCommandOptions, tool: string, sessionId: string, display: string,
+  evidence: InputEvidence, input: () => Promise<void>,
 ): Promise<void> {
-  const enabled = await pointerEvidenceEnabled(opts, tool);
-  const before = enabled ? await ownedDisplay(sessionId, display) : undefined;
+  const enabled = await inputEvidenceEnabled(opts, tool);
+  const before = enabled && evidence.owned === true ? await ownedDisplay(sessionId, display) : undefined;
+  const focus = enabled && evidence.focus === true ? await focusEvidence(display) : undefined;
   const startedAt = new Date();
   const action: EvidenceAction = {
     actionId: crypto.randomUUID(), source: "cli", tool, sessionId,
@@ -173,20 +201,20 @@ async function pointerWithEvidence(
     await input();
     action.inputState = "completed";
   } catch (error) {
-    if (error instanceof HumanControlActiveError || error instanceof AgentPermitUnavailableError ||
-        error instanceof DesktopInputTargetError) {
-      action.inputState = "not-attempted";
-    }
+    if (noInputSent(error)) action.inputState = "not-attempted";
     action.error = sanitizeErrorText(error instanceof Error ? error.message : String(error));
     action.status = /timed out/i.test(action.error) ? "timeout" : "error";
     throw error;
   } finally {
     action.durationMs = Date.now() - startedAt.getTime();
-    if (enabled) await recordPointerAction(opts, action, sessionId, display, before, target);
+    if (enabled) {
+      const target = { ...evidence.target, ...(focus === undefined ? {} : { focus }) };
+      await recordInputAction(opts, action, { sessionId, display }, before, target, evidence.typedValue);
+    }
   }
 }
 
-async function pointerEvidenceEnabled(opts: DesktopCommandOptions, tool: string): Promise<boolean> {
+async function inputEvidenceEnabled(opts: DesktopCommandOptions, tool: string): Promise<boolean> {
   try {
     return isEvidenceEnabled(await loadConfig(resolveProjectDir(opts)));
   } catch (error) {
@@ -196,15 +224,20 @@ async function pointerEvidenceEnabled(opts: DesktopCommandOptions, tool: string)
 }
 
 /** Marks the target as root pixels only when the same owned display survived the input. */
-async function recordPointerAction(
-  opts: DesktopCommandOptions, action: EvidenceAction, sessionId: string, display: string,
-  before: Awaited<ReturnType<typeof ownedDisplay>>, target: Record<string, number>,
+async function recordInputAction(
+  opts: DesktopCommandOptions, action: EvidenceAction, { sessionId, display }: { sessionId: string; display: string },
+  before: Awaited<ReturnType<typeof ownedDisplay>>, target: Record<string, unknown>,
+  typedValue: InputEvidence["typedValue"],
 ): Promise<void> {
   try {
     const after = before === undefined ? undefined : await ownedDisplay(sessionId, display);
     const verified = after !== undefined && after.display === before?.display &&
       after.pid === before.pid && after.startTicks === before.startTicks;
-    action.target = { ...sanitizeActionTarget(verified ? { ...target, coordinateSpace: "xvfb-root" } : target) };
+    const sanitized = {
+      ...sanitizeActionTarget(verified ? { ...target, coordinateSpace: "xvfb-root" } : target),
+      ...(typedValue === undefined ? {} : sanitizeTypedValue(typedValue.value, typedValue.inputType)),
+    };
+    if (Object.keys(sanitized).length > 0) action.target = sanitized;
     const { run } = await beginEvidenceRun(resolveProjectDir(opts), sessionId);
     await appendAction(run, action);
   } catch (error) {
@@ -541,7 +574,7 @@ export async function runDesktopClick(
     const parsedY = parseIntArg(y, "y");
     const button = parseButtonOption(opts.button);
     const { id, display } = await resolveDesktop(opts);
-    await pointerWithEvidence(opts, "desktop_click", id, display, { x: parsedX, y: parsedY }, () =>
+    await inputWithEvidence(opts, "desktop_click", id, display, { target: { x: parsedX, y: parsedY }, owned: true }, () =>
       click({ display, sessionId: id, x: parsedX, y: parsedY, button }));
     return {
       data: { sessionId: id, display, x: parsedX, y: parsedY, button: button ?? 1 },
@@ -559,7 +592,8 @@ export async function runDesktopMove(
     const parsedX = parseIntArg(x, "x");
     const parsedY = parseIntArg(y, "y");
     const { id, display } = await resolveDesktop(opts);
-    await move({ display, sessionId: id, x: parsedX, y: parsedY });
+    await inputWithEvidence(opts, "desktop_move", id, display, { target: { x: parsedX, y: parsedY }, owned: true }, () =>
+      move({ display, sessionId: id, x: parsedX, y: parsedY }));
     return {
       data: { sessionId: id, display, x: parsedX, y: parsedY },
       lines: [`moved pointer to (${parsedX}, ${parsedY}) on ${display}`],
@@ -597,7 +631,10 @@ export async function runDesktopScroll(
       y = Number(match[2]);
     }
     const { id, display } = await resolveDesktop(opts);
-    await scroll({ display, sessionId: id, deltaX: parsedDeltaX, deltaY: parsedDeltaY, x, y });
+    const point = x !== undefined && y !== undefined ? { x, y } : undefined;
+    await inputWithEvidence(opts, "desktop_scroll", id, display, {
+      target: { ...point, wheelX: parsedDeltaX, wheelY: parsedDeltaY }, owned: point !== undefined,
+    }, () => scroll({ display, sessionId: id, deltaX: parsedDeltaX, deltaY: parsedDeltaY, x, y }));
     const data: Record<string, unknown> = {
       sessionId: id,
       display,
@@ -642,7 +679,7 @@ export async function runDesktopDrag(
     );
     const { id, display } = await resolveDesktop(opts);
     const target = { fromX: parsedFromX, fromY: parsedFromY, x: parsedToX, y: parsedToY };
-    await pointerWithEvidence(opts, "desktop_drag", id, display, target, () => drag({
+    await inputWithEvidence(opts, "desktop_drag", id, display, { target, owned: true }, () => drag({
       display,
       sessionId: id,
       fromX: parsedFromX,
@@ -690,14 +727,14 @@ export async function runDesktopDoubleClick(
       MAX_DOUBLE_CLICK_INTERVAL_MS,
     );
     const { id, display } = await resolveDesktop(opts);
-    await doubleClick({
+    await inputWithEvidence(opts, "desktop_double_click", id, display, { target: { x: parsedX, y: parsedY }, owned: true }, () => doubleClick({
       display,
       sessionId: id,
       x: parsedX,
       y: parsedY,
       button,
       intervalMs,
-    });
+    }));
     return {
       data: {
         sessionId: id,
@@ -717,7 +754,9 @@ export async function runDesktopType(
 ): Promise<number> {
   return runReported(opts, async () => {
     const { id, display } = await resolveDesktop(opts);
-    await typeText({ display, sessionId: id, text });
+    await inputWithEvidence(opts, "desktop_type", id, display, {
+      typedValue: { value: text, inputType: "text" }, owned: true, focus: true,
+    }, () => typeText({ display, sessionId: id, text }));
     return {
       data: { sessionId: id, display, length: text.length },
       lines: [`typed ${text.length} character(s) on ${display}`],
@@ -731,7 +770,8 @@ export async function runDesktopKey(
 ): Promise<number> {
   return runReported(opts, async () => {
     const { id, display } = await resolveDesktop(opts);
-    await pressKey({ display, sessionId: id, key });
+    await inputWithEvidence(opts, "desktop_key", id, display, { typedValue: { value: key } }, () =>
+      pressKey({ display, sessionId: id, key }));
     return {
       data: { sessionId: id, display, key },
       lines: [`pressed ${key} on ${display}`],

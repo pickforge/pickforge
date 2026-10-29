@@ -6,4 +6,4 @@ A viewer host starts the binary and talks to it over stdio. `PROTOCOL.md` is the
 
 The window uses winit and softbuffer with no GPU. The capture and scaling modules have no window code, so tests run them against a bare Xvfb. On Linux, `cargo test -p pickforge-viewer` starts Xvfb servers on random free displays from 10000 to 50000. The window tests open the viewer on a second Xvfb, never on the host desktop. The tests skip when Xvfb is missing, unless `PICKFORGE_REQUIRE_XVFB=1` is set. Set `PICKFORGE_VIEWER_SCREENSHOTS=<dir>` to save PNG captures of the viewer window.
 
-The labels use Geist Medium by The Geist Project Authors, embedded under the SIL Open Font License 1.1 in `assets/OFL.txt`. Colors come from the Pickforge design tokens.
+The labels use Geist Medium by The Geist Project Authors, embedded under the SIL Open Font License 1.1 in `assets/OFL.txt`. Characters Geist lacks, such as CJK or Arabic, use the first installed host font that has them; the viewer looks for host fonts only when such a character appears. Colors come from the Pickforge design tokens.
