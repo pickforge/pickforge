@@ -474,8 +474,10 @@ interface StartContext {
 
 function isEmulatorProcess(pid: number): boolean {
   try {
-    const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, "latin1");
-    return /emulator|qemu/i.test(cmdline);
+    // Only the executable name counts. A process whose arguments mention an
+    // emulator, such as an editor with emulator.ts open, is not one.
+    const argv0 = fs.readFileSync(`/proc/${pid}/cmdline`, "latin1").split("\0")[0] ?? "";
+    return /emulator|qemu/i.test(path.basename(argv0));
   } catch {
     // cannot inspect the owner (another user, or no procfs): assume it is real
     return true;
