@@ -50,6 +50,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       PICKFORGE_REQUIRE_XVFB: ${{ matrix.os == 'ubuntu-latest' && '1' || '0' }}
+      PICKFORGE_REQUIRE_WESTON: ${{ matrix.os == 'ubuntu-latest' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -61,7 +62,7 @@ jobs:
 
       - name: Install Rust display test dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxkbcommon-x11-0 xvfb
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxkbcommon-x11-0 weston wl-clipboard xvfb
 
       - run: cargo fmt --check
 
