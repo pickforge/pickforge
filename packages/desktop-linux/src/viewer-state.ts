@@ -489,6 +489,22 @@ export async function lstatViewerSocket(file: string): Promise<fs.BigIntStats | 
   }
 }
 
+/**
+ * Open the private viewer directory that holds a recorded socket. Clients
+ * check and connect through its descriptor, so the socket path stays short
+ * whatever the length of the session home (#413).
+ */
+export async function openViewerSocketDir(socket: string): Promise<DirHandle> {
+  const directoryHandle = await DirHandle.open(path.dirname(socket));
+  try {
+    assertPrivate(directoryHandle.stat, true);
+    return directoryHandle;
+  } catch (error) {
+    await directoryHandle.close();
+    throw error;
+  }
+}
+
 /** True when this user's socket has the identity that readiness recorded. */
 export function sameViewerSocket(stats: fs.BigIntStats, host: Record<string, unknown>): boolean {
   if (!stats.isSocket() || Number(stats.uid) !== process.getuid?.()) return false;
