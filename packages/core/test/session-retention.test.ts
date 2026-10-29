@@ -336,26 +336,43 @@ describe("session marker horizon", () => {
     expect((await createSession({ type: "desktop", projectDir: home }, env)).id).toBe(record.id);
   });
 
-  /** Runs a whole second prune when the first one opens `name`, after its lstat. */
-  function pruneConcurrentlyAt(name: string) {
-    const open = DirHandle.prototype.openFile;
+  type PruneStep = "openFile" | "openChild" | "readEntryNames";
+
+  /**
+   * Runs a whole second prune when the first one, after its lstat, opens the
+   * entry `name` or lists the directory `name`. A removed directory then fails
+   * to list, as under Bun; Node lists it empty.
+   */
+  function pruneConcurrentlyAt(name: string, step: PruneStep = "openFile") {
     let other: Promise<string[]> | undefined;
-    vi.spyOn(DirHandle.prototype, "openFile").mockImplementation(async function (this: DirHandle, ...args: Parameters<DirHandle["openFile"]>) {
-      if (other === undefined && args[0] === name) await (other = pruneSessionLogs(0, env));
-      return open.apply(this, args);
+    const runAt = (target: unknown) => other === undefined && target === name ? (other = pruneSessionLogs(0, env)) : undefined;
+    const list = DirHandle.prototype.readEntryNames;
+    vi.spyOn(DirHandle.prototype, "readEntryNames").mockImplementation(async function (this: DirHandle) {
+      if (step === "readEntryNames") await runAt(path.basename(this.dir));
+      if (!fs.existsSync(this.dir)) throw Object.assign(new Error(`ENOENT: ${this.dir}`), { code: "ENOENT" });
+      return list.apply(this);
     });
+    if (step === "readEntryNames") return () => other;
+    const open = DirHandle.prototype[step] as (this: DirHandle, ...args: unknown[]) => Promise<unknown>;
+    vi.spyOn(DirHandle.prototype, step).mockImplementation(async function (this: DirHandle, ...args: unknown[]) {
+      await runAt(args[0]);
+      return open.apply(this, args);
+    } as never);
     return () => other;
   }
 
   it.each([
-    ["the teardown time", () => "stopped.json"],
-    ["a marker", (id: string) => takeoverIdentityName(id)],
-  ])("finishes a prune when a concurrent prune removed %s first", async (_, name) => {
+    ["the teardown time read", () => "stopped.json", "openFile"],
+    ["the marker carry", (id: string) => takeoverIdentityName(id), "openFile"],
+    ["the directory open", (id: string) => id, "openChild"],
+    ["the directory listing", (id: string) => id, "readEntryNames"],
+  ] as const)("finishes a prune when another prune runs first at %s", async (_, name, step) => {
     const record = await closed();
     setStoppedAt(record.id, past());
-    // Markers older than teardown, so prune opens them to carry its time.
-    backdate(markers(record.id), new Date(Date.now() - 2 * SESSION_MARKER_HORIZON_MS));
-    const other = pruneConcurrentlyAt(name(record.id));
+    // Markers older than teardown, so prune opens them to carry its time. An
+    // old directory sends a prune that misses stopped.json to its listing.
+    backdate([...markers(record.id), sessionDataDir(record.id, env)], new Date(Date.now() - 2 * SESSION_MARKER_HORIZON_MS));
+    const other = pruneConcurrentlyAt(name(record.id), step);
     expect(await pruneSessionLogs(0, env)).toEqual([]);
     expect(await other()).toEqual([record.id]);
     expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
@@ -607,6 +624,15 @@ describe("session marker horizon", () => {
     expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
   });
 
+  it("finishes a retained prune when another prune runs first at the permits/ open", async () => {
+    const { id, permits } = await retainedWithPermits();
+    backdate([permits, ...markers(id)]);
+    const other = pruneConcurrentlyAt("permits", "openChild");
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(await other()).toEqual([id]);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+  });
+
   it("removes stale permit files with gone owners from permits/ in a retained directory", async () => {
     const { id, dir, permits } = await retainedWithPermits();
     const dead = deadPid();
@@ -742,12 +768,16 @@ describe("session marker horizon", () => {
     expect(exist(markers(id))).toEqual([true, false]);
   });
 
-  it("finishes a prune when a concurrent prune removed a stranded permit first", async () => {
+  it.each([
+    ["a permit read", "openFile"],
+    ["the permits/ open", "openChild"],
+    ["the permits/ listing", "readEntryNames"],
+  ] as const)("finishes a stranded prune when another prune runs first at %s", async (_, step) => {
     const { id, dir, permits } = await strandedDirectory();
     const name = `${crypto.randomUUID()}.json`;
     fs.writeFileSync(path.join(permits, name), permitRecord(id, deadPid()));
     backdate([path.join(permits, name), permits, dir, markers(id)[0]!]);
-    const other = pruneConcurrentlyAt(name);
+    const other = pruneConcurrentlyAt(step === "openFile" ? name : "permits", step);
     expect(await pruneSessionLogs(0, env)).toEqual([]);
     expect(await other()).toEqual([id]);
     expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
