@@ -25,7 +25,11 @@ fn rounds(base: Option<&Path>, label: &str, lines: &mut Vec<String>) -> usize {
             std::thread::sleep(Duration::from_millis(400));
             let woke = start.elapsed();
             let result = std::fs::remove_file(&staging);
-            (woke, start.elapsed(), result.err().map(|error| format!("{error:?}")))
+            (
+                woke,
+                start.elapsed(),
+                result.err().map(|error| format!("{error:?}")),
+            )
         });
         let read = state::read_layout(&state_dir);
         let read_at = start.elapsed();
@@ -50,6 +54,11 @@ fn diag_468_publication_window_timing() {
     let default = rounds(None, "default-temp", &mut lines);
     let runner = std::env::var_os("RUNNER_TEMP").map(std::path::PathBuf::from);
     lines.push(format!("runner_temp={runner:?}"));
-    let other = runner.as_deref().map(|dir| rounds(Some(dir), "runner-temp", &mut lines));
-    panic!("diagnostic for #468: refused default={default} runner={other:?}\n{}", lines.join("\n"));
+    let other = runner
+        .as_deref()
+        .map(|dir| rounds(Some(dir), "runner-temp", &mut lines));
+    panic!(
+        "diagnostic for #468: refused default={default} runner={other:?}\n{}",
+        lines.join("\n")
+    );
 }
