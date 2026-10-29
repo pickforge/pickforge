@@ -255,7 +255,16 @@ fn attention_message(value: Option<&Value>) -> Result<String, ParseError> {
     if message.chars().count() > MAX_ATTENTION_CHARS || message.chars().any(char::is_control) {
         return Err(ParseError::BadField("message"));
     }
-    Ok(message.to_owned())
+    // An agent's message must not reorder what the human reads.
+    Ok(message.chars().filter(|&c| !is_bidi_control(c)).collect())
+}
+
+/// Characters that set the direction of the text around them.
+fn is_bidi_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
 }
 
 fn lease_id(value: Option<&Value>) -> Option<String> {
@@ -581,6 +590,15 @@ mod tests {
             ),
             Ok(Command::Attention {
                 message: "Entre com a sua senha, é rápido".into()
+            })
+        );
+        assert_eq!(
+            parse_command(
+                r#"{"cmd":"attention","message":"\u202eAbc\u2066 \u200fd\u061ce\u202c\u2069"}"#
+                    .as_bytes()
+            ),
+            Ok(Command::Attention {
+                message: "Abc de".into()
             })
         );
         let longest = format!(r#"{{"cmd":"attention","message":"{}"}}"#, "é".repeat(500));

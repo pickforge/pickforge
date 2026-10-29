@@ -295,25 +295,59 @@ fn attaches(c: char) -> bool {
             | Category::EnclosingMark
             | Category::NonspacingMark
             | Category::Format
+    ) || ignorable(c)
+}
+
+/// Unicode default ignorable code points, such as variation selectors and
+/// soft hyphens. Shaping drops them, so no font needs to draw them.
+fn ignorable(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00ad}'
+            | '\u{034f}'
+            | '\u{061c}'
+            | '\u{115f}'..='\u{1160}'
+            | '\u{17b4}'..='\u{17b5}'
+            | '\u{180b}'..='\u{180f}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{3164}'
+            | '\u{fe00}'..='\u{fe0f}'
+            | '\u{feff}'
+            | '\u{ffa0}'
+            | '\u{fff0}'..='\u{fff8}'
+            | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0000}'..='\u{e0fff}'
     )
 }
 
-/// Splits `text` into runs by font and script. Marks and format
-/// characters stay in the run before them, and characters common to
-/// scripts, such as spaces and digits, take the script of their run or
-/// the run before it.
-fn split_runs(text: &str, mut font_of: impl FnMut(char) -> usize) -> Vec<Run> {
+/// Splits `text` into runs by font and script. `font_of` picks the font of
+/// each cluster, a character and the marks and format characters after
+/// it, without ignorable code points. Characters common to scripts, such
+/// as spaces and digits, take the script of their run or the run before
+/// it.
+fn split_runs(text: &str, mut font_of: impl FnMut(&[char]) -> usize) -> Vec<Run> {
     let mut runs: Vec<(Range<usize>, usize, Option<Script>)> = Vec::new();
-    for (i, c) in text.char_indices() {
-        let end = i + c.len_utf8();
-        let attach = attaches(c);
-        let script = match c.script() {
-            _ if attach => None,
+    let mut chars = text.char_indices().peekable();
+    while let Some((start, base)) = chars.next() {
+        let mut cluster = vec![base];
+        let mut end = start + base.len_utf8();
+        while let Some((i, c)) = chars.next_if(|&(_, c)| attaches(c)) {
+            cluster.push(c);
+            end = i + c.len_utf8();
+        }
+        let script = match base.script() {
+            _ if attaches(base) => None,
             Script::Common | Script::Inherited | Script::Unknown => None,
             script => Some(script),
         };
-        if let Some((range, font, run_script)) = runs.last_mut() {
-            let font_ok = attach || *font == font_of(c);
+        cluster.retain(|&c| !ignorable(c));
+        // A cluster of ignorable code points only draws nothing.
+        let font = (!cluster.is_empty()).then(|| font_of(&cluster));
+        if let Some((range, run_font, run_script)) = runs.last_mut() {
+            let font_ok = font.is_none_or(|font| font == *run_font);
             let script_ok = script.is_none() || run_script.is_none() || *run_script == script;
             if font_ok && script_ok {
                 range.end = end;
@@ -321,7 +355,7 @@ fn split_runs(text: &str, mut font_of: impl FnMut(char) -> usize) -> Vec<Run> {
                 continue;
             }
         }
-        runs.push((i..end, font_of(c), script));
+        runs.push((start..end, font.unwrap_or(0), script));
     }
     // Runs with no script of their own take the one before them, or the
     // first one when they lead.
@@ -357,13 +391,21 @@ impl Text {
         }
     }
 
-    /// The font that draws `c`: the embedded font, else the first host
-    /// font that has it, else the embedded font.
-    fn font_of(&mut self, c: char) -> Option<usize> {
-        if self.font.charmap().map(c) != 0 {
+    /// The font that draws all of `cluster`: the embedded font, else the
+    /// first host font that has it all, else the font that draws its
+    /// first character.
+    fn font_of(&mut self, cluster: &[char]) -> Option<usize> {
+        let charmap = self.font.charmap();
+        if cluster.iter().all(|&c| charmap.map(c) != 0) {
             return Some(0);
         }
-        self.fallback.find(c).map(|i| i + 1)
+        if let Some(i) = self.fallback.find_cluster(cluster) {
+            return Some(i + 1);
+        }
+        match *cluster.first()? {
+            base if charmap.map(base) != 0 => Some(0),
+            base => self.fallback.find(base).map(|i| i + 1),
+        }
     }
 
     fn glyph(&mut self, font: usize, id: GlyphId, px: f32) -> &Glyph {
@@ -384,7 +426,7 @@ impl Text {
         // left-to-right run.
         let simple = text
             .chars()
-            .all(|c| (c as u32) < 0x0590 && self.font.charmap().map(c) != 0);
+            .all(|c| (c as u32) < 0x0590 && (ignorable(c) || self.font.charmap().map(c) != 0));
         if simple {
             let run = Run {
                 range: 0..text.len(),
@@ -398,13 +440,21 @@ impl Text {
         let (levels, visual) = bidi.visual_runs(0..text.len());
         for range in visual {
             let rtl = levels[range.start].is_rtl();
-            let part = &text[range.clone()];
-            let mut runs = split_runs(part, |c| self.font_of(c).unwrap_or(0));
+            // Right-to-left text draws paired punctuation mirrored.
+            let part: String = if rtl {
+                text[range]
+                    .chars()
+                    .map(|c| c.mirror().unwrap_or(c))
+                    .collect()
+            } else {
+                text[range].to_owned()
+            };
+            let mut runs = split_runs(&part, |cluster| self.font_of(cluster).unwrap_or(0));
             if rtl {
                 runs.reverse();
             }
             for run in runs {
-                self.shape_run(part, &run, rtl, px, &mut pen, &mut glyphs);
+                self.shape_run(&part, &run, rtl, px, &mut pen, &mut glyphs);
             }
         }
         (glyphs, pen)
@@ -463,12 +513,15 @@ impl Text {
     /// draw replaced by one ellipsis.
     pub fn displayable(&mut self, text: &str) -> String {
         let charmap = self.font.charmap();
-        let others: Vec<char> = text.chars().filter(|&c| charmap.map(c) == 0).collect();
+        let others: Vec<char> = text
+            .chars()
+            .filter(|&c| charmap.map(c) == 0 && !ignorable(c))
+            .collect();
         self.fallback.find_all(&others);
         let mut out = String::with_capacity(text.len());
         let mut missing = false;
         for c in text.chars() {
-            if c.category() == Category::Format || self.font_of(c).is_some() {
+            if c.category() == Category::Format || ignorable(c) || self.font_of(&[c]).is_some() {
                 out.push(c);
                 missing = false;
             } else if !missing {
@@ -1309,8 +1362,8 @@ mod tests {
             0x4e00..=0x9fff => 2,
             _ => 0,
         };
-        fn runs(text: &str, font_of: impl FnMut(char) -> usize) -> Vec<(&str, usize, Script)> {
-            split_runs(text, font_of)
+        fn runs(text: &str, font_of: impl Fn(char) -> usize) -> Vec<(&str, usize, Script)> {
+            split_runs(text, |cluster| font_of(cluster[0]))
                 .into_iter()
                 .map(|r| (&text[r.range], r.font, r.script))
                 .collect()
@@ -1368,7 +1421,7 @@ mod tests {
         let mut text = Text::new();
         let (alef, bet) = ('\u{5d0}', '\u{5d1}');
         if host_has(alef) {
-            let index = text.font_of(alef).unwrap();
+            let index = text.font_of(&[alef]).unwrap();
             let font = text.font(index);
             let ids = glyph_ids(&mut text, &format!("{alef}{bet}"));
             let nominal: Vec<_> = [bet, alef].map(|c| font.charmap().map(c)).into();
@@ -1410,6 +1463,67 @@ mod tests {
             let ink = buf.iter().filter(|&&p| p & 0xff > 128).count();
             assert!(ink > 30, "{sample}: {ink} ink pixels");
         }
+    }
+
+    #[test]
+    fn right_to_left_text_mirrors_brackets() {
+        let mut text = Text::new();
+        let geist = load_font().unwrap().charmap();
+        for (open, word, close) in [
+            ('(', "\u{645}\u{631}\u{62d}\u{628}\u{627}", ')'),
+            ('[', "\u{5d0}\u{5d1}\u{5d2}", ']'),
+        ] {
+            if !word.chars().all(host_has) {
+                continue;
+            }
+            let ids = glyph_ids(&mut text, &format!("{open}{word}{close}"));
+            assert_eq!(ids.first(), Some(&(0, geist.map(open))), "{word}");
+            assert_eq!(ids.last(), Some(&(0, geist.map(close))), "{word}");
+        }
+    }
+
+    #[test]
+    fn marks_take_a_font_that_draws_them() {
+        let mut text = Text::new();
+        let geist = load_font().unwrap();
+        // A combining arrow above, which the embedded font lacks.
+        assert!(!crate::fallback::covers(geist, '\u{20d7}'));
+        if host_has('\u{20d7}') {
+            let ids = glyph_ids(&mut text, "a\u{20d7}");
+            assert!(!ids.contains(&(0, 0)), "{ids:?}");
+            assert!(ids.iter().all(|&(font, _)| font > 0), "{ids:?}");
+        }
+        // Marks the embedded font has stay with it.
+        assert!(glyph_ids(&mut text, "e\u{301}x")
+            .iter()
+            .all(|&(font, id)| font == 0 && id != 0));
+    }
+
+    #[test]
+    fn ignorable_code_points_are_not_missing_text() {
+        let mut text = Text::new();
+        let geist = load_font().unwrap().charmap();
+        let quiet = "Pay\u{ad}ment\u{200b} now\u{fe0f}\u{2060}";
+        assert!(geist.map('\u{fe0f}') == 0);
+        assert_eq!(text.displayable(quiet), quiet);
+        assert!(text.width(quiet, 12.0) > 0.0);
+        assert!(!text.scanned(), "ignorable code points scan no host fonts");
+        let warning = text.displayable("\u{26a0}\u{fe0f} Approve payment");
+        assert!(warning.ends_with("\u{fe0f} Approve payment"), "{warning}");
+    }
+
+    #[test]
+    fn attention_bidi_controls_keep_logical_order() {
+        use crate::protocol::{parse_command, Command};
+        let line = r#"{"cmd":"attention","message":"Pay \u202eto: Alice"}"#;
+        let Ok(Command::Attention { message }) = parse_command(line.as_bytes()) else {
+            panic!("attention parses");
+        };
+        let mut text = Text::new();
+        assert_eq!(
+            glyph_ids(&mut text, &message),
+            glyph_ids(&mut text, "Pay to: Alice")
+        );
     }
 
     #[test]
