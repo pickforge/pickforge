@@ -90,6 +90,10 @@ export function createTakeoverBusyIntercept(
 export const SESSION_ENDED_ERROR_CODE = -32051;
 const SESSION_ENDED_MESSAGE =
   "Pickforge: the browser session has ended; create a new session and restart the DevTools relay";
+/** JSON-RPC error code for a call refused because the session check failed. */
+export const SESSION_CHECK_FAILED_ERROR_CODE = -32052;
+const SESSION_CHECK_FAILED_MESSAGE =
+  "Pickforge: could not check the browser session; try the call again";
 
 async function isRelaySessionCurrent(
   session: LiveBrowserSession,
@@ -118,7 +122,8 @@ async function isRelaySessionCurrent(
  * `tools/call` is answered with a stable error and never reaches the child.
  * A call that passes just before teardown cannot reach another browser: the
  * child is pinned to this Chrome's per-launch WebSocket endpoint, which a new
- * Chrome on the same port does not serve.
+ * Chrome on the same port does not serve. A check that cannot read the
+ * session refuses that call with a separate error and checks again next time.
  */
 export function createSessionEndedIntercept(
   session: LiveBrowserSession,
@@ -130,7 +135,18 @@ export function createSessionEndedIntercept(
     const id = jsonRpcRequestId(message);
     if (id === undefined) return undefined;
     if (!ended) {
-      ended = !(await isRelaySessionCurrent(session, env).catch(() => false));
+      let current: boolean;
+      try {
+        current = await isRelaySessionCurrent(session, env);
+      } catch {
+        // A read error refuses only this call; it does not prove the end.
+        return {
+          jsonrpc: "2.0",
+          id,
+          error: { code: SESSION_CHECK_FAILED_ERROR_CODE, message: SESSION_CHECK_FAILED_MESSAGE },
+        };
+      }
+      ended = !current;
     }
     if (!ended) return undefined;
     return {

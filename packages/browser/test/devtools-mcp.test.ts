@@ -20,6 +20,7 @@ import {
   createDeferred,
   CHROME_DEVTOOLS_MCP_BIN,
   CHROME_DEVTOOLS_MCP_VERSION,
+  SESSION_CHECK_FAILED_ERROR_CODE,
   SESSION_ENDED_ERROR_CODE,
   TAKEOVER_BUSY_ERROR_CODE,
   createSessionEndedIntercept,
@@ -385,6 +386,27 @@ describe("createSessionEndedIntercept", () => {
     expect(await intercept({ jsonrpc: "2.0", id: 4, method: "tools/call" })).toEqual(ended(4));
     await updateSession(session.record.id, { status: "running" }, env);
     expect(await intercept({ jsonrpc: "2.0", id: 5, method: "tools/call" })).toEqual(ended(5));
+  });
+
+  it("refuses only the call whose session check cannot read the record", async () => {
+    const env = registryEnv();
+    const session = await liveSession(env);
+    const intercept = createSessionEndedIntercept(session, env);
+    const record = path.join(env.PICKFORGE_HOME, "sessions", `${session.record.id}.json`);
+    fs.chmodSync(record, 0);
+    try {
+      expect(await intercept({ jsonrpc: "2.0", id: 8, method: "tools/call" })).toEqual({
+        jsonrpc: "2.0",
+        id: 8,
+        error: {
+          code: SESSION_CHECK_FAILED_ERROR_CODE,
+          message: "Pickforge: could not check the browser session; try the call again",
+        },
+      });
+    } finally {
+      fs.chmodSync(record, 0o600);
+    }
+    expect(await intercept({ jsonrpc: "2.0", id: 9, method: "tools/call" })).toBeUndefined();
   });
 
   it("blocks when the session's Chrome is no longer the pinned live process", async () => {
