@@ -341,9 +341,10 @@ describe("session marker horizon", () => {
   /**
    * Runs a whole second prune when the first one, after its lstat, opens the
    * entry `name` or lists the directory `name`. A removed directory then fails
-   * to list, as under Bun; Node lists it empty.
+   * to list, as under Bun; Node lists it empty. With `failure`, that open then
+   * fails with it instead.
    */
-  function pruneConcurrentlyAt(name: string, step: PruneStep = "openFile") {
+  function pruneConcurrentlyAt(name: string, step: PruneStep = "openFile", failure?: Error) {
     let other: Promise<string[]> | undefined;
     const runAt = (target: unknown) => other === undefined && target === name ? (other = pruneSessionLogs(0, env)) : undefined;
     const list = DirHandle.prototype.readEntryNames;
@@ -355,7 +356,9 @@ describe("session marker horizon", () => {
     if (step === "readEntryNames") return () => other;
     const open = DirHandle.prototype[step] as (this: DirHandle, ...args: unknown[]) => Promise<unknown>;
     vi.spyOn(DirHandle.prototype, step).mockImplementation(async function (this: DirHandle, ...args: unknown[]) {
+      const hooked = other === undefined && args[0] === name;
       await runAt(args[0]);
+      if (hooked && failure !== undefined) throw failure;
       return open.apply(this, args);
     } as never);
     return () => other;
@@ -376,6 +379,15 @@ describe("session marker horizon", () => {
     expect(await pruneSessionLogs(0, env)).toEqual([]);
     expect(await other()).toEqual([record.id]);
     expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+  });
+
+  it("still fails on a directory open error other than a concurrent removal", async () => {
+    const record = await closed();
+    setStoppedAt(record.id, past());
+    const failure = Object.assign(new Error("EIO: i/o error"), { code: "EIO" });
+    const other = pruneConcurrentlyAt(record.id, "openChild", failure);
+    await expect(pruneSessionLogs(0, env)).rejects.toBe(failure);
+    expect(await other()).toEqual([record.id]);
   });
 
   it("removes old markers whose directory is already gone and keeps other files", async () => {
