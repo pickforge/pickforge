@@ -629,8 +629,13 @@ it("kills the ffmpeg process group and settles when a descendant keeps stdout op
   expect(Date.now() - started).toBeLessThan(2500);
   expect(result.videoError).toContain("timed out");
   const pid = (await fs.promises.readFile(descendant, "utf8")).trim();
-  const status = await fs.promises.readFile(`/proc/${pid}/stat`, "utf8").catch(() => "");
-  expect(status === "" || status.includes(") Z ")).toBe(true);
+  // SIGKILL returns before the kernel ends the descendant, so wait for it.
+  await expect
+    .poll(async () => {
+      const status = await fs.promises.readFile(`/proc/${pid}/stat`, "utf8").catch(() => "");
+      return status === "" || status.includes(") Z ");
+    }, { timeout: 5000 })
+    .toBe(true);
   expect(fs.existsSync(path.join(result.exportDir, "slideshow.mp4"))).toBe(false);
 });
 
