@@ -212,7 +212,17 @@ export async function getSession(
   const filePath = sessionPathForRead(id, env);
   let raw: string;
   try {
-    raw = await fs.promises.readFile(filePath, "utf8");
+    // O_NONBLOCK keeps the open of a FIFO from waiting for a writer, and the
+    // check on the opened file refuses it before any read.
+    const file = await fs.promises.open(filePath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+    try {
+      if (!(await file.stat()).isFile()) {
+        throw new Error(`Session record at ${filePath} is not a regular file`);
+      }
+      raw = await fs.promises.readFile(file, "utf8");
+    } finally {
+      await file.close();
+    }
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT" || code === "ENOTDIR") {
