@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { FakeXServer, installProcessIdentityFixture, installTargetFixture } from "./x11-fixture.js";
+import { FakeXServer, installProcessIdentityFixture, installTargetFixture, withFifoRecord } from "./x11-fixture.js";
 
 vi.mock("@pickforge/lab-core", async (original) => {
   const actual = await original<typeof import("@pickforge/lab-core")>();
@@ -207,6 +207,21 @@ const unowned: Record<string, () => void> = {
     writeProc(2, "Num RefCount Protocol Flags Type St Inode Path\n0: 2 0 10000 0001 01 54321 /tmp/.X11-unix/X190\n");
   },
 };
+
+it("refuses a FIFO session record within the ownership deadline", async () => {
+  const record = path.join(root, "pf", "sessions", `${sessionId}.json`);
+  const { result, elapsed } = await withFifoRecord(record, verify);
+  expect(result).toBeUndefined();
+  expect(elapsed).toBeLessThan(X11_SETUP_MS / 3);
+});
+
+it.each(["click", "pressKey"] as const)("%s refuses a FIFO session record without sending input", async (name) => {
+  const record = path.join(root, "pf", "sessions", `${sessionId}.json`);
+  const { result, elapsed } = await withFifoRecord(record, () => inputs[name]().then(() => "sent", (error: Error) => error.message));
+  expect(result).toMatch(/is not a regular file$/);
+  expect(elapsed).toBeLessThan(X11_SETUP_MS / 3);
+  expect(runCommand).not.toHaveBeenCalled();
+});
 
 it.each(Object.keys(inputs))("%s dispatches only to the verified owned Xvfb", async (name) => {
   await inputs[name as keyof typeof inputs]();

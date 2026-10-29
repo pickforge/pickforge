@@ -31,19 +31,19 @@ const marker = (id: string) => path.join(home, "sessions", sessionInputClosedNam
 
 it.each([false, true])("refuses delayed input across teardown, prune=%s", async (prune) => {
   const record = await running();
-  const read = fs.promises.readFile;
+  const open = fs.promises.open;
   const resolved = barrier();
   const resume = barrier();
   const action = vi.fn(async (_display: string) => {});
   let stalled = false;
-  vi.spyOn(fs.promises, "readFile").mockImplementation(async (...args) => {
-    const raw = await read(...args);
+  vi.spyOn(fs.promises, "open").mockImplementation(async (...args) => {
+    const file = await open(...args);
     if (!stalled && String(args[0]).endsWith(`${record.id}.json`)) {
       stalled = true;
       resolved.resolve();
       await resume.promise;
     }
-    return raw;
+    return file;
   });
   // The input path reads its display before it enters withAgentPermit.
   const input = (async () => {
