@@ -178,9 +178,11 @@ it.skipIf(binary === null && !required)("two viewers expand, collapse and close 
 /** True once a screenshot of `display` holds `color`, within ten seconds. */
 async function paints(display: string, color: string, env: NodeJS.ProcessEnv): Promise<boolean> {
   const file = path.join(root!, "fixture.png");
-  for (const deadline = Date.now() + 10_000; Date.now() < deadline;) {
-    await screenshot({ display, outPath: file, env, countWindows: false });
-    const pixels = await runCommand(imageCommand!, [file, "-format", "%c", "histogram:info:"], { env });
+  const deadline = Date.now() + 10_000;
+  // Each command gets only the time left, so a slow one cannot outlast the test.
+  for (let left = 10_000; left > 0; left = deadline - Date.now()) {
+    await screenshot({ display, outPath: file, env, countWindows: false, timeoutMs: left });
+    const pixels = await runCommand(imageCommand!, [file, "-format", "%c", "histogram:info:"], { env, timeoutMs: deadline - Date.now() });
     if (pixels.ok && pixels.stdout.toLowerCase().includes(color)) return true;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
