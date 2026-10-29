@@ -285,17 +285,22 @@ describe.skipIf(!available)("native viewer host", () => {
   it("keeps the socket of dead readiness without a ctime, then starts again", async () => {
     const previous = await start();
     await stopNativeViewerHost(sessionId, env);
+    // Leave a socket with no listener, as a dead older host does. Node removes
+    // a listening socket's path on close, so keep a second link to it.
     const server = net.createServer();
     await new Promise<void>((resolve) => server.listen(previous.socket, resolve));
-    try {
-      const { socketCtimeNs: _, ...legacy } = previous;
-      await withViewerDir(sessionId, env, false, (directory) => writeViewerPrivateFile(directory, "host.json", JSON.stringify(legacy)));
-      await stopNativeViewerHost(sessionId, env);
-      expect(fs.existsSync(path.join(sessionViewerDir(sessionId, env), "host.json"))).toBe(false);
-      expect(fs.existsSync(previous.socket)).toBe(true);
-    } finally { await new Promise((resolve) => server.close(resolve)); }
+    fs.linkSync(previous.socket, `${previous.socket}.keep`);
+    await new Promise((resolve) => server.close(resolve));
+    fs.renameSync(`${previous.socket}.keep`, previous.socket);
+    const { socketCtimeNs: _, ...legacy } = previous;
+    await withViewerDir(sessionId, env, false, (directory) => writeViewerPrivateFile(directory, "host.json", JSON.stringify(legacy)));
+    await stopNativeViewerHost(sessionId, env);
+    expect(fs.existsSync(path.join(sessionViewerDir(sessionId, env), "host.json"))).toBe(false);
+    expect(fs.lstatSync(previous.socket).isSocket()).toBe(true);
+    // The next start replaces the leftover socket and records its own.
     const next = await start();
     expect(next.launchId).not.toBe(previous.launchId);
+    expect(fs.lstatSync(next.socket, { bigint: true }).ctimeNs.toString()).toBe(next.socketCtimeNs);
   }, 20_000);
 
   it.each([{ readyPid: 1 }, { readyVersion: "0.0.0" }, { noReady: true }])("cleans failed readiness %j", async (behavior) => {
