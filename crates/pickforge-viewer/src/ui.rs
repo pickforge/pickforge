@@ -518,11 +518,14 @@ impl Text {
     }
 
     /// Looks up, with at most one scan of the host fonts, every character
-    /// of `text` that the embedded font lacks.
+    /// of `text` that the embedded font lacks, and its mirror, which a
+    /// right-to-left run draws instead.
     fn load_fallbacks(&mut self, text: &str) {
         let charmap = self.font.charmap();
         let others: Vec<char> = text
             .chars()
+            .flat_map(|c| [Some(c), c.mirror()])
+            .flatten()
             .filter(|&c| charmap.map(c) == 0 && !ignorable(c))
             .collect();
         self.fallback.find_all(&others);
@@ -1347,6 +1350,14 @@ mod tests {
             text.fallback.scans() <= 1,
             "{} scans",
             text.fallback.scans()
+        );
+        // A right-to-left run draws mirrored characters the text lacks.
+        let before = text.fallback.scans();
+        assert!(text.width("\u{202e}\u{2208}\u{2209}\u{220a}\u{202c}", 12.0) > 0.0);
+        assert!(
+            text.fallback.scans() - before <= 1,
+            "{} scans for one right-to-left text",
+            text.fallback.scans() - before
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
