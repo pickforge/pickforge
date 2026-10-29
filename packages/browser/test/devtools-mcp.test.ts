@@ -388,7 +388,8 @@ describe("createSessionEndedIntercept", () => {
     expect(await intercept({ jsonrpc: "2.0", id: 5, method: "tools/call" })).toEqual(ended(5));
   });
 
-  it("refuses only the call whose session check cannot read the record", async () => {
+  // Root reads the record despite its mode, so the check cannot fail there.
+  it.skipIf(process.getuid?.() === 0)("refuses only the call whose session check cannot read the record", async () => {
     const env = registryEnv();
     const session = await liveSession(env);
     const intercept = createSessionEndedIntercept(session, env);
