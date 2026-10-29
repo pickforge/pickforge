@@ -1,13 +1,18 @@
 //! Software drawing for the bar, the status pill and the cursor. Colors come
 //! from the Pickforge design tokens. Text uses the embedded Geist Medium
-//! (SIL Open Font License 1.1, see `assets/OFL.txt`).
+//! (SIL Open Font License 1.1, see `assets/OFL.txt`), and host fonts for
+//! characters it lacks.
 
+use crate::fallback::Fallback;
 use crate::geometry::Rect;
 use std::collections::HashMap;
+use std::ops::Range;
 use swash::scale::{Render, ScaleContext, Source};
-use swash::shape::ShapeContext;
+use swash::shape::{Direction, ShapeContext};
+use swash::text::{Category, Codepoint as _, Script};
 use swash::zeno::Format;
 use swash::{FontRef, GlyphId};
+use unicode_bidi::ParagraphBidiInfo;
 
 const FONT: &[u8] = include_bytes!("../assets/Geist-Medium.ttf");
 
@@ -227,12 +232,31 @@ struct Glyph {
     coverage: Vec<u8>,
 }
 
-/// Lays out and draws one line of text with a glyph cache.
+/// A shaped glyph: its font and where it sits from the pen start.
+#[derive(Debug, Clone, Copy)]
+struct Placed {
+    font: usize,
+    id: GlyphId,
+    x: f32,
+    y: f32,
+}
+
+/// Text that one font shapes in one script and one direction.
+#[derive(Debug, Clone, PartialEq)]
+struct Run {
+    range: Range<usize>,
+    font: usize,
+    script: Script,
+}
+
+/// Lays out and draws one line of text with a glyph cache. Font 0 is the
+/// embedded font; characters it lacks come from host fonts.
 pub struct Text {
     font: FontRef<'static>,
+    fallback: Fallback,
     scale: ScaleContext,
     shape: ShapeContext,
-    cache: HashMap<(GlyphId, u32), Glyph>,
+    cache: HashMap<(usize, GlyphId, u32), Glyph>,
 }
 
 fn load_font() -> Result<FontRef<'static>, String> {
@@ -262,45 +286,189 @@ fn rasterize(scale: &mut ScaleContext, font: FontRef<'_>, id: GlyphId, px: f32) 
     }
 }
 
+/// Marks and format characters belong to the character before them.
+fn attaches(c: char) -> bool {
+    matches!(
+        c.category(),
+        Category::Mark
+            | Category::SpacingMark
+            | Category::EnclosingMark
+            | Category::NonspacingMark
+            | Category::Format
+    )
+}
+
+/// Splits `text` into runs by font and script. Marks and format
+/// characters stay in the run before them, and characters common to
+/// scripts, such as spaces and digits, take the script of their run or
+/// the run before it.
+fn split_runs(text: &str, mut font_of: impl FnMut(char) -> usize) -> Vec<Run> {
+    let mut runs: Vec<(Range<usize>, usize, Option<Script>)> = Vec::new();
+    for (i, c) in text.char_indices() {
+        let end = i + c.len_utf8();
+        let attach = attaches(c);
+        let script = match c.script() {
+            _ if attach => None,
+            Script::Common | Script::Inherited | Script::Unknown => None,
+            script => Some(script),
+        };
+        if let Some((range, font, run_script)) = runs.last_mut() {
+            let font_ok = attach || *font == font_of(c);
+            let script_ok = script.is_none() || run_script.is_none() || *run_script == script;
+            if font_ok && script_ok {
+                range.end = end;
+                *run_script = run_script.or(script);
+                continue;
+            }
+        }
+        runs.push((i..end, font_of(c), script));
+    }
+    // Runs with no script of their own take the one before them, or the
+    // first one when they lead.
+    let first = runs.iter().find_map(|(_, _, script)| *script);
+    let mut last = first.unwrap_or(Script::Latin);
+    runs.into_iter()
+        .map(|(range, font, script)| {
+            last = script.unwrap_or(last);
+            Run {
+                range,
+                font,
+                script: last,
+            }
+        })
+        .collect()
+}
+
 impl Text {
     pub fn new() -> Self {
         Self {
             font: load_font().expect("the embedded font is valid"),
+            fallback: Fallback::default(),
             scale: ScaleContext::new(),
             shape: ShapeContext::new(),
             cache: HashMap::new(),
         }
     }
 
-    fn glyph(&mut self, id: GlyphId, px: f32) -> &Glyph {
-        let (font, scale) = (self.font, &mut self.scale);
+    fn font(&self, index: usize) -> FontRef<'static> {
+        match index {
+            0 => self.font,
+            i => self.fallback.font(i - 1),
+        }
+    }
+
+    /// The font that draws `c`: the embedded font, else the first host
+    /// font that has it, else the embedded font.
+    fn font_of(&mut self, c: char) -> Option<usize> {
+        if self.font.charmap().map(c) != 0 {
+            return Some(0);
+        }
+        self.fallback.find(c).map(|i| i + 1)
+    }
+
+    fn glyph(&mut self, font: usize, id: GlyphId, px: f32) -> &Glyph {
+        let face = self.font(font);
+        let scale = &mut self.scale;
         self.cache
-            .entry((id, px.to_bits()))
-            .or_insert_with(|| rasterize(scale, font, id, px))
+            .entry((font, id, px.to_bits()))
+            .or_insert_with(|| rasterize(scale, face, id, px))
     }
 
-    /// Shaped glyphs of `text` with kerning, as glyph id, pen offset and
-    /// advance, before [`TRACKING`].
-    fn layout(&mut self, text: &str, px: f32) -> Vec<(GlyphId, f32, f32)> {
-        let mut shaper = self.shape.builder(self.font).size(px).build();
-        shaper.add_str(text);
+    /// Shaped glyphs of `text` in visual order, and the pen position after
+    /// the last one. Only the embedded font gets [`TRACKING`], which would
+    /// break the joins of connected scripts.
+    fn layout(&mut self, text: &str, px: f32) -> (Vec<Placed>, f32) {
         let mut glyphs = Vec::new();
-        shaper.shape_with(|cluster| {
-            for glyph in cluster.glyphs {
-                glyphs.push((glyph.id, glyph.x, glyph.advance));
+        let mut pen = 0.0;
+        // Text before the Hebrew block that the embedded font covers is one
+        // left-to-right run.
+        let simple = text
+            .chars()
+            .all(|c| (c as u32) < 0x0590 && self.font.charmap().map(c) != 0);
+        if simple {
+            let run = Run {
+                range: 0..text.len(),
+                font: 0,
+                script: Script::Latin,
+            };
+            self.shape_run(text, &run, false, px, &mut pen, &mut glyphs);
+            return (glyphs, pen);
+        }
+        let bidi = ParagraphBidiInfo::new(text, None);
+        let (levels, visual) = bidi.visual_runs(0..text.len());
+        for range in visual {
+            let rtl = levels[range.start].is_rtl();
+            let part = &text[range.clone()];
+            let mut runs = split_runs(part, |c| self.font_of(c).unwrap_or(0));
+            if rtl {
+                runs.reverse();
             }
-        });
-        glyphs
+            for run in runs {
+                self.shape_run(part, &run, rtl, px, &mut pen, &mut glyphs);
+            }
+        }
+        (glyphs, pen)
     }
 
-    /// `text` with each run of characters that the embedded font cannot
+    fn shape_run(
+        &mut self,
+        text: &str,
+        run: &Run,
+        rtl: bool,
+        px: f32,
+        pen: &mut f32,
+        out: &mut Vec<Placed>,
+    ) {
+        let direction = if rtl {
+            Direction::RightToLeft
+        } else {
+            Direction::LeftToRight
+        };
+        let font = self.font(run.font);
+        let mut shaper = self
+            .shape
+            .builder(font)
+            .script(run.script)
+            .direction(direction)
+            .size(px)
+            .build();
+        shaper.add_str(&text[run.range.clone()]);
+        let mut clusters = Vec::new();
+        shaper.shape_with(|cluster| {
+            let glyphs: Vec<_> = cluster
+                .glyphs
+                .iter()
+                .map(|g| (g.id, g.x, g.y, g.advance))
+                .collect();
+            clusters.push(glyphs);
+        });
+        // The shaper keeps logical order; right-to-left text reverses whole
+        // clusters, so marks keep their place.
+        if rtl {
+            clusters.reverse();
+        }
+        let tracking = if run.font == 0 { TRACKING * px } else { 0.0 };
+        for (id, x, y, advance) in clusters.into_iter().flatten() {
+            out.push(Placed {
+                font: run.font,
+                id,
+                x: *pen + x,
+                y,
+            });
+            *pen += advance + tracking;
+        }
+    }
+
+    /// `text` with each run of characters that no font on the host can
     /// draw replaced by one ellipsis.
-    pub fn displayable(&self, text: &str) -> String {
+    pub fn displayable(&mut self, text: &str) -> String {
         let charmap = self.font.charmap();
+        let others: Vec<char> = text.chars().filter(|&c| charmap.map(c) == 0).collect();
+        self.fallback.find_all(&others);
         let mut out = String::with_capacity(text.len());
         let mut missing = false;
         for c in text.chars() {
-            if charmap.map(c) != 0 {
+            if c.category() == Category::Format || self.font_of(c).is_some() {
                 out.push(c);
                 missing = false;
             } else if !missing {
@@ -313,9 +481,12 @@ impl Text {
 
     /// Advance width of `text` in pixels, with [`TRACKING`].
     pub fn width(&mut self, text: &str, px: f32) -> f32 {
-        let glyphs = self.layout(text, px);
-        let advance: f32 = glyphs.iter().map(|&(_, _, advance)| advance).sum();
-        (advance + TRACKING * px * glyphs.len() as f32 - TRACKING * px).max(0.0)
+        let (glyphs, pen) = self.layout(text, px);
+        let trailing = match glyphs.last() {
+            Some(last) if last.font == 0 => TRACKING * px,
+            _ => 0.0,
+        };
+        (pen - trailing).max(0.0)
     }
 
     /// Draws `text` from `x` with its cap height centered on `center_y`.
@@ -329,21 +500,25 @@ impl Text {
         color: u32,
     ) {
         let cap_id = self.font.charmap().map('H');
-        let cap_top = self.glyph(cap_id, px).top;
+        let cap_top = self.glyph(0, cap_id, px).top;
         let baseline = (center_y + cap_top as f32 / 2.0).round() as i32;
-        let mut pen = x;
-        for (id, offset, advance) in self.layout(text, px) {
-            let glyph = self.glyph(id, px);
+        for placed in self.layout(text, px).0 {
+            let glyph = self.glyph(placed.font, placed.id, px);
             canvas.mask(
-                (pen + offset).round() as i32 + glyph.left,
-                baseline - glyph.top,
+                (x + placed.x).round() as i32 + glyph.left,
+                baseline - glyph.top - placed.y.round() as i32,
                 glyph.width,
                 glyph.height,
                 &glyph.coverage,
                 color,
             );
-            pen += advance + TRACKING * px;
         }
+    }
+
+    /// Whether the host font directories were scanned, for tests.
+    #[cfg(test)]
+    fn scanned(&self) -> bool {
+        self.fallback.scanned()
     }
 }
 
@@ -764,7 +939,8 @@ impl Banner {
         // Fewer lines when the area is short, so the banner stays inside.
         let room = (outer.h as i32 - 2 * pad - below) / line_h;
         let max_lines = room.clamp(1, BANNER_LINES as i32) as usize;
-        let lines = wrap(message, text_w as f32, max_lines, |s| text.width(s, font));
+        let message = text.displayable(message);
+        let lines = wrap(&message, text_w as f32, max_lines, |s| text.width(s, font));
         let text_h = lines.len().max(1) as i32 * line_h;
         let body = if beside { text_h.max(button_h) } else { text_h };
         let h = (2 * pad + body + below).min(outer.h as i32);
@@ -1074,16 +1250,166 @@ mod tests {
         }
     }
 
+    /// Whether a host font draws `c`; tests that need one skip without it.
+    fn host_has(c: char) -> bool {
+        let found = Fallback::default().find(c).is_some();
+        if !found {
+            eprintln!("skipped: no host font draws {c:?}");
+        }
+        found
+    }
+
     #[test]
-    fn displayable_marks_text_the_font_cannot_draw() {
-        let text = Text::new();
+    fn displayable_marks_text_no_font_can_draw() {
+        let mut text = Text::new();
         let latin = "desk-1 \u{b7} A\u{e7}\u{e3}o \u{41f}\u{440}\u{438}\u{432}\u{435}\u{442}";
         assert_eq!(text.displayable(latin), latin);
+        assert!(!text.scanned(), "Latin text scans no host fonts");
+        // Unassigned code points, which no font maps.
         assert_eq!(
-            text.displayable("desk-1 \u{b7} \u{65e5}\u{672c}"),
+            text.displayable("desk-1 \u{b7} \u{378}\u{379}"),
             "desk-1 \u{b7} \u{2026}"
         );
-        assert_eq!(text.displayable("app-\u{65e5}\u{672c}-x"), "app-\u{2026}-x");
+        assert_eq!(text.displayable("app-\u{378}\u{379}-x"), "app-\u{2026}-x");
+        assert!(text.scanned());
+        for sample in [
+            "app-\u{65e5}\u{672c}-x",
+            "\u{645}\u{631}\u{62d}\u{628}\u{627}",
+        ] {
+            if sample.chars().all(|c| c.is_ascii() || host_has(c)) {
+                assert_eq!(text.displayable(sample), sample);
+            }
+        }
+    }
+
+    #[test]
+    fn latin_text_never_scans_host_fonts() {
+        let mut text = Text::new();
+        let mut buf = vec![0u32; 200 * 40];
+        let mut canvas = Canvas::new(&mut buf, 200, 40, Rect::new(0, 0, 200, 40));
+        let latin = "Entre com a sua senha, \u{e9} r\u{e1}pido \u{2026} \u{d7}";
+        assert!(text.width(latin, 12.0) > 0.0);
+        text.draw(&mut canvas, latin, 0.0, 20.0, 12.0, palette::TEXT);
+        assert!(!text.scanned());
+    }
+
+    #[test]
+    fn coverage_needs_outlines_and_the_character() {
+        let geist = load_font().unwrap();
+        assert!(crate::fallback::covers(geist, 'A'));
+        assert!(!crate::fallback::covers(geist, '\u{65e5}'));
+        assert!(!crate::fallback::covers(geist, '\u{378}'));
+    }
+
+    #[test]
+    fn runs_split_by_font_and_script() {
+        // Font 0 for Latin and common characters, 1 for Arabic, 2 for Han.
+        let font_of = |c: char| match c as u32 {
+            0x600..=0x6ff => 1,
+            0x4e00..=0x9fff => 2,
+            _ => 0,
+        };
+        fn runs(text: &str, font_of: impl FnMut(char) -> usize) -> Vec<(&str, usize, Script)> {
+            split_runs(text, font_of)
+                .into_iter()
+                .map(|r| (&text[r.range], r.font, r.script))
+                .collect()
+        }
+        assert_eq!(runs("", font_of), vec![]);
+        assert_eq!(
+            runs("desk-1 \u{b7} app", font_of),
+            vec![("desk-1 \u{b7} app", 0, Script::Latin)]
+        );
+        let salam = "\u{633}\u{644}\u{627}\u{645}";
+        assert_eq!(
+            runs(&format!("Hi {salam}!"), font_of),
+            vec![
+                ("Hi ", 0, Script::Latin),
+                (salam, 1, Script::Arabic),
+                ("!", 0, Script::Arabic),
+            ]
+        );
+        // A space between Arabic words keeps the Arabic script, and a
+        // vowel mark stays on its letter.
+        let ba = "\u{628}\u{64e}";
+        assert_eq!(
+            runs(&format!("{ba} {salam}"), font_of),
+            vec![
+                (ba, 1, Script::Arabic),
+                (" ", 0, Script::Arabic),
+                (salam, 1, Script::Arabic),
+            ]
+        );
+        // Leading digits take the first script found.
+        assert_eq!(
+            runs("12 \u{65e5}\u{672c}", font_of),
+            vec![
+                ("12 ", 0, Script::Han),
+                ("\u{65e5}\u{672c}", 2, Script::Han)
+            ]
+        );
+        assert_eq!(
+            runs("e\u{301}x", font_of),
+            vec![("e\u{301}x", 0, Script::Latin)]
+        );
+    }
+
+    /// Glyph ids of `text` in visual order, with their fonts.
+    fn glyph_ids(text: &mut Text, s: &str) -> Vec<(usize, GlyphId)> {
+        text.layout(s, 12.0)
+            .0
+            .iter()
+            .map(|p| (p.font, p.id))
+            .collect()
+    }
+
+    #[test]
+    fn right_to_left_text_reads_right_to_left() {
+        let mut text = Text::new();
+        let (alef, bet) = ('\u{5d0}', '\u{5d1}');
+        if host_has(alef) {
+            let index = text.font_of(alef).unwrap();
+            let font = text.font(index);
+            let ids = glyph_ids(&mut text, &format!("{alef}{bet}"));
+            let nominal: Vec<_> = [bet, alef].map(|c| font.charmap().map(c)).into();
+            assert_eq!(ids.iter().map(|&(_, id)| id).collect::<Vec<_>>(), nominal);
+            assert!(ids.iter().all(|&(font, _)| font > 0));
+        }
+        let (ba, ta) = ("\u{628}", "\u{62a}");
+        if host_has('\u{628}') {
+            let alone = |text: &mut Text, s: &str| glyph_ids(text, s);
+            let space = glyph_ids(&mut text, " ");
+            // Apart, each letter keeps its isolated form, last letter first.
+            let want = [alone(&mut text, ta), space, alone(&mut text, ba)].concat();
+            assert_eq!(glyph_ids(&mut text, &format!("{ba} {ta}")), want);
+            // Joined, the letters take other forms.
+            let joined = glyph_ids(&mut text, &format!("{ba}{ta}"));
+            let apart = [alone(&mut text, ta), alone(&mut text, ba)].concat();
+            assert_ne!(joined, apart, "joined forms");
+            // Latin before Arabic stays on the left.
+            let want = [glyph_ids(&mut text, "ab "), want].concat();
+            assert_eq!(glyph_ids(&mut text, &format!("ab {ba} {ta}")), want);
+        }
+    }
+
+    #[test]
+    fn fallback_text_draws_ink() {
+        let mut text = Text::new();
+        for sample in [
+            "\u{65e5}\u{672c}\u{8a9e}",
+            "\u{645}\u{631}\u{62d}\u{628}\u{627}",
+        ] {
+            if !sample.chars().all(host_has) {
+                continue;
+            }
+            let mut buf = vec![0u32; 120 * 40];
+            let mut canvas = Canvas::new(&mut buf, 120, 40, Rect::new(0, 0, 120, 40));
+            let w = text.width(sample, 12.0);
+            assert!(w > 12.0, "{sample}: {w}");
+            text.draw(&mut canvas, sample, 4.0, 20.0, 12.0, palette::WHITE);
+            let ink = buf.iter().filter(|&&p| p & 0xff > 128).count();
+            assert!(ink > 30, "{sample}: {ink} ink pixels");
+        }
     }
 
     #[test]
