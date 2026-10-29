@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { FakeXServer, installTargetFixture } from "./x11-fixture.js";
+import { FakeXServer, installTargetFixture, withFifoRecord } from "./x11-fixture.js";
 
 vi.mock("@pickforge/lab-core", async (original) => {
   const actual = await original<typeof import("@pickforge/lab-core")>();
@@ -228,4 +228,16 @@ it("uses one preparation deadline across repeated ownership reads", async () => 
   expect(state.active.size).toBe(0);
   expect(server.connections).toBe(0);
   expect(vi.mocked(runCommand).mock.calls.map(([, args]) => args)).toEqual([["--version"]]);
+});
+
+it("refuses a FIFO session record within the preparation deadline", async () => {
+  const record = path.join(root, "pf", "sessions", `${sessionId}.json`);
+  const check = await withFifoRecord(record, () => validateTypingTarget(sessionId, ":190", env).then(() => "accepted", (error: Error) => error.message));
+  expect(check.result).toBe("Desktop text preparation failed; no text was sent");
+  expect(check.elapsed).toBeLessThan(1000);
+  const typing = await withFifoRecord(record, () => typeText({ sessionId, display: ":190", text: "a", env }).then(() => "typed", (error: Error) => error.message));
+  expect(typing.result).toMatch(/is not a regular file$/);
+  expect(typing.elapsed).toBeLessThan(1000);
+  expect(server.connections).toBe(0);
+  expect(runCommand).not.toHaveBeenCalled();
 });

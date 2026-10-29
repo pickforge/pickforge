@@ -228,6 +228,20 @@ impl Screen {
         self.capture.snapshot().unwrap()
     }
 
+    /// Waits until the window shows `color` at `(x, y)` and returns that
+    /// frame, so pixel checks never read a frame from before a resize.
+    pub fn wait_color(&mut self, window: Placed, x: u32, y: u32, color: u32) -> Frame {
+        let mut last = None;
+        let found = wait_until(WAIT, || {
+            let shot = self.shot();
+            let hit = at(&shot, window, x, y) == color;
+            last = Some(shot);
+            hit
+        });
+        assert!(found, "color {color:06x} expected at {x},{y}");
+        last.unwrap()
+    }
+
     pub fn input(&self, kind: u8, detail: u8, x: i16, y: i16) {
         self.conn
             .xtest_fake_input(kind, detail, 0, self.root, x, y, 0)
