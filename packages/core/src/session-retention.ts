@@ -106,8 +106,10 @@ async function entriesIfPresent(dir: DirHandle): Promise<string[] | undefined> {
 /** Runs `fn` on a directory prune just lstat'ed; false when a concurrent prune removed it. */
 async function withChildIfPresent(dir: DirHandle, name: string, fn: (child: DirHandle) => Promise<boolean>): Promise<boolean> {
   const child = await dir.openChild(name).catch((error: unknown) => {
-    // openChild reports a gone entry as a storage error caused by ENOENT.
-    if (((error as Error | undefined)?.cause as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") throw error;
+    // openChild reports a gone entry as a storage error caused by ENOENT, or as
+    // a plain ENOENT when the entry goes after the open, while it is verified.
+    const cause = (error as Error | undefined)?.cause as NodeJS.ErrnoException | undefined;
+    if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT" && cause?.code !== "ENOENT") throw error;
     return undefined;
   });
   return child !== undefined && withDirHandle(child, fn);

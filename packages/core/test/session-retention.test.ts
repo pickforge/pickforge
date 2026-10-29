@@ -390,6 +390,25 @@ describe("session marker horizon", () => {
     expect(await other()).toEqual([record.id]);
   });
 
+  it("finishes a prune when another prune runs first while its directory open is verified", async () => {
+    const record = await closed();
+    setStoppedAt(record.id, past());
+    backdate([...markers(record.id), sessionDataDir(record.id, env)], new Date(Date.now() - 2 * SESSION_MARKER_HORIZON_MS));
+    const dir = fs.realpathSync(sessionDataDir(record.id, env));
+    let other: Promise<string[]> | undefined;
+    // DirHandle.open resolves the open descriptor's path after the open succeeds.
+    const realpath = fs.promises.realpath;
+    vi.spyOn(fs.promises, "realpath").mockImplementation((async (target: string, ...args: never[]) => {
+      if (other === undefined && target.startsWith("/proc/self/fd/") && fs.readlinkSync(target) === dir) {
+        await (other = pruneSessionLogs(0, env));
+      }
+      return realpath(target, ...args);
+    }) as never);
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(await other).toEqual([record.id]);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+  });
+
   it("removes old markers whose directory is already gone and keeps other files", async () => {
     const old = orphanMarkers("desk-0badc0de");
     const fresh = orphanMarkers("brow-0badf00d");
