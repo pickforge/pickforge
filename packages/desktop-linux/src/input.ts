@@ -1,4 +1,4 @@
-import { runCommand, withAgentPermit, type EnvLike } from "@pickforge/lab-core";
+import { CommandError, runCommand, withAgentPermit, type EnvLike } from "@pickforge/lab-core";
 import { parseDisplayNumber } from "./display.js";
 import { performance } from "node:perf_hooks";
 import { prepareText, typingEnvironment } from "./x11-prebind.js";
@@ -443,7 +443,15 @@ export async function typeText(opts: TypeTextOptions): Promise<void> {
 }
 
 export async function pressKey(opts: PressKeyOptions): Promise<void> {
-  await withAgentPermit(opts.sessionId, opts.env ?? process.env, () =>
-    runXdotool(opts.sessionId, opts.display, opts.env ?? process.env, buildKeyArgs(opts.key), INPUT_TIMEOUT_MS),
-  );
+  await withAgentPermit(opts.sessionId, opts.env ?? process.env, async () => {
+    try {
+      await runXdotool(opts.sessionId, opts.display, opts.env ?? process.env, buildKeyArgs(opts.key), INPUT_TIMEOUT_MS);
+    } catch (error) {
+      if (!(error instanceof CommandError)) throw error;
+      // Evidence keeps a key only as its length, so the error never echoes the argv.
+      const { code, signal, timedOut } = error.result;
+      const reason = code !== null ? `exited with code ${code}` : `killed with signal ${signal ?? "unknown"}`;
+      throw new Error(`Desktop key dispatch failed (${reason}${timedOut ? ", timed out" : ""})`);
+    }
+  });
 }
