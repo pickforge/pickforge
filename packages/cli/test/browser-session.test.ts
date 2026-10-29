@@ -193,7 +193,7 @@ describe.skipIf(!hasXvfb)("built CLI browser lifecycle", () => {
     expect(deleted.code).toBe(0);
     expect(parseJson(deleted).deleted).toBe("ops");
     expect(fs.existsSync(first.profileDir)).toBe(false);
-  }, 60_000);
+  }, cliSpawnTimeout(9));
 
   it("rejects invalid names and profiles on other session types", () => {
     const invalid = runCli(["session", "create", "--type", "browser", "--profile", "../ops", "--json"]);
