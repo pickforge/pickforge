@@ -202,6 +202,11 @@ async function restoreTimes(dir: DirHandle): Promise<void> {
   await fs.promises.utimes(dir.resolve(), dir.stat.atime, dir.stat.mtime);
 }
 
+/**
+ * Removes a file that prune checked, unless it was replaced since. The check
+ * and the unlink by name are two syscalls, and POSIX has no unlink by inode,
+ * so a replacement made between them is still removed.
+ */
 async function unlinkStaleFile(dir: DirHandle, name: string, stat: fs.Stats): Promise<void> {
   // A concurrent prune may have removed it first; a replaced entry still fails.
   await dir.unlinkOwnedFile(name, stat).catch(async (error: unknown) => {
