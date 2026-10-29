@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -478,7 +480,7 @@ describe("session marker horizon", () => {
   it.each([
     ["a file", (dir: string) => fs.writeFileSync(path.join(dir, "notes.txt"), "mine")],
     ["a hidden file", (dir: string) => fs.writeFileSync(path.join(dir, ".stopped.json.tmp-1-1"), "")],
-    ["a directory", (dir: string) => fs.mkdirSync(path.join(dir, "permits"))],
+    ["an unknown directory", (dir: string) => fs.mkdirSync(path.join(dir, "logs"))],
   ])("keeps an old session directory without stopped.json that holds %s", async (_, add) => {
     const files = orphanMarkers("desk-0badc0de");
     const dir = path.join(sessionsDir(env), "desk-0badc0de");
@@ -515,6 +517,159 @@ describe("session marker horizon", () => {
     });
     expect(await pruneSessionLogs(0, env)).toEqual([]);
     expect(fs.readFileSync(path.join(dir, "xvfb.log"), "utf8")).toBe("late");
+  });
+
+  // A first permit caller re-reads the record, then stalls before it creates the
+  // session directory, through teardown and prune.
+  async function stalledFirstCaller() {
+    const record = await createSession({ type: "desktop", status: "running", projectDir: home }, env);
+    const ensure = DirHandle.prototype.ensureChildDir;
+    let paused!: () => void;
+    let resume!: () => void;
+    const reached = new Promise<void>((resolve) => { paused = resolve; });
+    const gate = new Promise<void>((resolve) => { resume = resolve; });
+    let armed = true;
+    vi.spyOn(DirHandle.prototype, "ensureChildDir").mockImplementation(async function (this: DirHandle, name, mode) {
+      if (armed && name === record.id) { armed = false; paused(); await gate; }
+      return ensure.call(this, name, mode);
+    });
+    let delivered = false;
+    const late = withAgentPermit(record.id, env, async () => { delivered = true; });
+    await reached;
+    await stopSessionAgentInput(record.id, env, 0);
+    await retainSessionLogs(record, env);
+    await destroySessionRecord(record.id, env);
+    setStoppedAt(record.id, past());
+    backdate([markers(record.id)[1]!]);
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+    const dir = sessionDataDir(record.id, env);
+    const permits = path.join(dir, "permits");
+    return { id: record.id, dir, permits, late, resume, delivered: () => delivered };
+  }
+
+  async function strandedDirectory() {
+    const caller = await stalledFirstCaller();
+    caller.resume();
+    await expect(caller.late).rejects.toThrow(AgentPermitUnavailableError);
+    expect(caller.delivered()).toBe(false);
+    expect(fs.readdirSync(caller.dir)).toEqual(["permits"]);
+    expect(fs.readdirSync(caller.permits)).toEqual([]);
+    expect(exist(markers(caller.id))).toEqual([true, false]);
+    return caller;
+  }
+
+  const deadPid = () => spawnSync("true").pid!;
+  const permitRecord = (id: string, ownerPid: number) => JSON.stringify({ permitId: crypto.randomUUID(), sessionId: id, ownerPid, createdAt: new Date().toISOString() });
+  const leaseRecord = (id: string, ownerPid: number) => JSON.stringify({
+    leaseId: crypto.randomUUID(), sessionId: id, ownerPid, createdAt: new Date().toISOString(),
+    expiresAt: new Date().toISOString(), ttlMs: 30_000, heartbeatMs: 5_000,
+  });
+
+  it("removes a directory left by a stalled first caller, then its identity", async () => {
+    const { id, dir, permits } = await strandedDirectory();
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(exist([dir, ...markers(id)])).toEqual([true, true, false]);
+    backdate([permits, dir, markers(id)[0]!]);
+    expect(await pruneSessionLogs(0, env)).toEqual([id]);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+    await lateInput(id);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+    forcedIds.push(id.slice("desk-".length));
+    expect((await createSession({ type: "desktop", projectDir: home }, env)).id).toBe(id);
+  });
+
+  it("fails closed for a stalled caller that resumes after its directory is removed", async () => {
+    const caller = await stalledFirstCaller();
+    const write = DirHandle.prototype.writeFileAtomic;
+    let paused!: () => void;
+    let resume!: () => void;
+    const reached = new Promise<void>((resolve) => { paused = resolve; });
+    const gate = new Promise<void>((resolve) => { resume = resolve; });
+    vi.spyOn(DirHandle.prototype, "writeFileAtomic").mockImplementation(async function (this: DirHandle, name, content) {
+      // The caller holds its new directories and stops before it writes the permit.
+      if (name.startsWith(".agent-permit-")) { paused(); await gate; }
+      return write.call(this, name, content);
+    });
+    caller.resume();
+    await reached;
+    backdate([caller.permits, caller.dir, markers(caller.id)[0]!]);
+    expect(await pruneSessionLogs(0, env)).toEqual([caller.id]);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+    resume();
+    await expect(caller.late).rejects.toThrow(AgentPermitUnavailableError);
+    expect(caller.delivered()).toBe(false);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+  });
+
+  it.each([
+    ["the session directory", "notes.txt"],
+    ["the permits directory", "permits/notes.txt"],
+    ["the session directory", "human.lease.json.bak"],
+  ])("keeps a stranded directory with an unknown file in %s (%s)", async (_, name) => {
+    const { id, dir, permits } = await strandedDirectory();
+    const file = path.join(dir, name);
+    fs.writeFileSync(file, "mine");
+    backdate([file, permits, dir, markers(id)[0]!]);
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(fs.readFileSync(file, "utf8")).toBe("mine");
+    expect(exist(markers(id))).toEqual([true, false]);
+  });
+
+  it("keeps a stranded directory while a coordination file is young", async () => {
+    const { id, dir, permits } = await strandedDirectory();
+    const permit = path.join(permits, `${crypto.randomUUID()}.json`);
+    fs.writeFileSync(permit, permitRecord(id, deadPid()));
+    backdate([permits, dir, markers(id)[0]!]);
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(fs.existsSync(permit)).toBe(true);
+    backdate([permit, permits]);
+    expect(await pruneSessionLogs(0, env)).toEqual([id]);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+  });
+
+  it.each([
+    ["a permit", (id: string) => [`permits/${crypto.randomUUID()}.json`, permitRecord(id, process.pid)]],
+    ["a staged permit", (id: string) => [`permits/.agent-permit-${crypto.randomUUID()}`, permitRecord(id, process.pid)]],
+    ["a lease", (id: string) => ["human.lease.json", leaseRecord(id, process.pid)]],
+    ["a lease renewal temp", () => [`.human.lease.json.tmp-${process.pid}-1`, ""]],
+  ])("keeps a stranded directory with %s whose owner is alive", async (_, entry) => {
+    const { id, dir, permits } = await strandedDirectory();
+    const [name, content] = entry(id);
+    const file = path.join(dir, name!);
+    fs.writeFileSync(file, content!);
+    backdate([file, permits, dir, markers(id)[0]!]);
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(fs.existsSync(file)).toBe(true);
+    expect(exist(markers(id))).toEqual([true, false]);
+  });
+
+  it("finishes a stranded directory on the next prune after one stops midway", async () => {
+    const { id, dir, permits } = await strandedDirectory();
+    const dead = deadPid();
+    const files = [
+      [`permits/${crypto.randomUUID()}.json`, permitRecord(id, dead)],
+      [`permits/.agent-permit-${crypto.randomUUID()}`, permitRecord(id, dead)],
+      [`permits/..agent-permit-${crypto.randomUUID()}.tmp-${dead}-1`, ""],
+      ["human.lease.json", leaseRecord(id, dead)],
+      [`.human-lease-${crypto.randomUUID()}`, leaseRecord(id, dead)],
+      [`..human-lease-${crypto.randomUUID()}.tmp-${dead}-1`, ""],
+      [`.human.lease.json.tmp-${dead}-2`, ""],
+    ].map(([name, content]) => { const file = path.join(dir, name!); fs.writeFileSync(file, content!); return file; });
+    backdate([...files, permits, dir, markers(id)[0]!]);
+    const unlink = DirHandle.prototype.unlinkOwnedFile;
+    let calls = 0;
+    vi.spyOn(DirHandle.prototype, "unlinkOwnedFile").mockImplementation(async function (this: DirHandle, name, stat) {
+      calls += 1;
+      if (calls === 2) throw new Error("crash");
+      return unlink.call(this, name, stat);
+    });
+    await expect(pruneSessionLogs(0, env)).rejects.toThrow("crash");
+    expect(exist(files).filter(Boolean)).toHaveLength(files.length - 1);
+    vi.restoreAllMocks();
+    // The stopped prune left both directories old, so the next one finishes.
+    expect(await pruneSessionLogs(0, env)).toEqual([id]);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
   });
 
   it("keeps markers when prune stops after carrying the teardown time", async () => {
