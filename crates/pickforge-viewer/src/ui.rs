@@ -532,18 +532,32 @@ impl Text {
     }
 
     /// `text` with each run of characters that no font on the host can
-    /// draw replaced by one ellipsis.
+    /// draw replaced by one ellipsis. A mark that the font of its cluster
+    /// lacks counts as such a character, so it never draws as an empty box.
     pub fn displayable(&mut self, text: &str) -> String {
         self.load_fallbacks(text);
         let mut out = String::with_capacity(text.len());
         let mut missing = false;
-        for c in text.chars() {
-            if c.category() == Category::Format || ignorable(c) || self.font_of(&[c]).is_some() {
-                out.push(c);
-                missing = false;
-            } else if !missing {
-                out.push_str(ELLIPSIS);
-                missing = true;
+        let mut chars = text.chars().peekable();
+        while let Some(base) = chars.next() {
+            let mut cluster = vec![base];
+            while let Some(c) = chars.next_if(|&c| attaches(c)) {
+                cluster.push(c);
+            }
+            let drawn: Vec<char> = cluster.iter().copied().filter(|&c| !ignorable(c)).collect();
+            let font = (!drawn.is_empty())
+                .then(|| self.font_of(&drawn))
+                .flatten()
+                .map(|i| self.font(i));
+            for c in cluster {
+                let draws = font.is_some_and(|font| font.charmap().map(c) != 0);
+                if c.category() == Category::Format || ignorable(c) || draws {
+                    out.push(c);
+                    missing = false;
+                } else if !missing {
+                    out.push_str(ELLIPSIS);
+                    missing = true;
+                }
             }
         }
         out
@@ -932,14 +946,20 @@ impl Wrapper {
 }
 
 /// The byte length of the longest prefix of `word` within `max_w`, at
-/// least one character.
+/// least one cluster. It never ends between a character and its marks.
 fn fitting_prefix(word: &str, max_w: f32, measure: &mut impl FnMut(&str) -> f32) -> usize {
-    let mut end = word.chars().next().map_or(0, char::len_utf8);
-    for (i, c) in word.char_indices().skip(1) {
-        if measure(&word[..i + c.len_utf8()]) > max_w {
+    let mut ends = word
+        .char_indices()
+        .skip(1)
+        .filter(|&(_, c)| !attaches(c))
+        .map(|(i, _)| i)
+        .chain([word.len()]);
+    let mut end = ends.next().unwrap_or(0);
+    for next in ends {
+        if measure(&word[..next]) > max_w {
             break;
         }
-        end = i + c.len_utf8();
+        end = next;
     }
     end
 }
@@ -950,7 +970,8 @@ fn ellipsize(lines: &mut [String], max_w: f32, measure: &mut impl FnMut(&str) ->
         return;
     };
     while !last.is_empty() && measure(&format!("{last}{ELLIPSIS}")) > max_w {
-        last.pop();
+        // Drop the last cluster whole, so no character loses its marks.
+        while last.pop().is_some_and(attaches) {}
     }
     let trimmed = last.trim_end().len();
     last.truncate(trimmed);
@@ -1320,6 +1341,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn wrap_keeps_marks_with_their_character() {
+        let measure = |s: &str| s.chars().count() as f32;
+        // Words wider than the line, each character followed by a mark.
+        for word in ["\u{65e5}\u{1ab0}".repeat(12), "e\u{301}".repeat(12)] {
+            let lines = wrap(&word, 3.0, 20, measure);
+            assert_eq!(lines.concat(), word);
+            for line in &lines {
+                assert!(!line.starts_with(attaches), "{line:?} starts with a mark");
+            }
+        }
+        // Truncation drops whole clusters too.
+        assert_eq!(
+            wrap(&"e\u{301}".repeat(6), 4.0, 2, measure),
+            vec!["e\u{301}e\u{301}", "e\u{301}\u{2026}"]
+        );
+    }
+
     /// Whether a host font draws `c`; tests that need one skip without it.
     fn host_has(c: char) -> bool {
         let found = Fallback::default().find(c).is_some();
@@ -1382,6 +1421,30 @@ mod tests {
             if sample.chars().all(|c| c.is_ascii() || host_has(c)) {
                 assert_eq!(text.displayable(sample), sample);
             }
+        }
+    }
+
+    #[test]
+    fn displayable_never_leaves_a_mark_its_font_lacks() {
+        let dir = std::env::temp_dir().join(format!("pickforge-marks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut text = Text {
+            fallback: Fallback::from_dir(&dir),
+            ..Text::new()
+        };
+        // A character no font draws takes its marks into the ellipsis.
+        assert_eq!(text.displayable("a\u{378}\u{301}b"), "a\u{2026}b");
+        assert_eq!(text.displayable("a\u{1ab0}b"), "a\u{2026}b");
+        assert_eq!(text.displayable("e\u{301}"), "e\u{301}");
+        std::fs::remove_dir_all(&dir).unwrap();
+        // Host fonts may draw the mark only apart from its ideograph.
+        let mut text = Text::new();
+        let sample = "\u{65e5}\u{1ab0}\u{672c}\u{1ab0}";
+        if sample.chars().all(host_has) {
+            let shown = text.displayable(sample);
+            let ids = glyph_ids(&mut text, &shown);
+            assert!(ids.iter().all(|&(_, id)| id != 0), "{shown:?} draws a box");
+            assert!(shown.starts_with('\u{65e5}'));
         }
     }
 
