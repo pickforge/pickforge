@@ -89,16 +89,16 @@ function markerNames(id: string): string[] {
 
 /** Opens a file prune just lstat'ed, or undefined when a concurrent prune removed it. */
 async function openIfPresent(dir: DirHandle, name: string): Promise<fs.promises.FileHandle | undefined> {
-  return dir.openFile(name, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW).catch((error: NodeJS.ErrnoException) => {
-    if (error.code !== "ENOENT") throw error;
+  return dir.openFile(name, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     return undefined;
   });
 }
 
 /** Lists a directory prune opened, or undefined when a concurrent prune removed it. */
 async function entriesIfPresent(dir: DirHandle): Promise<string[] | undefined> {
-  return dir.readEntryNames().catch((error: NodeJS.ErrnoException) => {
-    if (error.code !== "ENOENT") throw error;
+  return dir.readEntryNames().catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     return undefined;
   });
 }
