@@ -105,7 +105,7 @@ impl DataDevice {
         // this connection because `window` keeps it open.
         let backend = unsafe { Backend::from_foreign_display(handle.display.as_ptr().cast()) };
         let conn = Connection::from_backend(backend);
-        let (globals, queue) = registry_queue_init::<State>(&conn)
+        let (globals, mut queue) = registry_queue_init::<State>(&conn)
             .map_err(|e| failed("list the Wayland globals", e))
             .ok()?;
         let control = globals
@@ -123,13 +123,21 @@ impl DataDevice {
             .bind(&qh, 1..=3, ())
             .map_err(|e| failed("bind wl_seat", e))
             .ok()?;
+        // The seat reports its keyboard first, so the keyboard exists
+        // before the device gets any selection, and every selection falls
+        // in a focus period that the keyboard reports.
+        let mut state = State::default();
+        queue
+            .roundtrip(&mut state)
+            .map_err(|e| failed("read the seat", e))
+            .ok()?;
         let device = manager.get_data_device(&seat, &qh, ());
         conn.flush()
             .map_err(|e| failed("create the data device", e))
             .ok()?;
         Some(DataDevice {
             queue,
-            state: State::default(),
+            state,
             device,
             conn,
             _window: window,
@@ -178,11 +186,7 @@ impl Drop for DataDevice {
         {
             offer.destroy();
         }
-        if let Some(keyboard) = self.state.keyboard.take() {
-            if keyboard.version() >= 3 {
-                keyboard.release();
-            }
-        }
+        self.state.lose_keyboard();
         if self.device.version() >= 2 {
             self.device.release();
         }
@@ -243,10 +247,28 @@ impl Dispatch<WlSeat, ()> for State {
             capabilities: wayland_client::WEnum::Value(caps),
         } = event
         {
-            if caps.contains(wl_seat::Capability::Keyboard) && state.keyboard.is_none() {
+            // A keyboard that the seat loses gets no more focus events, so
+            // a new one is asked for when the seat has a keyboard again.
+            if !caps.contains(wl_seat::Capability::Keyboard) {
+                state.lose_keyboard();
+            } else if state.keyboard.is_none() {
                 state.keyboard = Some(seat.get_keyboard(qh, ()));
             }
         }
+    }
+}
+
+impl State {
+    /// Releases the keyboard. Without it the window has no focus, so the
+    /// selection goes too.
+    fn lose_keyboard(&mut self) {
+        if let Some(keyboard) = self.keyboard.take() {
+            if keyboard.version() >= 3 {
+                keyboard.release();
+            }
+        }
+        self.focused = false;
+        replace(&mut self.selection, None);
     }
 }
 
