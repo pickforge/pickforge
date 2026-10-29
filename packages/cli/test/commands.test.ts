@@ -680,7 +680,7 @@ describe("pickforge-lab session (desktop)", () => {
         tmpDir,
       );
       const watched = parseJson(watchedResult);
-      expect(watched.ok).toBe(true);
+      expect(watched.ok, JSON.stringify(watched.errors)).toBe(true);
       expect(watched).toMatchObject({
         opened: true,
         browser: "chromium",
