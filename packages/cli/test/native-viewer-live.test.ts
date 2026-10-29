@@ -179,12 +179,15 @@ it.skipIf(binary === null && !required)("two viewers expand, collapse and close 
 async function paints(display: string, color: string, env: NodeJS.ProcessEnv): Promise<boolean> {
   const file = path.join(root!, "fixture.png");
   const deadline = Date.now() + 10_000;
-  // Each command gets only the time left, so a slow one cannot outlast the test.
-  for (let left = 10_000; left > 0; left = deadline - Date.now()) {
-    await screenshot({ display, outPath: file, env, countWindows: false, timeoutMs: left });
-    const pixels = await runCommand(imageCommand!, [file, "-format", "%c", "histogram:info:"], { env, timeoutMs: deadline - Date.now() });
+  const left = () => deadline - Date.now();
+  // Each wait gets only the time left, and a command is killed at once, so a
+  // slow one cannot outlast the deadline.
+  while (left() > 0) {
+    await screenshot({ display, outPath: file, env, countWindows: false, timeoutMs: left(), killGraceMs: 0 });
+    if (left() <= 0) break;
+    const pixels = await runCommand(imageCommand!, [file, "-format", "%c", "histogram:info:"], { env, timeoutMs: left(), killGraceMs: 0 });
     if (pixels.ok && pixels.stdout.toLowerCase().includes(color)) return true;
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, Math.min(50, Math.max(0, left()))));
   }
   return false;
 }
