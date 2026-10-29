@@ -4,13 +4,13 @@ import net from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   getSession, startDaemon, stopOwnedDaemonGroup, processIdentityMatches, checkHumanLeaseBusy,
-  HumanLeaseHeldError, readProcessIdentity, sessionDataDir, type DirHandle, type EnvLike, type ProcessIdentity,
+  HumanLeaseHeldError, readProcessIdentity, sessionDataDir, type EnvLike, type ProcessIdentity,
 } from "@pickforge/lab-core";
 import { withSessionVncLock, recoverStaleTakeoverLocked, SESSION_VNC_LOCK_TIMEOUT_MS } from "./session.js";
 import { verifyOwnedDisplayTarget, type OwnedDisplayIdentity } from "./x11-target.js";
 import {
   withViewerDir, readViewerPrivateFile, sessionViewerDir, readViewerLaunchRecord,
-  stopNativeViewerProcesses,
+  stopNativeViewerProcesses, lstatViewerSocket, sameViewerSocket, removeDeadViewerReadiness,
 } from "./viewer-state.js";
 import {
   VIEWER_MESSAGE_MAX_BYTES, type NativeViewerHostIdentity, type ViewerHostRequest,
@@ -28,12 +28,13 @@ export function validNativeViewerHost(value: unknown, sessionId: string, env: En
   if (typeof host.version !== "string" || !/^[0-9A-Za-z.+-]+$/.test(host.version)) return false;
   if (host.sessionId !== sessionId || !/^[a-f0-9]{32}$/.test(host.launchId)) return false;
   if (![host.pid, host.startTicks, host.viewerPid, host.viewerStartTicks, host.socketIno].every(positive)) return false;
+  if (host.socketCtimeNs !== undefined && (typeof host.socketCtimeNs !== "string" || !/^[0-9]+$/.test(host.socketCtimeNs))) return false;
   return Number.isSafeInteger(host.socketDev) && host.socket === path.join(sessionViewerDir(sessionId, env), "host.sock");
 }
 
 function sameHost(actual: NativeViewerHostIdentity, expected: NativeViewerHostIdentity): boolean {
   if (typeof actual !== "object" || actual === null) return false;
-  const keys: (keyof NativeViewerHostIdentity)[] = ["version", "sessionId", "launchId", "pid", "startTicks", "viewerPid", "viewerStartTicks", "socket", "socketIno", "socketDev"];
+  const keys: (keyof NativeViewerHostIdentity)[] = ["version", "sessionId", "launchId", "pid", "startTicks", "viewerPid", "viewerStartTicks", "socket", "socketIno", "socketDev", "socketCtimeNs"];
   return keys.every((key) => actual[key] === expected[key]);
 }
 
@@ -42,11 +43,10 @@ async function assertHostSocket(host: NativeViewerHostIdentity): Promise<void> {
       !processIdentityMatches({ pid: host.viewerPid, startTicks: host.viewerStartTicks })) {
     throw new Error("Native viewer identity changed");
   }
-  const stats = await fs.promises.lstat(host.socket);
-  if (!stats.isSocket() || stats.uid !== process.getuid?.() || (stats.mode & 0o777) !== 0o600) {
-    throw new Error("Unsafe viewer socket");
-  }
-  if (stats.ino !== host.socketIno || stats.dev !== host.socketDev) throw new Error("Unsafe viewer socket");
+  const stats = await lstatViewerSocket(host.socket);
+  if (stats === undefined) throw new Error("Viewer socket unavailable");
+  // Readiness without a ctime came from a host before #404 and cannot prove its socket.
+  if (!sameViewerSocket(stats, { ...host }) || (stats.mode & 0o777n) !== 0o600n) throw new Error("Unsafe viewer socket");
 }
 
 export async function requestNativeViewerHost(host: NativeViewerHostIdentity, request: ViewerHostRequest): Promise<ViewerHostResponse> {
@@ -178,17 +178,6 @@ export async function pulseNativeViewer(
   } catch { /* A pulse never changes the click result. */ }
 }
 
-/** Remove readiness whose host and viewer are both gone, refusing a replaced socket. */
-async function removeDeadReadiness(directory: DirHandle, host: NativeViewerHostIdentity): Promise<void> {
-  const socket = await directory.lstatChild("host.sock");
-  if (socket !== undefined) {
-    const safe = [socket.isSocket(), socket.uid === process.getuid?.(), socket.ino === host.socketIno, socket.dev === host.socketDev];
-    if (!safe.every(Boolean)) throw new Error("Unsafe stale viewer socket");
-  }
-  await directory.unlinkChild("host.sock");
-  await directory.unlinkChild("host.json");
-}
-
 export async function stopNativeViewerHost(sessionId: string, env: EnvLike = process.env): Promise<void> {
   const host = await findNativeViewerHost(sessionId, env);
   if (host !== undefined) {
@@ -209,7 +198,7 @@ async function stopNativeViewerHostLocked(sessionId: string, env: EnvLike): Prom
     const hostAlive = processIdentityMatches({ pid: host.pid, startTicks: host.startTicks });
     const viewerAlive = processIdentityMatches({ pid: host.viewerPid, startTicks: host.viewerStartTicks });
     if (!hostAlive && !viewerAlive) {
-      await removeDeadReadiness(directory, host);
+      await removeDeadViewerReadiness(directory, { ...host });
       return;
     }
     const record = await readViewerLaunchRecord(sessionId, host.launchId, env);

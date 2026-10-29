@@ -7,7 +7,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { getSession, readProcessIdentity, processIdentityMatches } from "@pickforge/lab-core";
 import {
   prepareViewerLaunch, writeViewerLaunchRecord, verifyOwnedDisplayTarget,
-  withViewerDir, writeViewerPrivateFile, sessionViewerDir, withSessionVncLock,
+  withViewerDir, writeViewerPrivateFile, sessionViewerDir, withSessionVncLock, lstatViewerSocket, viewerSocketIdentity,
   VIEWER_MESSAGE_MAX_BYTES, validTakeoverMessage, validTakeoverTimeout,
   type StartHumanTakeoverOptions,
   type NativeViewerCommand, type NativeViewerHostIdentity, type NativeViewerLaunchRecord,
@@ -256,14 +256,14 @@ class NativeHost {
       await once(server, "listening");
       server.on("error", () => { void this.stop(); });
       await fs.promises.chmod(directory.resolve("host.sock"), 0o600);
-      const socket = await directory.lstatChild("host.sock");
+      const socket = await lstatViewerSocket(directory.resolve("host.sock"));
       if (socket === undefined || !socket.isSocket()) throw new Error("Viewer socket unavailable");
       this.host = {
         sessionId: this.record.sessionId, launchId: this.record.launchId, version: this.version,
         pid: this.record.hostPid, startTicks: this.record.hostStartTicks,
         viewerPid: this.record.viewerPid, viewerStartTicks: this.record.viewerStartTicks,
         socket: path.join(sessionViewerDir(this.record.sessionId, this.env), "host.sock"),
-        socketIno: socket.ino, socketDev: socket.dev,
+        ...viewerSocketIdentity(socket),
       };
       await writeViewerPrivateFile(directory, "host.json", `${JSON.stringify(this.host)}\n`);
     });

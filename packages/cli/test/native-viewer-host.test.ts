@@ -9,6 +9,7 @@ import { createSession, updateSession, processIdentityMatches, readProcessIdenti
 import {
   startXvfb, stopXvfb, findOnPath, findNativeViewerHost, requestNativeViewerHost,
   withSessionVncLock, followNativeViewerRequest, pulseNativeViewer, withViewerDir, writeViewerPrivateFile, sessionViewerDir,
+  lstatViewerSocket, viewerSocketIdentity,
   type NativeViewerHostIdentity, type XvfbHandle,
 } from "@pickforge/lab-desktop-linux";
 import { runNativeViewerHost, type NativeHostOptions } from "../src/viewer/native-host.js";
@@ -384,12 +385,12 @@ describe.skipIf(!available)("native host click pulse", () => {
       server.listen(directory.resolve("host.sock"));
       await once(server, "listening");
       fs.chmodSync(directory.resolve("host.sock"), 0o600);
-      const stats = (await directory.lstatChild("host.sock"))!;
+      const stats = (await lstatViewerSocket(directory.resolve("host.sock")))!;
       const identity = readProcessIdentity(process.pid)!;
       await writeViewerPrivateFile(directory, "host.json", JSON.stringify({
         version: nativeViewerVersion, sessionId, launchId: "a".repeat(32), ...identity,
         viewerPid: identity.pid, viewerStartTicks: identity.startTicks,
-        socket: path.join(sessionViewerDir(sessionId, process.env), "host.sock"), socketIno: stats.ino, socketDev: stats.dev,
+        socket: path.join(sessionViewerDir(sessionId, process.env), "host.sock"), ...viewerSocketIdentity(stats),
       }));
     });
     try {

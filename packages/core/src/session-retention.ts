@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DirHandle, withDirHandle } from "./dir-handle.js";
 import { legacySessionsDirs, sessionsDir, type EnvLike } from "./paths.js";
-import { isPidAlive } from "./proc.js";
+import { identityIsAlive, isPidAlive } from "./proc.js";
 import { sessionDataDir, sessionInputClosedName, takeoverIdentityName, type SessionRecord } from "./session.js";
 
 const MARKER = "stopped.json";
@@ -17,6 +17,12 @@ const LEASE_STAGING = new RegExp(
 );
 // The writeFileAtomic temp for the marker, left when teardown dies before the rename.
 const MARKER_TEMP = /^\.stopped\.json\.tmp-(\d+)-\d+$/;
+// Coordination files of takeover.ts that carry an owner, and write temps
+// that carry their writer pid, in the session and permits directories.
+const LEASE_RECORD = new RegExp(`^(human\\.lease\\.json|\\.human-lease-${UUID})$`);
+const LEASE_TEMP = new RegExp(`^(?:\\.\\.human-lease-${UUID}|\\.human\\.lease\\.json)\\.tmp-(\\d+)-\\d+$`);
+const PERMIT_RECORD = new RegExp(`^(${UUID}\\.json|\\.agent-permit-${UUID})$`);
+const PERMIT_TEMP = new RegExp(`^\\.\\.agent-permit-${UUID}\\.tmp-(\\d+)-\\d+$`);
 
 // A temp whose writer may still run belongs to an overlapping retain. If a
 // live process reuses the dead writer's pid, the orphan stays and blocks
@@ -120,11 +126,131 @@ async function carryStoppedAt(root: DirHandle, id: string, stoppedAt: number): P
   }
 }
 
+type StaleFiles = Array<[string, fs.Stats]>;
+
+function isOld(stat: fs.Stats): boolean {
+  return Date.now() - stat.mtimeMs >= SESSION_MARKER_HORIZON_MS;
+}
+
+function ownerIsGone(raw: string): boolean {
+  try {
+    const { ownerPid, ownerStartTicks } = JSON.parse(raw);
+    if (!Number.isSafeInteger(ownerPid) || ownerPid <= 0) return false;
+    return !identityIsAlive(ownerPid, typeof ownerStartTicks === "number" ? ownerStartTicks : undefined);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * An old regular file that a first permit or lease caller writes: a permit or
+ * lease record, or its staging copy, whose owner is gone; or a write temp
+ * whose writer pid is gone. Anything else is not ours to delete.
+ */
+async function staleCoordinationFile(dir: DirHandle, name: string, records: RegExp, temps: RegExp): Promise<fs.Stats | undefined> {
+  const stat = await dir.lstatChild(name);
+  if (stat?.isFile() !== true || !isOld(stat)) return undefined;
+  const pid = temps.exec(name)?.[1];
+  if (pid !== undefined) return isPidAlive(Number(pid)) ? undefined : stat;
+  if (!records.test(name)) return undefined;
+  const file = await dir.openFile(name, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    return ownerIsGone(await file.readFile("utf8")) ? stat : undefined;
+  } finally {
+    await file.close();
+  }
+}
+
+// Restored after our own unlinks, so a prune that stops midway leaves the
+// directory old and the next prune finishes it.
+async function restoreTimes(dir: DirHandle): Promise<void> {
+  await fs.promises.utimes(dir.resolve(), dir.stat.atime, dir.stat.mtime);
+}
+
+async function unlinkStaleFile(dir: DirHandle, name: string, stat: fs.Stats): Promise<void> {
+  // A concurrent prune may have removed it first; a replaced entry still fails.
+  await dir.unlinkOwnedFile(name, stat).catch(async (error: unknown) => {
+    if (await dir.lstatChild(name) !== undefined) throw error;
+  });
+}
+
+async function rmdirIfEmpty(target: string): Promise<boolean> {
+  try {
+    await fs.promises.rmdir(target);
+    return true;
+  } catch (error) {
+    // A concurrent prune removed it, or a writer added an entry first.
+    if (!["ENOENT", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+    return false;
+  }
+}
+
+async function stalePermitFiles(permits: DirHandle): Promise<StaleFiles | undefined> {
+  if (!isOld(permits.stat)) return undefined;
+  const files: StaleFiles = [];
+  for (const name of await permits.readEntryNames()) {
+    const stat = await staleCoordinationFile(permits, name, PERMIT_RECORD, PERMIT_TEMP);
+    if (stat === undefined) return undefined;
+    files.push([name, stat]);
+  }
+  return files;
+}
+
+async function removePermits(dir: DirHandle, permits: DirHandle, files: StaleFiles): Promise<boolean> {
+  try {
+    for (const [name, stat] of files) await unlinkStaleFile(permits, name, stat);
+  } finally {
+    await restoreTimes(permits);
+  }
+  return rmdirIfEmpty(dir.resolve("permits"));
+}
+
+async function removeCoordinationDirectory(
+  root: DirHandle, dir: DirHandle, id: string, roots: string[],
+  files: StaleFiles, permits?: [DirHandle, StaleFiles],
+): Promise<boolean> {
+  if (await registryHasSession(id, roots)) return false;
+  const current = await root.lstatChild(id);
+  if (current?.dev !== dir.stat.dev || current.ino !== dir.stat.ino) return false;
+  try {
+    if (permits !== undefined && !await removePermits(dir, ...permits)) return false;
+    for (const [name, stat] of files) await unlinkStaleFile(dir, name, stat);
+  } finally {
+    await restoreTimes(dir);
+  }
+  return rmdirIfEmpty(root.resolve(id));
+}
+
+/**
+ * A directory without stopped.json is left by a prune that stopped before
+ * rmdir, or rebuilt by a first permit or lease caller that stalled past
+ * teardown and prune. With no record or lock, it goes once it and every entry
+ * are past the horizon and hold only stale coordination files. The directory
+ * mtime is the last entry change, after teardown in both cases.
+ */
+async function pruneCoordinationDirectory(root: DirHandle, dir: DirHandle, id: string, roots: string[]): Promise<boolean> {
+  if (!isOld(dir.stat)) return false;
+  const names = await dir.readEntryNames();
+  const files: StaleFiles = [];
+  for (const name of names.filter((name) => name !== "permits")) {
+    const stat = await staleCoordinationFile(dir, name, LEASE_RECORD, LEASE_TEMP);
+    if (stat === undefined) return false;
+    files.push([name, stat]);
+  }
+  if (!names.includes("permits")) return removeCoordinationDirectory(root, dir, id, roots, files);
+  if ((await dir.lstatChild("permits"))?.isDirectory() !== true) return false;
+  return withDirHandle(dir.openChild("permits"), async (permits) => {
+    const permitFiles = await stalePermitFiles(permits);
+    return permitFiles !== undefined && removeCoordinationDirectory(root, dir, id, roots, files, [permits, permitFiles]);
+  });
+}
+
 async function pruneDirectory(root: DirHandle, id: string, roots: string[], age: number): Promise<boolean> {
   if (await registryHasSession(id, roots)) return false;
   return withDirHandle(root.openChild(id), async (dir) => {
     const stoppedAt = await retainedStoppedAt(dir, id);
-    if (stoppedAt === undefined || Date.now() - stoppedAt < age) return false;
+    if (stoppedAt === undefined) return pruneCoordinationDirectory(root, dir, id, roots);
+    if (Date.now() - stoppedAt < age) return false;
     const names = await dir.readEntryNames();
     // Unknown data is not ours to delete. Never traverse a child directory or link.
     for (const name of names) {
@@ -178,6 +304,8 @@ async function pruneMarkers(root: DirHandle, id: string, roots: string[]): Promi
 
 /**
  * Explicit only. Active/error records and unmarked legacy directories are kept.
+ * A directory without stopped.json that holds only stale coordination files
+ * goes after the horizon.
  * Markers of a gone session go once they are older than the horizon.
  */
 export async function pruneSessionLogs(
