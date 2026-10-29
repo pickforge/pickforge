@@ -1002,6 +1002,8 @@ describe("DevTools relay agent permits", () => {
     expect(Date.now() - started).toBeLessThan(3_000);
     await run;
     expect(relayExited).toBe(true);
+    // Nothing reads the input any more; an open one would keep the process alive.
+    expect(input.destroyed).toBe(true);
     expect(responses(output)).toEqual([
       {
         jsonrpc: "2.0",
