@@ -95,24 +95,28 @@ export const SESSION_CHECK_FAILED_ERROR_CODE = -32052;
 const SESSION_CHECK_FAILED_MESSAGE =
   "Pickforge: could not check the browser session; try the call again";
 
+type BrowserLeg = NonNullable<SessionRecord["browser"]>;
+
+function sameBrowser(browser: BrowserLeg | undefined, pinned: BrowserLeg): boolean {
+  return (
+    browser?.browserPid === pinned.browserPid &&
+    browser.browserStartTimeTicks === pinned.browserStartTimeTicks
+  );
+}
+
 async function isRelaySessionCurrent(
   session: LiveBrowserSession,
   env: EnvLike,
 ): Promise<boolean> {
   const pinned = session.record.browser;
+  if (pinned === undefined) return false;
   const record = await getSession(session.record.id, env);
-  const browser = record?.browser;
-  return (
-    pinned !== undefined &&
-    record?.status === "running" &&
-    browser?.browserPid === pinned.browserPid &&
-    browser.browserStartTimeTicks === pinned.browserStartTimeTicks &&
-    !(await isSessionInputClosed(record.id, env)) &&
-    processIdentityMatches({
-      pid: pinned.browserPid,
-      startTicks: pinned.browserStartTimeTicks,
-    })
-  );
+  if (record?.status !== "running" || !sameBrowser(record.browser, pinned)) return false;
+  if (await isSessionInputClosed(record.id, env)) return false;
+  return processIdentityMatches({
+    pid: pinned.browserPid,
+    startTicks: pinned.browserStartTimeTicks,
+  });
 }
 
 /**
