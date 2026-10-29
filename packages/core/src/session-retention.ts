@@ -23,6 +23,10 @@ const LEASE_RECORD = new RegExp(`^(human\\.lease\\.json|\\.human-lease-${UUID})$
 const LEASE_TEMP = new RegExp(`^(?:\\.\\.human-lease-${UUID}|\\.human\\.lease\\.json)\\.tmp-(\\d+)-\\d+$`);
 const PERMIT_RECORD = new RegExp(`^(${UUID}\\.json|\\.agent-permit-${UUID})$`);
 const PERMIT_TEMP = new RegExp(`^\\.\\.agent-permit-${UUID}\\.tmp-(\\d+)-\\d+$`);
+// publishCoordinationIdentity's staging file in the sessions root, and the
+// writeFileAtomic temp for it, which carries its writer pid.
+const IDENTITY_STAGING = new RegExp(`^\\.takeover-identity-${UUID}$`);
+const IDENTITY_TEMP = new RegExp(`^\\.\\.takeover-identity-${UUID}\\.tmp-(\\d+)-\\d+$`);
 
 // A temp whose writer may still run belongs to an overlapping retain. If a
 // live process reuses the dead writer's pid, the orphan stays and blocks
@@ -245,6 +249,25 @@ async function pruneCoordinationDirectory(root: DirHandle, dir: DirHandle, id: s
   });
 }
 
+/** The files prune checked in a retained directory, and its teardown time. */
+type Retained = { files: string[]; stoppedAt: number };
+
+async function removeRetainedDirectory(
+  root: DirHandle, dir: DirHandle, id: string, roots: string[],
+  { files, stoppedAt }: Retained, permits?: [DirHandle, StaleFiles],
+): Promise<boolean> {
+  if (await registryHasSession(id, roots)) return false;
+  const current = await root.lstatChild(id);
+  if (current?.dev !== dir.stat.dev || current.ino !== dir.stat.ino) return false;
+  if (permits !== undefined && !await removePermits(dir, ...permits)) return false;
+  await carryStoppedAt(root, id, stoppedAt);
+  for (const name of files.filter((name) => name !== MARKER)) await dir.unlinkChild(name);
+  await dir.unlinkChild(MARKER);
+  // The sibling markers stay until the horizon: late callers for this id
+  // keep failing closed, and createSession never reuses a reserved id.
+  return rmdirIfEmpty(root.resolve(id));
+}
+
 async function pruneDirectory(root: DirHandle, id: string, roots: string[], age: number): Promise<boolean> {
   if (await registryHasSession(id, roots)) return false;
   return withDirHandle(root.openChild(id), async (dir) => {
@@ -252,20 +275,35 @@ async function pruneDirectory(root: DirHandle, id: string, roots: string[], age:
     if (stoppedAt === undefined) return pruneCoordinationDirectory(root, dir, id, roots);
     if (Date.now() - stoppedAt < age) return false;
     const names = await dir.readEntryNames();
+    const files = names.filter((name) => name !== "permits");
     // Unknown data is not ours to delete. Never traverse a child directory or link.
-    for (const name of names) {
+    for (const name of files) {
       if (name !== MARKER && !LOG_FILE.test(name)) return false;
       if ((await dir.lstatChild(name))?.isFile() !== true) return false;
     }
-    if (await registryHasSession(id, roots)) return false;
-    await carryStoppedAt(root, id, stoppedAt);
-    for (const name of names.filter((name) => name !== MARKER)) await dir.unlinkChild(name);
-    await dir.unlinkChild(MARKER);
-    await fs.promises.rmdir(root.resolve(id));
-    // The sibling markers stay until the horizon: late callers for this id
-    // keep failing closed, and createSession never reuses a reserved id.
-    return true;
+    if (files.length === names.length) return removeRetainedDirectory(root, dir, id, roots, { files, stoppedAt });
+    // A first permit caller that stalled only through teardown builds permits/
+    // in the retained directory, then fails closed.
+    if ((await dir.lstatChild("permits"))?.isDirectory() !== true) return false;
+    return withDirHandle(dir.openChild("permits"), async (permits) => {
+      const permitFiles = await stalePermitFiles(permits);
+      return permitFiles !== undefined &&
+        removeRetainedDirectory(root, dir, id, roots, { files, stoppedAt }, [permits, permitFiles]);
+    });
   });
+}
+
+/**
+ * The staging file names no writer, so age alone decides. Its writer links it
+ * right after the write; a writer that stalls past the horizon and then finds
+ * it gone fails on the link and publishes nothing.
+ */
+async function staleIdentityStaging(root: DirHandle, name: string): Promise<fs.Stats | undefined> {
+  const temp = IDENTITY_TEMP.exec(name);
+  if (temp === null && !IDENTITY_STAGING.test(name)) return undefined;
+  const stat = await root.lstatChild(name);
+  if (stat?.isFile() !== true || !isOld(stat)) return undefined;
+  return temp !== null && isPidAlive(Number(temp[1])) ? undefined : stat;
 }
 
 async function sessionEntryExists(id: string, roots: string[]): Promise<boolean> {
@@ -307,6 +345,7 @@ async function pruneMarkers(root: DirHandle, id: string, roots: string[]): Promi
  * A directory without stopped.json that holds only stale coordination files
  * goes after the horizon.
  * Markers of a gone session go once they are older than the horizon.
+ * So do takeover identity staging files a killed writer left.
  */
 export async function pruneSessionLogs(
   olderThanMs: number,
@@ -327,6 +366,10 @@ export async function pruneSessionLogs(
       // After the directories, so a pruned one has carried its teardown time.
       const markerIds = new Set(names.flatMap((name) => SESSION_MARKER.exec(name)?.[1] ?? []));
       for (const id of markerIds) await pruneMarkers(root, id, roots);
+      for (const name of names) {
+        const stat = await staleIdentityStaging(root, name);
+        if (stat !== undefined) await unlinkStaleFile(root, name, stat);
+      }
     });
   }
   return pruned;
