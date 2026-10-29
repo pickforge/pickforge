@@ -221,6 +221,8 @@ describe.skipIf(!available)("native viewer host", () => {
     expect(validNativeViewerHost({ ...host, socket: "/tmp/foreign.sock" }, sessionId, env)).toBe(false);
     await expect(requestNativeViewerHost({ ...host!, startTicks: host!.startTicks + 1 }, { op: "status" })).rejects.toThrow("identity");
     await expect(requestNativeViewerHost({ ...host!, socketIno: 1 }, { op: "status" })).rejects.toThrow("socket");
+    await expect(requestNativeViewerHost({ ...host!, socketCtimeNs: "1" }, { op: "status" })).rejects.toThrow("socket");
+    await expect(requestNativeViewerHost({ ...host!, socketCtimeNs: undefined }, { op: "status" })).rejects.toThrow("socket");
     await withViewerDir(sessionId, env, false, (directory) => writeViewerPrivateFile(directory, "host.json", JSON.stringify({ ...host, viewerStartTicks: host!.viewerStartTicks + 1 })));
     expect(await findNativeViewerHost(sessionId, env)).toBeUndefined();
     await expect(stopNativeViewerHost(sessionId, env)).rejects.toThrow("identity differs");
@@ -263,19 +265,42 @@ describe.skipIf(!available)("native viewer host", () => {
     expect(fs.existsSync(readiness)).toBe(false);
   }, 20_000);
 
-  it("refuses dead readiness whose socket was replaced", async () => {
+  it.each(["stop", "remove"])("refuses dead readiness whose socket was replaced on %s", async (cleanup) => {
     const previous = await start();
     await stopNativeViewerHost(sessionId, env);
     fs.rmSync(previous.socket, { force: true });
     const server = net.createServer();
     await new Promise<void>((resolve) => server.listen(previous.socket, resolve));
     try {
-      // ext4 gives the replacement the freed inode number, so record one it cannot have (#404).
-      const stale = { ...previous, socketIno: fs.lstatSync(previous.socket).ino + 1 };
+      // ext4 gives the replacement the freed inode number (#404); record that on any filesystem.
+      const replaced = fs.lstatSync(previous.socket);
+      const stale = { ...previous, socketIno: replaced.ino, socketDev: replaced.dev };
       await withViewerDir(sessionId, env, false, (directory) => writeViewerPrivateFile(directory, "host.json", JSON.stringify(stale)));
-      await expect(stopNativeViewerHost(sessionId, env)).rejects.toThrow("Unsafe stale viewer socket");
+      const cleaned = cleanup === "stop" ? stopNativeViewerHost(sessionId, env) : removeViewerLaunch(sessionId, previous.launchId, env);
+      await expect(cleaned).rejects.toThrow("Unsafe stale viewer socket");
       expect(fs.existsSync(previous.socket)).toBe(true);
     } finally { await new Promise((resolve) => server.close(resolve)); }
+  }, 20_000);
+
+  it("keeps the socket of dead readiness without a ctime, then starts again", async () => {
+    const previous = await start();
+    await stopNativeViewerHost(sessionId, env);
+    // Leave a socket with no listener, as a dead older host does. Node removes
+    // a listening socket's path on close, so keep a second link to it.
+    const server = net.createServer();
+    await new Promise<void>((resolve) => server.listen(previous.socket, resolve));
+    fs.linkSync(previous.socket, `${previous.socket}.keep`);
+    await new Promise((resolve) => server.close(resolve));
+    fs.renameSync(`${previous.socket}.keep`, previous.socket);
+    const { socketCtimeNs: _, ...legacy } = previous;
+    await withViewerDir(sessionId, env, false, (directory) => writeViewerPrivateFile(directory, "host.json", JSON.stringify(legacy)));
+    await stopNativeViewerHost(sessionId, env);
+    expect(fs.existsSync(path.join(sessionViewerDir(sessionId, env), "host.json"))).toBe(false);
+    expect(fs.lstatSync(previous.socket).isSocket()).toBe(true);
+    // The next start replaces the leftover socket and records its own.
+    const next = await start();
+    expect(next.launchId).not.toBe(previous.launchId);
+    expect(fs.lstatSync(next.socket, { bigint: true }).ctimeNs.toString()).toBe(next.socketCtimeNs);
   }, 20_000);
 
   it.each([{ readyPid: 1 }, { readyVersion: "0.0.0" }, { noReady: true }])("cleans failed readiness %j", async (behavior) => {

@@ -8,7 +8,7 @@ import {
   acquireHumanLease, releaseHumanLease, readHumanLease, readActions, readProcessIdentity,
   projectConfigPath, resolveRunStorage, type EnvLike,
 } from "@pickforge/lab-core";
-import { withViewerDir, writeViewerPrivateFile, type NativeViewerHostIdentity, type ViewerControlEvent } from "@pickforge/lab-desktop-linux";
+import { withViewerDir, writeViewerPrivateFile, lstatViewerSocket, viewerSocketIdentity, type NativeViewerHostIdentity, type ViewerControlEvent } from "@pickforge/lab-desktop-linux";
 import { registerTakeoverTools } from "../src/tools/takeover.js";
 import type { ViewerLauncher } from "../src/context.js";
 import { connectLab, makeLabDirs, MINI_PNG, parseToolJson, writeDesktopSessionRecord, writeScript, type ConnectedLab, type LabDirs } from "./helpers.js";
@@ -87,11 +87,11 @@ async function openFakeHost(beforeReply?: () => Promise<void>): Promise<{
     server.listen(directory.resolve("host.sock"));
     await once(server, "listening");
     fs.chmodSync(directory.resolve("host.sock"), 0o600);
-    const stats = (await directory.lstatChild("host.sock"))!;
+    const stats = (await lstatViewerSocket(directory.resolve("host.sock")))!;
     const identity = readProcessIdentity(process.pid)!;
     host = { version: "0.6.0", sessionId: id, launchId: "a".repeat(32), ...identity,
       viewerPid: identity.pid, viewerStartTicks: identity.startTicks,
-      socket: path.join(dirs.home, "sessions", id, "viewer", "host.sock"), socketIno: stats.ino, socketDev: stats.dev };
+      socket: path.join(dirs.home, "sessions", id, "viewer", "host.sock"), ...viewerSocketIdentity(stats) };
     await writeViewerPrivateFile(directory, "host.json", JSON.stringify(host));
   });
   return { host, calls, emit, close: async () => {
