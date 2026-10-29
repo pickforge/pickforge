@@ -1,6 +1,1 @@
 # Scan all dependency findings. Each exception needs a reason and an expiry.
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2026-0192"
-ignoreUntil = 2027-01-31
-reason = "ttf-parser is unmaintained, with no known vulnerability. The viewer's fontdb uses it to read installed host fonts only. Replacement tracked in #443."
