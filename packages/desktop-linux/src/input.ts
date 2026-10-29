@@ -321,7 +321,8 @@ function assertOnScreen(points: PointerPoint[], screen: OwnedDisplayScreen | und
  * with the check typing uses (pickforge/pickforge#219), and every pointer
  * point is on that server's current screen. xdotool connects by display
  * number, so a server that replaces the owned Xvfb between the check and that
- * connection, a few milliseconds, can still receive the input.
+ * connection, a few milliseconds, can still receive the input. A RandR resize
+ * in that window can likewise move a point that was on screen to the new edge.
  */
 async function runXdotool(
   sessionId: string,
