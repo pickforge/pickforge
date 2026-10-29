@@ -7,7 +7,10 @@ import { acquireHumanLease, createSession, processIdentityMatches, readProcessId
 import {
   startXvfb, stopXvfb, findOnPath, findNativeViewerHost, requestNativeViewerHost, type XvfbHandle,
 } from "@pickforge/lab-desktop-linux";
-import { runDesktopClick, runDesktopDoubleClick, runDesktopDrag } from "../src/commands/desktop.js";
+import { execFileSync } from "node:child_process";
+import {
+  runDesktopClick, runDesktopDoubleClick, runDesktopDrag, runDesktopMove, runDesktopScroll,
+} from "../src/commands/desktop.js";
 import { runNativeViewerHost } from "../src/viewer/native-host.js";
 import { createViewerFakes, type ViewerFakes } from "./viewer-fakes.js";
 import { unusedTestDisplay } from "../../desktop-linux/test/test-resources.js";
@@ -93,4 +96,35 @@ describe.skipIf(!available)("desktop click pulse", () => {
     expect(await runDesktopDoubleClick("12", "34", opts())).toBe(1);
     expect(await settledPulses()).toEqual([]);
   }, 20_000);
+
+  it("refuses points past the screen with no X event or pulse, and accepts the last pixel", async () => {
+    const pointer = () => execFileSync("xdotool", ["getmouselocation", "--shell"], {
+      env: { ...process.env, DISPLAY: display.display }, encoding: "utf8",
+    }).split("\n").slice(0, 2).join(" ");
+    const lastError = (): string => {
+      const calls = vi.mocked(console.log).mock.calls;
+      return (JSON.parse(String(calls[calls.length - 1]![0])) as { errors: string[] }).errors.join("; ");
+    };
+    const commands: Record<string, (x: string, y: string) => Promise<number>> = {
+      click: (x, y) => runDesktopClick(x, y, opts()),
+      "double click": (x, y) => runDesktopDoubleClick(x, y, opts()),
+      move: (x, y) => runDesktopMove(x, y, opts()),
+      scroll: (x, y) => runDesktopScroll("0", "1", { ...opts(), at: `${x},${y}` }),
+      "drag start": (x, y) => runDesktopDrag(x, y, "5", "5", { ...opts(), duration: "0" }),
+      "drag end": (x, y) => runDesktopDrag("5", "5", x, y, { ...opts(), duration: "0" }),
+    };
+    for (const [name, run] of Object.entries(commands)) {
+      expect(await runDesktopMove("100", "100", opts()), name).toBe(0);
+      const before = pointer();
+      expect(before).toBe("X=100 Y=100");
+      for (const [x, y, value] of [["640", "0", "640"], ["0", "480", "480"], ["32768", "100", "32768"], ["100", "65537", "65537"]]) {
+        expect(await run(x!, y!), `${name} ${x},${y}`).toBe(1);
+        expect(lastError()).toMatch(new RegExp(` ${value} is outside the 640x480 screen \\(x 0-639, y 0-479\\); no input was sent$`));
+        expect(pointer(), `${name} ${x},${y}`).toBe(before);
+      }
+      expect(await run("639", "479"), name).toBe(0);
+      expect(pointer(), name).toBe(name === "drag start" ? "X=5 Y=5" : "X=639 Y=479");
+    }
+    expect(await settledPulses(2)).toEqual([{ x: 639, y: 479 }, { x: 639, y: 479 }]);
+  }, 30_000);
 });
