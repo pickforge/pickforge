@@ -14,6 +14,7 @@ import {
   writeFakeChrome,
 } from "../../browser/test/fakes.js";
 import { ensureCliBuilt } from "./build-once.js";
+import { cliSpawnTimeout } from "./spawn-timeout.js";
 
 const cliPath = fileURLToPath(new URL("../dist/pickforge-lab.js", import.meta.url));
 const mcpPath = fileURLToPath(
@@ -165,7 +166,7 @@ describe.skipIf(!hasXvfb)("built CLI browser lifecycle", () => {
     expect(text.stdout).toContain("healthy  0 bytes");
     expect(text.stdout).toContain('linked  Refusing browser profile "linked": it is a symlink');
     expect(text.stdout).not.toContain("undefined");
-  });
+  }, cliSpawnTimeout(2));
 
   it("creates, lists, refuses held deletion, and deletes a named profile with explicit consent", async () => {
     const create = () => runCli(["session", "create", "--type", "browser", "--profile", "ops", "--json"]);
@@ -192,7 +193,7 @@ describe.skipIf(!hasXvfb)("built CLI browser lifecycle", () => {
     expect(deleted.code).toBe(0);
     expect(parseJson(deleted).deleted).toBe("ops");
     expect(fs.existsSync(first.profileDir)).toBe(false);
-  }, 60_000);
+  }, cliSpawnTimeout(9));
 
   it("rejects invalid names and profiles on other session types", () => {
     const invalid = runCli(["session", "create", "--type", "browser", "--profile", "../ops", "--json"]);
@@ -201,7 +202,7 @@ describe.skipIf(!hasXvfb)("built CLI browser lifecycle", () => {
     const desktop = runCli(["session", "create", "--type", "desktop", "--profile", "ops", "--json"]);
     expect(desktop.code).toBe(1);
     expect(parseJson(desktop).errors.join()).toContain("--profile requires --type browser");
-  });
+  }, cliSpawnTimeout(2));
 
   it(
     "creates, reports, lists, and destroys a browser session from the bundled CLI",
