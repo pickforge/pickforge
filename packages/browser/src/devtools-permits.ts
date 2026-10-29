@@ -182,26 +182,28 @@ class PermitGate implements DevtoolsPermitGate {
       this.closedInput.resolve();
       return;
     }
-    if (!this.holdsPermits()) return;
+    // A lease read covers only the calls admitted before it. A later call
+    // read the lease itself, so a stale read must not release its permit.
+    const held = this.heldCalls();
+    if (held.length === 0) return;
     if ((await checkHumanLeaseBusy(this.sessionId, this.env)) !== undefined) {
-      await this.releaseHeld();
+      await this.releaseCalls(held);
     }
   }
 
-  private holdsPermits(): boolean {
-    for (const queue of this.calls.values()) {
-      if (queue.some((call) => call.permit !== undefined)) return true;
-    }
-    return false;
+  private heldCalls(): ForwardedCall[] {
+    return [...this.calls.values()].flat().filter((call) => call.permit !== undefined);
   }
 
   private async releaseHeld(): Promise<void> {
+    await this.releaseCalls(this.heldCalls());
+  }
+
+  private async releaseCalls(calls: ForwardedCall[]): Promise<void> {
     const held: AgentPermit[] = [];
-    for (const queue of this.calls.values()) {
-      for (const call of queue) {
-        if (call.permit !== undefined) held.push(call.permit);
-        call.permit = undefined;
-      }
+    for (const call of calls) {
+      if (call.permit !== undefined) held.push(call.permit);
+      call.permit = undefined;
     }
     const done = Promise.all(held.map((permit) => releaseAgentPermit(permit).catch(() => {})));
     this.releases = Promise.all([this.releases, done]);

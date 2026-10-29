@@ -5,7 +5,7 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import { PassThrough, Readable, Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AGENT_PERMITS_DIR,
   acquireHumanLease,
@@ -38,9 +38,24 @@ import {
   type RelaySignalSource,
 } from "../src/index.js";
 
+// A test can pause a lease check of the relay right after its read.
+const leaseRead = vi.hoisted(() => ({ after: undefined as ((lease: unknown) => Promise<void>) | undefined }));
+vi.mock("@pickforge/lab-core", async (importOriginal) => {
+  const core = await importOriginal<typeof import("@pickforge/lab-core")>();
+  return {
+    ...core,
+    checkHumanLeaseBusy: async (...args: Parameters<typeof core.checkHumanLeaseBusy>) => {
+      const lease = await core.checkHumanLeaseBusy(...args);
+      await leaseRead.after?.(lease);
+      return lease;
+    },
+  };
+});
+
 const temporaryDirectories: string[] = [];
 
 afterEach(() => {
+  leaseRead.after = undefined;
   for (const dir of temporaryDirectories.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -1169,6 +1184,34 @@ describe("DevTools relay agent permits", () => {
     await gate.release({ jsonrpc: "2.0", id: 5, result: {} });
     expect(gate.takeUnanswered()).toEqual([]);
     await gate.close();
+  });
+
+  it("keeps the permit of a call admitted after a lease the watcher read has ended", async () => {
+    const env = registryEnv();
+    const id = (await liveSession(env)).record.id;
+    const gate = createDevtoolsPermitGate(id, env, 10);
+    expect(await gate.intercept({ jsonrpc: "2.0", id: 1, method: "tools/call" })).toBeUndefined();
+    // The watcher reads the lease, then waits while the call is answered,
+    // takeover ends and a new call is admitted.
+    const read = createDeferred<void>();
+    const resume = createDeferred<void>();
+    leaseRead.after = async (lease) => {
+      if (lease === undefined) return;
+      leaseRead.after = undefined;
+      read.resolve();
+      await resume.promise;
+    };
+    const leased = acquireHumanLease(id, env);
+    await read.promise;
+    await gate.release({ jsonrpc: "2.0", id: 1, result: {} });
+    await releaseHumanLease(id, (await leased).leaseId, env);
+    expect(await gate.intercept({ jsonrpc: "2.0", id: 2, method: "tools/call" })).toBeUndefined();
+    expect(permitCount(id, env)).toBe(1);
+    resume.resolve();
+    await delay(50);
+    expect(permitCount(id, env)).toBe(1);
+    await gate.close();
+    expect(permitCount(id, env)).toBe(0);
   });
 
   it("releases every permit when the child exits with calls unanswered", async () => {
