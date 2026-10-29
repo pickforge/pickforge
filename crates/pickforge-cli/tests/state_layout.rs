@@ -564,6 +564,34 @@ fn a_socket_marker_is_refused_instead_of_blocking() {
 /// 40 × 5 ms window (#104 R6).
 #[test]
 fn a_slow_publication_window_is_waited_out_rather_than_refused() {
+    // The reader waits a publication out for at most 1 s. A runner that
+    // stalls the publisher itself past that makes a refusal correct, so only
+    // that attempt runs again (#468). Refusing a publication that ended in
+    // time fails at once.
+    for _ in 0..5 {
+        // Stalled for 400 ms, twice the old window.
+        let (read, published) = race_slow_publisher(std::time::Duration::from_millis(400));
+        match read {
+            Ok(version) => {
+                assert_eq!(version, Some(1));
+                return;
+            }
+            Err(error) if published < std::time::Duration::from_millis(900) => panic!(
+                "refused a publication whose staging entry was gone {published:?} after the \
+                 read began: {error}"
+            ),
+            Err(_) => {}
+        }
+    }
+    panic!("the publisher overran the settle budget in all 5 attempts");
+}
+
+/// Reads a marker whose publisher unlinks its staging entry after `stall`,
+/// between its `link(2)` and that unlink. Also returns how long after the read
+/// began the staging entry was gone.
+fn race_slow_publisher(
+    stall: std::time::Duration,
+) -> (Result<Option<u32>, state::LayoutError>, std::time::Duration) {
     let temp = TempDir::new().unwrap();
     let state_dir = temp.path().join("projects").join("app-0000");
     std::fs::create_dir_all(&state_dir).unwrap();
@@ -571,15 +599,14 @@ fn a_slow_publication_window_is_waited_out_rather_than_refused() {
     std::fs::write(&staging, state::layout_marker_bytes()).unwrap();
     std::fs::hard_link(&staging, state_dir.join("layout.json")).unwrap();
 
-    // A publisher stalled for 400 ms — twice the old window — between its
-    // `link(2)` and the unlink of its staging entry.
+    let began = std::time::Instant::now();
     let publisher = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(400));
+        std::thread::sleep(stall);
         std::fs::remove_file(&staging).unwrap();
+        began.elapsed()
     });
-
-    assert_eq!(state::read_layout(&state_dir).unwrap(), Some(1));
-    publisher.join().unwrap();
+    let read = state::read_layout(&state_dir);
+    (read, publisher.join().unwrap())
 }
 
 /// A second name that is *not* a publication in flight is a planted hard link
