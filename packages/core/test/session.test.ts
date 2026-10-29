@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -257,6 +257,24 @@ describe("session registry", () => {
     await fs.promises.mkdir(path.dirname(file), { recursive: true });
     await fs.promises.writeFile(file, "{ not json", "utf8");
     await expect(getSession("andr-deadbeef", env)).rejects.toThrow(file);
+  });
+
+  it("getSession refuses a FIFO record without blocking", async () => {
+    const file = path.join(home, "sessions", "desk-f1f0f1f0.json");
+    await fs.promises.mkdir(path.dirname(file), { recursive: true });
+    expect(spawnSync("mkfifo", [file]).status).toBe(0);
+    const reading = getSession("desk-f1f0f1f0", env).then(
+      () => "read",
+      (error: Error) => error.message,
+    );
+    const result = await Promise.race([reading, delay(1000, "timed out")]);
+    // Release a reader that blocked on the FIFO, so a failure cannot hang.
+    try {
+      fs.closeSync(fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK));
+    } catch {
+      // No reader is waiting.
+    }
+    expect(result).toBe(`Session record at ${file} is not a regular file`);
   });
 
   it("updateSession cannot change id, type, or createdAt", async () => {

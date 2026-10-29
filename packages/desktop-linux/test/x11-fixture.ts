@@ -1,7 +1,9 @@
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
-import { vi } from "vitest";
+import { performance } from "node:perf_hooks";
+import { expect, vi } from "vitest";
 
 interface Client { socket: net.Socket; buffer: Buffer; setup: boolean; sequence: number }
 export type ReplyFault = (opcode: number, reply: Buffer, client: net.Socket) => Buffer | undefined;
@@ -262,4 +264,25 @@ export function installProcessIdentityFixture(root: string, pid: number, startTi
   vi.spyOn(fs, "readFileSync").mockImplementation(((file: fs.PathOrFileDescriptor, ...args: unknown[]) =>
     Reflect.apply(read, fs, [String(file) === `/proc/${pid}/stat` ? fixture : file, ...args])) as typeof fs.readFileSync);
   return fixture;
+}
+
+/** Replace a session record with a FIFO and time `action` against a short
+ * limit. A reader blocked on the FIFO is released afterwards with EOF.
+ */
+export async function withFifoRecord<T>(recordPath: string, action: () => Promise<T>): Promise<{ result: T | "timed out"; elapsed: number }> {
+  fs.rmSync(recordPath);
+  expect(spawnSync("mkfifo", [recordPath]).status).toBe(0);
+  const start = performance.now();
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const result = await Promise.race([
+      action(),
+      new Promise<"timed out">((resolve) => { timer = setTimeout(() => resolve("timed out"), 1000); }),
+    ]);
+    return { result, elapsed: performance.now() - start };
+  } finally {
+    clearTimeout(timer);
+    try { fs.closeSync(fs.openSync(recordPath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK)); }
+    catch { /* No reader is waiting. */ }
+  }
 }

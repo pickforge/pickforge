@@ -212,7 +212,14 @@ export async function getSession(
   const filePath = sessionPathForRead(id, env);
   let raw: string;
   try {
-    raw = await fs.promises.readFile(filePath, "utf8");
+    if (!(await fs.promises.stat(filePath)).isFile()) {
+      throw new Error(`Session record at ${filePath} is not a regular file`);
+    }
+    // A FIFO swapped in after the check must still not block the read.
+    raw = await fs.promises.readFile(filePath, {
+      encoding: "utf8",
+      flag: fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    });
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT" || code === "ENOTDIR") {
