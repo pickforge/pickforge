@@ -1162,6 +1162,8 @@ describe("DevTools relay agent permits", () => {
     input.write(call(3, { exit: true }));
     await expect(run).resolves.toEqual({ code: 3, signal: null });
     expect(permitCount(session.record.id, env)).toBe(0);
+    // The client still holds the input open; the relay lets go so it can exit.
+    expect(input.destroyed).toBe(true);
   });
 
   it("releases every permit once the child exits, even when the output cannot drain", async () => {

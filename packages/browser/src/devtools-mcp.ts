@@ -766,8 +766,7 @@ function throwIfRelayPumpsFailed(
  * Teardown closed session input while forwarded calls were unanswered: stop
  * the child, release the permits once it exited and so no call can reach
  * Chrome, then answer each unanswered call after the child's output settled,
- * so no late child response can follow that answer. The input is still open,
- * and nothing reads it any more, so release it and let the relay exit.
+ * so no late child response can follow that answer.
  */
 async function endRelayForClosedInput(
   child: RelayChild,
@@ -775,7 +774,7 @@ async function endRelayForClosedInput(
   exited: Promise<RelayExit>,
   timeoutMs: number,
   permits: DevtoolsPermitGate,
-  { input, output }: { input: Readable; output: Writable },
+  output: Writable,
 ): Promise<RelayExit> {
   pumps.inputAbort.abort();
   const stopped = await stopChild(child, exited, timeoutMs);
@@ -784,7 +783,6 @@ async function endRelayForClosedInput(
   for (const message of permits.takeUnanswered()) {
     await writeWithBackpressure(output, serializeJsonRpcMessage(message)).catch(() => {});
   }
-  input.destroy();
   return stopped;
 }
 
@@ -832,7 +830,7 @@ export async function runDevtoolsMcpRelay(
         exited,
         timeoutMs,
         outcome.permits,
-        { input, output },
+        output,
       );
     }
     if (outcome.kind === "child-error") {
@@ -858,6 +856,9 @@ export async function runDevtoolsMcpRelay(
     return await finishRelayExit(outcome, pumps, termination);
   } finally {
     detachRelaySignalHandlers(termination);
+    // Every path settled the input pump, so nothing reads the input any more.
+    // An open one, such as the client's stdin, would keep the relay alive.
+    input.destroy();
     // Every exit releases the held permits. A relay killed outright leaves
     // files whose dead owner the next drain sweeps.
     await opts.permits?.close();
