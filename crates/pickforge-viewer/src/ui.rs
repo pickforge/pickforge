@@ -506,14 +506,25 @@ impl Text {
             clusters.reverse();
         }
         let tracking = if run.font == 0 { TRACKING * px } else { 0.0 };
-        for (id, x, y, advance) in clusters.into_iter().flatten() {
-            out.push(Placed {
-                font: run.font,
-                id,
-                x: *pen + x,
-                y,
-            });
-            *pen += advance + tracking;
+        // Whole-pixel cluster advances space glyphs evenly. Glyphs draw at
+        // whole pixels, and a fractional pen left an empty column now and
+        // then. Inside a cluster, glyphs keep their shaped places, so a mark
+        // stays where the font puts it on its base. A cluster that advances
+        // nothing, such as a lone mark, takes no tracking either.
+        for cluster in clusters {
+            let mut advance = 0.0;
+            for (id, x, y, glyph_advance) in cluster {
+                out.push(Placed {
+                    font: run.font,
+                    id,
+                    x: *pen + advance + x,
+                    y,
+                });
+                advance += glyph_advance;
+            }
+            if advance != 0.0 {
+                *pen += (advance + tracking).round();
+            }
         }
     }
 
@@ -1536,6 +1547,73 @@ mod tests {
             runs("e\u{301}x", font_of),
             vec![("e\u{301}x", 0, Script::Latin)]
         );
+    }
+
+    #[test]
+    fn a_long_word_draws_with_even_spacing() {
+        let mut text = Text::new();
+        for px in [12.0, 18.0, 24.0] {
+            for word in ["e\u{301}".repeat(80), "\u{e9}".repeat(80)] {
+                let (glyphs, _) = text.layout(&word, px);
+                let steps: Vec<f32> = glyphs.windows(2).map(|w| w[1].x - w[0].x).collect();
+                assert!(
+                    steps.iter().all(|&s| s == steps[0] && s.fract() == 0.0),
+                    "{px}: {steps:?}"
+                );
+            }
+        }
+        // Marks advance nothing, so they take no tracking at any size.
+        for px in [12.0, 24.0, 36.0] {
+            let plain = text.layout("ab", px).1;
+            assert_eq!(text.layout("a\u{301}\u{302}b", px).1, plain, "{px}");
+        }
+        // Rounding a fractional advance once left an empty column about
+        // every 31 glyphs.
+        let (w, h) = (800, 30);
+        let mut buf = vec![0u32; w * h];
+        let mut canvas = Canvas::new(
+            &mut buf,
+            w as u32,
+            h as u32,
+            Rect::new(0, 0, w as u32, h as u32),
+        );
+        text.draw(
+            &mut canvas,
+            &"e\u{301}".repeat(80),
+            10.0,
+            15.0,
+            12.0,
+            0xffffff,
+        );
+        let ink: Vec<bool> = (0..w)
+            .map(|x| (0..h).any(|y| buf[y * w + x] != 0))
+            .collect();
+        let first = ink.iter().position(|&i| i).unwrap();
+        let last = ink.iter().rposition(|&i| i).unwrap();
+        assert!(
+            ink[first..=last].iter().all(|&i| i),
+            "an empty column inside the word"
+        );
+    }
+
+    #[test]
+    fn a_mark_keeps_its_place_on_its_base() {
+        let mut text = Text::new();
+        for px in [12.0, 18.0, 26.0, 36.0] {
+            let mut shaper = text.shape.builder(text.font).size(px).build();
+            shaper.add_str("x\u{301}");
+            let mut shaped = Vec::new();
+            shaper.shape_with(|c| shaped.extend(c.glyphs.iter().map(|g| (g.x, g.advance))));
+            let [(base, advance), (mark, _)] = shaped[..] else {
+                panic!("{px}: {shaped:?}");
+            };
+            let (glyphs, _) = text.layout("x\u{301}", px);
+            let placed = glyphs[1].x - glyphs[0].x;
+            assert!(
+                (placed - (advance + mark - base)).abs() < 1e-3,
+                "{px}: {placed}"
+            );
+        }
     }
 
     /// Glyph ids of `text` in visual order, with their fonts.
