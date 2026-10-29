@@ -551,11 +551,8 @@ impl Text {
                 .then(|| self.font_of(&drawn))
                 .flatten()
                 .map(|i| self.font(i));
-            let draws = |c: char| {
-                c.category() == Category::Format
-                    || ignorable(c)
-                    || font.is_some_and(|font| font.charmap().map(c) != 0)
-            };
+            let silent = |c: char| c.category() == Category::Format || ignorable(c);
+            let draws = |c: char| silent(c) || font.is_some_and(|font| font.charmap().map(c) != 0);
             let kept = cluster.iter().take_while(|&&c| draws(c)).count();
             if kept > 0 {
                 out.extend(&cluster[..kept]);
@@ -565,6 +562,9 @@ impl Text {
                 out.push_str(ELLIPSIS);
                 missing = true;
             }
+            // Characters after a lost mark that draw nothing stay, so a bidi
+            // override or isolate still closes.
+            out.extend(cluster[kept..].iter().filter(|&&c| silent(c)));
         }
         out
     }
@@ -1444,6 +1444,11 @@ mod tests {
         // A mark after the lost one goes too, or it would mark the ellipsis.
         assert_eq!(text.displayable("e\u{1ab0}\u{301}x"), "e\u{2026}x");
         assert_eq!(text.displayable("e\u{301}"), "e\u{301}");
+        // A bidi control after the lost mark stays, so the isolate closes.
+        assert_eq!(
+            text.displayable("\u{2067}e\u{1ab0}\u{2069} rest"),
+            "\u{2067}e\u{2026}\u{2069} rest"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
         // Host fonts may draw the mark only apart from its ideograph.
         let mut text = Text::new();
