@@ -465,6 +465,52 @@ export async function writeViewerLaunchRecord(
   );
 }
 
+/**
+ * The identity `host.json` records for `host.sock`. ext4 gives a freed inode
+ * number to the next file, so a replaced socket can keep `ino` and `dev`
+ * (#404). Its ctime is the time it was created or changed, so it differs.
+ */
+export interface ViewerSocketIdentity {
+  socketIno: number;
+  socketDev: number;
+  socketCtimeNs: string;
+}
+
+export function viewerSocketIdentity(stats: fs.BigIntStats): ViewerSocketIdentity {
+  return { socketIno: Number(stats.ino), socketDev: Number(stats.dev), socketCtimeNs: stats.ctimeNs.toString() };
+}
+
+export async function lstatViewerSocket(file: string): Promise<fs.BigIntStats | undefined> {
+  try {
+    return await fs.promises.lstat(file, { bigint: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+/** True when this user's socket has the identity that readiness recorded. */
+export function sameViewerSocket(stats: fs.BigIntStats, host: Record<string, unknown>): boolean {
+  if (!stats.isSocket() || Number(stats.uid) !== process.getuid?.()) return false;
+  return Object.entries(viewerSocketIdentity(stats)).every(([key, value]) => host[key] === value);
+}
+
+/** Remove readiness whose host and viewer are both gone, refusing a replaced socket. */
+export async function removeDeadViewerReadiness(directory: DirHandle, host: Record<string, unknown>): Promise<void> {
+  const socket = await lstatViewerSocket(directory.resolve("host.sock"));
+  if (socket !== undefined) {
+    // Readiness from a host before #404 has no ctime, so it cannot prove the
+    // socket is its own. Keep the socket; the next start replaces it.
+    if (host.socketCtimeNs === undefined) {
+      await directory.unlinkChild("host.json");
+      return;
+    }
+    if (!sameViewerSocket(socket, host)) throw new Error("Unsafe stale viewer socket");
+  }
+  await directory.unlinkChild("host.sock");
+  await directory.unlinkChild("host.json");
+}
+
 async function removeNativeReadiness(directory: DirHandle, record: NativeViewerLaunchRecord): Promise<void> {
   const json = await readViewerPrivateFile(directory, "host.json");
   if (json === undefined) return;
@@ -472,13 +518,7 @@ async function removeNativeReadiness(directory: DirHandle, record: NativeViewerL
   const expected = { sessionId: record.sessionId, launchId: record.launchId, pid: record.hostPid, startTicks: record.hostStartTicks,
     viewerPid: record.viewerPid, viewerStartTicks: record.viewerStartTicks };
   if (!Object.entries(expected).every(([key, value]) => host[key] === value)) return;
-  const socket = await directory.lstatChild("host.sock");
-  if (socket !== undefined) {
-    const safe = [socket.isSocket(), socket.uid === process.getuid?.(), socket.ino === host.socketIno, socket.dev === host.socketDev];
-    if (!safe.every(Boolean)) throw new Error("Unsafe stale viewer socket");
-  }
-  await directory.unlinkChild("host.sock");
-  await directory.unlinkChild("host.json");
+  await removeDeadViewerReadiness(directory, host);
 }
 
 async function removeLaunchIn(
