@@ -613,6 +613,12 @@ fn publication_in_flight(_dir: &PinnedDir, _marker: FileFacts) -> Option<bool> {
 fn read_marker(dir: &PinnedDir) -> Result<Option<Vec<u8>>, LayoutError> {
     let deadline = std::time::Instant::now() + LINK_SETTLE_BUDGET;
     let mut planted = 0;
+    // Temporary diagnostic hooks for #468, never merged.
+    let probe_stall = std::env::var("PROBE_468_READER_STALL_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok());
+    let probe_old = std::env::var_os("PROBE_468_OLD_DEADLINE").is_some();
+    let mut probe_stalled = false;
     loop {
         // Read the clock before the marker, so a refusal at the deadline rests
         // on a reading taken after it. A reader descheduled between a reading
@@ -622,6 +628,17 @@ fn read_marker(dir: &PinnedDir) -> Result<Option<Vec<u8>>, LayoutError> {
             MarkerRead::Absent => return Ok(None),
             MarkerRead::Bytes(bytes) => return Ok(Some(bytes)),
             MarkerRead::MultiplyLinked(facts) => {
+                if let Some(ms) = probe_stall {
+                    if !probe_stalled {
+                        probe_stalled = true;
+                        std::thread::sleep(std::time::Duration::from_millis(ms));
+                    }
+                }
+                let past_deadline = if probe_old {
+                    std::time::Instant::now() >= deadline
+                } else {
+                    past_deadline
+                };
                 planted = match publication_in_flight(dir, facts) {
                     Some(false) => planted + 1,
                     _ => 0,
