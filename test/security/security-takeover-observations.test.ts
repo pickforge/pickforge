@@ -22,7 +22,7 @@ beforeEach(() => {
   resume = path.join(dirs.root, "resume");
   const fixture = path.join(dirs.root, "fixture.png");
   fs.writeFileSync(fixture, MINI_PNG);
-  const pause = `: > "${entered}"\nwhile [ ! -f "${resume}" ]; do /bin/sleep 0.01; done\n`;
+  const pause = `echo $$ > "${entered}"\nwhile [ ! -f "${resume}" ]; do /bin/sleep 0.01; done\n`;
   const capture = pause + `for arg in "$@"; do out="$arg"; done\n/bin/cp "${fixture}" "$out"`;
   for (const tool of ["import", "maim", "scrot"]) writeScript(path.join(dirs.binDir, tool), capture);
   writeScript(path.join(dirs.binDir, "xdotool"), `case "$1" in\n search) ${pause}exit 1 ;;\nesac`);
@@ -44,6 +44,13 @@ function observationArgs(kind: string, baseline: string): Record<string, unknown
   if (kind === "window") return { window: "Absent" };
   if (kind === "changed") return { baseline };
   return { stableMs: 60_000 };
+}
+
+/** True once a process has exited, reaped or not. */
+function ended(pid: number): boolean {
+  let stat: string;
+  try { stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8"); } catch { return true; }
+  return stat.includes(") Z ");
 }
 
 async function startObservation(transport: string, kind: string, baseline: string): Promise<{ done: Promise<unknown> }> {
@@ -70,15 +77,18 @@ it.each([
   fs.writeFileSync(baseline, MINI_PNG);
   const operation = await startObservation(transport, kind, baseline);
   let granted = false;
+  let sampleEndedAtGrant = false;
   let created!: () => void;
   const published = new Promise<void>((resolve) => { created = resolve; });
-  await expect.poll(() => fs.existsSync(entered)).toBe(true);
+  await expect.poll(() => fs.existsSync(entered) && fs.readFileSync(entered, "utf8").trim() !== "").toBe(true);
+  const sample = Number(fs.readFileSync(entered, "utf8"));
   const acquisition = acquireHumanLease(id, env, { _afterCreate: async () => { created(); } })
-    .then((lease) => { granted = true; return lease; });
+    .then((lease) => { granted = true; sampleEndedAtGrant = ended(sample); return lease; });
   try {
     await published;
+    // A wait may cancel its sample when it sees the lease; either way the
+    // grant must come after the sample ended, never while it still runs.
     await sleep(40);
-    expect(granted).toBe(false);
   } finally {
     fs.writeFileSync(resume, "");
     const lease = await acquisition;
@@ -87,4 +97,5 @@ it.each([
   }
   // A long wait releases its permit after this sample and refuses the next.
   expect(granted).toBe(true);
+  expect(sampleEndedAtGrant).toBe(true);
 });

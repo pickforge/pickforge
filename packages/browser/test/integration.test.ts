@@ -6,6 +6,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import {
   getSession,
   isPidAlive,
+  isProcessGroupAlive,
   listProcessGroupMembers,
   readPickforgeEnv,
   type EnvLike,
@@ -144,7 +145,8 @@ describe.skipIf(!ready)("real headed Chrome under Xvfb", () => {
       ]));
       await expect(createBrowserSession(opts)).rejects.toThrow(second.id);
       process.kill(-second.browserPid, "SIGKILL");
-      await vi.waitFor(() => expect(isPidAlive(second.browserPid)).toBe(false));
+      // The profile claim counts the whole process group, which can outlive its leader under load.
+      await vi.waitFor(() => expect(isProcessGroupAlive(second.browserPid)).toBe(false), { timeout: 10_000 });
       expect(fs.lstatSync(path.join(second.profileDir, "SingletonLock")).isSymbolicLink()).toBe(true);
       const third = await createBrowserSession(opts);
       sessions.push(third);
