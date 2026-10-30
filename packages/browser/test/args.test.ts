@@ -2,11 +2,11 @@ import { describe, expect, it } from "vitest";
 import { buildChromeArgs } from "../src/args.js";
 
 describe("buildChromeArgs", () => {
-  it("uses an ephemeral profile, port 0, and explicit loopback", () => {
+  it("uses an ephemeral profile and CDP over a pipe, never a TCP port", () => {
     const args = buildChromeArgs({ profileDir: "/tmp/p" });
     expect(args).toContain("--user-data-dir=/tmp/p");
-    expect(args).toContain("--remote-debugging-port=0");
-    expect(args).toContain("--remote-debugging-address=127.0.0.1");
+    expect(args).toContain("--remote-debugging-pipe");
+    expect(args.some((arg) => /^--remote-debugging-(port|address)/.test(arg))).toBe(false);
     expect(args).toContain("--no-first-run");
     // The start URL is the final positional argument.
     expect(args[args.length - 1]).toBe("about:blank");
@@ -32,8 +32,7 @@ describe("buildChromeArgs", () => {
     expect(args.filter((arg) => arg.startsWith("--disable-features="))).toEqual([
       "--disable-features=Translate,MediaRouter,AutofillServerCommunication,OptimizationHints,OptimizationTargetPrediction,OptimizationGuideModelExecution,NetworkTimeServiceQuerying,SafeBrowsingHashPrefixRealTimeLookups,AimEnabled,PreconnectToSearch",
     ]);
-    expect(args).toContain("--remote-debugging-address=127.0.0.1");
-    expect(args).toContain("--remote-debugging-port=0");
+    expect(args).toContain("--remote-debugging-pipe");
     expect(args).not.toContain("--no-sandbox");
     expect(args.some((arg) => /^(--headless|--proxy-server|--host-resolver-rules)/.test(arg))).toBe(false);
   });
@@ -62,12 +61,6 @@ describe("buildChromeArgs", () => {
     expect(
       buildChromeArgs({ profileDir: "/p", noSandbox: true }),
     ).toContain("--no-sandbox");
-  });
-
-  it("refuses a non-loopback CDP address", () => {
-    expect(() =>
-      buildChromeArgs({ profileDir: "/p", cdpAddress: "0.0.0.0" }),
-    ).toThrow(/non-loopback/);
   });
 
   it("requires a profile directory", () => {

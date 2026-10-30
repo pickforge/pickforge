@@ -14,12 +14,15 @@ import {
 import { findOnPath } from "@pickforge/lab-desktop-linux";
 import {
   browserRuntimeLayout,
+  cdpWebSocketUrl,
   createBrowserSession,
   destroyBrowserSession,
   detectChromeBinary,
   getBrowserSessionStatus,
+  readBrowserSessionCdpEndpoint,
   type BrowserSessionHandle,
 } from "../src/index.js";
+import { readDevToolsBrowserVersion } from "../src/devtools.js";
 
 const hasXvfb = findOnPath("Xvfb") !== null;
 const hasChrome = detectChromeBinary() !== null;
@@ -56,20 +59,11 @@ afterEach(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-async function fetchJson(url: string): Promise<unknown> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5000);
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    return await res.json();
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
+/** Send one browser-level CDP command through the session's own socket. */
 async function browserCdp(session: BrowserSessionHandle, method: string, params = {}): Promise<any> {
-  const version = await fetchJson(`http://127.0.0.1:${session.cdpPort}/json/version`) as { webSocketDebuggerUrl: string };
-  const socket = new WebSocket(version.webSocketDebuggerUrl);
+  const endpoint = await readBrowserSessionCdpEndpoint(session.id, registryEnv);
+  if (endpoint === undefined) throw new Error(`Session ${session.id} has no CDP endpoint`);
+  const socket = new WebSocket(cdpWebSocketUrl(endpoint.socketPath, endpoint.browserPath));
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => { socket.close(); reject(new Error(`CDP ${method} timed out`)); }, 5_000);
     const finish = (error?: Error, result?: unknown) => {
@@ -85,6 +79,93 @@ async function browserCdp(session: BrowserSessionHandle, method: string, params 
       finish(message.error ? new Error(message.error.message) : undefined, message.result);
     });
   });
+}
+
+interface CdpClient {
+  send(method: string, params?: object): Promise<any>;
+  close(): Promise<void>;
+}
+
+/** Open one websocket client on the session's socket for several commands. */
+async function openCdpClient(session: BrowserSessionHandle): Promise<CdpClient> {
+  const endpoint = await readBrowserSessionCdpEndpoint(session.id, registryEnv);
+  if (endpoint === undefined) throw new Error(`Session ${session.id} has no CDP endpoint`);
+  const socket = new WebSocket(cdpWebSocketUrl(endpoint.socketPath, endpoint.browserPath));
+  const replies = new Map<number, (message: any) => void>();
+  socket.on("message", (data) => {
+    const message = JSON.parse(String(data));
+    replies.get(message.id)?.(message);
+  });
+  await new Promise((resolve, reject) => {
+    socket.once("open", resolve);
+    socket.once("error", reject);
+  });
+  let nextId = 1;
+  return {
+    send(method, params = {}) {
+      const id = nextId++;
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`CDP ${method} timed out`)), 10_000);
+        replies.set(id, (message) => {
+          clearTimeout(timer);
+          if (message.error) reject(new Error(message.error.message));
+          else resolve(message.result);
+        });
+        socket.send(JSON.stringify({ id, method, params }));
+      });
+    },
+    async close() {
+      socket.close();
+      if (socket.readyState !== WebSocket.CLOSED) await new Promise((resolve) => socket.once("close", resolve));
+    },
+  };
+}
+
+/** Socket inodes that any process of the group holds open. */
+function groupSocketInodes(pgid: number): Set<string> {
+  const inodes = new Set<string>();
+  for (const pid of listProcessGroupMembers(pgid)) {
+    let fds: string[];
+    try {
+      fds = fs.readdirSync(`/proc/${pid}/fd`);
+    } catch {
+      continue;
+    }
+    for (const fd of fds) {
+      try {
+        const match = /^socket:\[(\d+)\]$/.exec(fs.readlinkSync(`/proc/${pid}/fd/${fd}`));
+        if (match?.[1] !== undefined) inodes.add(match[1]);
+      } catch {
+        // The fd closed while we listed it.
+      }
+    }
+  }
+  return inodes;
+}
+
+/** Loopback and wildcard TCP ports that any process of the group listens on. */
+function listeningTcpPorts(pgid: number): number[] {
+  const inodes = groupSocketInodes(pgid);
+  const ports: number[] = [];
+  for (const table of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+    for (const line of fs.readFileSync(table, "utf8").split("\n").slice(1)) {
+      const fields = line.trim().split(/\s+/);
+      // fields: sl, local address, remote address, state, ..., inode at 9.
+      if (fields[3] !== "0A" || fields[9] === undefined || !inodes.has(fields[9])) continue;
+      ports.push(Number.parseInt(fields[1]!.split(":")[1]!, 16));
+    }
+  }
+  return ports;
+}
+
+async function answersJsonVersion(port: number): Promise<boolean> {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(2_000) });
+    await response.body?.cancel();
+    return response.status === 200;
+  } catch {
+    return false;
+  }
 }
 
 // The "no silent skip" guard: in CI (PICKFORGE_REQUIRE_BROWSER=1) the browser and
@@ -200,7 +281,7 @@ describe.skipIf(!ready)("real headed Chrome under Xvfb", () => {
   );
 
   it(
-    "launches an isolated session, binds CDP to loopback, and scrubs secrets",
+    "launches an isolated session, serves CDP only on its private socket, and scrubs secrets",
     // Real Xvfb + real Chrome startup is timing-sensitive on a saturated host;
     // retry absorbs transient display/startup nondeterminism.
     { timeout: TEST_TIMEOUT_MS, retry: 2 },
@@ -219,11 +300,19 @@ describe.skipIf(!ready)("real headed Chrome under Xvfb", () => {
         expect(status.browserAlive).toBe(true);
         expect(status.alive).toBe(true);
 
-        // CDP answers on loopback and reports a loopback websocket URL.
-        const version = (await fetchJson(
-          `http://127.0.0.1:${session.cdpPort}/json/version`,
-        )) as { webSocketDebuggerUrl?: string };
-        expect(version.webSocketDebuggerUrl).toMatch(/^ws:\/\/127\.0\.0\.1:/);
+        // CDP answers only on the supervisor's 0600 socket in the 0700
+        // session temp directory, and Chrome itself listens on no TCP port
+        // that answers DevTools.
+        const layout = browserRuntimeLayout(session.logDir);
+        expect(fs.statSync(layout.cdpSocketPath).mode & 0o777).toBe(0o600);
+        expect(fs.statSync(layout.cdpEndpointFile).mode & 0o777).toBe(0o600);
+        expect(fs.statSync(layout.tmpDir).mode & 0o777).toBe(0o700);
+        expect(await readDevToolsBrowserVersion(layout.cdpSocketPath)).toMatch(/^[\w.]+\/[\d.]+$/);
+        const ports = listeningTcpPorts(session.browserPid);
+        for (const port of ports) expect(await answersJsonVersion(port), `port ${port}`).toBe(false);
+        const argv = fs.readFileSync(`/proc/${session.browserPid}/cmdline`, "utf8").split("\0");
+        expect(argv.some((arg) => arg.startsWith("--remote-debugging-port"))).toBe(false);
+        expect(argv).toContain("--remote-debugging-pipe");
 
         // The capability websocket URL must never be persisted.
         const raw = fs.readFileSync(
@@ -264,7 +353,7 @@ describe.skipIf(!ready)("real headed Chrome under Xvfb", () => {
   );
 
   it(
-    "gives two concurrent sessions distinct displays, ports, and profiles",
+    "gives two concurrent sessions distinct displays, CDP sockets, and profiles",
     { timeout: TEST_TIMEOUT_MS, retry: 2 },
     async () => {
       const settled = await Promise.allSettled([
@@ -285,13 +374,68 @@ describe.skipIf(!ready)("real headed Chrome under Xvfb", () => {
         ).toEqual([]);
         const [a, b] = sessions as [BrowserSessionHandle, BrowserSessionHandle];
         expect(a.display).not.toBe(b.display);
-        expect(a.cdpPort).not.toBe(b.cdpPort);
+        expect(browserRuntimeLayout(a.logDir).cdpSocketPath).not.toBe(
+          browserRuntimeLayout(b.logDir).cdpSocketPath,
+        );
         expect(a.profileDir).not.toBe(b.profileDir);
       } finally {
         for (const s of sessions) {
           await destroyBrowserSession(s.id, registryEnv).catch(() => {});
         }
       }
+    },
+  );
+
+  it(
+    "gives each CDP client its own browser session, which Chrome ends when the client leaves",
+    { timeout: TEST_TIMEOUT_MS },
+    async () => {
+      const session = await createBrowserSession({ projectDir, registryEnv, env: spawnEnv });
+      try {
+        const first = await openCdpClient(session);
+        const { browserContextId } = await first.send("Target.createBrowserContext", { disposeOnDetach: true });
+        expect((await first.send("Target.getBrowserContexts")).browserContextIds).toContain(browserContextId);
+        await first.send("Tracing.start");
+        await first.close();
+
+        // The supervisor waits for the reset before it accepts the next client.
+        const second = await vi.waitFor(() => openCdpClient(session), { timeout: 10_000, interval: 100 });
+        try {
+          expect((await second.send("Target.getBrowserContexts")).browserContextIds).not.toContain(browserContextId);
+          await expect(second.send("Tracing.start")).resolves.toEqual({});
+          await second.send("Tracing.end");
+        } finally {
+          await second.close();
+        }
+      } finally {
+        await destroyBrowserSession(session.id, registryEnv).catch(() => {});
+      }
+    },
+  );
+
+  it(
+    "ends Chrome when its supervisor is killed, so no browser outlives the pipe",
+    { timeout: TEST_TIMEOUT_MS },
+    async () => {
+      const session = await createBrowserSession({ projectDir, registryEnv, env: spawnEnv });
+      const layout = browserRuntimeLayout(session.logDir);
+      try {
+        const chrome = listProcessGroupMembers(session.browserPid).filter((pid) => pid !== session.browserPid);
+        expect(chrome.length).toBeGreaterThan(0);
+        // Only the supervisor; Chrome sees its CDP pipe close.
+        process.kill(session.browserPid, "SIGKILL");
+        await vi.waitFor(() => expect(listProcessGroupMembers(session.browserPid)).toEqual([]), {
+          timeout: 15_000,
+          interval: 100,
+        });
+        for (const pid of chrome) expect(isPidAlive(pid)).toBe(false);
+        expect((await getBrowserSessionStatus(session.id, registryEnv)).browserAlive).toBe(false);
+      } finally {
+        await destroyBrowserSession(session.id, registryEnv).catch(() => {});
+      }
+      expect(await getSession(session.id, registryEnv)).toBeUndefined();
+      expect(fs.existsSync(layout.tmpDir)).toBe(false);
+      expect(isPidAlive(session.xvfbPid)).toBe(false);
     },
   );
 });

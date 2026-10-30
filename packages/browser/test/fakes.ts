@@ -9,10 +9,13 @@ export function writeExecutable(filePath: string, content: string): void {
 export type FakeChromeMode =
   | "ready"
   | "crash"
-  | "crash-after-port"
+  | "crash-after-ready"
   | "launcher"
   | "stall"
   | "stubborn-stall";
+
+/** The browser build the fake reports through `Browser.getVersion`. */
+export const FAKE_CHROME_PRODUCT = "Chrome/131.0.6778.85";
 
 /**
  * A fake Chrome binary. It is named `google-chrome-stable` — the first entry in
@@ -21,12 +24,15 @@ export type FakeChromeMode =
  * from there). It records its scrubbed environment, argv, and PID next to the
  * profile (env/argv inside the profile, pid in the parent session dir so it
  * survives profile deletion), then:
- *   - ready: binds a loopback socket and publishes DevToolsActivePort, and,
- *     like a real Chrome, keeps serving after a probe hangs up mid-response
+ *   - ready: speaks CDP like `--remote-debugging-pipe`, NUL-terminated JSON
+ *     commands on fd 3 and replies on fd 4, and binds no TCP port. It records
+ *     each command in `cdp-commands.jsonl` in the session dir and exits when
+ *     the pipe closes or on `Browser.close`, like Chrome. After a clean
+ *     `Browser.close` it writes `exited-after-close`
  *   - crash: exits non-zero immediately
- *   - crash-after-port: publishes a port, closes it, then exits non-zero
- *   - stall: stays alive but never publishes a port
- *   - stubborn-stall: ignores graceful signals and never publishes a port
+ *   - crash-after-ready: answers `Browser.getVersion`, then exits non-zero
+ *   - stall: stays alive but never answers the pipe
+ *   - stubborn-stall: ignores graceful signals and never answers the pipe
  *     (for deterministic failed-cleanup tests). Its `chrome.pid` is written
  *     only after those handlers are installed, so it is the readiness marker.
  */
@@ -40,6 +46,7 @@ export function writeFakeChrome(binDir: string, mode: FakeChromeMode): void {
       'const net = require("node:net");',
       'const path = require("node:path");',
       `const MODE = ${JSON.stringify(mode === "launcher" ? "ready" : mode)};`,
+      `const PRODUCT = ${JSON.stringify(FAKE_CHROME_PRODUCT)};`,
       "let profile = null;",
       "for (const a of process.argv.slice(2)) {",
       '  if (a.startsWith("--user-data-dir=")) profile = a.slice("--user-data-dir=".length);',
@@ -58,26 +65,43 @@ export function writeFakeChrome(binDir: string, mode: FakeChromeMode): void {
       '  safeWrite(path.join(profile, "fake-chrome-env.json"), JSON.stringify(process.env));',
       '  safeWrite(path.join(profile, "fake-chrome-argv.json"), JSON.stringify(process.argv.slice(2)));',
       "}",
-      'if (MODE === "crash") { console.error("fake Chrome crashed before publishing a port"); process.exit(1); }',
-      'if (MODE === "ready" || MODE === "crash-after-port") {',
-      '  const response = "HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nContent-Length: 2\\r\\nConnection: close\\r\\n\\r\\n{}";',
-      "  const server = net.createServer((s) => {",
-      // A real Chrome survives a DevTools client that hangs up mid-response.
-      // Readiness probes abort on a timeout, which resets the connection, and
-      // an unhandled socket 'error' would kill this fake and be reported as
-      // "Chrome exited during startup" (pickforge/pickforge#100).
-      "    s.on(\"error\", () => {});",
-      "    s.end(response);",
+      'if (MODE === "crash") { console.error("fake Chrome crashed before answering its pipe"); process.exit(1); }',
+      'if (MODE === "ready" || MODE === "crash-after-ready") {',
+      "  const input = new net.Socket({ fd: 3, readable: true, writable: false });",
+      "  const output = new net.Socket({ fd: 4, readable: false, writable: true });",
+      '  const reply = (message, done) => output.write(JSON.stringify(message) + "\\0", done);',
+      "  function handle(message) {",
+      '    if (sessionDir) fs.appendFileSync(path.join(sessionDir, "cdp-commands.jsonl"), JSON.stringify(message) + "\\n");',
+      '    if (message.method === "Browser.getVersion") {',
+      '      const crash = () => { console.error("fake Chrome crashed after answering its pipe"); process.exit(1); };',
+      '      reply({ id: message.id, result: { protocolVersion: "1.3", product: PRODUCT, revision: "@fake", userAgent: "FakeChrome", jsVersion: "13.1" } }, MODE === "crash-after-ready" ? crash : undefined);',
+      "      return;",
+      "    }",
+      '    reply({ id: message.id, result: {}, ...(message.sessionId === undefined ? {} : { sessionId: message.sessionId }) });',
+      '    if (message.method !== "Browser.close") return;',
+      // A `slow-close` file in the session dir delays the clean exit by 2s.
+      '    const slow = sessionDir !== null && fs.existsSync(path.join(sessionDir, "slow-close"));',
+      "    setTimeout(() => {",
+      '      if (sessionDir) safeWrite(path.join(sessionDir, "exited-after-close"), "1");',
+      "      process.exit(0);",
+      "    }, slow ? 2000 : 0);",
+      "  }",
+      '  let buffered = "";',
+      '  input.setEncoding("utf8");',
+      '  input.on("data", (chunk) => {',
+      "    buffered += chunk;",
+      "    let end;",
+      '    while ((end = buffered.indexOf("\\0")) !== -1) {',
+      "      handle(JSON.parse(buffered.slice(0, end)));",
+      "      buffered = buffered.slice(end + 1);",
+      "    }",
       "  });",
-      '  server.listen(0, "127.0.0.1", () => {',
-      "    const addr = server.address();",
-      '    const port = typeof addr === "object" && addr ? addr.port : 0;',
-      '    if (profile) safeWrite(path.join(profile, "DevToolsActivePort"), port + "\\n/devtools/browser/fake-guid-deadbeef\\n");',
-      '    if (sessionDir) safeWrite(path.join(sessionDir, "cdp-published"), String(port));',
-      '    if (MODE === "crash-after-port") server.close(() => { console.error("fake Chrome crashed after publishing a port"); process.exit(1); });',
-      "  });",
+      // Chrome on --remote-debugging-pipe shuts down when its pipe closes.
+      '  input.on("end", () => process.exit(0));',
+      '  input.on("error", () => process.exit(0));',
+      '  output.on("error", () => {});',
       "}",
-      'if (MODE === "stall" || MODE === "stubborn-stall") console.error("fake Chrome stalled before publishing a port");',
+      'if (MODE === "stall" || MODE === "stubborn-stall") console.error("fake Chrome stalled before answering its pipe");',
       "setInterval(() => {}, 1000);",
     ].join("\n"),
   );

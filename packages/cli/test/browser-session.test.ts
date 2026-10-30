@@ -226,7 +226,8 @@ describe.skipIf(!hasXvfb)("built CLI browser lifecycle", () => {
       expect(session.id).toMatch(/^brow-[0-9a-f]+$/);
       expect(session.type).toBe("browser");
       expect(session.display).toMatch(/^:\d+$/);
-      expect(session.cdpPort).toBeGreaterThan(0);
+      expect(session).not.toHaveProperty("cdpPort");
+      expect(createdResult.stdout).not.toContain("/devtools/browser/");
 
       const chromeEnv = JSON.parse(
         fs.readFileSync(
@@ -248,7 +249,7 @@ describe.skipIf(!hasXvfb)("built CLI browser lifecycle", () => {
       expect(status.desktop.xvfbAlive).toBe(true);
       expect(status.desktop.displayAlive).toBe(true);
       expect(status.browser.browserAlive).toBe(true);
-      expect(status.browser.cdpPort).toBe(session.cdpPort);
+      expect(status.browser).not.toHaveProperty("cdpPort");
       expect(status.viewer).toEqual({
         endpoint: null,
         ready: false,
@@ -262,7 +263,7 @@ describe.skipIf(!hasXvfb)("built CLI browser lifecycle", () => {
       ]);
       expect(textStatus.code).toBe(0);
       expect(textStatus.stdout).toContain("browser=alive");
-      expect(textStatus.stdout).toContain(`cdp=${session.cdpPort}`);
+      expect(textStatus.stdout).not.toContain("cdp");
 
       const all = parseJson(
         await runCli(["session", "status", "--json"]),
@@ -303,7 +304,7 @@ describe.skipIf(!hasXvfb)("built CLI browser lifecycle", () => {
         "file was not created before the Chrome process exited",
       );
       expect(report.errors[0]).toContain(
-        "fake Chrome crashed before publishing a port",
+        "fake Chrome crashed before answering its pipe",
       );
     },
     60_000,
@@ -439,7 +440,6 @@ describe.skipIf(!hasXvfb)("built MCP browser lifecycle", () => {
                 z.object({
                   id: z.string(),
                   type: z.literal("browser"),
-                  cdpPort: z.number().positive(),
                   profileDir: z.string(),
                 }),
               )
@@ -450,6 +450,7 @@ describe.skipIf(!hasXvfb)("built MCP browser lifecycle", () => {
           stderr,
         );
         const session = created.sessions[0];
+        expect(JSON.stringify(createdResult)).not.toContain("cdpPort");
 
         const statusResult = await client.callTool({
           name: "session_status",
@@ -463,7 +464,6 @@ describe.skipIf(!hasXvfb)("built MCP browser lifecycle", () => {
                   status: z.string(),
                   browser: z.object({
                     browserAlive: z.boolean(),
-                    cdpPort: z.number(),
                   }),
                 }),
               )
@@ -475,7 +475,7 @@ describe.skipIf(!hasXvfb)("built MCP browser lifecycle", () => {
         ).sessions[0];
         expect(status.status).toBe("running");
         expect(status.browser.browserAlive).toBe(true);
-        expect(status.browser.cdpPort).toBe(session.cdpPort);
+        expect(JSON.stringify(statusResult)).not.toContain("cdpPort");
 
         const destroyedResult = await client.callTool({
           name: "session_destroy",

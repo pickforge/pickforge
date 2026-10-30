@@ -11,6 +11,7 @@ import {
   type LocalSessionDestroyRuntime,
   type LocalSessionRecipe,
   type LocalSessionStatusRuntime,
+  type BrowserSessionInfo,
   type LocalSessionTeardownRuntime,
   type SessionRecord,
 } from "../src/index.js";
@@ -35,7 +36,6 @@ const androidHandle = {
 const browserHandle = {
   id: "brow-123456",
   display: ":200",
-  cdpPort: 9222,
   profileDir: "/logs/browser/profile",
   binaryPath: "/usr/bin/chromium",
   logDir: "/logs/browser",
@@ -158,6 +158,7 @@ describe("local session lifecycle", () => {
     const create = createRuntime();
     const sessions = await createLocalSessions("browser", create);
     expect(sessions).toEqual([{ type: "browser", ...browserHandle }]);
+    expect(sessions[0]).not.toHaveProperty("cdpPort");
     expect(create.desktop.create).not.toHaveBeenCalled();
 
     const status: LocalSessionStatusRuntime = {
@@ -193,8 +194,9 @@ describe("local session lifecycle", () => {
           binaryPath: browserHandle.binaryPath,
           profileMode: "ephemeral",
           profileDir: browserHandle.profileDir,
-          cdpPort: browserHandle.cdpPort,
-        },
+          // A record from before the CDP socket; status must not echo it.
+          cdpPort: 9222,
+        } as BrowserSessionInfo,
         desktop: { display: browserHandle.display, vncPort: 5901 },
       }),
       status,
@@ -207,6 +209,7 @@ describe("local session lifecycle", () => {
       vncAlive: true,
     });
     expect(entry.browser).toMatchObject({ browserAlive: true });
+    expect(entry.browser).not.toHaveProperty("cdpPort");
     expect(entry.viewer).toEqual({
       endpoint: "vnc://127.0.0.1:5901",
       ready: true,

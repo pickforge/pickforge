@@ -26,6 +26,7 @@
 - An Android session start no longer refuses an AVD as in use when its lock names a process that only mentions an emulator in its arguments, such as an editor or a test runner. (#458)
 - `session prune` no longer removes a retained session file that was replaced after prune checked it. It reports an error and keeps the file and its directory. (#463)
 - A Pickforge command that pauses while another one publishes the layout marker no longer refuses the marker as a hard link. (#468)
+- Browser sessions serve DevTools through a pipe and a private Unix socket instead of a loopback TCP port, so other local processes can no longer find it on a port. Session output no longer shows `cdpPort`. Only one DevTools relay can attach to a session at a time. Recreate browser sessions made by an older version to use the relay. (#459)
 
 ## Validation
 

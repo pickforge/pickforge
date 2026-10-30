@@ -9,7 +9,6 @@ import {
   pickforgeHome,
   processIdentityMatches,
   readProcessIdentity,
-  readBoundedFileIn,
   readProcessGroupLeaderIdentity,
   type EnvLike,
   type ProcessIdentity,
@@ -111,40 +110,6 @@ async function openProfile(root: DirHandle, name: string, create: boolean): Prom
     await dir.close();
     throw error;
   }
-}
-
-/** Read the launch-specific CDP capability through the pinned private profile. */
-export async function namedProfileBrowserEndpoint(name: string, port: number, env: EnvLike): Promise<URL | undefined> {
-  validateBrowserProfileName(name);
-  const root = await openProfiles(env, false);
-  if (root === undefined) return undefined;
-  try {
-    const dir = await openProfile(root, name, false);
-    try {
-      return await readBrowserEndpointIn(dir, port);
-    } finally {
-      await dir.close();
-    }
-  } finally {
-    await root.close();
-  }
-}
-
-/** Read the launch-specific CDP capability from a session-owned profile directory. */
-export async function profileBrowserEndpoint(profileDir: string, port: number): Promise<URL | undefined> {
-  const dir = await DirHandle.open(profileDir);
-  try {
-    return await readBrowserEndpointIn(dir, port);
-  } finally {
-    await dir.close();
-  }
-}
-
-async function readBrowserEndpointIn(dir: DirHandle, port: number): Promise<URL | undefined> {
-  const content = await readBoundedFileIn(dir, "DevToolsActivePort", Date.now() + 3_000, { maxBytes: 1024 });
-  const [recordedPort, browserPath] = content.toString("utf8").trimEnd().split("\n");
-  if (recordedPort !== String(port) || !/^\/devtools\/browser\/[a-zA-Z0-9-]+$/.test(browserPath ?? "")) return undefined;
-  return new URL(`ws://127.0.0.1:${port}${browserPath}`);
 }
 
 const lockName = (name: string): string => `.${name}.lock`;

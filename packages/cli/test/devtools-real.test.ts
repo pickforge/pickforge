@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import fs from "node:fs";
@@ -14,10 +14,12 @@ import { readPickforgeEnv } from "@pickforge/lab-core";
 import { findOnPath } from "@pickforge/lab-desktop-linux";
 import {
   SESSION_ENDED_ERROR_CODE,
+  attachCdpClient,
   createBrowserSession,
   destroyBrowserSession,
   detectChromeBinary,
   resolveDevtoolsMcpExecutable,
+  resolveLiveBrowserSession,
   runDevtoolsMcpRelay,
   type LiveBrowserSession,
 } from "@pickforge/lab-browser";
@@ -39,77 +41,86 @@ afterEach(() => {
   }
 });
 
-const OTHER_CHROME_PAGE =
-  "data:text/html,<title>Other Chrome</title><h1>Other Chrome Content</h1>";
-
-interface HeadlessChrome {
-  child: ChildProcess;
-  port: number;
-  endpoint: string;
+/** Serve one HTML page on loopback so a second Chrome shows known content. */
+async function servePage(html: string): Promise<{ url: string; close(): Promise<void> }> {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "text/html" });
+    response.end(html);
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("Test HTTP server did not bind a TCP port");
+  }
+  return {
+    url: `http://127.0.0.1:${address.port}/`,
+    close: async () => {
+      server.close();
+      await once(server, "close");
+    },
+  };
 }
 
-/** Start a headless Chrome with a private profile on a loopback CDP port. */
-async function startHeadlessChrome(
-  profileDir: string,
-  port: number,
-  url = "about:blank",
-): Promise<HeadlessChrome> {
-  const binary = detectChromeBinary();
-  if (binary === null) throw new Error("Chrome is not installed");
-  const child = spawn(
-    binary,
-    [
-      "--headless=new",
-      `--user-data-dir=${profileDir}`,
-      `--remote-debugging-port=${port}`,
-      "--remote-debugging-address=127.0.0.1",
-      "--no-first-run",
-      "--no-default-browser-check",
-      ...(readPickforgeEnv(process.env, "CHROME_NO_SANDBOX") === "1" ? ["--no-sandbox"] : []),
-      url,
-    ],
-    { detached: true, stdio: "ignore" },
-  );
-  // Chrome writes DevToolsActivePort only for an ephemeral port.
-  const activePort = path.join(profileDir, "DevToolsActivePort");
-  const deadline = Date.now() + 30_000;
+function cliEnvFor(home: string): Record<string, string> {
+  const cliEnv: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) cliEnv[key] = value;
+  }
+  cliEnv.PICKFORGE_HOME = home;
+  return cliEnv;
+}
+
+function relayTransport(projectDir: string, home: string): StdioClientTransport {
+  return new StdioClientTransport({
+    command: process.execPath,
+    args: [cliPath, "browser", "devtools-mcp"],
+    cwd: projectDir,
+    env: cliEnvFor(home),
+    stderr: "pipe",
+  });
+}
+
+/** Close a relay client and wait until its CLI process is gone. */
+async function closeRelay(client: Client, transport: StdioClientTransport): Promise<void> {
+  const pid = transport.pid;
+  await client.close().catch(() => {});
+  if (pid === null) return;
+  const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
-    const content = fs.existsSync(activePort) ? fs.readFileSync(activePort, "utf8") : "";
-    const rawPort = port === 0 ? content.split("\n")[0] : String(port);
-    if (rawPort !== undefined && rawPort !== "") {
-      const version = await fetch(`http://127.0.0.1:${rawPort}/json/version`)
-        .then((response) => response.json() as Promise<{ webSocketDebuggerUrl?: string }>)
-        .catch(() => undefined);
-      if (version?.webSocketDebuggerUrl !== undefined) {
-        return { child, port: Number(rawPort), endpoint: version.webSocketDebuggerUrl };
-      }
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return;
     }
     await delay(50);
   }
-  stopHeadlessChrome(child);
-  throw new Error("Headless Chrome did not publish a DevTools port");
+  throw new Error(`Relay process ${pid} did not exit`);
 }
 
-function stopHeadlessChrome(child: ChildProcess): void {
-  if (child.pid === undefined || child.exitCode !== null) return;
+/** Run a relay that should fail before it serves MCP, and capture stderr. */
+async function runFailingRelay(
+  projectDir: string,
+  home: string,
+): Promise<{ code: number | null; stderr: string }> {
+  const child = spawn(process.execPath, [cliPath, "browser", "devtools-mcp"], {
+    cwd: projectDir,
+    env: cliEnvFor(home),
+    stdio: ["pipe", "ignore", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  const timer = setTimeout(() => child.kill("SIGKILL"), 30_000);
   try {
-    process.kill(-child.pid, "SIGKILL");
-  } catch {
-    // Already gone.
+    const [code] = (await once(child, "exit")) as [number | null];
+    return { code, stderr };
+  } finally {
+    clearTimeout(timer);
+    child.stdin.destroy();
   }
-}
-
-async function waitForPortClosed(port: number): Promise<void> {
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    const open = await fetch(`http://127.0.0.1:${port}/json/version`).then(
-      () => true,
-      () => false,
-    );
-    if (!open) return;
-    await delay(50);
-  }
-  throw new Error(`CDP port ${port} stayed open`);
 }
 
 /** Minimal newline-delimited JSON-RPC client over in-process relay streams. */
@@ -250,77 +261,111 @@ describe.skipIf(!ready)("real Chrome through the exact upstream relay", () => {
   );
 
   it(
-    "fails every tool call after its session ends and never reaches another Chrome on the old port",
+    "serves one relay at a time and lets the next relay see the same page",
+    { timeout: 120_000 },
+    async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "pf-relay-single-"));
+      temporaryDirectories.push(root);
+      const projectDir = path.join(root, "project");
+      const home = path.join(root, "home");
+      for (const dir of [projectDir, home]) fs.mkdirSync(dir, { recursive: true });
+      const page = await servePage("<!doctype html><title>Pickforge Reconnect</title><h1>Reconnect Ready</h1>");
+      const registryEnv = { PICKFORGE_HOME: home };
+      const session = await createBrowserSession({ projectDir, registryEnv, env: process.env });
+      let transport = relayTransport(projectDir, home);
+      let client = new Client({ name: "pickforge-lab-relay-first", version: "0.0.0" });
+      try {
+        await client.connect(transport);
+        const navigation = await client.callTool({
+          name: "navigate_page",
+          arguments: { type: "url", url: page.url },
+        });
+        expect(navigation.isError).not.toBe(true);
+        const pages = await client.callTool({ name: "list_pages", arguments: {} });
+        expect(pages.isError).not.toBe(true);
+        expect(JSON.stringify(pages)).toContain(page.url);
+
+        const second = await runFailingRelay(projectDir, home);
+        expect(second.code).toBe(1);
+        expect(second.stderr).toContain(
+          `Browser session ${session.id} is already attached to another DevTools relay`,
+        );
+        // The refused relay left the first one attached.
+        const stillAttached = await client.callTool({ name: "list_pages", arguments: {} });
+        expect(JSON.stringify(stillAttached)).toContain(page.url);
+
+        await closeRelay(client, transport);
+        transport = relayTransport(projectDir, home);
+        client = new Client({ name: "pickforge-lab-relay-second", version: "0.0.0" });
+        await client.connect(transport);
+        const reconnected = await client.callTool({ name: "list_pages", arguments: {} });
+        expect(reconnected.isError).not.toBe(true);
+        expect(JSON.stringify(reconnected)).toContain(page.url);
+        const snapshot = await client.callTool({ name: "take_snapshot", arguments: {} });
+        expect(JSON.stringify(snapshot)).toContain("Reconnect Ready");
+      } finally {
+        await closeRelay(client, transport).catch(() => {});
+        await destroyBrowserSession(session.id, registryEnv).catch(() => {});
+        await page.close();
+      }
+    },
+  );
+
+  it(
+    "fails every tool call after its session ends",
     { timeout: 120_000 },
     async () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), "pf-relay-ended-"));
       temporaryDirectories.push(root);
       const projectDir = path.join(root, "project");
       const home = path.join(root, "home");
-      const otherProfile = path.join(root, "other-profile");
-      for (const dir of [projectDir, home, otherProfile]) fs.mkdirSync(dir, { recursive: true });
+      for (const dir of [projectDir, home]) fs.mkdirSync(dir, { recursive: true });
       const registryEnv = { PICKFORGE_HOME: home };
       const session = await createBrowserSession({ projectDir, registryEnv, env: process.env });
-      const cliEnv: Record<string, string> = {};
-      for (const [key, value] of Object.entries(process.env)) {
-        if (value !== undefined) cliEnv[key] = value;
-      }
-      cliEnv.PICKFORGE_HOME = home;
-      const transport = new StdioClientTransport({
-        command: process.execPath,
-        args: [cliPath, "browser", "devtools-mcp"],
-        cwd: projectDir,
-        env: cliEnv,
-        stderr: "pipe",
-      });
+      const transport = relayTransport(projectDir, home);
       const client = new Client({ name: "pickforge-lab-relay-session-end", version: "0.0.0" });
-      let other: HeadlessChrome | undefined;
       try {
         await client.connect(transport);
         const before = await client.callTool({ name: "list_pages", arguments: {} });
         expect(before.isError).not.toBe(true);
 
         await destroyBrowserSession(session.id, registryEnv);
-        await waitForPortClosed(session.cdpPort);
-        other = await startHeadlessChrome(otherProfile, session.cdpPort, OTHER_CHROME_PAGE);
 
         for (const name of ["list_pages", "take_snapshot"]) {
           const outcome = await client.callTool({ name, arguments: {} }).then(
             (value) => ({ value }),
             (error: unknown) => ({ error }),
           );
-          expect(JSON.stringify(outcome)).not.toContain("Other Chrome");
           expect(outcome).toMatchObject({ error: { code: SESSION_ENDED_ERROR_CODE } });
         }
       } finally {
         await client.close().catch(() => {});
-        if (other !== undefined) stopHeadlessChrome(other.child);
         await destroyBrowserSession(session.id, registryEnv).catch(() => {});
       }
     },
   );
 
   it(
-    "pins the upstream child to its own Chrome so a replacement on the same port is unreachable",
+    "pins the upstream child to its own session socket so a later session is unreachable",
     { timeout: 120_000 },
     async () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), "pf-relay-pinned-"));
       temporaryDirectories.push(root);
-      const ownProfile = path.join(root, "own-profile");
-      const otherProfile = path.join(root, "other-profile");
-      fs.mkdirSync(ownProfile);
-      fs.mkdirSync(otherProfile);
-      const own = await startHeadlessChrome(ownProfile, 0);
-      let other: HeadlessChrome | undefined;
+      const projectDir = path.join(root, "project");
+      const home = path.join(root, "home");
+      for (const dir of [projectDir, home]) fs.mkdirSync(dir, { recursive: true });
+      const page = await servePage("<!doctype html><title>Other Chrome</title><h1>Other Chrome Content</h1>");
+      const registryEnv = { PICKFORGE_HOME: home };
+      const own = await createBrowserSession({ projectDir, registryEnv, env: process.env });
+      let other: Awaited<ReturnType<typeof createBrowserSession>> | undefined;
+      const live = await resolveLiveBrowserSession({ projectDir, env: registryEnv });
+      const lease = await attachCdpClient(live.cdpEndpoint);
       const input = new PassThrough();
       const output = new PassThrough();
       const diagnostics = new PassThrough();
       diagnostics.resume();
-      const session = {
-        record: { id: "brow-0000aa44" },
-        cdpPort: own.port,
-        browserEndpoint: own.endpoint,
-      } as LiveBrowserSession;
+      const session: LiveBrowserSession = { ...live, browserEndpoint: lease.browserEndpoint };
+      expect(session.browserEndpoint).toMatch(/^ws\+unix:\//);
       // No session gate here: this isolates the child's own reconnect target.
       const relay = runDevtoolsMcpRelay({
         session,
@@ -342,9 +387,9 @@ describe.skipIf(!ready)("real Chrome through the exact upstream relay", () => {
         const before = await client.request("tools/call", { name: "list_pages", arguments: {} });
         expect(JSON.stringify(before)).toContain("about:blank");
 
-        stopHeadlessChrome(own.child);
-        await waitForPortClosed(own.port);
-        other = await startHeadlessChrome(otherProfile, own.port, OTHER_CHROME_PAGE);
+        await destroyBrowserSession(own.id, registryEnv);
+        expect(fs.existsSync(live.cdpEndpoint.socketPath)).toBe(false);
+        other = await createBrowserSession({ projectDir, registryEnv, env: process.env, startUrl: page.url });
 
         const after = await client.request("tools/call", { name: "take_snapshot", arguments: {} });
         expect(JSON.stringify(after)).not.toContain("Other Chrome");
@@ -352,8 +397,10 @@ describe.skipIf(!ready)("real Chrome through the exact upstream relay", () => {
       } finally {
         input.end();
         await relay.catch(() => {});
-        stopHeadlessChrome(own.child);
-        if (other !== undefined) stopHeadlessChrome(other.child);
+        lease.release();
+        await destroyBrowserSession(own.id, registryEnv).catch(() => {});
+        if (other !== undefined) await destroyBrowserSession(other.id, registryEnv).catch(() => {});
+        await page.close();
       }
     },
   );

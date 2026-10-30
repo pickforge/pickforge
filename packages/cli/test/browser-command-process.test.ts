@@ -108,6 +108,10 @@ describe.skipIf(!hasXvfb)("built browser relay command exit", () => {
           "process.stdin.resume();",
         ].join("\n"),
       );
+      fs.writeFileSync(
+        path.join(path.dirname(upstreamBin), "chrome-devtools-mcp-cli-options.js"),
+        "export const cliOptions = { wsEndpoint: { coerce: (url) => url } };\n",
+      );
 
       const child = spawn(
         process.execPath,

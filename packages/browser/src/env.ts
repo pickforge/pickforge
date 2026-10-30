@@ -22,6 +22,10 @@ export interface BrowserRuntimeLayout {
   tmpDir: string;
   /** Short private alias used as Chrome's TMPDIR for Unix socket limits. */
   chromeTmpDir: string;
+  /** The supervisor's CDP Unix socket, reached through the short alias. */
+  cdpSocketPath: string;
+  /** The 0600 file where the supervisor publishes the CDP socket and path. */
+  cdpEndpointFile: string;
 }
 
 function chromeTmpAlias(sessionDir: string): string {
@@ -32,6 +36,7 @@ function chromeTmpAlias(sessionDir: string): string {
 
 export function browserRuntimeLayout(sessionDir: string): BrowserRuntimeLayout {
   const home = path.join(sessionDir, "home");
+  const chromeTmpDir = chromeTmpAlias(sessionDir);
   return {
     homeDir: home,
     profileDir: path.join(sessionDir, "profile"),
@@ -41,7 +46,9 @@ export function browserRuntimeLayout(sessionDir: string): BrowserRuntimeLayout {
     xdgStateHome: path.join(home, ".local", "state"),
     xdgRuntimeDir: path.join(sessionDir, "xdg-runtime"),
     tmpDir: path.join(sessionDir, "tmp"),
-    chromeTmpDir: chromeTmpAlias(sessionDir),
+    chromeTmpDir,
+    cdpSocketPath: path.join(chromeTmpDir, "cdp.sock"),
+    cdpEndpointFile: path.join(sessionDir, "cdp-endpoint"),
   };
 }
 

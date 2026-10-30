@@ -32,11 +32,16 @@ import {
   type DevtoolsEvidenceRecorder,
 } from "./devtools-evidence.js";
 import { createDevtoolsPermitGate, type DevtoolsPermitGate } from "./devtools-permits.js";
-import { browserRuntimeLayout } from "./env.js";
-import { namedProfileBrowserEndpoint, profileBrowserEndpoint } from "./profiles.js";
 import {
-  browserSessionLogDir,
+  CdpAlreadyAttachedError,
+  attachCdpClient,
+  cdpWebSocketUrl,
+  type CdpClientLease,
+  type CdpEndpoint,
+} from "./devtools.js";
+import {
   getBrowserSessionStatus,
+  readBrowserSessionCdpEndpoint,
   type BrowserSessionStatus,
 } from "./session.js";
 import {
@@ -115,9 +120,9 @@ async function isRelaySessionCurrent(
  * open agent input and the same live Chrome. Once that fails, every later
  * `tools/call` is answered with a stable error and never reaches the child.
  * A call that passes just before teardown cannot reach another browser: the
- * child is pinned to this Chrome's per-launch WebSocket endpoint, which a new
- * Chrome on the same port does not serve. A check that cannot read the
- * session refuses that call with a separate error and checks again next time.
+ * child is pinned to this session's own CDP socket, which teardown removes and
+ * no other session uses. A check that cannot read the session refuses that
+ * call with a separate error and checks again next time.
  */
 export function createSessionEndedIntercept(
   session: LiveBrowserSession,
@@ -146,6 +151,28 @@ export function createSessionEndedIntercept(
 export const CHROME_DEVTOOLS_MCP_PACKAGE = "chrome-devtools-mcp";
 export const CHROME_DEVTOOLS_MCP_VERSION = "1.5.0";
 export const CHROME_DEVTOOLS_MCP_BIN = "./build/src/bin/chrome-devtools-mcp.js";
+/** The upstream module that holds its CLI option table, next to the bin. */
+const CHROME_DEVTOOLS_MCP_CLI_OPTIONS = "chrome-devtools-mcp-cli-options.js";
+
+/**
+ * chrome-devtools-mcp 1.5.0 refuses a `--wsEndpoint` that is not `ws:` or
+ * `wss:`, although puppeteer and `ws` connect to `ws+unix:` as is. This
+ * bootstrap lets that one option also take `ws+unix:` and then runs the
+ * upstream entry point unchanged. argv: <cli options module> <bin> [args...]
+ */
+const DEVTOOLS_MCP_BOOTSTRAP = String.raw`
+import { pathToFileURL } from "node:url";
+const [optionsPath, binPath, ...args] = process.argv.slice(1);
+const { cliOptions } = await import(pathToFileURL(optionsPath).href);
+const coerce = cliOptions?.wsEndpoint?.coerce;
+if (typeof coerce !== "function") {
+  throw new Error("Unsupported chrome-devtools-mcp: --wsEndpoint has no validator to extend");
+}
+cliOptions.wsEndpoint.coerce = (url) =>
+  typeof url === "string" && url.startsWith("ws+unix:") ? url : coerce(url);
+process.argv = [process.argv[0], binPath, ...args];
+await import(pathToFileURL(binPath).href);
+`;
 
 /** Maximum bytes retained for one unterminated upstream diagnostic line. */
 export const DEFAULT_MAX_DIAGNOSTIC_LINE_BYTES = 64 * 1024;
@@ -157,6 +184,8 @@ export interface DevtoolsMcpExecutable {
   packageJsonPath: string;
   packageRoot: string;
   binPath: string;
+  /** The bin's own CLI option module, which the relay bootstrap extends. */
+  cliOptionsPath: string;
   version: typeof CHROME_DEVTOOLS_MCP_VERSION;
 }
 
@@ -222,21 +251,28 @@ export async function resolveDevtoolsMcpExecutable(
   if (!(await fs.promises.stat(binPath)).isFile()) {
     throw new Error("Invalid Chrome DevTools MCP bin path: expected a regular file");
   }
+  const cliOptionsPath = path.join(path.dirname(binPath), CHROME_DEVTOOLS_MCP_CLI_OPTIONS);
+  const cliOptionsStat = await fs.promises.lstat(cliOptionsPath).catch(() => undefined);
+  if (cliOptionsStat?.isFile() !== true) {
+    throw new Error("Invalid Chrome DevTools MCP package: missing its CLI option module");
+  }
   return {
     packageJsonPath: resolvedManifest,
     packageRoot,
     binPath,
+    cliOptionsPath,
     version: CHROME_DEVTOOLS_MCP_VERSION,
   };
 }
 
 export interface LiveBrowserSession {
   record: SessionRecord;
-  cdpPort: number;
+  /** The endpoint the session's supervisor published. */
+  cdpEndpoint: CdpEndpoint;
   /**
-   * This Chrome's per-launch browser WebSocket endpoint. Unlike a bare
-   * `http://127.0.0.1:<port>`, another Chrome that later listens on the same
-   * port does not serve it.
+   * The `ws+unix:` endpoint the upstream child connects to. It names this
+   * session's own CDP socket, which teardown removes, so the child can never
+   * reach another browser.
    */
   browserEndpoint: string;
 }
@@ -246,31 +282,69 @@ export interface ResolveLiveBrowserSessionOptions {
   env?: EnvLike;
   list?: (env: EnvLike) => Promise<SessionRecord[]>;
   status?: (id: string, env: EnvLike) => Promise<BrowserSessionStatus>;
-  endpoint?: (
-    record: SessionRecord,
-    cdpPort: number,
-    env: EnvLike,
-  ) => Promise<URL | undefined>;
+  endpoint?: (record: SessionRecord, env: EnvLike) => Promise<CdpEndpoint | undefined>;
 }
 
-/** Read the endpoint the session's own Chrome wrote into its private profile. */
-async function readSessionBrowserEndpoint(
-  record: SessionRecord,
-  cdpPort: number,
-  env: EnvLike,
-): Promise<URL | undefined> {
-  const browser = record.browser;
-  if (browser === undefined) return undefined;
-  const profileName = browser.profileName ?? record.meta?.browserProfile;
-  if (browser.profileMode === "named" || profileName !== undefined) {
-    return typeof profileName === "string"
-      ? namedProfileBrowserEndpoint(profileName, cdpPort, env)
-      : undefined;
-  }
-  return profileBrowserEndpoint(
-    browserRuntimeLayout(browserSessionLogDir(record.id, env)).profileDir,
-    cdpPort,
+/**
+ * A session record from before pickforge/pickforge#459 names the TCP port its
+ * Chrome served CDP on. It still runs and tears down, but has no CDP socket.
+ */
+function isLegacyTcpSession(record: SessionRecord): boolean {
+  return record.browser !== undefined && "cdpPort" in record.browser;
+}
+
+function unsafeEndpointError(record: SessionRecord, error: unknown): Error {
+  const reason = error instanceof Error ? error.message : String(error);
+  return new Error(`The DevTools endpoint file of browser session ${record.id} cannot be used: ${reason}`);
+}
+
+function legacySessionError(record: SessionRecord): Error {
+  return new Error(
+    `Browser session ${record.id} was created by an older Pickforge that served DevTools on a TCP port, ` +
+      `which the relay no longer uses; destroy it with "pickforge-lab session destroy ${record.id}" and create a new one`,
   );
+}
+
+type BrowserSessionCandidate =
+  | { kind: "live"; record: SessionRecord; session: LiveBrowserSession }
+  | { kind: "legacy"; record: SessionRecord }
+  | { kind: "unsafe"; record: SessionRecord; error: Error };
+
+/** Live sessions are listed first, then legacy ones, then unsafe ones. */
+const CANDIDATE_ORDER = { live: 0, legacy: 1, unsafe: 2 } as const;
+
+/** What a running browser record of the project is, or undefined when it is not live. */
+async function classifyBrowserSession(
+  record: SessionRecord,
+  opts: ResolveLiveBrowserSessionOptions,
+  env: EnvLike,
+): Promise<BrowserSessionCandidate | undefined> {
+  let status: BrowserSessionStatus;
+  try {
+    status = await (opts.status ?? getBrowserSessionStatus)(record.id, env);
+  } catch {
+    return undefined;
+  }
+  if (!status.alive) return undefined;
+  if (isLegacyTcpSession(record)) return { kind: "legacy", record };
+  let cdpEndpoint: CdpEndpoint | undefined;
+  try {
+    cdpEndpoint = await (
+      opts.endpoint ?? ((own: SessionRecord, ownEnv: EnvLike) => readBrowserSessionCdpEndpoint(own.id, ownEnv))
+    )(record, env);
+  } catch (error) {
+    return { kind: "unsafe", record, error: unsafeEndpointError(record, error) };
+  }
+  if (cdpEndpoint === undefined) return undefined;
+  return {
+    kind: "live",
+    record,
+    session: {
+      record,
+      cdpEndpoint,
+      browserEndpoint: cdpWebSocketUrl(cdpEndpoint.socketPath, cdpEndpoint.browserPath),
+    },
+  };
 }
 
 export async function resolveLiveBrowserSession(
@@ -285,43 +359,26 @@ export async function resolveLiveBrowserSession(
       record.browser !== undefined &&
       path.resolve(record.projectDir) === projectDir,
   );
-  const live: LiveBrowserSession[] = [];
+  const found: BrowserSessionCandidate[] = [];
   for (const record of projectBrowsers) {
-    let status: BrowserSessionStatus;
-    try {
-      status = await (opts.status ?? getBrowserSessionStatus)(record.id, env);
-    } catch {
-      continue;
-    }
-    const cdpPort = status.cdpPort;
-    if (
-      !status.alive ||
-      cdpPort === undefined ||
-      !Number.isInteger(cdpPort) ||
-      cdpPort < 1 ||
-      cdpPort > 65_535
-    ) {
-      continue;
-    }
-    const endpoint = await (opts.endpoint ?? readSessionBrowserEndpoint)(
-      record,
-      cdpPort,
-      env,
-    ).catch(() => undefined);
-    if (endpoint === undefined) continue;
-    live.push({ record, cdpPort, browserEndpoint: endpoint.href });
+    const candidate = await classifyBrowserSession(record, opts, env);
+    if (candidate !== undefined) found.push(candidate);
   }
-  if (live.length === 0) {
+  found.sort((a, b) => CANDIDATE_ORDER[a.kind] - CANDIDATE_ORDER[b.kind]);
+  const [only] = found;
+  if (only === undefined) {
     throw new Error(
       "No live browser session for this project; create one with: pickforge-lab session create --type browser",
     );
   }
-  if (live.length > 1) {
+  if (found.length > 1) {
     throw new Error(
-      `Multiple live browser sessions for this project (${live.map(({ record }) => record.id).join(", ")}); destroy all but one`,
+      `Multiple live browser sessions for this project (${found.map(({ record }) => record.id).join(", ")}); destroy all but one`,
     );
   }
-  return live[0] as LiveBrowserSession;
+  if (only.kind === "legacy") throw legacySessionError(only.record);
+  if (only.kind === "unsafe") throw only.error;
+  return only.session;
 }
 
 export interface RelayHooks {
@@ -526,7 +583,15 @@ function spawnDevtoolsRelayChild(opts: RunDevtoolsMcpRelayOptions): RelayChild {
   };
   const child = (opts.spawnProcess ?? spawn)(
     process.execPath,
-    [opts.executable.binPath, "--wsEndpoint", opts.session.browserEndpoint],
+    [
+      "--input-type=module",
+      "-e",
+      DEVTOOLS_MCP_BOOTSTRAP,
+      opts.executable.cliOptionsPath,
+      opts.executable.binPath,
+      "--wsEndpoint",
+      opts.session.browserEndpoint,
+    ],
     {
       cwd: opts.cwd,
       env: childEnv,
@@ -890,13 +955,44 @@ function reportProjectEvidenceFailure(
   ).catch(() => {});
 }
 
+/**
+ * Take the session's one CDP client slot for this relay. A second relay on the
+ * same session fails here, before its upstream child starts.
+ */
+async function attachRelayClient(session: LiveBrowserSession): Promise<CdpClientLease> {
+  try {
+    return await attachCdpClient(session.cdpEndpoint);
+  } catch (error) {
+    if (error instanceof CdpAlreadyAttachedError) {
+      throw new Error(
+        `Browser session ${session.record.id} is already attached to another DevTools relay; stop that relay first`,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+}
+
 export async function runProjectDevtoolsMcp(
   opts: RunProjectDevtoolsMcpOptions,
 ): Promise<RelayExit> {
-  const [session, executable] = await Promise.all([
+  const [resolved, executable] = await Promise.all([
     resolveLiveBrowserSession({ projectDir: opts.projectDir, env: opts.env }),
     resolveDevtoolsMcpExecutable(),
   ]);
+  const lease = await attachRelayClient(resolved);
+  try {
+    return await runLeasedProjectRelay(opts, { ...resolved, browserEndpoint: lease.browserEndpoint }, executable);
+  } finally {
+    lease.release();
+  }
+}
+
+async function runLeasedProjectRelay(
+  opts: RunProjectDevtoolsMcpOptions,
+  session: LiveBrowserSession,
+  executable: DevtoolsMcpExecutable,
+): Promise<RelayExit> {
   const diagnostics = opts.diagnostics ?? process.stderr;
   let evidenceFailureReported = false;
   const reportEvidenceFailure = (error: unknown): void => {

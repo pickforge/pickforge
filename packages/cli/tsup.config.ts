@@ -32,6 +32,18 @@ function copyViewerAssets(): void {
   }
 }
 
+/**
+ * Ship the browser supervisor next to the bundled entry (pickforge/pickforge#459).
+ * It runs as its own Node process, so `resolveSupervisorScript()` finds it as
+ * `dist/supervisor-main.js`. It imports only Node built-ins and `ws`.
+ */
+function copySupervisorScript(): void {
+  fs.copyFileSync(
+    path.join(packageDir, "..", "browser", "src", "supervisor-main.js"),
+    path.join(packageDir, "dist", "supervisor-main.js"),
+  );
+}
+
 export default defineConfig({
   entry: ["src/pickforge-lab.ts", "src/pickforge-mcp.ts"],
   format: ["esm"],
@@ -39,5 +51,8 @@ export default defineConfig({
   clean: true,
   sourcemap: true,
   noExternal: [/^@pickforge\//],
-  onSuccess: async () => copyViewerAssets(),
+  onSuccess: async () => {
+    copyViewerAssets();
+    copySupervisorScript();
+  },
 });

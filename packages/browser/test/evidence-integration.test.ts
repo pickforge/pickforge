@@ -75,17 +75,23 @@ function session(sessionId: string): LiveBrowserSession {
       binaryPath: "/fake/chrome",
       profileMode: "ephemeral",
       profileDir: "/fake/profile",
-      cdpPort: 9222,
     },
   };
-  return { record, cdpPort: 9222, browserEndpoint: "ws://127.0.0.1:9222/devtools/browser/fake-guid" };
+  const cdpEndpoint = {
+    socketPath: "/tmp/pickforge-browser-0/fake/cdp.sock",
+    browserPath: "/devtools/browser/0b4a3f0e-1f6c-4c2e-9a77-2d2f6f1b9e10",
+  };
+  return { record, cdpEndpoint, browserEndpoint: `ws+unix:${cdpEndpoint.socketPath}:${cdpEndpoint.browserPath}` };
 }
 
 function executable(script: string): DevtoolsMcpExecutable {
+  const cliOptionsPath = path.join(root, "fake-cli-options.mjs");
+  fs.writeFileSync(cliOptionsPath, "export const cliOptions = { wsEndpoint: { coerce: (url) => url } };\n");
   return {
     packageJsonPath: path.join(root, "package.json"),
     packageRoot: root,
     binPath: script,
+    cliOptionsPath,
     version: "1.5.0",
   };
 }

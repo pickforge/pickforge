@@ -308,18 +308,40 @@ What Pickforge does do:
 - Chrome starts from a **scrubbed environment** (`cleanEnv`): only the isolated
   display, isolated `HOME`/`XDG_*` paths, `PATH`, and locale reach it. Secrets
   in your shell environment are not inherited by the browser.
-- The DevTools/CDP endpoint uses an OS-assigned port bound to loopback
-  (`--remote-debugging-port=0` plus an explicit `127.0.0.1` address). It is not
-  reachable off-host.
-- The DevTools websocket path is a capability URL: whoever holds it controls the
-  browser. Pickforge **never** persists the websocket path/GUID in session
+- Chrome serves DevTools/CDP only on `--remote-debugging-pipe`. It opens no
+  TCP port. The session's browser supervisor owns the pipe and serves it on a
+  Unix socket, `cdp.sock`, with mode 0600 in the session's 0700 temporary
+  directory. It writes the socket path and a random websocket path to
+  `cdp-endpoint` in the session directory, with mode 0600.
+- The socket serves `GET /json/version` from a cached `Browser.getVersion`
+  reply, one websocket client at a time, and `POST /close`, which closes Chrome
+  so a named profile flushes its cookies. A second client is refused.
+- Each client gets its own browser session, and its top-level commands run
+  there. Chrome's own pipe session stays with the supervisor. A command for a
+  session the client did not attach, such as one an earlier client attached,
+  is refused before it reaches Chrome. When the client
+  leaves, the supervisor detaches the client's session, and Chrome ends it.
+  This also ends the sessions below it and the client's auto-attach, target
+  discovery, tracing and download behavior. It closes the browser contexts the
+  client created with `disposeOnDetach`. A session whose attach reply arrives
+  after its client left is detached too.
+- Some browser state outlives a client: open tabs and their pages, browser
+  contexts created without `disposeOnDetach`, and cookies, storage and other
+  profile data. The next client sees them.
+- A client can have at most 1024 commands waiting for Chrome. The supervisor
+  closes a client that goes over this limit and drops the commands of a client
+  that leaves.
+- The websocket path is a capability: whoever holds it and can open the socket
+  controls the browser. Pickforge **never** puts the websocket path in session
   records or diagnostics.
-- `pickforge-lab browser devtools-mcp` resolves only a live browser session owned by the current project and reads that Chrome's websocket endpoint from its own profile in memory. It accepts no arbitrary browser URL and stores no CDP endpoint or websocket GUID. The upstream child gets the endpoint as `--wsEndpoint`, so it is on that child's command line; local processes can already read it from the loopback `/json/version` endpoint.
-- The relay is bound to the Chrome it started with. The per-launch GUID means a later Chrome on the same port cannot be reached. Before each tool call the relay rechecks that the session is running, its input is open and its Chrome is the same live process; after that check fails once, every tool call returns a stable session-ended error. A check that cannot read the session refuses only that call.
+- `pickforge-lab browser devtools-mcp` resolves only a live browser session owned by the current project and reads its endpoint file in memory. It accepts no arbitrary browser URL and stores no CDP endpoint. It holds the session's one client slot for its whole run, so a second relay on the same session fails with an "already attached" error. When the relay ends, the supervisor drops its websocket at once, so the next relay can attach. The upstream child gets a per-relay `ws+unix:` endpoint as `--wsEndpoint`, so it is on that child's command line. A session created by an older Pickforge, which served CDP on a TCP port, still shows in status and destroys, but the relay refuses it and asks you to recreate it.
+- The relay is bound to the Chrome it started with. Its endpoint names that session's own socket, which teardown removes, so it cannot reach a later browser. Before each tool call the relay rechecks that the session is running, its input is open and its Chrome is the same live process; after that check fails once, every tool call returns a stable session-ended error. A check that cannot read the session refuses only that call.
 - Each forwarded tool call holds an agent permit until the upstream child answers it, so teardown drains relay calls before it stops Chrome. While a call is unanswered, the relay checks the session about every 100 ms. When teardown closes input, the relay stops its child, releases the permits and answers each unanswered call with the session-ended error. Teardown then waits at most about a second, whatever the call length. A relay killed outright leaves permits that the next drain sweeps, because their owner is dead.
-- A human takeover releases these permits at once, so its 5-second drain succeeds. The call that was already running can still finish during human control, and its response is forwarded. Later calls get the busy error. If teardown starts while such a call runs, the relay still stops its child, but teardown does not wait for it. That call can then still connect after its Chrome exits, and a local process that takes the freed port could answer it or forward it to another browser. Such a process can already drive any session's browser over loopback CDP, as the list below says.
+- A human takeover releases these permits at once, so its 5-second drain succeeds. The call that was already running can still finish during human control, and its response is forwarded. Later calls get the busy error. If teardown starts while such a call runs, the relay still stops its child, but teardown does not wait for it. That call can then still try to connect after its Chrome exits, but the session's socket is gone, so it fails.
 - The relay validates the installed `chrome-devtools-mcp` package name, exact `1.5.0` version, declared bin, and confined real path before starting it directly with Node (`shell: false`). Runtime `npx`, upstream update checks, and upstream usage statistics are disabled.
 - Relay stdout contains only validated LF-delimited JSON-RPC records, with pending records capped at 16 MiB. Upstream stderr lines are capped at 64 KiB, redacted, and forwarded only to stderr; over-limit lines are dropped with a safe notice. Malformed or incomplete protocol input fails closed and terminates the upstream process.
+- If the supervisor dies, Chrome loses its pipe and exits on its own. Destroy
+  still checks and ends the whole process group.
 - On destroy or reap, the whole Chrome **process group** is terminated and
   verified dead (PID plus `/proc` start-time identity, so a reused PID is never
   signalled) **before** the profile is deleted — no orphaned renderers, no
@@ -327,16 +349,16 @@ What Pickforge does do:
 
 What it does not do, and you must account for:
 
-- **Loopback is not isolation from local processes.** Chrome and the CDP
-  endpoint run as the user who started Pickforge. Any local process running as
-  that user can reach the loopback CDP port and drive the browser. Loopback
-  binding only keeps the network out, not other local processes.
+- **A Unix socket is not isolation from local processes.** Chrome, its
+  supervisor and the CDP socket run as the user who started Pickforge. Any
+  local process running as that user can read the endpoint file, connect to the
+  socket while no client holds it, and drive the browser. The file modes keep
+  out other users, not processes of the same user.
 - There is **no uid sandbox** for the browser yet (same limitation as SEC-02).
   Launch only content you trust; prefer a throwaway user or VM otherwise.
 - The official Chrome DevTools MCP runs with the same user privileges as Pickforge and exposes its upstream tool surface without method filtering. An agent with access to `pickforge-lab-browser` can inspect and control the isolated browser; grant that MCP entry only to agents you trust.
 
-Planned hardening tracked separately: per-session uid isolation, and moving CDP
-off a TCP port onto `--remote-debugging-pipe`.
+Planned hardening tracked separately: per-session uid isolation.
 
 ## Reporting a vulnerability
 

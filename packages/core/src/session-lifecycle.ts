@@ -6,6 +6,7 @@ import {
   desktopHomePolicy,
   isSessionProcessAlive,
   listSessions,
+  type BrowserSessionInfo,
   type SessionLivenessCheck,
   type SessionRecord,
   type SessionType,
@@ -40,7 +41,6 @@ export interface AndroidLegHandle {
 export interface BrowserLegHandle {
   id: string;
   display: string;
-  cdpPort: number;
   profileDir: string;
   binaryPath: string;
   logDir: string;
@@ -222,12 +222,22 @@ function androidSummary(handle: AndroidLegHandle): LocalSessionSummary {
   return summary;
 }
 
+/**
+ * A record from before pickforge/pickforge#459 still names the TCP port its
+ * Chrome served CDP on. Status never reports it.
+ */
+function withoutLegacyCdpPort(
+  browser: BrowserSessionInfo | undefined,
+): Record<string, unknown> {
+  const { cdpPort: _legacyPort, ...rest } = (browser ?? {}) as BrowserSessionInfo & { cdpPort?: unknown };
+  return rest;
+}
+
 function browserSummary(handle: BrowserLegHandle): LocalSessionSummary {
   return {
     id: handle.id,
     type: "browser",
     display: handle.display,
-    cdpPort: handle.cdpPort,
     profileDir: handle.profileDir,
     binaryPath: handle.binaryPath,
     logDir: handle.logDir,
@@ -288,7 +298,7 @@ export async function localSessionStatusEntry(
       displayAlive: browserStatus.displayAlive,
     };
     entry.browser = {
-      ...record.browser,
+      ...withoutLegacyCdpPort(record.browser),
       browserAlive: browserStatus.browserAlive,
     };
     entry.viewer = {
