@@ -297,6 +297,12 @@ it.skipIf(!prerequisites)(
       });
       framebuffer = await connectRfb(vnc.port);
       await framebuffer.snapshot();
+      // x11vnc applies -nocursorshape by polling. libvncserver enables shape
+      // updates when it reads SetEncodings, and x11vnc clears them on its
+      // next main loop pass, so the first update can carry one shape (#481).
+      // No shape follows once the pointer is painted into the pixels.
+      const initialCursorShapes = framebuffer.cursorShapes;
+      framebuffer.cursorShapes = 0;
       const first = await snapshotWithCursorAt(framebuffer, display, 60, 70);
       const second = await snapshotWithCursorAt(framebuffer, display, 200, 130);
       const changes = cursorPixelChanges(first, second, framebuffer.width);
@@ -311,6 +317,7 @@ it.skipIf(!prerequisites)(
             [200, 130],
           ],
           changes,
+          initialCursorShapes,
           cursorShapes: framebuffer.cursorShapes,
           cursorPositions: framebuffer.cursorPositions,
         }),
@@ -318,6 +325,7 @@ it.skipIf(!prerequisites)(
       expect(changes.oldPosition).toBeGreaterThan(0);
       expect(changes.newPosition).toBeGreaterThan(0);
       expect(changes.elsewhere).toBe(0);
+      expect(initialCursorShapes).toBeLessThanOrEqual(1);
       expect(framebuffer.cursorShapes).toBe(0);
     } finally {
       framebuffer?.socket.destroy();
