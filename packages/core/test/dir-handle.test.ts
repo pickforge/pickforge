@@ -176,6 +176,16 @@ describe("owned file removal", () => {
     expect(fs.readdirSync(project)).toEqual([]);
   });
 
+  it("removes a file whose name is too long to keep in its removal name", async () => {
+    const name = `${"x".repeat(240)}.log`;
+    const stat = await owned(name);
+    const removal = afterMove(() => {});
+    await withDirHandle(DirHandle.open(project), (dir) => dir.unlinkOwnedFile(name, stat));
+    expect(removal()).toMatch(new RegExp(`^${REMOVAL.source}`));
+    expect(abandonedRemoval(removal()!)).toBeUndefined();
+    expect(fs.readdirSync(project)).toEqual([]);
+  });
+
   it("keeps a replacement made at the last step", async () => {
     const stat = await owned("app.log");
     const unlink = DirHandle.prototype.unlinkChild;

@@ -386,8 +386,11 @@ export class DirHandle {
   async unlinkOwnedFile(name: string, expected: fs.Stats): Promise<void> {
     assertSafeEntryName(name);
     // The random part keeps the move off any entry that a stopped remover
-    // left under a removal name, or that a restore puts back under one.
-    const removal = `.${name}.remove-${process.pid}-${randomUUID()}`;
+    // left under a removal name, or that a restore puts back under one. A
+    // name too long to keep in it is left out, so a crash midway leaves an
+    // entry that prune keeps as unknown data.
+    const suffix = `.remove-${process.pid}-${randomUUID()}`;
+    const removal = Buffer.byteLength(`.${name}${suffix}`) <= NAME_MAX ? `.${name}${suffix}` : suffix;
     removalsInFlight.add(removal);
     try {
       try {
@@ -494,6 +497,9 @@ export class DirHandle {
 }
 
 let atomicTmpCounter = 0;
+
+/** Linux's limit on one path component, in bytes. */
+const NAME_MAX = 255;
 
 const REMOVAL_NAME = /^\.(.+)\.remove-(\d+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 

@@ -246,6 +246,12 @@ describe("explicit session log pruning", () => {
     expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
   });
 
+  it("prunes a retained log whose name is near the length limit", async () => {
+    const { record, dir } = await stopped();
+    fs.writeFileSync(path.join(dir, `${"x".repeat(251)}.log`), "diagnostics");
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+  });
+
   it("prunes a retained log that a stopped remover left after a writer took its name again", async () => {
     const { record, dir } = await stopped();
     const removal = `.xvfb.log.remove-${spawnSync("true").pid!}-${crypto.randomUUID()}`;
