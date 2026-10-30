@@ -319,17 +319,20 @@ describe("browser supervisor CDP bridge", () => {
     const client = await connect(cdpWebSocketUrl(bridge.endpoint.socketPath, bridge.endpoint.browserPath));
     // id 1 is also the id of the supervisor's own Browser.getVersion.
     client.socket.send(JSON.stringify({ id: 1, method: "Test.joined" }));
-    client.socket.send(JSON.stringify({ id: 1, method: "Test.echo", sessionId: "PAGE" }));
+    client.socket.send(JSON.stringify({ id: 2, method: "Target.attachToTarget", params: { targetId: "page" } }));
+    await client.next((message) => message.id === 2);
+    client.socket.send(JSON.stringify({ id: 1, method: "Test.echo", sessionId: "T1" }));
 
-    await client.next((message) => message.id === 1 && message.sessionId === "PAGE");
+    await client.next((message) => message.id === 1 && message.sessionId === "T1");
     expect(client.messages).toEqual([
       { method: "Test.event", params: { n: 1 } },
       { id: 1, result: {} },
-      { id: 1, result: {}, sessionId: "PAGE" },
+      { id: 2, result: { sessionId: "T1" } },
+      { id: 1, result: {}, sessionId: "T1" },
     ]);
     const forwarded = bridge.commands().slice(2);
-    expect(forwarded.map(({ method }) => method)).toEqual(["Test.joined", "Test.echo"]);
-    expect(new Set(bridge.commands().map(({ id }) => id)).size).toBe(4);
+    expect(forwarded.map(({ method }) => method)).toEqual(["Test.joined", "Target.attachToTarget", "Test.echo"]);
+    expect(new Set(bridge.commands().map(({ id }) => id)).size).toBe(5);
   });
 
   it("runs a client's top-level commands in its own browser session and hides that session", async () => {
@@ -351,6 +354,32 @@ describe("browser supervisor CDP bridge", () => {
     const [code, reason] = (await closed) as [number, Buffer];
     expect({ code, reason: reason.toString() }).toEqual({ code: 1008, reason: "Invalid CDP message" });
     expect(bridge.commands().map(({ method }) => method)).not.toContain("Test.echo");
+  });
+
+  it("answers a command for a session the client does not own without forwarding it", async () => {
+    const bridge = await startBridge();
+    const url = cdpWebSocketUrl(bridge.endpoint.socketPath, bridge.endpoint.browserPath);
+    const first = await connect(url);
+    first.socket.send(JSON.stringify({ id: 1, method: "Target.attachToTarget", params: { targetId: "page" } }));
+    await first.next((message) => message.id === 1);
+    await closeClient(first);
+
+    // B1 and T1 were the first client's sessions, and OTHER was never attached.
+    const second = await connect(url);
+    for (const [id, sessionId] of [[1, "B1"], [2, "T1"], [3, "OTHER"]] as const) {
+      second.socket.send(JSON.stringify({ id, method: "Test.echo", sessionId }));
+    }
+    second.socket.send(JSON.stringify({ id: 4, method: "Test.echo" }));
+    await second.next((message) => message.id === 4);
+    const error = { code: -32001, message: "Session with given id not found." };
+    expect(second.messages).toEqual([
+      { id: 1, sessionId: "B1", error },
+      { id: 2, sessionId: "T1", error },
+      { id: 3, sessionId: "OTHER", error },
+      { id: 4, result: {} },
+    ]);
+    const echoes = bridge.commands().filter(({ method }) => method === "Test.echo");
+    expect(echoes.map(({ sessionId }) => sessionId)).toEqual(["B2"]);
   });
 
   it("serves one client at a time and refuses a second websocket or relay lease", async () => {

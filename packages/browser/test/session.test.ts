@@ -1357,12 +1357,12 @@ describe.skipIf(!hasXvfb)("named browser profile lifecycle", () => {
         // The relay names the refused file and why, not "no live session".
         const relayError = {
           "missing file": "No live browser session for this project",
-          "symlinked file": `The DevTools endpoint file of browser session ${session.id} is unsafe: ELOOP`,
+          "symlinked file": `The DevTools endpoint file of browser session ${session.id} cannot be used: ELOOP`,
           "group-readable file":
-            `The DevTools endpoint file of browser session ${session.id} is unsafe: ` +
+            `The DevTools endpoint file of browser session ${session.id} cannot be used: ` +
             `Refusing unsafe CDP endpoint file ${file}: must be a regular file of this user with mode 0600`,
           "foreign socket":
-            `The DevTools endpoint file of browser session ${session.id} is unsafe: ` +
+            `The DevTools endpoint file of browser session ${session.id} cannot be used: ` +
             `Refusing CDP endpoint file ${file}: it names a socket outside browser session ${session.id}`,
         }[scenario];
         await expect(resolveLiveBrowserSession({ projectDir, env: registryEnv })).rejects.toThrow(relayError);

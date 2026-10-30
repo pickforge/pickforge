@@ -274,7 +274,7 @@ describe("resolveLiveBrowserSession", () => {
         throw new Error("Refusing unsafe CDP endpoint file /s/cdp-endpoint: must be a regular file of this user with mode 0600");
       }),
     ).rejects.toThrow(
-      `The DevTools endpoint file of browser session ${one.id} is unsafe: ` +
+      `The DevTools endpoint file of browser session ${one.id} cannot be used: ` +
         "Refusing unsafe CDP endpoint file /s/cdp-endpoint: must be a regular file of this user with mode 0600",
     );
   });

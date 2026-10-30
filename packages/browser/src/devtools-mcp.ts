@@ -295,7 +295,7 @@ function isLegacyTcpSession(record: SessionRecord): boolean {
 
 function unsafeEndpointError(record: SessionRecord, error: unknown): Error {
   const reason = error instanceof Error ? error.message : String(error);
-  return new Error(`The DevTools endpoint file of browser session ${record.id} is unsafe: ${reason}`);
+  return new Error(`The DevTools endpoint file of browser session ${record.id} cannot be used: ${reason}`);
 }
 
 function legacySessionError(record: SessionRecord): Error {
