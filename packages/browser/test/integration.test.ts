@@ -81,6 +81,46 @@ async function browserCdp(session: BrowserSessionHandle, method: string, params 
   });
 }
 
+interface CdpClient {
+  send(method: string, params?: object): Promise<any>;
+  close(): Promise<void>;
+}
+
+/** Open one websocket client on the session's socket for several commands. */
+async function openCdpClient(session: BrowserSessionHandle): Promise<CdpClient> {
+  const endpoint = await readBrowserSessionCdpEndpoint(session.id, registryEnv);
+  if (endpoint === undefined) throw new Error(`Session ${session.id} has no CDP endpoint`);
+  const socket = new WebSocket(cdpWebSocketUrl(endpoint.socketPath, endpoint.browserPath));
+  const replies = new Map<number, (message: any) => void>();
+  socket.on("message", (data) => {
+    const message = JSON.parse(String(data));
+    replies.get(message.id)?.(message);
+  });
+  await new Promise((resolve, reject) => {
+    socket.once("open", resolve);
+    socket.once("error", reject);
+  });
+  let nextId = 1;
+  return {
+    send(method, params = {}) {
+      const id = nextId++;
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`CDP ${method} timed out`)), 10_000);
+        replies.set(id, (message) => {
+          clearTimeout(timer);
+          if (message.error) reject(new Error(message.error.message));
+          else resolve(message.result);
+        });
+        socket.send(JSON.stringify({ id, method, params }));
+      });
+    },
+    async close() {
+      socket.close();
+      if (socket.readyState !== WebSocket.CLOSED) await new Promise((resolve) => socket.once("close", resolve));
+    },
+  };
+}
+
 /** Loopback and wildcard TCP ports that any process of the group listens on. */
 function listeningTcpPorts(pgid: number): number[] {
   const inodes = new Set<string>();
@@ -336,6 +376,33 @@ describe.skipIf(!ready)("real headed Chrome under Xvfb", () => {
         for (const s of sessions) {
           await destroyBrowserSession(s.id, registryEnv).catch(() => {});
         }
+      }
+    },
+  );
+
+  it(
+    "gives each CDP client its own browser session, which Chrome ends when the client leaves",
+    { timeout: TEST_TIMEOUT_MS },
+    async () => {
+      const session = await createBrowserSession({ projectDir, registryEnv, env: spawnEnv });
+      try {
+        const first = await openCdpClient(session);
+        const { browserContextId } = await first.send("Target.createBrowserContext", { disposeOnDetach: true });
+        expect((await first.send("Target.getBrowserContexts")).browserContextIds).toContain(browserContextId);
+        await first.send("Tracing.start");
+        await first.close();
+
+        // The supervisor waits for the reset before it accepts the next client.
+        const second = await vi.waitFor(() => openCdpClient(session), { timeout: 10_000, interval: 100 });
+        try {
+          expect((await second.send("Target.getBrowserContexts")).browserContextIds).not.toContain(browserContextId);
+          await expect(second.send("Tracing.start")).resolves.toEqual({});
+          await second.send("Tracing.end");
+        } finally {
+          await second.close();
+        }
+      } finally {
+        await destroyBrowserSession(session.id, registryEnv).catch(() => {});
       }
     },
   );

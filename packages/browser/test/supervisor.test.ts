@@ -23,6 +23,8 @@ import {
   resolveSupervisorScript,
 } from "../src/supervisor.js";
 
+/** The supervisor's MAX_PENDING_COMMANDS. */
+const MAX_PENDING_COMMANDS = 1024;
 const temporaryDirectories: string[] = [];
 const supervisors: ChildProcess[] = [];
 
@@ -53,9 +55,12 @@ function cdpPaths(dir: string) {
 
 /**
  * A scripted browser on the CDP pipe. It records every command it reads on
- * fd 3 in `commands.jsonl` and answers on fd 4. Its `Browser.getVersion` reply
- * arrives in two writes, and `Test.joined` gets an event and its reply in one
- * write, so the supervisor must split and join NUL frames itself.
+ * fd 3 in `commands.jsonl` and answers on fd 4, in order, as Chrome does. Its
+ * `Browser.getVersion` reply arrives in two writes, and `Test.joined` gets an
+ * event and its reply in one write, so the supervisor must split and join NUL
+ * frames itself. `Target.attachToBrowserTarget` opens sessions B1, B2 and so
+ * on, and `Target.attachToTarget` opens T1, T2 and so on. `Test.hang` is never
+ * answered.
  */
 function writePipeBrowser(dir: string): string {
   const script = path.join(dir, "pipe-browser.cjs");
@@ -69,19 +74,32 @@ function writePipeBrowser(dir: string): string {
       "const input = new net.Socket({ fd: 3, readable: true, writable: false });",
       "const output = new net.Socket({ fd: 4, readable: false, writable: true });",
       'const frame = (message) => JSON.stringify(message) + "\\0";',
-      "function handle(message) {",
+      "let browserSessions = 0;",
+      "let targetSessions = 0;",
+      "async function handle(message) {",
       '  fs.appendFileSync(log, JSON.stringify(message) + "\\n");',
-      "  const reply = { id: message.id, result: {}, ...(message.sessionId ? { sessionId: message.sessionId } : {}) };",
+      "  const on = message.sessionId ? { sessionId: message.sessionId } : {};",
+      "  const reply = { id: message.id, result: {}, ...on };",
       '  if (message.method === "Browser.getVersion") {',
       '    const text = frame({ id: message.id, result: { product: "Chrome/1.2.3", protocolVersion: "1.3", revision: "@r", userAgent: "Pipe", jsVersion: "1" } });',
       "    output.write(text.slice(0, 7));",
       "    setTimeout(() => output.write(text.slice(7)), 20);",
       '  } else if (message.method === "Test.joined") {',
-      '    output.write(frame({ method: "Test.event", params: { n: 1 } }) + frame(reply));',
+      '    output.write(frame({ method: "Test.event", params: { n: 1 }, ...on }) + frame(reply));',
+      '  } else if (message.method === "Test.events") {',
+      '    output.write(frame({ method: "Test.root" }) + frame({ method: "Test.other", sessionId: "OTHER" }) + frame({ method: "Test.own", ...on }) + frame(reply));',
+      '  } else if (message.method === "Test.hang") {',
+      "    // Never answered, like an await of a promise that never settles.",
+      '  } else if (message.method === "Target.attachToBrowserTarget") {',
+      "    const sessionId = `B${++browserSessions}`;",
+      '    output.write(frame({ ...reply, result: { sessionId } }) + frame({ method: "Target.attachedToTarget", params: { sessionId, targetInfo: {}, waitingForDebugger: false }, ...on }));',
+      '  } else if (message.method === "Target.attachToTarget") {',
+      "    await new Promise((resolve) => setTimeout(resolve, message.params.delayMs ?? 0));",
+      '    output.write(frame({ ...reply, result: { sessionId: `T${++targetSessions}` } }));',
       '  } else if (message.method === "Target.setAutoAttach" && message.params.autoAttach) {',
-      '    output.write(frame(reply) + frame({ method: "Target.attachedToTarget", params: { sessionId: "S1", targetInfo: {}, waitingForDebugger: true } }));',
+      '    output.write(frame(reply) + frame({ method: "Target.attachedToTarget", params: { sessionId: "S1", targetInfo: {}, waitingForDebugger: true }, ...on }));',
       '  } else if (message.method === "Target.detachFromTarget") {',
-      '    output.write(frame(reply) + frame({ method: "Target.detachedFromTarget", params: { sessionId: message.params.sessionId } }));',
+      '    output.write(frame(reply) + frame({ method: "Target.detachedFromTarget", params: { sessionId: message.params.sessionId }, ...on }));',
       '  } else if (message.method === "Test.exit") {',
       "    process.exit(3);",
       "  } else {",
@@ -89,12 +107,14 @@ function writePipeBrowser(dir: string): string {
       "  }",
       "}",
       'let buffered = "";',
+      "let queue = Promise.resolve();",
       'input.setEncoding("utf8");',
       'input.on("data", (chunk) => {',
       "  buffered += chunk;",
       "  let end;",
       '  while ((end = buffered.indexOf("\\0")) !== -1) {',
-      "    handle(JSON.parse(buffered.slice(0, end)));",
+      "    const message = JSON.parse(buffered.slice(0, end));",
+      "    queue = queue.then(() => handle(message));",
       "    buffered = buffered.slice(end + 1);",
       "  }",
       "});",
@@ -307,10 +327,30 @@ describe("browser supervisor CDP bridge", () => {
       { id: 1, result: {} },
       { id: 1, result: {}, sessionId: "PAGE" },
     ]);
-    const forwarded = bridge.commands().slice(1);
+    const forwarded = bridge.commands().slice(2);
     expect(forwarded.map(({ method }) => method)).toEqual(["Test.joined", "Test.echo"]);
-    const ids = [bridge.commands()[0]?.id, ...forwarded.map(({ id }) => id)];
-    expect(new Set(ids).size).toBe(3);
+    expect(new Set(bridge.commands().map(({ id }) => id)).size).toBe(4);
+  });
+
+  it("runs a client's top-level commands in its own browser session and hides that session", async () => {
+    const bridge = await startBridge();
+    const client = await connect(cdpWebSocketUrl(bridge.endpoint.socketPath, bridge.endpoint.browserPath));
+    client.socket.send(JSON.stringify({ id: 1, method: "Test.events" }));
+
+    await client.next((message) => message.id === 1);
+    // Root events and events of sessions the client does not own stay out.
+    expect(client.messages).toEqual([{ method: "Test.own" }, { id: 1, result: {} }]);
+    expect(bridge.commands().slice(1).map(({ method, sessionId }) => ({ method, sessionId }))).toEqual([
+      { method: "Target.attachToBrowserTarget", sessionId: undefined },
+      { method: "Test.events", sessionId: "B1" },
+    ]);
+
+    // An empty session id would address the root session.
+    const closed = once(client.socket, "close");
+    client.socket.send(JSON.stringify({ id: 2, method: "Test.echo", sessionId: "" }));
+    const [code, reason] = (await closed) as [number, Buffer];
+    expect({ code, reason: reason.toString() }).toEqual({ code: 1008, reason: "Invalid CDP message" });
+    expect(bridge.commands().map(({ method }) => method)).not.toContain("Test.echo");
   });
 
   it("serves one client at a time and refuses a second websocket or relay lease", async () => {
@@ -343,7 +383,32 @@ describe("browser supervisor CDP bridge", () => {
     again.release();
   });
 
-  it("resets what a disconnected client set up before the next client attaches", async () => {
+  it("frees the slot at once when a lease ends while its client stopped reading", async () => {
+    const bridge = await startBridge();
+    const lease = await attachCdpClient(bridge.endpoint);
+    const stuck = await connect(lease.browserEndpoint);
+    // A live peer that reads nothing never answers a close handshake.
+    stuck.socket.pause();
+    try {
+      const started = Date.now();
+      lease.release();
+      let next: Awaited<ReturnType<typeof attachCdpClient>> | undefined;
+      while (next === undefined) {
+        try {
+          next = await attachCdpClient(bridge.endpoint);
+        } catch (error) {
+          if (!(error instanceof CdpAlreadyAttachedError) || Date.now() - started > 10_000) throw error;
+          await delay(50);
+        }
+      }
+      next.release();
+      expect(Date.now() - started).toBeLessThan(5_000);
+    } finally {
+      stuck.socket.terminate();
+    }
+  });
+
+  it("detaches a disconnected client's browser session before the next client attaches", async () => {
     const bridge = await startBridge();
     const url = cdpWebSocketUrl(bridge.endpoint.socketPath, bridge.endpoint.browserPath);
     const first = await connect(url);
@@ -352,22 +417,67 @@ describe("browser supervisor CDP bridge", () => {
       method: "Target.setAutoAttach",
       params: { autoAttach: true, waitForDebuggerOnStart: true, flatten: true },
     }));
-    await first.next((message) => message.method === "Target.attachedToTarget");
+    // The auto-attached session belongs to the client, so its event arrives.
+    expect(await first.next((message) => message.method === "Target.attachedToTarget")).toMatchObject({
+      params: { sessionId: "S1" },
+    });
+    expect(first.messages.some((message) => "sessionId" in message)).toBe(false);
     await closeClient(first);
 
     const second = await connect(url);
     second.socket.send(JSON.stringify({ id: 1, method: "Test.echo" }));
     await second.next((message) => message.id === 1);
-    const methods = bridge.commands().map(({ method, params }) => ({ method, params }));
-    const reset = methods.slice(methods.findIndex(({ method }) => method === "Target.setAutoAttach") + 1);
+    const commands = bridge.commands().map(({ method, params, sessionId }) => ({ method, params, sessionId }));
+    const reset = commands.slice(commands.findIndex(({ method }) => method === "Target.setAutoAttach") + 1);
+    // Chrome ends the first client's session and everything below it.
     expect(reset).toEqual([
-      { method: "Target.setAutoAttach", params: { autoAttach: false, waitForDebuggerOnStart: false, flatten: true } },
-      { method: "Target.setDiscoverTargets", params: { discover: false } },
-      { method: "Target.detachFromTarget", params: { sessionId: "S1" } },
-      { method: "Test.echo" },
+      { method: "Target.detachFromTarget", params: { sessionId: "B1" }, sessionId: undefined },
+      { method: "Target.attachToBrowserTarget", params: {}, sessionId: undefined },
+      { method: "Test.echo", params: undefined, sessionId: "B2" },
     ]);
     // The second client sees nothing of the first client's sessions.
     expect(second.messages).toEqual([{ id: 1, result: {} }]);
+  });
+
+  it("detaches a session whose attach reply arrives after its client left", async () => {
+    const bridge = await startBridge();
+    const url = cdpWebSocketUrl(bridge.endpoint.socketPath, bridge.endpoint.browserPath);
+    const first = await connect(url);
+    first.socket.send(JSON.stringify({ id: 1, method: "Target.attachToTarget", params: { targetId: "page", delayMs: 300 } }));
+    await expect.poll(() => bridge.commands().map(({ method }) => method)).toContain("Target.attachToTarget");
+    await closeClient(first);
+
+    const second = await connect(url);
+    second.socket.send(JSON.stringify({ id: 1, method: "Test.echo" }));
+    await second.next((message) => message.id === 1);
+    expect(bridge.commands()).toContainEqual(
+      expect.objectContaining({ method: "Target.detachFromTarget", params: { sessionId: "T1" }, sessionId: "B1" }),
+    );
+    expect(second.messages).toEqual([{ id: 1, result: {} }]);
+  });
+
+  it("caps a client's pending commands and drops them when it leaves", async () => {
+    const bridge = await startBridge();
+    const url = cdpWebSocketUrl(bridge.endpoint.socketPath, bridge.endpoint.browserPath);
+    const hangs = () => bridge.commands().filter(({ method }) => method === "Test.hang").length;
+    const first = await connect(url);
+    for (let id = 1; id <= MAX_PENDING_COMMANDS; id += 1) first.socket.send(JSON.stringify({ id, method: "Test.hang" }));
+    await expect.poll(hangs, { timeout: 10_000 }).toBe(MAX_PENDING_COMMANDS);
+    await closeClient(first);
+
+    // The first client's unanswered commands no longer count.
+    const second = await connect(url);
+    const closed = once(second.socket, "close");
+    for (let id = 1; id <= MAX_PENDING_COMMANDS; id += 1) second.socket.send(JSON.stringify({ id, method: "Test.hang" }));
+    await expect.poll(hangs, { timeout: 10_000 }).toBe(2 * MAX_PENDING_COMMANDS);
+    expect(second.socket.readyState).toBe(WebSocket.OPEN);
+    second.socket.send(JSON.stringify({ id: 0, method: "Test.hang" }));
+    const [code, reason] = (await closed) as [number, Buffer];
+    expect({ code, reason: reason.toString() }).toEqual({
+      code: 1008,
+      reason: `Too many pending CDP commands (over ${MAX_PENDING_COMMANDS})`,
+    });
+    expect(hangs()).toBe(2 * MAX_PENDING_COMMANDS);
   });
 
   it("closes its client and removes the socket and endpoint file when the browser exits", async () => {

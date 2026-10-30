@@ -4,7 +4,9 @@
  * group and owns Chrome's DevTools pipe: Chrome reads commands from fd 3 and
  * writes replies to fd 4, one NUL-terminated JSON message each. Chrome opens no
  * TCP port. The supervisor serves CDP to one client at a time on a 0600 Unix
- * socket in the session's private temp directory.
+ * socket in the session's private temp directory. Each client gets its own
+ * browser-target session, and its top-level commands run there. Detaching that
+ * session when the client leaves makes Chrome undo what the client set up.
  *
  * This file runs as plain JavaScript under Node: the browser package starts it
  * from source in tests, and the CLI build copies it next to its bundle.
@@ -38,6 +40,8 @@ const MAX_MESSAGE_BYTES = 256 * 1024 * 1024;
 /** Stop reading Chrome's pipe while this much waits for a slow client. */
 const CLIENT_HIGH_WATER_BYTES = 16 * 1024 * 1024;
 const RESET_TIMEOUT_MS = 5_000;
+/** Most commands a client may have waiting for Chrome's reply. */
+const MAX_PENDING_COMMANDS = 1024;
 const MAX_STDERR_BUFFER_BYTES = 64 * 1024;
 const ALREADY_ATTACHED = "A CDP client is already attached to this browser session";
 const ATTACH_METHODS = new Set(["Target.attachToTarget", "Target.attachToBrowserTarget"]);
@@ -132,10 +136,14 @@ const bridge = {
   clientLease: undefined,
   /** @type {Lease | undefined} */
   lease: undefined,
-  /** @type {Map<string, string | undefined>} Current client's sessions and their parents. */
-  sessions: new Map(),
-  /** @type {Set<string>} Sessions of a detached client, until they are detached. */
-  staleSessions: new Set(),
+  /** @type {string | undefined} The current client's own browser-target session. */
+  clientSession: undefined,
+  /** @type {Promise<string | undefined> | undefined} Resolves with that session once Chrome opens it. */
+  clientSessionReady: undefined,
+  /** @type {any[]} Client commands that wait for the client's session. */
+  queued: [],
+  /** @type {Set<string>} Sessions the current client attached below its own session. */
+  sessions: new Set(),
   /** @type {Promise<void> | undefined} */
   resetting: undefined,
   /** @type {http.Server | undefined} */
@@ -198,14 +206,38 @@ function handleChromeResponse(message) {
     return;
   }
   const client = pending.client;
-  // A reply to a client that has since detached is dropped.
-  if (client === undefined || client !== bridge.client) return;
-  const attached = message.result?.sessionId;
-  if (ATTACH_METHODS.has(pending.method) && typeof attached === "string") {
-    bridge.sessions.set(attached, message.sessionId);
+  const attached = ATTACH_METHODS.has(pending.method) ? message.result?.sessionId : undefined;
+  if (client === undefined || client !== bridge.client) {
+    // A reply to a client that has since detached is dropped. A session it
+    // attached is released, so its events never reach the next client.
+    if (typeof attached === "string") {
+      void command("Target.detachFromTarget", { sessionId: attached }, message.sessionId);
+    }
+    return;
   }
+  if (typeof attached === "string") bridge.sessions.add(attached);
   message.id = pending.id;
-  sendToClient(client, JSON.stringify(message));
+  sendToClient(client, toClientText(message));
+}
+
+/**
+ * The client sees its own browser-target session as the root session.
+ * @param {any} message
+ */
+function toClientText(message) {
+  if (message.sessionId === bridge.clientSession) delete message.sessionId;
+  return JSON.stringify(message);
+}
+
+/**
+ * @param {unknown} sessionId
+ * @returns {boolean}
+ */
+function isClientSession(sessionId) {
+  return (
+    typeof sessionId === "string" &&
+    (sessionId === bridge.clientSession || bridge.sessions.has(sessionId))
+  );
 }
 
 /** @param {any} message */
@@ -213,15 +245,16 @@ function trackSessionEvent(message) {
   const sessionId = message.params?.sessionId;
   if (typeof sessionId !== "string") return;
   if (message.method === "Target.attachedToTarget") {
-    if (bridge.client === undefined) {
-      // Auto-attach of a detached client: release the target at once.
-      void command("Target.detachFromTarget", { sessionId }, message.sessionId);
+    // The root session is the bridge's own; it attaches only client sessions.
+    if (message.sessionId === undefined) return;
+    if (isClientSession(message.sessionId)) {
+      bridge.sessions.add(sessionId);
       return;
     }
-    bridge.sessions.set(sessionId, message.sessionId);
+    // Auto-attach of a detached client: release the target at once.
+    void command("Target.detachFromTarget", { sessionId }, message.sessionId);
   } else if (message.method === "Target.detachedFromTarget") {
     bridge.sessions.delete(sessionId);
-    bridge.staleSessions.delete(sessionId);
   }
 }
 
@@ -241,8 +274,10 @@ function handleChromeMessage(text) {
   }
   trackSessionEvent(message);
   const client = bridge.client;
-  if (client === undefined || bridge.staleSessions.has(message.sessionId)) return;
-  sendToClient(client, text);
+  // Root events belong to the bridge, and other events to sessions that are
+  // not this client's.
+  if (client === undefined || !isClientSession(message.sessionId)) return;
+  sendToClient(client, message.sessionId === bridge.clientSession ? toClientText(message) : text);
 }
 
 /** @type {Buffer[]} */
@@ -295,17 +330,18 @@ function isClientCommand(message) {
     typeof message === "object" &&
     message !== null &&
     Number.isSafeInteger(message.id) &&
-    typeof message.method === "string"
+    typeof message.method === "string" &&
+    // An empty session id would address Chrome's root session.
+    (message.sessionId === undefined || (typeof message.sessionId === "string" && message.sessionId !== ""))
   );
 }
 
 /**
- * Forward a client command under a bridge id, so the bridge can send its own
- * commands on the same pipe without an id collision.
  * @param {WebSocket} client
  * @param {import("ws").RawData} data
  */
 function handleClientMessage(client, data) {
+  if (bridge.client !== client || client.readyState !== client.OPEN) return;
   let message;
   try {
     message = JSON.parse(data.toString());
@@ -316,9 +352,31 @@ function handleClientMessage(client, data) {
     client.close(1008, "Invalid CDP message");
     return;
   }
+  // Chrome may never answer a command, such as an await of a promise that
+  // never settles, so the commands a client may have pending are capped.
+  if (inflight.size + bridge.queued.length >= MAX_PENDING_COMMANDS) {
+    client.close(1008, `Too many pending CDP commands (over ${MAX_PENDING_COMMANDS})`);
+    return;
+  }
+  if (bridge.clientSession === undefined) {
+    bridge.queued.push(message);
+    return;
+  }
+  forwardClientCommand(client, message);
+}
+
+/**
+ * Forward a client command under a bridge id, so the bridge can send its own
+ * commands on the same pipe without an id collision. A top-level command runs
+ * in the client's own browser-target session.
+ * @param {WebSocket} client
+ * @param {any} message
+ */
+function forwardClientCommand(client, message) {
   const id = nextId++;
   inflight.set(id, { client, id: message.id, method: message.method });
   message.id = id;
+  if (message.sessionId === undefined) message.sessionId = bridge.clientSession;
   if (writeToChrome(message) || bridge.waitingForDrain) return;
   bridge.waitingForDrain = true;
   client.pause();
@@ -329,36 +387,66 @@ function handleClientMessage(client, data) {
 }
 
 /**
- * Undo what a detached client set up, so the next client starts clean: stop
- * auto-attach and target discovery, and detach every session it attached.
- * Detaching a session also releases a target paused on start.
- * @param {Map<string, string | undefined>} sessions
+ * Undo what a detached client set up, so the next client starts clean. Chrome
+ * ends the client's browser-target session and every session below it, and
+ * with them auto-attach, discovery, tracing, download behavior and browser
+ * contexts created with `disposeOnDetach`. Detaching a session also releases
+ * a target paused on start.
+ * @param {WebSocket} client
+ * @param {Promise<string | undefined>} sessionReady
  */
-async function resetClientState(sessions) {
-  for (const sessionId of sessions.keys()) bridge.staleSessions.add(sessionId);
-  const commands = [
-    command("Target.setAutoAttach", { autoAttach: false, waitForDebuggerOnStart: false, flatten: true }),
-    command("Target.setDiscoverTargets", { discover: false }),
-  ];
-  for (const [sessionId, parent] of sessions) {
-    // A child session ends with its parent.
-    if (parent === undefined) commands.push(command("Target.detachFromTarget", { sessionId }));
+async function resetClientState(client, sessionReady) {
+  const detach = sessionReady.then((sessionId) =>
+    sessionId === undefined ? undefined : command("Target.detachFromTarget", { sessionId }),
+  );
+  await Promise.race([detach, delay(RESET_TIMEOUT_MS)]);
+  // Chrome answers in order, so an attach the client sent before it left was
+  // answered before this detach, and its session is released by now.
+  for (const [id, pending] of inflight) {
+    if (pending.client === client) inflight.delete(id);
   }
-  await Promise.race([Promise.all(commands), delay(RESET_TIMEOUT_MS)]);
-  bridge.staleSessions.clear();
 }
 
 /** @param {WebSocket} client */
 function detachClient(client) {
   if (bridge.client !== client) return;
+  const sessionReady = bridge.clientSessionReady ?? Promise.resolve(undefined);
   bridge.client = undefined;
   bridge.clientLease = undefined;
+  bridge.clientSession = undefined;
+  bridge.clientSessionReady = undefined;
+  bridge.queued = [];
+  bridge.sessions = new Set();
   fromChrome.resume();
-  const sessions = bridge.sessions;
-  bridge.sessions = new Map();
-  bridge.resetting = resetClientState(sessions).finally(() => {
+  // Chrome may never answer these. An attach stays until the reset, so a late
+  // reply still releases its session.
+  for (const [id, pending] of inflight) {
+    if (pending.client === client && !ATTACH_METHODS.has(pending.method)) inflight.delete(id);
+  }
+  bridge.resetting = resetClientState(client, sessionReady).finally(() => {
     bridge.resetting = undefined;
   });
+}
+
+/**
+ * Give the client its own browser-target session. Its commands wait in a
+ * queue until Chrome opens the session.
+ * @param {WebSocket} client
+ * @returns {Promise<string | undefined>}
+ */
+async function openClientSession(client) {
+  const sessionId = (await command("Target.attachToBrowserTarget"))?.result?.sessionId;
+  if (typeof sessionId !== "string") {
+    if (bridge.client === client) client.close(1011, "The browser did not open a CDP session");
+    return undefined;
+  }
+  // A client that left meanwhile has its session detached by the reset.
+  if (bridge.client !== client) return sessionId;
+  bridge.clientSession = sessionId;
+  const queued = bridge.queued;
+  bridge.queued = [];
+  for (const message of queued) forwardClientCommand(client, message);
+  return sessionId;
 }
 
 /**
@@ -371,6 +459,7 @@ function attachClient(client, lease) {
   client.on("message", (data) => handleClientMessage(client, data));
   client.on("error", () => {});
   client.once("close", () => detachClient(client));
+  bridge.clientSessionReady = openClientSession(client);
 }
 
 /**
@@ -417,7 +506,9 @@ function handleUpgrade(wss, request, socket, head) {
 function releaseLease(lease) {
   if (bridge.lease !== lease) return;
   bridge.lease = undefined;
-  if (bridge.clientLease === lease) bridge.client?.close(1001, "DevTools relay detached");
+  // Terminate, not close: a relay that stopped reading would otherwise hold
+  // the slot until the close handshake times out.
+  if (bridge.clientLease === lease) bridge.client?.terminate();
 }
 
 /**

@@ -315,13 +315,24 @@ What Pickforge does do:
   `cdp-endpoint` in the session directory, with mode 0600.
 - The socket serves `GET /json/version` from a cached `Browser.getVersion`
   reply, one websocket client at a time, and `POST /close`, which closes Chrome
-  so a named profile flushes its cookies. A second client is refused. When a
-  client leaves, the supervisor turns off the auto-attach and target discovery
-  it set and detaches its sessions, so the next client starts clean.
+  so a named profile flushes its cookies. A second client is refused.
+- Each client gets its own browser session, and its top-level commands run
+  there. Chrome's own pipe session stays with the supervisor. When the client
+  leaves, the supervisor detaches the client's session, and Chrome ends it.
+  This also ends the sessions below it and the client's auto-attach, target
+  discovery, tracing and download behavior. It closes the browser contexts the
+  client created with `disposeOnDetach`. A session whose attach reply arrives
+  after its client left is detached too.
+- Some browser state outlives a client: open tabs and their pages, browser
+  contexts created without `disposeOnDetach`, and cookies, storage and other
+  profile data. The next client sees them.
+- A client can have at most 1024 commands waiting for Chrome. The supervisor
+  closes a client that goes over this limit and drops the commands of a client
+  that leaves.
 - The websocket path is a capability: whoever holds it and can open the socket
   controls the browser. Pickforge **never** puts the websocket path in session
   records or diagnostics.
-- `pickforge-lab browser devtools-mcp` resolves only a live browser session owned by the current project and reads its endpoint file in memory. It accepts no arbitrary browser URL and stores no CDP endpoint. It holds the session's one client slot for its whole run, so a second relay on the same session fails with an "already attached" error. The upstream child gets a per-relay `ws+unix:` endpoint as `--wsEndpoint`, so it is on that child's command line. A session created by an older Pickforge, which served CDP on a TCP port, still shows in status and destroys, but the relay refuses it and asks you to recreate it.
+- `pickforge-lab browser devtools-mcp` resolves only a live browser session owned by the current project and reads its endpoint file in memory. It accepts no arbitrary browser URL and stores no CDP endpoint. It holds the session's one client slot for its whole run, so a second relay on the same session fails with an "already attached" error. When the relay ends, the supervisor drops its websocket at once, so the next relay can attach. The upstream child gets a per-relay `ws+unix:` endpoint as `--wsEndpoint`, so it is on that child's command line. A session created by an older Pickforge, which served CDP on a TCP port, still shows in status and destroys, but the relay refuses it and asks you to recreate it.
 - The relay is bound to the Chrome it started with. Its endpoint names that session's own socket, which teardown removes, so it cannot reach a later browser. Before each tool call the relay rechecks that the session is running, its input is open and its Chrome is the same live process; after that check fails once, every tool call returns a stable session-ended error. A check that cannot read the session refuses only that call.
 - Each forwarded tool call holds an agent permit until the upstream child answers it, so teardown drains relay calls before it stops Chrome. While a call is unanswered, the relay checks the session about every 100 ms. When teardown closes input, the relay stops its child, releases the permits and answers each unanswered call with the session-ended error. Teardown then waits at most about a second, whatever the call length. A relay killed outright leaves permits that the next drain sweeps, because their owner is dead.
 - A human takeover releases these permits at once, so its 5-second drain succeeds. The call that was already running can still finish during human control, and its response is forwarded. Later calls get the busy error. If teardown starts while such a call runs, the relay still stops its child, but teardown does not wait for it. That call can then still try to connect after its Chrome exits, but the session's socket is gone, so it fails.
