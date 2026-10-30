@@ -1,10 +1,8 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { WebSocketServer } from "ws";
 import { scheduler } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -29,6 +27,8 @@ import {
   createBrowserSession,
   destroyBrowserSession,
   getBrowserSessionStatus,
+  probeCdpEndpoint,
+  readBrowserSessionCdpEndpoint,
   resolveLiveBrowserSession,
   teardownBrowserSession,
   type BrowserSessionHandle,
@@ -61,41 +61,19 @@ afterEach(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-/** Stand in for a CDP server that may have reused the recorded port. */
-async function closeEndpoint(session: BrowserSessionHandle, handshakeDelayMs = 0) {
-  const browserPath = "/devtools/browser/test-launch-guid";
-  const server = http.createServer((_req, res) => {
-    res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ webSocketDebuggerUrl: `ws://127.0.0.1:${port}${browserPath}` }));
-  });
-  const connections = new Set<net.Socket>();
-  server.on("connection", (socket) => {
-    connections.add(socket);
-    socket.on("close", () => connections.delete(socket));
-  });
-  const websocket = new WebSocketServer({
-    server,
-    path: browserPath,
-    verifyClient: (_info, done) => { setTimeout(() => done(true), handshakeDelayMs); },
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  if (address === null || typeof address === "string") throw new Error("Missing test CDP port");
-  const port = address.port;
-  const record = (await getSession(session.id, registryEnv))!;
-  await updateSession(session.id, { browser: { ...record.browser!, cdpPort: port } }, registryEnv);
-  fs.writeFileSync(path.join(session.profileDir, "DevToolsActivePort"), `${port}\n${browserPath}\n`);
-  return {
-    websocket,
-    port,
-    close: async () => {
-      for (const socket of connections) socket.destroy();
-      await Promise.all([
-        new Promise<void>((resolve) => websocket.close(() => resolve())),
-        new Promise<void>((resolve) => server.close(() => resolve())),
-      ]);
-    },
-  };
+/**
+ * Where the fake Chrome keeps its markers: the parent of its profile, which is
+ * the profile root for a named profile.
+ */
+function fakeDir(session: BrowserSessionHandle): string {
+  return path.dirname(session.profileDir);
+}
+
+/** The CDP commands the fake Chrome read from its pipe. */
+function fakeCdpMethods(session: BrowserSessionHandle): string[] {
+  const file = path.join(fakeDir(session), "cdp-commands.jsonl");
+  if (!fs.existsSync(file)) return [];
+  return fs.readFileSync(file, "utf8").trim().split("\n").map((line) => (JSON.parse(line) as { method: string }).method);
 }
 
 function hasMissingPid(...pids: (number | undefined)[]): boolean {
@@ -135,20 +113,6 @@ async function rejectionMessage(promise: Promise<unknown>): Promise<string> {
     (error: unknown) =>
       error instanceof Error ? error.message : String(error),
   );
-}
-
-function isPortListening(port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const socket = net.connect({ host: "127.0.0.1", port });
-    socket.once("connect", () => {
-      socket.destroy();
-      resolve(true);
-    });
-    socket.once("error", () => {
-      socket.destroy();
-      resolve(false);
-    });
-  });
 }
 
 async function waitForEntry(
@@ -239,8 +203,17 @@ describe.skipIf(!hasXvfb)("createBrowserSession (fake binaries)", () => {
       expect(session.id).toMatch(/^brow-[0-9a-f]+$/);
       expect(isPidAlive(session.xvfbPid)).toBe(true);
       expect(isPidAlive(session.browserPid)).toBe(true);
-      expect(session.cdpPort).toBeGreaterThan(0);
-      expect(await isPortListening(session.cdpPort)).toBe(true);
+      // CDP is on the supervisor's private socket; Chrome gets a pipe only.
+      const cdp = browserRuntimeLayout(session.logDir);
+      const argv = JSON.parse(fs.readFileSync(path.join(session.profileDir, "fake-chrome-argv.json"), "utf8")) as string[];
+      expect(argv).toContain("--remote-debugging-pipe");
+      expect(argv.some((arg) => arg.startsWith("--remote-debugging-port"))).toBe(false);
+      expect(fs.statSync(cdp.cdpEndpointFile).mode & 0o777).toBe(0o600);
+      expect(fs.statSync(cdp.cdpSocketPath).mode & 0o777).toBe(0o600);
+      expect(await probeCdpEndpoint(cdp.cdpSocketPath)).toBe(true);
+      await expect(readBrowserSessionCdpEndpoint(session.id, registryEnv)).resolves.toMatchObject({
+        socketPath: cdp.cdpSocketPath,
+      });
 
       // The record carries both legs and the ephemeral profile contract.
       const record = await getSession(session.id, registryEnv);
@@ -249,7 +222,8 @@ describe.skipIf(!hasXvfb)("createBrowserSession (fake binaries)", () => {
       expect(record?.desktop?.display).toBe(session.display);
       expect(record?.desktop?.width).toBe(1024);
       expect(record?.browser?.profileMode).toBe("ephemeral");
-      expect(record?.browser?.cdpPort).toBe(session.cdpPort);
+      expect(record?.browser).not.toHaveProperty("cdpPort");
+      expect(record?.browser?.browserVersion).toBe("Chrome/131.0.6778.85");
       expect(record?.browser?.profileDir).toBe(session.profileDir);
 
       // The DevTools websocket path/GUID must never be persisted.
@@ -259,7 +233,6 @@ describe.skipIf(!hasXvfb)("createBrowserSession (fake binaries)", () => {
       );
       expect(raw).not.toContain("/devtools/browser/");
       expect(raw).not.toContain("webSocketDebuggerUrl");
-      expect(raw).not.toContain("fake-guid");
 
       // The profile lives under the session directory.
       expect(session.profileDir).toBe(
@@ -308,7 +281,7 @@ describe.skipIf(!hasXvfb)("createBrowserSession (fake binaries)", () => {
         env: registryEnv,
       });
       expect(initial.record.id).toBe(first.id);
-      expect(initial.cdpPort).toBe(first.cdpPort);
+      expect(initial.cdpEndpoint.socketPath).toBe(browserRuntimeLayout(first.logDir).cdpSocketPath);
 
       await destroyBrowserSession(first.id, registryEnv);
       first = undefined;
@@ -323,10 +296,12 @@ describe.skipIf(!hasXvfb)("createBrowserSession (fake binaries)", () => {
         env: registryEnv,
       });
       expect(recreated.record.id).toBe(second.id);
-      expect(recreated.cdpPort).toBe(second.cdpPort);
+      const socketPath = browserRuntimeLayout(second.logDir).cdpSocketPath;
+      expect(recreated.cdpEndpoint.socketPath).toBe(socketPath);
       expect(recreated.browserEndpoint).toBe(
-        `ws://127.0.0.1:${second.cdpPort}/devtools/browser/fake-guid-deadbeef`,
+        `ws+unix:${socketPath}:${recreated.cdpEndpoint.browserPath}`,
       );
+      expect(recreated.cdpEndpoint.browserPath).not.toBe(initial.cdpEndpoint.browserPath);
       expect(recreated.record.id).not.toBe(initial.record.id);
     } finally {
       if (first !== undefined) {
@@ -401,6 +376,42 @@ describe.skipIf(!hasXvfb)("createBrowserSession (fake binaries)", () => {
   });
 });
 
+describe.skipIf(!hasXvfb)("a session created before the CDP socket", () => {
+  it("still shows in status and tears down through its group, but the relay refuses it", async () => {
+    const session = await createBrowserSession({
+      projectDir,
+      registryEnv,
+      env: spawnEnvFor("ready"),
+      cdpTimeoutMs: 5000,
+    });
+    try {
+      // The shape an older Pickforge left: a TCP port and no endpoint file.
+      const record = await getSession(session.id, registryEnv);
+      await updateSession(
+        session.id,
+        { browser: { ...record!.browser!, cdpPort: 45123 } as NonNullable<CreateSessionInput["browser"]> },
+        registryEnv,
+      );
+      fs.unlinkSync(browserRuntimeLayout(session.logDir).cdpEndpointFile);
+
+      const status = await getBrowserSessionStatus(session.id, registryEnv);
+      expect(status.alive).toBe(true);
+      expect(status).not.toHaveProperty("cdpPort");
+      await expect(resolveLiveBrowserSession({ projectDir, env: registryEnv })).rejects.toThrow(
+        `Browser session ${session.id} was created by an older Pickforge that served DevTools on a TCP port`,
+      );
+
+      await destroyBrowserSession(session.id, registryEnv);
+      expect(await getSession(session.id, registryEnv)).toBeUndefined();
+      expect(isPidAlive(session.browserPid)).toBe(false);
+      expect(isPidAlive(session.xvfbPid)).toBe(false);
+      expect(fs.existsSync(session.profileDir)).toBe(false);
+    } finally {
+      await destroyBrowserSession(session.id, registryEnv).catch(() => {});
+    }
+  }, TEST_TIMEOUT_MS);
+});
+
 describe.skipIf(!hasXvfb)("getBrowserSessionStatus (fake binaries)", () => {
   it("reports both legs live and overall alive", async () => {
     const session = await createBrowserSession({
@@ -415,7 +426,7 @@ describe.skipIf(!hasXvfb)("getBrowserSessionStatus (fake binaries)", () => {
       expect(status.displayAlive).toBe(true);
       expect(status.browserAlive).toBe(true);
       expect(status.alive).toBe(true);
-      expect(status.cdpPort).toBe(session.cdpPort);
+      expect(status).not.toHaveProperty("cdpPort");
     } finally {
       await destroyBrowserSession(session.id, registryEnv).catch(() => {});
     }
@@ -722,7 +733,7 @@ describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
     expect(failure).toContain(
       "file was not created before the Chrome process exited",
     );
-    expect(failure).toContain("fake Chrome crashed before publishing a port");
+    expect(failure).toContain("fake Chrome crashed before answering its pipe");
 
     // Exactly one record exists (status error), its profile is gone, and its
     // Xvfb leg was stopped.
@@ -749,15 +760,15 @@ describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
     expect(await getSession(id, registryEnv)).toBeUndefined();
   }, TEST_TIMEOUT_MS);
 
-  it("rejects Chrome that exits after publishing a DevTools port", async () => {
-    const env = spawnEnvFor("crash-after-port");
+  it("rejects Chrome that exits right after answering its pipe", async () => {
+    const env = spawnEnvFor("crash-after-ready");
     const failure = await rejectionMessage(
       createBrowserSession({ projectDir, registryEnv, env, cdpTimeoutMs: 3000 }),
     );
-    expect(failure).toMatch(/published port \d+, then the Chrome process exited/);
-    expect(failure).toContain("fake Chrome crashed after publishing a port");
-    expect(failure).not.toContain("HTTP endpoint");
-    expect(failure).not.toContain("did not become ready");
+    expect(failure).toMatch(/^Chrome exited during startup\.\ncdp-endpoint /);
+    expect(failure).toContain("fake Chrome crashed after answering its pipe");
+    expect(failure).not.toContain("did not answer");
+    expect(failure).not.toContain("/devtools/browser/");
 
     const recordFile = fs
       .readdirSync(path.join(home, "sessions"))
@@ -767,7 +778,8 @@ describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
     }
     const id = recordFile.slice(0, -".json".length);
     const sessionDir = browserSessionLogDir(id, registryEnv);
-    expect(fs.existsSync(path.join(sessionDir, "cdp-published"))).toBe(true);
+    expect(fs.readFileSync(path.join(sessionDir, "cdp-commands.jsonl"), "utf8")).toContain("Browser.getVersion");
+    expect(fs.existsSync(path.join(sessionDir, "cdp-endpoint"))).toBe(false);
     expect(fs.existsSync(path.join(sessionDir, "profile"))).toBe(false);
     expect((await getSession(id, registryEnv))?.status).toBe("error");
   }, TEST_TIMEOUT_MS);
@@ -987,7 +999,7 @@ describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
         profileMode: "ephemeral",
         profileDir: path.join(sessionDir, "profile"),
       });
-      expect(failed.browser?.cdpPort).toBeUndefined();
+      expect(failed.browser?.browserVersion).toBeUndefined();
       expect(fs.existsSync(path.join(sessionDir, "profile"))).toBe(true);
 
       await expect(destroyBrowserSession(id, registryEnv)).rejects.toThrow(
@@ -1018,7 +1030,7 @@ describe.skipIf(!hasXvfb)("partial-failure cleanup (fake binaries)", () => {
 
   it("kills the process group and removes the profile when Chrome stalls", async () => {
     const env = spawnEnvFor("stall");
-    const stallMessage = "fake Chrome stalled before publishing a port";
+    const stallMessage = "fake Chrome stalled before answering its pipe";
     // The readiness timeout starts right after the starting-browser record is
     // written. Hold that write until the fake has logged its stall, so a
     // loaded host cannot expire the short timeout before the fake has run.
@@ -1118,7 +1130,9 @@ describe.skipIf(!hasXvfb)("concurrent browser sessions (fake binaries)", () => {
       expect(rejections).toEqual([]);
       const [a, b] = sessions as [BrowserSessionHandle, BrowserSessionHandle];
       expect(a.display).not.toBe(b.display);
-      expect(a.cdpPort).not.toBe(b.cdpPort);
+      expect(browserRuntimeLayout(a.logDir).cdpSocketPath).not.toBe(
+        browserRuntimeLayout(b.logDir).cdpSocketPath,
+      );
       expect(a.profileDir).not.toBe(b.profileDir);
 
       // Destroying one leaves the other fully intact.
@@ -1141,7 +1155,7 @@ describe("browser record inspection (no live processes)", () => {
     return createSession(overrides, registryEnv);
   }
 
-  it("reports every leg dead for a stale record and echoes the cdp port", async () => {
+  it("reports every leg dead for a stale record from before the CDP socket", async () => {
     const rec = await craftBrowserRecord({
       type: "browser",
       projectDir,
@@ -1154,14 +1168,14 @@ describe("browser record inspection (no live processes)", () => {
         profileMode: "ephemeral",
         profileDir: "/tmp/pickforge-lab-stale",
         cdpPort: 9222,
-      },
+      } as NonNullable<CreateSessionInput["browser"]>,
     });
     const status = await getBrowserSessionStatus(rec.id, registryEnv);
     expect(status.xvfbAlive).toBe(false);
     expect(status.displayAlive).toBe(false);
     expect(status.browserAlive).toBe(false);
     expect(status.alive).toBe(false);
-    expect(status.cdpPort).toBe(9222);
+    expect(status).not.toHaveProperty("cdpPort");
   });
 
   it("handles a record with no legs at all", async () => {
@@ -1174,7 +1188,7 @@ describe("browser record inspection (no live processes)", () => {
     expect(status.xvfbAlive).toBe(false);
     expect(status.displayAlive).toBe(false);
     expect(status.browserAlive).toBe(false);
-    expect(status.cdpPort).toBeUndefined();
+    expect(status).not.toHaveProperty("cdpPort");
   });
 
   it("treats a malformed recorded display as unavailable", async () => {
@@ -1206,7 +1220,6 @@ describe("browser record inspection (no live processes)", () => {
         binaryPath: "/usr/bin/chromium",
         profileMode: "ephemeral",
         profileDir: outside,
-        cdpPort: 1,
       },
     });
     const error = await destroyBrowserSession(rec.id, registryEnv).catch(
@@ -1291,7 +1304,7 @@ describe.skipIf(!hasXvfb)("named browser profile lifecycle", () => {
       expect(argv).toContain(`--user-data-dir=${first.profileDir}`);
       fs.writeFileSync(path.join(first.profileDir, "Cookies"), "persist");
       await expect(resolveLiveBrowserSession({ projectDir, env: registryEnv })).resolves.toMatchObject({
-        browserEndpoint: `ws://127.0.0.1:${first.cdpPort}/devtools/browser/fake-guid-deadbeef`,
+        cdpEndpoint: { socketPath: browserRuntimeLayout(first.logDir).cdpSocketPath },
       });
       await expect(createBrowserSession(opts)).rejects.toThrow(first.id);
     } finally {
@@ -1307,110 +1320,96 @@ describe.skipIf(!hasXvfb)("named browser profile lifecycle", () => {
     }
   }, TEST_TIMEOUT_MS);
 
-  it("stops the verified browser group when the named profile CDP close fails", async () => {
+  it("closes the named browser with Browser.close through the supervisor", async () => {
     const session = await createBrowserSession({ projectDir, registryEnv, env: spawnEnvFor("ready"), profile: "ops" });
-    const fetch = vi.spyOn(globalThis, "fetch");
     try {
       await destroyBrowserSession(session.id, registryEnv);
-      expect(fetch).not.toHaveBeenCalled();
+      expect(fakeCdpMethods(session)).toEqual(["Browser.getVersion", "Browser.close"]);
+      expect(fs.existsSync(path.join(fakeDir(session), "exited-after-close"))).toBe(true);
       expect(isPidAlive(session.browserPid)).toBe(false);
-      expect(isPidAlive(session.xvfbPid)).toBe(false);
       expect(await getSession(session.id, registryEnv)).toBeUndefined();
       expect(fs.existsSync(session.profileDir)).toBe(true);
     } finally {
-      fetch.mockRestore();
       await destroyBrowserSession(session.id, registryEnv).catch(() => {});
     }
   }, TEST_TIMEOUT_MS);
 
-  it("closes the named browser without a global WebSocket", async () => {
-    const session = await createBrowserSession({ projectDir, registryEnv, env: spawnEnvFor("ready"), profile: "ops" });
-    const endpoint = await closeEndpoint(session);
-    const commands: unknown[] = [];
-    endpoint.websocket.on("connection", (socket) => socket.on("message", (data) => {
-      commands.push(JSON.parse(data.toString()));
-      process.kill(-session.browserPid, "SIGTERM");
-    }));
-    vi.stubGlobal("WebSocket", undefined);
-    try {
-      await destroyBrowserSession(session.id, registryEnv);
-      expect(commands).toEqual([{ id: 1, method: "Browser.close" }]);
-    } finally {
-      vi.unstubAllGlobals();
-      await endpoint.close();
-      await destroyBrowserSession(session.id, registryEnv).catch(() => {});
-    }
-  }, TEST_TIMEOUT_MS);
-
-  it.each(["reused port", "mismatched port", "missing file", "symlinked file"])(
-    "does not close another browser with a lingering supervisor and %s", async (scenario) => {
+  it.each(["missing file", "symlinked file", "group-readable file", "foreign socket"])(
+    "stops the verified group without a CDP close for a %s", async (scenario) => {
       const session = await createBrowserSession({ projectDir, registryEnv, env: spawnEnvFor("ready"), profile: "ops" });
-      const endpoint = await closeEndpoint(session);
-      const connected = vi.fn();
-      endpoint.websocket.on("connection", connected);
-      const file = path.join(session.profileDir, "DevToolsActivePort");
-      if (scenario === "reused port") fs.writeFileSync(file, `${endpoint.port}\n/devtools/browser/previous-launch-guid\n`);
-      if (scenario === "mismatched port") fs.writeFileSync(file, "1\n/devtools/browser/test-launch-guid\n");
+      const file = browserRuntimeLayout(session.logDir).cdpEndpointFile;
+      const foreignSocket = path.join(tmp, "foreign.sock");
+      const foreign = http.createServer((_request, response) => response.end("{}"));
+      const contacted = vi.fn();
+      foreign.on("request", contacted);
+      await new Promise<void>((resolve) => foreign.listen(foreignSocket, resolve));
+      const content = fs.readFileSync(file, "utf8");
       if (scenario === "missing file") fs.unlinkSync(file);
       if (scenario === "symlinked file") {
         fs.renameSync(file, `${file}-outside`);
         fs.symlinkSync(`${file}-outside`, file);
       }
-      const fetch = vi.spyOn(globalThis, "fetch");
+      if (scenario === "group-readable file") fs.chmodSync(file, 0o640);
+      if (scenario === "foreign socket") {
+        fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(content), socketPath: foreignSocket }));
+      }
       try {
         await destroyBrowserSession(session.id, registryEnv);
-        expect(connected).not.toHaveBeenCalled();
-        expect(fetch).not.toHaveBeenCalled();
+        expect(contacted).not.toHaveBeenCalled();
+        expect(fakeCdpMethods(session)).toEqual(["Browser.getVersion"]);
         expect(isPidAlive(session.browserPid)).toBe(false);
+        expect(fs.existsSync(file)).toBe(false);
       } finally {
-        fetch.mockRestore();
-        await endpoint.close();
+        await new Promise((resolve) => foreign.close(resolve));
         await destroyBrowserSession(session.id, registryEnv).catch(() => {});
       }
     }, TEST_TIMEOUT_MS,
   );
 
-  it("gives Chrome its exit budget after a slow websocket handshake", async () => {
+  it("gives Chrome its exit budget after the close request", async () => {
     const session = await createBrowserSession({ projectDir, registryEnv, env: spawnEnvFor("ready"), profile: "ops" });
-    const endpoint = await closeEndpoint(session, 2_000);
-    let exitedCleanly = false;
-    let exitTimer: ReturnType<typeof setTimeout> | undefined;
-    endpoint.websocket.on("connection", (socket) => socket.on("message", () => {
-      exitTimer = setTimeout(() => {
-        exitedCleanly = isPidAlive(session.browserPid);
-        if (exitedCleanly) process.kill(-session.browserPid, "SIGTERM");
-      }, 2_000);
-    }));
+    fs.writeFileSync(path.join(fakeDir(session), "slow-close"), "");
     try {
       await destroyBrowserSession(session.id, registryEnv);
-      expect(exitedCleanly).toBe(true);
+      // The fake exits by itself 2s after Browser.close; a group stop would
+      // have killed it before it wrote this marker.
+      expect(fs.existsSync(path.join(fakeDir(session), "exited-after-close"))).toBe(true);
       expect(isPidAlive(session.browserPid)).toBe(false);
     } finally {
-      clearTimeout(exitTimer);
-      await endpoint.close();
       await destroyBrowserSession(session.id, registryEnv).catch(() => {});
     }
   }, TEST_TIMEOUT_MS);
 
-  it.each(["handshake", "exit"])("aborts the CDP %s wait and still stops the verified group", async (phase) => {
+  it.each(["request", "exit"])("aborts the CDP %s wait and still stops the verified group", async (phase) => {
     const session = await createBrowserSession({ projectDir, registryEnv, env: spawnEnvFor("ready"), profile: "ops" });
-    const endpoint = await closeEndpoint(session, phase === "handshake" ? 2_000 : 0);
+    fs.writeFileSync(path.join(fakeDir(session), "slow-close"), "");
     const controller = new AbortController();
     let abortAt = 0;
-    const abort = () => { abortAt = Date.now(); controller.abort(); };
+    const abort = () => {
+      abortAt = Date.now();
+      controller.abort();
+      if (phase === "request") process.kill(session.browserPid, "SIGCONT");
+    };
     let abortTimer: ReturnType<typeof setTimeout> | undefined;
-    if (phase === "handshake") abortTimer = setTimeout(abort, 200);
-    else endpoint.websocket.on("connection", (socket) => socket.on("message", () => {
-      abortTimer = setTimeout(abort, 100);
-    }));
+    if (phase === "request") {
+      // A stopped supervisor accepts the connection but never answers.
+      process.kill(session.browserPid, "SIGSTOP");
+      abortTimer = setTimeout(abort, 200);
+    } else {
+      const sent = setInterval(() => {
+        if (!fakeCdpMethods(session).includes("Browser.close")) return;
+        clearInterval(sent);
+        abortTimer = setTimeout(abort, 100);
+      }, 10);
+    }
     try {
       await destroyBrowserSession(session.id, registryEnv, { signal: controller.signal });
       expect(abortAt).toBeGreaterThan(0);
       expect(Date.now() - abortAt).toBeLessThan(1_500);
       expect(isPidAlive(session.browserPid)).toBe(false);
+      expect(fs.existsSync(path.join(fakeDir(session), "exited-after-close"))).toBe(false);
     } finally {
       clearTimeout(abortTimer);
-      await endpoint.close();
       await destroyBrowserSession(session.id, registryEnv).catch(() => {});
     }
   }, TEST_TIMEOUT_MS);

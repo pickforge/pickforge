@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import path from "node:path";
 import { redactSecrets } from "@pickforge/lab-core";
 
 const MAX_LOG_TAIL_BYTES = 8 * 1024;
@@ -34,22 +33,23 @@ function readLogTail(logPath: string | undefined): string {
 export type ChromeStartupFailureReason = "exited" | "timeout";
 
 export interface ChromeStartupDiagnosticsOptions {
-  profileDir: string;
+  /** The supervisor's `cdp-endpoint` file. */
+  endpointFile: string;
   /** Authoritative daemon log path. Omit only when the caller has no daemon. */
   logPath?: string;
   reason: ChromeStartupFailureReason;
-  port?: number;
+  /** The endpoint file was valid, so only its socket failed to answer. */
+  published?: boolean;
 }
 
-function devToolsPortStatus(opts: ChromeStartupDiagnosticsOptions): string {
-  const activePortPath = path.join(opts.profileDir, "DevToolsActivePort");
-  if (opts.port !== undefined) {
+function endpointStatus(opts: ChromeStartupDiagnosticsOptions): string {
+  if (opts.published === true) {
     return opts.reason === "exited"
-      ? `published port ${opts.port}, then the Chrome process exited`
-      : `published port ${opts.port}, but its HTTP endpoint did not become ready before timeout`;
+      ? "published a CDP socket, then the Chrome process exited"
+      : "published a CDP socket, but it did not answer before timeout";
   }
-  const fileStatus = fs.existsSync(activePortPath)
-    ? "file exists but does not contain a valid port"
+  const fileStatus = fs.existsSync(opts.endpointFile)
+    ? "file exists but does not hold a valid endpoint"
     : "file was not created";
   return opts.reason === "exited"
     ? `${fileStatus} before the Chrome process exited`
@@ -62,7 +62,7 @@ export function formatChromeStartupDiagnostics(
 ): string {
   const logTail = redactSecrets(readLogTail(opts.logPath));
   return (
-    `DevToolsActivePort ${devToolsPortStatus(opts)}; ` +
+    `cdp-endpoint ${endpointStatus(opts)}; ` +
     `chrome.log tail:\n${logTail === "" ? "[empty]" : logTail}`
   );
 }

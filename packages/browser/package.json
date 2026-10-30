@@ -14,7 +14,7 @@
     }
   },
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts --clean"
+    "build": "tsup src/index.ts --format esm --dts --clean && node -e \"require('node:fs').copyFileSync('src/supervisor-main.js','dist/supervisor-main.js')\""
   },
   "dependencies": {
     "@pickforge/lab-core": "*",

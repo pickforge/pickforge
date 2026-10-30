@@ -7,14 +7,13 @@ import { formatChromeStartupDiagnostics } from "../src/startup-diagnostics.js";
 const MAX_LOG_TAIL_BYTES = 8 * 1024;
 
 let tmp: string;
-let profileDir: string;
+let endpointFile: string;
 let logPath: string;
 
 beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pf-chrome-diagnostics-"));
-  profileDir = path.join(tmp, "profile");
+  endpointFile = path.join(tmp, "cdp-endpoint");
   logPath = path.join(tmp, "daemon-logs", "actual-chrome.log");
-  fs.mkdirSync(profileDir);
   fs.mkdirSync(path.dirname(logPath));
 });
 
@@ -25,20 +24,20 @@ afterEach(() => {
 
 function diagnostics(
   reason: "exited" | "timeout" = "timeout",
-  port?: number,
+  published = false,
 ): string {
   return formatChromeStartupDiagnostics({
-    profileDir,
+    endpointFile,
     logPath,
     reason,
-    ...(port === undefined ? {} : { port }),
+    published,
   });
 }
 
 describe("formatChromeStartupDiagnostics", () => {
-  it("reports a missing port file and an empty log for a timeout", () => {
+  it("reports a missing endpoint file and an empty log for a timeout", () => {
     expect(diagnostics()).toBe(
-      "DevToolsActivePort file was not created before timeout; chrome.log tail:\n[empty]",
+      "cdp-endpoint file was not created before timeout; chrome.log tail:\n[empty]",
     );
   });
 
@@ -105,35 +104,34 @@ describe("formatChromeStartupDiagnostics", () => {
     expect(output).not.toContain("\0");
   });
 
-  it.each(["", "45123", "not-a-port\n"])(
-    "reports an invalid or partial port file containing %j",
+  it.each(["", "45123", "not-an-endpoint\n"])(
+    "reports an invalid or partial endpoint file containing %j",
     (content) => {
-      fs.writeFileSync(path.join(profileDir, "DevToolsActivePort"), content);
+      fs.writeFileSync(endpointFile, content);
 
       expect(diagnostics()).toContain(
-        "file exists but does not contain a valid port before timeout",
+        "file exists but does not hold a valid endpoint before timeout",
       );
     },
   );
 
-  it("distinguishes timeout after probing a port from process exit", () => {
+  it("distinguishes timeout after probing a socket from process exit", () => {
     fs.writeFileSync(
-      path.join(profileDir, "DevToolsActivePort"),
-      "45123\n/devtools/browser/capability-guid\n",
+      endpointFile,
+      JSON.stringify({ socketPath: "/tmp/a/cdp.sock", browserPath: "/devtools/browser/capability-guid" }),
     );
     fs.writeFileSync(logPath, "endpoint still starting\n");
 
-    const timedOut = diagnostics("timeout", 45123);
-    const exited = diagnostics("exited", 45123);
+    const timedOut = diagnostics("timeout", true);
+    const exited = diagnostics("exited", true);
 
     expect(timedOut).toContain(
-      "published port 45123, but its HTTP endpoint did not become ready before timeout",
+      "published a CDP socket, but it did not answer before timeout",
     );
     expect(exited).toContain(
-      "published port 45123, then the Chrome process exited",
+      "published a CDP socket, then the Chrome process exited",
     );
-    expect(exited).not.toContain("HTTP endpoint");
-    expect(exited).not.toContain("did not become ready");
+    expect(exited).not.toContain("did not answer");
     expect(exited).not.toContain("capability-guid");
   });
 });

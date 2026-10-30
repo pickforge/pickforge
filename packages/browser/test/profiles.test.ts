@@ -5,7 +5,6 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DirHandle, createSession, readProcessStartTicks, updateSession, type EnvLike } from "@pickforge/lab-core";
-import { namedProfileBrowserEndpoint } from "../src/profiles.js";
 import {
   browserProfileDir,
   claimBrowserProfile,
@@ -371,57 +370,5 @@ describe("persistent browser profiles", () => {
     expect(fs.readFileSync(path.join(outside, "keep"), "utf8")).toBe("keep");
     expect(await listBrowserProfiles(env)).toEqual([]);
     await expect(deleteBrowserProfile("missing", env)).rejects.toThrow();
-  });
-});
-
-describe("named profile close endpoint", () => {
-  it.each([
-    ["45678\n/devtools/browser/launch-guid\n", "ws://127.0.0.1:45678/devtools/browser/launch-guid"],
-    ["45679\n/devtools/browser/launch-guid\n", undefined],
-    ["45678\n", undefined],
-    ["45678\n/devtools/page/launch-guid\n", undefined],
-    ["45678\n/devtools/browser/guid?redirect=other\n", undefined],
-  ])("validates the recorded port and browser path in %j", async (content, expected) => {
-    const dir = await seedProfile();
-    fs.writeFileSync(path.join(dir, "DevToolsActivePort"), content!);
-    expect((await namedProfileBrowserEndpoint("ops", 45678, env))?.href).toBe(expected);
-  });
-
-  it("refuses a missing DevToolsActivePort file", async () => {
-    await seedProfile();
-    await expect(namedProfileBrowserEndpoint("ops", 45678, env)).rejects.toThrow();
-  });
-
-  it("refuses a symlinked DevToolsActivePort file", async () => {
-    const dir = await seedProfile();
-    const outside = path.join(tmp, "outside-port");
-    fs.writeFileSync(outside, "45678\n/devtools/browser/outside-guid\n");
-    fs.symlinkSync(outside, path.join(dir, "DevToolsActivePort"));
-    await expect(namedProfileBrowserEndpoint("ops", 45678, env)).rejects.toThrow("not a regular file");
-  });
-
-  it("refuses a symlinked profile directory", async () => {
-    const dir = await seedProfile();
-    fs.renameSync(dir, `${dir}-moved`);
-    fs.symlinkSync(`${dir}-moved`, dir);
-    await expect(namedProfileBrowserEndpoint("ops", 45678, env)).rejects.toThrow("it is a symlink");
-  });
-
-  it("reads through the pinned directory if the profile path is replaced", async () => {
-    const dir = await seedProfile();
-    fs.writeFileSync(path.join(dir, "DevToolsActivePort"), "45678\n/devtools/browser/original-guid\n");
-    const outside = path.join(tmp, "outside-profile");
-    fs.mkdirSync(outside);
-    fs.writeFileSync(path.join(outside, "DevToolsActivePort"), "45678\n/devtools/browser/replaced-guid\n");
-    const openFile = DirHandle.prototype.openFile;
-    vi.spyOn(DirHandle.prototype, "openFile").mockImplementation(async function (this: DirHandle, name, flags, mode) {
-      if (name === "DevToolsActivePort") {
-        fs.renameSync(dir, `${dir}-moved`);
-        fs.symlinkSync(outside, dir);
-      }
-      return openFile.call(this, name, flags, mode);
-    });
-    expect((await namedProfileBrowserEndpoint("ops", 45678, env))?.href)
-      .toBe("ws://127.0.0.1:45678/devtools/browser/original-guid");
   });
 });

@@ -20,8 +20,8 @@ vi.mock("@pickforge/lab-desktop-linux", async (original) => {
   return { ...actual, startXvfb: vi.fn(async () => ({ display: ":2993", pid: XVFB_PID, startTimeTicks: 321, logPath: "/fake/xvfb.log", width: 1280, height: 800 })) };
 });
 vi.mock("../src/detect.js", () => ({ requireChromeBinary: () => "/fake/chrome" }));
-vi.mock("../src/devtools.js", () => ({ waitForDevToolsPort: vi.fn(), readDevToolsBrowserVersion: vi.fn() }));
-import { waitForDevToolsPort } from "../src/devtools.js";
+vi.mock("../src/devtools.js", () => ({ waitForCdpEndpoint: vi.fn(), readDevToolsBrowserVersion: vi.fn() }));
+import { waitForCdpEndpoint } from "../src/devtools.js";
 import { createBrowserSession, destroyBrowserSession, teardownBrowserSession } from "../src/session.js";
 
 let home: string;
@@ -83,7 +83,7 @@ it("a drain timeout preserves Chrome and the display for a reaper retry", async 
 
 it.each([false, true])("startup rollback preserves resources until input drains, timeout=%s", async (timeout) => {
   let permit!: core.AgentPermit;
-  vi.mocked(waitForDevToolsPort).mockImplementationOnce(async () => {
+  vi.mocked(waitForCdpEndpoint).mockImplementationOnce(async () => {
     const [record] = await core.listSessions(env);
     await core.updateSession(record!.id, { status: "running" }, env);
     permit = await core.acquireAgentPermit(record!.id, env);
@@ -111,7 +111,7 @@ it.each([false, true])("startup rollback preserves resources until input drains,
 });
 
 it("browser rollback releases its own startup permit before draining", async () => {
-  vi.mocked(waitForDevToolsPort).mockImplementationOnce(async () => {
+  vi.mocked(waitForCdpEndpoint).mockImplementationOnce(async () => {
     const [record] = await core.listSessions(env);
     expect(fs.readdirSync(path.join(core.sessionDataDir(record!.id, env), "permits"))).toHaveLength(1);
     throw new Error("own startup failed");

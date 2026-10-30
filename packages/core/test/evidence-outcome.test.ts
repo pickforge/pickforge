@@ -57,7 +57,6 @@ it("records the browser build of a browser session and leaves desktop runs untou
     binaryPath: "/usr/bin/chrome",
     profileMode: "ephemeral" as const,
     profileDir: path.join(project, "profile"),
-    cdpPort: 45123,
   };
   const withVersion = await createSession({
     type: "browser",

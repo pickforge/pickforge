@@ -1,80 +1,91 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { createServer } from "node:http";
+import { createServer, type Server } from "node:http";
 import { connect } from "node:net";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  parseDevToolsActivePort,
-  readDevToolsActivePort,
-  waitForDevToolsPort,
-  probeDevToolsHttp,
+  parseCdpEndpoint,
+  probeCdpEndpoint,
   readDevToolsBrowserVersion,
+  waitForCdpEndpoint,
 } from "../src/devtools.js";
+import { buildSupervisedBrowserCommand } from "../src/supervisor.js";
 import { writeFakeChrome } from "./fakes.js";
 
 let tmp: string;
+let endpointFile: string;
 
 beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pickforge-lab-devtools-"));
+  endpointFile = path.join(tmp, "cdp-endpoint");
 });
 
 afterEach(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-describe("parseDevToolsActivePort", () => {
-  it("reads the port from the first line and ignores the websocket GUID", () => {
+const BROWSER_PATH = "/devtools/browser/0b4a3f0e-1f6c-4c2e-9a77-2d2f6f1b9e10";
+
+function publish(socketPath: string): void {
+  fs.writeFileSync(endpointFile, JSON.stringify({ socketPath, browserPath: BROWSER_PATH }), { mode: 0o600 });
+}
+
+async function listenOnSocket(server: Server, socketPath: string): Promise<void> {
+  server.listen(socketPath);
+  await once(server, "listening");
+}
+
+async function closeServer(server: Server): Promise<void> {
+  const closed = once(server, "close");
+  server.close();
+  await closed;
+}
+
+describe("parseCdpEndpoint", () => {
+  it("reads the socket path and the browser path", () => {
     expect(
-      parseDevToolsActivePort("45123\n/devtools/browser/abc-123\n"),
-    ).toBe(45123);
+      parseCdpEndpoint(JSON.stringify({ socketPath: "/tmp/a/cdp.sock", browserPath: BROWSER_PATH })),
+    ).toEqual({ socketPath: "/tmp/a/cdp.sock", browserPath: BROWSER_PATH });
   });
 
-  it("rejects empty, partial, non-numeric, or out-of-range content", () => {
-    expect(parseDevToolsActivePort("")).toBeUndefined();
-    expect(parseDevToolsActivePort("45123")).toBeUndefined();
-    expect(parseDevToolsActivePort("not-a-port\n")).toBeUndefined();
-    expect(parseDevToolsActivePort("0\n")).toBeUndefined();
-    expect(parseDevToolsActivePort("70000\n")).toBeUndefined();
-  });
-});
-
-describe("readDevToolsActivePort", () => {
-  it("returns undefined when the file is missing", () => {
-    expect(readDevToolsActivePort(tmp)).toBeUndefined();
-  });
-
-  it("reads the port once the file exists", () => {
-    fs.writeFileSync(
-      path.join(tmp, "DevToolsActivePort"),
-      "33221\n/devtools/browser/xyz\n",
-    );
-    expect(readDevToolsActivePort(tmp)).toBe(33221);
+  it("rejects empty, partial, legacy, or unsafe content", () => {
+    for (const content of [
+      "",
+      "{",
+      "45123\n/devtools/browser/abc-123\n",
+      JSON.stringify({ socketPath: "/tmp/a/cdp.sock" }),
+      JSON.stringify({ socketPath: "cdp.sock", browserPath: BROWSER_PATH }),
+      JSON.stringify({ socketPath: "/tmp/a/cdp.sock", browserPath: "/devtools/browser/../json" }),
+    ]) {
+      expect(parseCdpEndpoint(content)).toBeUndefined();
+    }
   });
 });
 
-describe("waitForDevToolsPort", () => {
-  it("resolves with the port as soon as it appears", async () => {
-    setTimeout(() => {
-      fs.writeFileSync(path.join(tmp, "DevToolsActivePort"), "5555\n/x\n");
-    }, 50);
-    const result = await waitForDevToolsPort({
-      profileDir: tmp,
+describe("waitForCdpEndpoint", () => {
+  it("resolves with the endpoint as soon as it appears and answers", async () => {
+    setTimeout(() => publish("/tmp/a/cdp.sock"), 50);
+    const result = await waitForCdpEndpoint({
+      endpointFile,
       timeoutMs: 2000,
       isAlive: () => true,
-      isReady: async (port) => port === 5555,
+      isReady: async (endpoint) => endpoint.socketPath === "/tmp/a/cdp.sock",
       pollIntervalMs: 10,
     });
-    expect(result).toEqual({ ok: true, port: 5555 });
+    expect(result).toEqual({
+      ok: true,
+      endpoint: { socketPath: "/tmp/a/cdp.sock", browserPath: BROWSER_PATH },
+    });
   });
 
   it("stops waiting when creation is aborted", async () => {
     const controller = new AbortController();
     controller.abort();
-    const result = await waitForDevToolsPort({
-      profileDir: tmp,
+    const result = await waitForCdpEndpoint({
+      endpointFile,
       timeoutMs: 2000,
       isAlive: () => true,
       signal: controller.signal,
@@ -86,8 +97,8 @@ describe("waitForDevToolsPort", () => {
   it("interrupts the inter-poll wait when creation is aborted", async () => {
     const controller = new AbortController();
     setImmediate(() => controller.abort());
-    const result = await waitForDevToolsPort({
-      profileDir: tmp,
+    const result = await waitForCdpEndpoint({
+      endpointFile,
       timeoutMs: 60_000,
       isAlive: () => true,
       signal: controller.signal,
@@ -99,19 +110,12 @@ describe("waitForDevToolsPort", () => {
   it("returns aborted when cancellation happens during the endpoint probe", async () => {
     const controller = new AbortController();
     const server = createServer(() => controller.abort());
-    server.listen(0, "127.0.0.1");
-    await once(server, "listening");
-    const address = server.address();
-    if (address === null || typeof address === "string") {
-      throw new Error("Probe server did not expose a TCP port");
-    }
-    fs.writeFileSync(
-      path.join(tmp, "DevToolsActivePort"),
-      `${address.port}\n/x\n`,
-    );
+    const socketPath = path.join(tmp, "cdp.sock");
+    await listenOnSocket(server, socketPath);
+    publish(socketPath);
     try {
-      const result = await waitForDevToolsPort({
-        profileDir: tmp,
+      const result = await waitForCdpEndpoint({
+        endpointFile,
         timeoutMs: 2000,
         isAlive: () => true,
         signal: controller.signal,
@@ -119,15 +123,14 @@ describe("waitForDevToolsPort", () => {
       });
       expect(result).toEqual({ ok: false, reason: "aborted" });
     } finally {
-      const closed = once(server, "close");
-      server.close();
-      await closed;
+      server.closeAllConnections();
+      await closeServer(server);
     }
   });
 
-  it("fails with 'exited' when the process dies before publishing a port", async () => {
-    const result = await waitForDevToolsPort({
-      profileDir: tmp,
+  it("fails with 'exited' when the process dies before publishing an endpoint", async () => {
+    const result = await waitForCdpEndpoint({
+      endpointFile,
       timeoutMs: 2000,
       isAlive: () => false,
       pollIntervalMs: 10,
@@ -141,10 +144,10 @@ describe("waitForDevToolsPort", () => {
     );
   });
 
-  it("rejects a published port without claiming an unrun readiness probe", async () => {
-    fs.writeFileSync(path.join(tmp, "DevToolsActivePort"), "6006\n/x\n");
-    const result = await waitForDevToolsPort({
-      profileDir: tmp,
+  it("rejects a published endpoint without claiming an unrun readiness probe", async () => {
+    publish("/tmp/a/cdp.sock");
+    const result = await waitForCdpEndpoint({
+      endpointFile,
       timeoutMs: 2000,
       isAlive: () => false,
       pollIntervalMs: 10,
@@ -154,21 +157,19 @@ describe("waitForDevToolsPort", () => {
       throw new Error("Expected exited diagnostics");
     }
     expect(result.diagnostics).toContain(
-      "published port 6006, then the Chrome process exited",
+      "published a CDP socket, then the Chrome process exited",
     );
-    expect(result.diagnostics).not.toContain("HTTP endpoint");
-    expect(result.diagnostics).not.toContain("did not become ready");
+    expect(result.diagnostics).not.toContain("did not answer");
+    expect(result.diagnostics).not.toContain(BROWSER_PATH);
   });
 
-  it("returns durable timeout diagnostics for an invalid port file", async () => {
-    const profileDir = path.join(tmp, "profile");
+  it("returns durable timeout diagnostics for an invalid endpoint file", async () => {
     const logPath = path.join(tmp, "daemon.log");
-    fs.mkdirSync(profileDir);
-    fs.writeFileSync(path.join(profileDir, "DevToolsActivePort"), "45123");
+    fs.writeFileSync(endpointFile, "45123", { mode: 0o600 });
     fs.writeFileSync(logPath, "cold Chrome marker\n");
 
-    const result = await waitForDevToolsPort({
-      profileDir,
+    const result = await waitForCdpEndpoint({
+      endpointFile,
       logPath,
       timeoutMs: 60,
       isAlive: () => true,
@@ -180,17 +181,17 @@ describe("waitForDevToolsPort", () => {
       throw new Error("Expected timeout diagnostics");
     }
     expect(result.diagnostics).toContain(
-      "file exists but does not contain a valid port before timeout",
+      "file exists but does not hold a valid endpoint before timeout",
     );
     expect(result.diagnostics).toContain("cold Chrome marker");
   });
 
   it("reports endpoint readiness only after timeout probes ran", async () => {
-    fs.writeFileSync(path.join(tmp, "DevToolsActivePort"), "6007\n/x\n");
+    publish("/tmp/a/cdp.sock");
     let probes = 0;
 
-    const result = await waitForDevToolsPort({
-      profileDir: tmp,
+    const result = await waitForCdpEndpoint({
+      endpointFile,
       timeoutMs: 20,
       isAlive: () => true,
       isReady: () => {
@@ -206,13 +207,13 @@ describe("waitForDevToolsPort", () => {
       throw new Error("Expected timeout diagnostics");
     }
     expect(result.diagnostics).toContain(
-      "published port 6007, but its HTTP endpoint did not become ready before timeout",
+      "published a CDP socket, but it did not answer before timeout",
     );
   });
 });
 
-describe("probeDevToolsHttp", () => {
-  it("does not follow redirects away from the direct loopback endpoint", async () => {
+describe("probeCdpEndpoint", () => {
+  it("does not follow a redirect away from the supervisor's socket", async () => {
     let targetHits = 0;
     const target = createServer((_request, response) => {
       targetHits += 1;
@@ -224,52 +225,43 @@ describe("probeDevToolsHttp", () => {
     if (targetAddress === null || typeof targetAddress === "string") {
       throw new Error("Redirect target did not expose a TCP port");
     }
-
     const redirect = createServer((_request, response) => {
       response
-        .writeHead(302, {
-          Location: `http://127.0.0.1:${targetAddress.port}/json/version`,
-        })
+        .writeHead(302, { Location: `http://127.0.0.1:${targetAddress.port}/json/version` })
         .end();
     });
-    redirect.listen(0, "127.0.0.1");
-    await once(redirect, "listening");
-    const redirectAddress = redirect.address();
-    if (redirectAddress === null || typeof redirectAddress === "string") {
-      throw new Error("Redirect server did not expose a TCP port");
-    }
-
+    const socketPath = path.join(tmp, "cdp.sock");
+    await listenOnSocket(redirect, socketPath);
     try {
-      expect(await probeDevToolsHttp(redirectAddress.port)).toBe(false);
+      expect(await probeCdpEndpoint(socketPath)).toBe(false);
       expect(targetHits).toBe(0);
     } finally {
-      const redirectClosed = once(redirect, "close");
-      const targetClosed = once(target, "close");
-      redirect.close();
-      target.close();
-      await Promise.all([redirectClosed, targetClosed]);
+      await Promise.all([closeServer(redirect), closeServer(target)]);
     }
   });
 });
 
-describe("readiness probing against a real Chrome stand-in", () => {
+describe("readiness probing against a supervised Chrome stand-in", () => {
   /**
-   * A readiness probe that times out aborts its fetch, which resets the
-   * DevTools connection. Neither the endpoint nor the wait may treat that as a
-   * dead browser: on a loaded CI host every probe can abort, and reporting
-   * "Chrome exited during startup" from a probe the caller itself cancelled is
-   * how pickforge/pickforge#100 failed the built MCP browser lifecycle.
+   * A readiness probe that times out aborts its request, which resets the
+   * connection. Neither the endpoint nor the wait may treat that as a dead
+   * browser: on a loaded CI host every probe can abort, and reporting "Chrome
+   * exited during startup" from a probe the caller itself cancelled is how
+   * pickforge/pickforge#100 failed the built MCP browser lifecycle.
    */
   it("keeps a published endpoint alive and usable across aborted probes", async () => {
     const binDir = path.join(tmp, "bin");
     const profileDir = path.join(tmp, "session", "profile");
     fs.mkdirSync(profileDir, { recursive: true });
     writeFakeChrome(binDir, "ready");
-    const chrome = spawn(
+    const socketPath = path.join(tmp, "cdp.sock");
+    const command = buildSupervisedBrowserCommand(
       process.execPath,
-      [path.join(binDir, "fake-chrome.cjs"), `--user-data-dir=${profileDir}`],
-      { stdio: ["ignore", "ignore", "pipe"] },
+      path.join(binDir, "google-chrome-stable"),
+      [`--user-data-dir=${profileDir}`],
+      { endpointFile, socketPath },
     );
+    const chrome = spawn(command.command, command.args, { stdio: ["ignore", "ignore", "pipe"], detached: true });
     let chromeStderr = "";
     chrome.stderr.setEncoding("utf8");
     chrome.stderr.on("data", (chunk: string) => {
@@ -280,22 +272,19 @@ describe("readiness probing against a real Chrome stand-in", () => {
 
     try {
       const deadline = Date.now() + 10_000;
-      let port = readDevToolsActivePort(profileDir);
-      while (port === undefined && Date.now() < deadline) {
+      while (!fs.existsSync(endpointFile) && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 20));
-        port = readDevToolsActivePort(profileDir);
       }
-      expect(port).toBeGreaterThan(0);
+      expect(fs.existsSync(endpointFile)).toBe(true);
 
-      // Exactly what an aborted `fetch` does to the endpoint at the TCP level,
-      // plus the aborting probe itself.
+      // An abrupt hang-up, as an aborted request does, plus the aborting
+      // probe itself.
       for (let attempt = 0; attempt < 5; attempt += 1) {
-        const socket = connect(port as number, "127.0.0.1");
+        const socket = connect(socketPath);
         try {
           await once(socket, "connect");
         } catch (error) {
           socket.destroy();
-          // Let the stand-in's own diagnosis arrive before reporting.
           await new Promise((resolve) => setTimeout(resolve, 200));
           throw new Error(
             `the endpoint stopped accepting connections after ${attempt} ` +
@@ -304,22 +293,18 @@ describe("readiness probing against a real Chrome stand-in", () => {
               `stand-in stderr: ${chromeStderr || "(empty)"}`,
           );
         }
-        socket.resetAndDestroy();
+        socket.destroy();
         // A probe budget this small normally aborts; whether this particular
         // one beat the clock does not matter, only that the endpoint survives.
-        await probeDevToolsHttp(port as number, 1);
+        await probeCdpEndpoint(socketPath, 1);
       }
 
-      const ready = await waitForDevToolsPort({
-        profileDir,
-        timeoutMs: 10_000,
-        isAlive,
-      });
+      const ready = await waitForCdpEndpoint({ endpointFile, timeoutMs: 10_000, isAlive });
       expect(ready).toMatchObject({ ok: true });
       expect(chromeStderr).toBe("");
       expect(isAlive()).toBe(true);
     } finally {
-      chrome.kill("SIGKILL");
+      if (chrome.pid !== undefined) process.kill(-chrome.pid, "SIGKILL");
     }
   }, 30_000);
 });
@@ -327,21 +312,15 @@ describe("readiness probing against a real Chrome stand-in", () => {
 describe("readDevToolsBrowserVersion", () => {
   async function withVersionEndpoint(
     handler: (response: import("node:http").ServerResponse) => void,
-    check: (port: number) => Promise<void>,
+    check: (socketPath: string) => Promise<void>,
   ): Promise<void> {
     const server = createServer((_request, response) => handler(response));
-    server.listen(0, "127.0.0.1");
-    await once(server, "listening");
-    const address = server.address();
-    if (address === null || typeof address === "string") {
-      throw new Error("Version server did not expose a TCP port");
-    }
+    const socketPath = path.join(tmp, `version-${Math.random().toString(36).slice(2)}.sock`);
+    await listenOnSocket(server, socketPath);
     try {
-      await check(address.port);
+      await check(socketPath);
     } finally {
-      const closed = once(server, "close");
-      server.close();
-      await closed;
+      await closeServer(server);
     }
   }
 
@@ -351,8 +330,8 @@ describe("readDevToolsBrowserVersion", () => {
         response
           .writeHead(200, { "content-type": "application/json" })
           .end(JSON.stringify({ Browser: " Chrome/131.0.6778.85 " })),
-      async (port) => {
-        expect(await readDevToolsBrowserVersion(port)).toBe(
+      async (socketPath) => {
+        expect(await readDevToolsBrowserVersion(socketPath)).toBe(
           "Chrome/131.0.6778.85",
         );
       },
@@ -371,27 +350,27 @@ describe("readDevToolsBrowserVersion", () => {
     for (const body of bodies) {
       await withVersionEndpoint(
         (response) => response.writeHead(200).end(body),
-        async (port) => {
-          expect(await readDevToolsBrowserVersion(port)).toBeUndefined();
+        async (socketPath) => {
+          expect(await readDevToolsBrowserVersion(socketPath)).toBeUndefined();
         },
       );
     }
   });
 
-  it("returns undefined for a non-200 endpoint and for a dead port", async () => {
+  it("returns undefined for a non-200 endpoint and for a dead socket", async () => {
     await withVersionEndpoint(
       (response) => response.writeHead(500).end("{}"),
-      async (port) => {
-        expect(await readDevToolsBrowserVersion(port)).toBeUndefined();
+      async (socketPath) => {
+        expect(await readDevToolsBrowserVersion(socketPath)).toBeUndefined();
       },
     );
-    let deadPort = 0;
+    let deadSocket = "";
     await withVersionEndpoint(
       (response) => response.writeHead(200).end("{}"),
-      async (port) => {
-        deadPort = port;
+      async (socketPath) => {
+        deadSocket = socketPath;
       },
     );
-    expect(await readDevToolsBrowserVersion(deadPort, 200)).toBeUndefined();
+    expect(await readDevToolsBrowserVersion(deadSocket, 200)).toBeUndefined();
   });
 });

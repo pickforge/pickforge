@@ -1,7 +1,11 @@
 {
   "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "allowJs": true
+  },
   "include": [
     "packages/*/src/**/*.ts",
+    "packages/browser/src/supervisor-main.js",
     "packages/*/test/**/*.ts",
     "packages/*/tsup.config.ts",
     "test/**/*.ts",

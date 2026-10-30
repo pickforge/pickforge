@@ -41,7 +41,6 @@ async function createRunningBrowser(projectDir: string): Promise<string> {
         binaryPath: "/usr/bin/chromium",
         profileMode: "ephemeral",
         profileDir: "/tmp/pickforge-lab-profile",
-        cdpPort: 1,
       },
     },
     env,

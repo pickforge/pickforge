@@ -18,16 +18,24 @@ export { buildChromeArgs, type BuildChromeArgsOptions } from "./args.js";
 
 export {
   buildSupervisedBrowserCommand,
+  resolveSupervisorScript,
   type SupervisedBrowserCommand,
+  type SupervisorCdpPaths,
 } from "./supervisor.js";
 
 export {
-  parseDevToolsActivePort,
-  probeDevToolsHttp,
-  readDevToolsActivePort,
-  waitForDevToolsPort,
-  type DevToolsPortResult,
-  type WaitForDevToolsPortOptions,
+  CdpAlreadyAttachedError,
+  attachCdpClient,
+  cdpWebSocketUrl,
+  parseCdpEndpoint,
+  probeCdpEndpoint,
+  readCdpEndpoint,
+  requestCdpBrowserClose,
+  waitForCdpEndpoint,
+  type CdpClientLease,
+  type CdpEndpoint,
+  type CdpEndpointResult,
+  type WaitForCdpEndpointOptions,
 } from "./devtools.js";
 
 export {
@@ -35,6 +43,7 @@ export {
   createBrowserSession,
   destroyBrowserSession,
   getBrowserSessionStatus,
+  readBrowserSessionCdpEndpoint,
   teardownBrowserSession,
   type BrowserSessionHandle,
   type BrowserSessionStatus,

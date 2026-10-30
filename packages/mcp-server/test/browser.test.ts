@@ -104,7 +104,7 @@ describe.skipIf(!hasXvfb)("MCP browser lifecycle", () => {
       expect(first.id).toMatch(/^brow-[0-9a-f]+$/);
       expect(first.type).toBe("browser");
       expect(first.display).toMatch(/^:\d+$/);
-      expect(first.cdpPort).toBeGreaterThan(0);
+      expect(first).not.toHaveProperty("cdpPort");
 
       const chromeEnv = JSON.parse(
         fs.readFileSync(
@@ -124,7 +124,7 @@ describe.skipIf(!hasXvfb)("MCP browser lifecycle", () => {
       expect(status.desktop.xvfbAlive).toBe(true);
       expect(status.desktop.displayAlive).toBe(true);
       expect(status.browser.browserAlive).toBe(true);
-      expect(status.browser.cdpPort).toBe(first.cdpPort);
+      expect(status.browser).not.toHaveProperty("cdpPort");
       expect(status.viewer).toEqual({
         endpoint: null,
         ready: false,
@@ -140,7 +140,7 @@ describe.skipIf(!hasXvfb)("MCP browser lifecycle", () => {
       ).sessions[0] as Record<string, any>;
       expect(second.id).not.toBe(first.id);
       expect(second.display).not.toBe(first.display);
-      expect(second.cdpPort).not.toBe(first.cdpPort);
+      expect(second).not.toHaveProperty("cdpPort");
       expect(second.profileDir).not.toBe(first.profileDir);
 
       const allStatus = parseToolJson(
@@ -194,7 +194,7 @@ describe.skipIf(!hasXvfb)("MCP browser lifecycle", () => {
         "file was not created before the Chrome process exited",
       );
       expect(report.errors[0]).toContain(
-        "fake Chrome crashed before publishing a port",
+        "fake Chrome crashed before answering its pipe",
       );
     },
     TEST_TIMEOUT_MS,

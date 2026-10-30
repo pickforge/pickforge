@@ -5,11 +5,13 @@ import { beforeAll, expect, it } from "vitest";
 import { ensureCliBuilt } from "./build-once.js";
 
 const dist = new URL("../dist/", import.meta.url);
+// Copied from the browser package as is, not bundled by tsup.
+const SUPERVISOR = "supervisor-main.js";
 
 beforeAll(ensureCliBuilt, 300_000);
 
 it("emits ESM bundles and linked sourcemaps for every CLI chunk", () => {
-  const files = readdirSync(dist).filter((file) => file.endsWith(".js"));
+  const files = readdirSync(dist).filter((file) => file.endsWith(".js") && file !== SUPERVISOR);
   expect(files).toEqual(expect.arrayContaining(["pickforge-lab.js", "pickforge-mcp.js"]));
   for (const file of files) {
     const code = readFileSync(new URL(file, dist), "utf8");
@@ -40,3 +42,8 @@ it.each(["pickforge-lab", "pickforge-mcp"])(
     expect(mapped.originalColumn).toBe(0);
   },
 );
+
+it("ships the browser supervisor script unchanged next to the entrypoints", () => {
+  const source = new URL("../../browser/src/supervisor-main.js", import.meta.url);
+  expect(readFileSync(new URL(SUPERVISOR, dist), "utf8")).toBe(readFileSync(source, "utf8"));
+});

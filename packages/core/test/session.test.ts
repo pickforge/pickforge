@@ -34,6 +34,7 @@ import {
   sessionDataDir,
   sessionInputClosedName,
   updateSession,
+  type BrowserSessionInfo,
   type SessionLivenessCheck,
 } from "../src/session.js";
 import { DirHandle } from "../src/dir-handle.js";
@@ -130,7 +131,6 @@ describe("session registry", () => {
           binaryPath: "/usr/bin/chromium",
           profileMode: "ephemeral",
           profileDir: "/tmp/pickforge-lab-profile",
-          cdpPort: 45123,
         },
       },
       env,
@@ -139,9 +139,21 @@ describe("session registry", () => {
     const loaded = await getSession(created.id, env);
     expect(loaded).toEqual(created);
     expect(loaded?.browser?.profileMode).toBe("ephemeral");
-    expect(loaded?.browser?.cdpPort).toBe(45123);
     expect(loaded?.desktop?.width).toBe(1280);
     expect(loaded?.desktop?.height).toBe(800);
+  });
+
+  it("still loads a browser record from before the CDP socket", async () => {
+    const legacy = {
+      browserPid: 4243,
+      browserStartTimeTicks: 987654,
+      binaryPath: "/usr/bin/chromium",
+      profileMode: "ephemeral",
+      profileDir: "/tmp/pickforge-lab-profile",
+      cdpPort: 45123,
+    } as BrowserSessionInfo;
+    const created = await createSession({ type: "browser", projectDir: "/proj", status: "running", browser: legacy }, env);
+    expect(await getSession(created.id, env)).toEqual(created);
   });
 
   it("persists desktop width and height while staying compatible without them", async () => {
@@ -695,7 +707,6 @@ describe("session registry", () => {
               binaryPath: "/usr/bin/chromium",
               profileMode: "ephemeral",
               profileDir: "/tmp/pickforge-lab-profile",
-              cdpPort: 1,
             },
           },
           env,
@@ -834,7 +845,6 @@ describe("session registry", () => {
           binaryPath: "/usr/bin/chromium",
           profileMode: "ephemeral",
           profileDir: path.join(home, "sessions", "placeholder", "profile"),
-          cdpPort: 1,
         },
       },
       env,
@@ -919,7 +929,6 @@ describe("session registry", () => {
           binaryPath: "/usr/bin/chromium",
           profileMode: "ephemeral",
           profileDir: path.join(home, "sessions", "placeholder", "profile"),
-          cdpPort: 1,
         },
       },
       env,
@@ -937,7 +946,6 @@ describe("session registry", () => {
           binaryPath: "/usr/bin/chromium",
           profileMode: "ephemeral",
           profileDir,
-          cdpPort: 1,
         },
       },
       env,
@@ -1067,7 +1075,6 @@ describe("session registry", () => {
             binaryPath: "/usr/bin/chromium",
             profileMode: "ephemeral",
             profileDir: outside,
-            cdpPort: 1,
           },
         },
         env,
@@ -1152,7 +1159,6 @@ describe("session registry", () => {
             binaryPath: "/usr/bin/chromium",
             profileMode: "ephemeral",
             profileDir: path.join(home, "sessions", "placeholder", "profile"),
-            cdpPort: 1,
           },
         },
         env,
@@ -1244,7 +1250,6 @@ describe("session registry", () => {
             binaryPath: "/usr/bin/chromium",
             profileMode: "ephemeral",
             profileDir,
-            cdpPort: 1,
           },
         },
         env,

@@ -33,6 +33,7 @@ import {
   resolveLiveBrowserSession,
   runDevtoolsMcpRelay,
   type BrowserSessionStatus,
+  type CdpEndpoint,
   type DevtoolsMcpExecutable,
   type LiveBrowserSession,
   type RelaySignalSource,
@@ -87,6 +88,7 @@ function writePackage(
   const binPath = path.join(root, CHROME_DEVTOOLS_MCP_BIN);
   fs.mkdirSync(path.dirname(binPath), { recursive: true });
   fs.writeFileSync(binPath, "// fake upstream\n");
+  fs.writeFileSync(path.join(path.dirname(binPath), "chrome-devtools-mcp-cli-options.js"), "// fake options\n");
   const manifestPath = path.join(root, "package.json");
   fs.writeFileSync(
     manifestPath,
@@ -118,7 +120,6 @@ function browserRecord(
       binaryPath: "/chrome",
       profileMode: "ephemeral",
       profileDir: "/profile",
-      cdpPort: 9222,
     },
   };
 }
@@ -126,7 +127,6 @@ function browserRecord(
 function browserStatus(
   record: SessionRecord,
   alive: boolean,
-  cdpPort = 9222,
 ): BrowserSessionStatus {
   return {
     record,
@@ -134,7 +134,6 @@ function browserStatus(
     displayAlive: alive,
     browserAlive: alive,
     alive,
-    cdpPort,
   };
 }
 
@@ -147,18 +146,32 @@ function collect(chunks: Buffer[]): Writable {
   });
 }
 
+/** A fake upstream with an option table the relay bootstrap can extend. */
 function fakeExecutable(scriptPath: string): DevtoolsMcpExecutable {
+  const dir = path.dirname(scriptPath);
+  const cliOptionsPath = path.join(dir, "fake-cli-options.mjs");
+  if (fs.existsSync(dir)) {
+    fs.writeFileSync(cliOptionsPath, "export const cliOptions = { wsEndpoint: { coerce: (url) => url } };\n");
+  }
   return {
-    packageJsonPath: path.join(path.dirname(scriptPath), "package.json"),
-    packageRoot: path.dirname(scriptPath),
+    packageJsonPath: path.join(dir, "package.json"),
+    packageRoot: dir,
     binPath: scriptPath,
+    cliOptionsPath,
     version: CHROME_DEVTOOLS_MCP_VERSION,
   };
 }
 
+const FAKE_BROWSER_PATH = "/devtools/browser/0b4a3f0e-1f6c-4c2e-9a77-2d2f6f1b9e10";
+const FAKE_ENDPOINT = `ws+unix:/tmp/pickforge-browser-0/fake/cdp.sock:${FAKE_BROWSER_PATH}`;
+
 function fakeSession(): LiveBrowserSession {
   const record = browserRecord("brow-abcdef12", "/project");
-  return { record, cdpPort: 9333, browserEndpoint: "ws://127.0.0.1:9333/devtools/browser/fake-guid" };
+  return {
+    record,
+    cdpEndpoint: { socketPath: "/tmp/pickforge-browser-0/fake/cdp.sock", browserPath: FAKE_BROWSER_PATH },
+    browserEndpoint: FAKE_ENDPOINT,
+  };
 }
 
 class Signals extends EventEmitter implements RelaySignalSource {
@@ -199,6 +212,14 @@ describe("resolveDevtoolsMcpExecutable", () => {
     );
   });
 
+  it("rejects a package without the bin's CLI option module", async () => {
+    const fixture = writePackage();
+    fs.rmSync(path.join(fixture.root, "build/src/bin/chrome-devtools-mcp-cli-options.js"));
+    await expect(resolveDevtoolsMcpExecutable(fixture.manifestPath)).rejects.toThrow(
+      "missing its CLI option module",
+    );
+  });
+
   it("rejects an exact lexical bin whose symlink escapes the package", async () => {
     const fixture = writePackage();
     const outside = path.join(temporaryDirectory(), "outside.js");
@@ -211,8 +232,10 @@ describe("resolveDevtoolsMcpExecutable", () => {
   });
 });
 
-const fakeEndpoint = async (record: SessionRecord, cdpPort: number): Promise<URL> =>
-  new URL(`ws://127.0.0.1:${cdpPort}/devtools/browser/guid-${record.id}`);
+const fakeEndpoint = async (record: SessionRecord): Promise<CdpEndpoint> => ({
+  socketPath: `/tmp/pickforge-browser-0/${record.id}/cdp.sock`,
+  browserPath: FAKE_BROWSER_PATH,
+});
 
 describe("resolveLiveBrowserSession", () => {
   it("resolves exactly one live project-local browser and pins its browser endpoint", async () => {
@@ -224,12 +247,12 @@ describe("resolveLiveBrowserSession", () => {
       projectDir: project,
       env: {},
       list: async () => [other, dead, wanted],
-      status: async (id) => browserStatus(id === wanted.id ? wanted : dead, id === wanted.id, 9444),
+      status: async (id) => browserStatus(id === wanted.id ? wanted : dead, id === wanted.id),
       endpoint: fakeEndpoint,
     });
     expect(resolved.record.id).toBe(wanted.id);
     expect(resolved.browserEndpoint).toBe(
-      "ws://127.0.0.1:9444/devtools/browser/guid-brow-aaaaaa11",
+      `ws+unix:/tmp/pickforge-browser-0/brow-aaaaaa11/cdp.sock:${FAKE_BROWSER_PATH}`,
     );
   });
 
@@ -254,7 +277,7 @@ describe("resolveLiveBrowserSession", () => {
     }
   });
 
-  it("fails closed for dead, other-project, missing-port, and ambiguous sessions", async () => {
+  it("fails closed for dead, other-project, and ambiguous sessions", async () => {
     const project = "/wanted";
     const one = browserRecord("brow-aaaaaa11", project);
     const two = browserRecord("brow-bbbbbb22", project);
@@ -272,20 +295,42 @@ describe("resolveLiveBrowserSession", () => {
       resolveLiveBrowserSession({
         projectDir: project,
         env: {},
-        list: async () => [one],
-        status: async () => browserStatus(one, true, 0),
-        endpoint: fakeEndpoint,
-      }),
-    ).rejects.toThrow("No live browser session for this project");
-    await expect(
-      resolveLiveBrowserSession({
-        projectDir: project,
-        env: {},
         list: async () => [one, two],
         status: async (id) => browserStatus(id === one.id ? one : two, true),
         endpoint: fakeEndpoint,
       }),
     ).rejects.toThrow(`Multiple live browser sessions for this project (${one.id}, ${two.id})`);
+  });
+
+  it("refuses a live session from before the CDP socket and says to recreate it", async () => {
+    const project = path.resolve("/wanted");
+    const legacy = browserRecord("brow-aaaaaa11", project);
+    legacy.browser = { ...legacy.browser!, cdpPort: 9222 } as typeof legacy.browser;
+    const endpoint = vi.fn(fakeEndpoint);
+    await expect(
+      resolveLiveBrowserSession({
+        projectDir: project,
+        env: {},
+        list: async () => [legacy],
+        status: async () => browserStatus(legacy, true),
+        endpoint,
+      }),
+    ).rejects.toThrow(
+      `Browser session ${legacy.id} was created by an older Pickforge that served DevTools on a TCP port, ` +
+        `which the relay no longer uses; destroy it with "pickforge-lab session destroy ${legacy.id}" and create a new one`,
+    );
+    expect(endpoint).not.toHaveBeenCalled();
+
+    const current = browserRecord("brow-bbbbbb22", project);
+    await expect(
+      resolveLiveBrowserSession({
+        projectDir: project,
+        env: {},
+        list: async () => [legacy, current],
+        status: async (id) => browserStatus(id === legacy.id ? legacy : current, true),
+        endpoint,
+      }),
+    ).rejects.toThrow(`Multiple live browser sessions for this project (${current.id}, ${legacy.id})`);
   });
 });
 
@@ -345,16 +390,12 @@ async function liveSession(env: { PICKFORGE_HOME: string }): Promise<LiveBrowser
         binaryPath: "/chrome",
         profileMode: "ephemeral",
         profileDir: "/profile",
-        cdpPort: 9222,
       },
     },
     env,
   );
-  return {
-    record,
-    cdpPort: 9222,
-    browserEndpoint: "ws://127.0.0.1:9222/devtools/browser/fake-guid",
-  };
+  const { cdpEndpoint, browserEndpoint } = fakeSession();
+  return { record, cdpEndpoint, browserEndpoint };
 }
 
 function registryEnv(): { PICKFORGE_HOME: string } {
@@ -502,9 +543,13 @@ describe("runDevtoolsMcpRelay", () => {
     expect(exit).toEqual({ code: 0, signal: null });
     expect(spawnedCommand).toBe(process.execPath);
     expect(spawnedArgs).toEqual([
+      "--input-type=module",
+      "-e",
+      expect.stringContaining('url.startsWith("ws+unix:")'),
+      path.join(dir, "fake-cli-options.mjs"),
       script,
       "--wsEndpoint",
-      "ws://127.0.0.1:9333/devtools/browser/fake-guid",
+      FAKE_ENDPOINT,
     ]);
     expect(spawnedOptions).toMatchObject({
       cwd: dir,
@@ -518,13 +563,53 @@ describe("runDevtoolsMcpRelay", () => {
     expect(diagnosticText).not.toContain("super-secret-token");
     const observed: unknown = JSON.parse(fs.readFileSync(recordPath, "utf8"));
     expect(observed).toMatchObject({
-      argv: ["--wsEndpoint", "ws://127.0.0.1:9333/devtools/browser/fake-guid"],
+      argv: ["--wsEndpoint", FAKE_ENDPOINT],
       env: {
         CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS: "true",
         CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS: "true",
       },
     });
   });
+
+  it("lets the installed upstream take a ws+unix endpoint and still checks other schemes", async () => {
+    const executable = await resolveDevtoolsMcpExecutable();
+    const initialize = `${JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } },
+    })}\n`;
+    const run = async (browserEndpoint: string) => {
+      const input = new PassThrough();
+      const output: Buffer[] = [];
+      const diagnostics: Buffer[] = [];
+      const exit = runDevtoolsMcpRelay({
+        session: { ...fakeSession(), browserEndpoint },
+        executable,
+        input,
+        output: collect(output),
+        diagnostics: collect(diagnostics),
+        env: { ...process.env, CI: "1" },
+        cwd: temporaryDirectory(),
+        signalSource: new Signals(),
+        shutdownTimeoutMs: 5_000,
+      });
+      input.write(initialize);
+      await expect.poll(() => Buffer.concat(output).length > 0 || Buffer.concat(diagnostics).includes("protocol"), {
+        timeout: 20_000,
+      }).toBe(true);
+      input.end();
+      return { exit: await exit.catch((error: unknown) => error), output: Buffer.concat(output).toString(), diagnostics: Buffer.concat(diagnostics).toString() };
+    };
+
+    const accepted = await run(FAKE_ENDPOINT);
+    expect(accepted.output).toContain('"serverInfo"');
+    expect(accepted.diagnostics).not.toContain("must use ws:// or wss://");
+
+    const refused = await run("http://127.0.0.1:9/devtools/browser/x");
+    expect(refused.output).toBe("");
+    expect(refused.diagnostics).toContain("must use ws:// or wss:// protocol");
+  }, 60_000);
 
   it("applies before-forward and after-response hooks without changing IDs", async () => {
     const dir = temporaryDirectory();

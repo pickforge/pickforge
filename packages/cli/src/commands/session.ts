@@ -142,7 +142,7 @@ function describeCreated(summary: LocalSessionSummary): string {
     return `created desktop session ${summary.id} (display ${summary.display}${vnc})`;
   }
   if (summary.type === "browser") {
-    return `created browser session ${summary.id} (display ${summary.display}, cdp port ${summary.cdpPort})`;
+    return `created browser session ${summary.id} (display ${summary.display})`;
   }
   return `created android session ${summary.id} (serial ${summary.serial})`;
 }
@@ -248,10 +248,7 @@ function statusLine(entry: LocalSessionStatusEntry): string {
   }
   const browser = entry.browser as Record<string, unknown> | undefined;
   if (browser !== undefined) {
-    parts.push(
-      `browser=${browser.browserAlive === true ? "alive" : "dead"}`,
-      `cdp=${browser.cdpPort ?? "unknown"}`,
-    );
+    parts.push(`browser=${browser.browserAlive === true ? "alive" : "dead"}`);
   }
   const android = entry.android as Record<string, unknown> | undefined;
   if (android !== undefined) {

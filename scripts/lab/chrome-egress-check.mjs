@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Run only in an authorized Astra low execution lane. Never opens a host viewer.
 import { execFile } from "node:child_process";
+import http from "node:http";
 import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -74,36 +75,22 @@ async function chromeBinary() {
   throw new Error("Chrome not found; set CHROME_BIN to its absolute executable path");
 }
 
-async function closeBrowser(port) {
-  const response = await fetch(`http://127.0.0.1:${port}/json/version`, {
-    signal: AbortSignal.timeout(5000),
-  });
-  const { webSocketDebuggerUrl } = await response.json();
-  const endpoint = new URL(webSocketDebuggerUrl);
-  if (endpoint.hostname !== "127.0.0.1" || endpoint.port !== String(port)) {
+async function closeBrowser(endpointFile) {
+  // The supervisor publishes its private CDP socket in the session directory.
+  const { socketPath } = JSON.parse(await readFile(endpointFile, "utf8"));
+  if (typeof socketPath !== "string" || !path.isAbsolute(socketPath)) {
     throw new Error("Refusing a non-session CDP endpoint");
   }
   await new Promise((resolve, reject) => {
-    const socket = new WebSocket(endpoint);
-    const timer = setTimeout(() => {
-      socket.close();
-      reject(new Error("Timed out closing Chrome to flush NetLog"));
-    }, 10000);
-    let acknowledged = false;
-    socket.addEventListener("open", () => socket.send(JSON.stringify({ id: 1, method: "Browser.close" })));
-    // Chrome acknowledges, then drops the socket with an error as it exits.
-    socket.addEventListener("message", ({ data }) => {
-      const reply = JSON.parse(data);
-      if (reply.id !== 1) return;
-      clearTimeout(timer);
-      if (reply.error) reject(new Error(`CDP close failed: ${reply.error.message}`));
-      else { acknowledged = true; resolve(); }
+    const request = http.request({ socketPath, method: "POST", path: "/close", timeout: 10000 });
+    request.once("timeout", () => request.destroy(new Error("Timed out closing Chrome to flush NetLog")));
+    request.once("error", reject);
+    request.once("response", (response) => {
+      response.resume();
+      if (response.statusCode === 202) resolve();
+      else reject(new Error(`CDP close failed with HTTP ${response.statusCode}`));
     });
-    socket.addEventListener("close", () => { clearTimeout(timer); resolve(); });
-    socket.addEventListener("error", () => {
-      clearTimeout(timer);
-      if (!acknowledged) reject(new Error("CDP close failed"));
-    });
+    request.end();
   });
 }
 
@@ -119,7 +106,6 @@ async function waitForNetLog(file) {
 }
 
 async function capture() {
-  if (typeof WebSocket === "undefined") throw new Error("Capture requires Node.js 22 or newer");
   process.umask(0o077);
   const root = path.join(homedir(), ".pickforge", "lab", "chrome-egress-checks");
   await mkdir(root, { recursive: true, mode: 0o700 });
@@ -155,14 +141,14 @@ async function capture() {
     // Use only the session returned from this fresh lab home.
     const status = JSON.parse(created.stdout);
     const sessions = status.sessions;
-    if (!Array.isArray(sessions) || sessions.length !== 1 || !Number.isInteger(sessions[0].cdpPort)) {
+    if (!Array.isArray(sessions) || sessions.length !== 1 || typeof sessions[0].profileDir !== "string") {
       throw new Error("Unexpected session create response; see private session.json");
     }
     const session = sessions[0];
     console.log(`Headed browser on private Xvfb ${session.display}; observing about:blank for 120 seconds`);
     // Component update checks start about 90 seconds after launch.
     await delay(120000, undefined, { signal: controller.signal });
-    await closeBrowser(session.cdpPort);
+    await closeBrowser(path.join(path.dirname(session.profileDir), "cdp-endpoint"));
     // Browser.close disconnects before the process has finished flushing the file.
     await waitForNetLog(netLog);
   } finally {

@@ -8,7 +8,7 @@ describe("browserRuntimeLayout", () => {
   it("confines runtime storage and gives Chrome a short temp alias", () => {
     const layout = browserRuntimeLayout(SESSION_DIR);
     for (const [name, dir] of Object.entries(layout)) {
-      if (name === "chromeTmpDir") continue;
+      if (name === "chromeTmpDir" || name === "cdpSocketPath") continue;
       expect(dir.startsWith(SESSION_DIR + path.sep)).toBe(true);
     }
     expect(layout.profileDir).toBe(path.join(SESSION_DIR, "profile"));
@@ -20,6 +20,9 @@ describe("browserRuntimeLayout", () => {
       /^\/tmp\/pickforge-browser-[^/]+\/[0-9a-f]{16}$/,
     );
     expect(layout.chromeTmpDir.length).toBeLessThan(64);
+    // sun_path holds 108 bytes, so the CDP socket also lives under the alias.
+    expect(layout.cdpSocketPath).toBe(path.join(layout.chromeTmpDir, "cdp.sock"));
+    expect(layout.cdpEndpointFile).toBe(path.join(SESSION_DIR, "cdp-endpoint"));
   });
 });
 

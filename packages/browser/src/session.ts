@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import WebSocket from "ws";
 import {
   REAPER_CLEANUP_PENDING_META_KEY,
   createSession,
@@ -49,14 +48,16 @@ import {
   type BrowserRuntimeLayout,
 } from "./env.js";
 import {
+  readCdpEndpoint,
   readDevToolsBrowserVersion,
-  waitForDevToolsPort,
+  requestCdpBrowserClose,
+  waitForCdpEndpoint,
+  type CdpEndpoint,
 } from "./devtools.js";
 import { buildSupervisedBrowserCommand } from "./supervisor.js";
 import {
   abandonedBrowserProfileStartup,
   claimBrowserProfile,
-  namedProfileBrowserEndpoint,
   releaseBrowserProfile,
   validateBrowserProfileName,
 } from "./profiles.js";
@@ -103,7 +104,6 @@ export interface BrowserSessionHandle {
   display: string;
   xvfbPid: number;
   browserPid: number;
-  cdpPort: number;
   profileDir: string;
   binaryPath: string;
   logDir: string;
@@ -116,7 +116,6 @@ export interface BrowserSessionStatus {
   browserAlive: boolean;
   /** True only when both legs (Xvfb display and Chrome identity) are live. */
   alive: boolean;
-  cdpPort?: number;
 }
 
 export function browserSessionLogDir(
@@ -124,6 +123,24 @@ export function browserSessionLogDir(
   registryEnv: EnvLike = process.env,
 ): string {
   return sessionDataDir(id, registryEnv);
+}
+
+/**
+ * Read the CDP endpoint the session's supervisor published. Only this
+ * session's own socket is accepted, so an edited file cannot point a client
+ * at another socket. A session without the file has none, such as one created
+ * by an older Pickforge that served CDP on a TCP port.
+ */
+export async function readBrowserSessionCdpEndpoint(
+  id: string,
+  registryEnv: EnvLike = process.env,
+): Promise<CdpEndpoint | undefined> {
+  const layout = browserRuntimeLayout(browserSessionLogDir(id, registryEnv));
+  const endpoint = await readCdpEndpoint(layout.cdpEndpointFile);
+  if (endpoint !== undefined && endpoint.socketPath !== layout.cdpSocketPath) {
+    throw new Error(`The CDP endpoint of browser session ${id} names a foreign socket`);
+  }
+  return endpoint;
 }
 
 function hasErrnoCode(error: unknown, code: string): boolean {
@@ -276,6 +293,7 @@ async function removeRuntimeData(
     layout.homeDir,
     layout.xdgRuntimeDir,
     layout.tmpDir,
+    layout.cdpEndpointFile,
   ]) {
     try {
       await fs.promises.rm(dir, { recursive: true, force: true });
@@ -310,45 +328,20 @@ async function stopBrowserGroup(
 
 /** Flush named-profile cookies before the verified group-stop fallback. */
 async function closeNamedProfileBrowser(record: SessionRecord, env: EnvLike, signal?: AbortSignal): Promise<void> {
-  const profileName = namedProfile(record);
   const browser = record.browser;
-  if (profileName === undefined || browser?.cdpPort === undefined) return;
+  if (namedProfile(record) === undefined || browser === undefined) return;
   const identity = { pid: browser.browserPid, startTicks: browser.browserStartTimeTicks };
   if (!processIdentityMatches(identity)) return;
   try {
     signal?.throwIfAborted();
-    const url = await namedProfileBrowserEndpoint(profileName, browser.cdpPort, env);
-    if (url === undefined || !await requestBrowserClose(url, identity, signal)) return;
+    const endpoint = await readBrowserSessionCdpEndpoint(record.id, env);
+    if (endpoint === undefined || !processIdentityMatches(identity)) return;
+    if (!await requestCdpBrowserClose(endpoint.socketPath, undefined, signal)) return;
     const deadline = Date.now() + 10_000;
     while (processIdentityMatches(identity) && Date.now() < deadline) await sleep(50, signal);
   } catch {
     // CDP is best effort. Always continue to the verified group stop.
   }
-}
-
-async function requestBrowserClose(url: URL, identity: ProcessIdentity, signal?: AbortSignal): Promise<boolean> {
-  signal?.throwIfAborted();
-  const socket = new WebSocket(url);
-  return new Promise<boolean>((resolve) => {
-    let finished = false;
-    const timer = setTimeout(() => finish(false), 3_000);
-    const aborted = (): void => finish(false);
-    function finish(sent: boolean): void {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", aborted);
-      socket.terminate();
-      resolve(sent);
-    }
-    signal?.addEventListener("abort", aborted, { once: true });
-    socket.on("error", () => finish(false));
-    socket.once("close", () => finish(false));
-    socket.once("open", () => {
-      if (!processIdentityMatches(identity)) { finish(false); return; }
-      socket.send(JSON.stringify({ id: 1, method: "Browser.close" }), (error) => finish(!error));
-    });
-  });
 }
 
 function ownedDaemonExited(daemon: OwnedDaemonHandle): boolean {
@@ -426,6 +419,7 @@ async function launchBrowserDaemon(
     process.execPath,
     ctx.binaryPath,
     args,
+    { endpointFile: ctx.layout.cdpEndpointFile, socketPath: ctx.layout.cdpSocketPath },
   );
   return startDaemon(supervised.command, supervised.args, {
     logDir: ctx.logDir,
@@ -436,23 +430,23 @@ async function launchBrowserDaemon(
   });
 }
 
-async function waitForReadyPort(
+async function waitForReadyEndpoint(
   ctx: BrowserCreationContext,
   state: BrowserCreationState,
-): Promise<number> {
+): Promise<CdpEndpoint> {
   const { browserDaemon, browserIdentity } = state;
   if (browserDaemon === undefined || browserIdentity === undefined) {
     throw new Error("Chrome startup state is incomplete");
   }
   const timeoutMs = ctx.opts.cdpTimeoutMs ?? DEFAULT_CDP_TIMEOUT_MS;
-  const waited = await waitForDevToolsPort({
-    profileDir: ctx.profileDir,
+  const waited = await waitForCdpEndpoint({
+    endpointFile: ctx.layout.cdpEndpointFile,
     logPath: browserDaemon.logPath,
     timeoutMs,
     isAlive: () => processIdentityMatches(browserIdentity),
     signal: ctx.opts.signal,
   });
-  if (waited.ok) return waited.port;
+  if (waited.ok) return waited.endpoint;
   if (waited.reason === "aborted") {
     throw new Error("Browser session creation aborted by the client");
   }
@@ -497,7 +491,7 @@ async function finishBrowserStartup(
   );
   browserDaemon.release();
 
-  const cdpPort = await waitForReadyPort(ctx, state);
+  const endpoint = await waitForReadyEndpoint(ctx, state);
   if (!processIdentityMatches(browserIdentity)) {
     throw new Error(
       `Chrome process ${browserDaemon.pid} vanished right after startup; ` +
@@ -507,13 +501,12 @@ async function finishBrowserStartup(
   // Capture the browser build once, while the endpoint is known ready, so run
   // creation later reads it from the session record without any network call.
   const browserVersion = await readDevToolsBrowserVersion(
-    cdpPort,
+    endpoint.socketPath,
     undefined,
     ctx.opts.signal,
   );
   const browser: BrowserSessionInfo = {
     ...startingBrowser,
-    cdpPort,
     ...(browserVersion === undefined ? {} : { browserVersion }),
   };
   assertNotAborted(ctx.opts.signal);
@@ -531,7 +524,6 @@ async function finishBrowserStartup(
     display: xvfb.display,
     xvfbPid: xvfb.pid,
     browserPid: browserIdentity.pid,
-    cdpPort,
     profileDir: ctx.profileDir,
     binaryPath: ctx.binaryPath,
     logDir: ctx.logDir,
@@ -733,7 +725,7 @@ async function recoverProfileStartup(name: string | undefined, registryEnv: EnvL
 
 /**
  * Create an isolated headed-Chrome session: a private Xvfb display plus headed
- * Chrome on a private profile with a loopback CDP endpoint. A partial
+ * Chrome on a private profile, with CDP on a private Unix socket. A partial
  * failure tears down every process and deletes ephemeral profiles before rethrowing.
  * If cleanup cannot be confirmed, the error record retains every known
  * identity and is marked for a later reaper retry.
@@ -838,7 +830,6 @@ export async function getBrowserSessionStatus(
     displayAlive,
     browserAlive,
     alive: xvfbAlive && displayAlive && browserAlive,
-    ...(browser?.cdpPort !== undefined ? { cdpPort: browser.cdpPort } : {}),
   };
 }
 

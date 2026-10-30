@@ -1,4 +1,3 @@
-const LOOPBACK_ADDRESSES = new Set(["127.0.0.1", "::1", "localhost"]);
 const RESERVED_ARG_PREFIXES = [
   "--profile-directory",
   "--remote-debugging-address",
@@ -33,8 +32,6 @@ function assertSafeExtraArgs(args: string[]): void {
 export interface BuildChromeArgsOptions {
   /** Chrome `--user-data-dir`; the ephemeral profile. */
   profileDir: string;
-  /** CDP bind address; must be loopback. Defaults to `127.0.0.1`. */
-  cdpAddress?: string;
   width?: number;
   height?: number;
   /** Disable Chrome's own sandbox. Off by default; only for constrained hosts. */
@@ -46,20 +43,13 @@ export interface BuildChromeArgsOptions {
 /**
  * Build the argv array for a headed Chrome launched inside a private Xvfb.
  *
- * The DevTools endpoint uses an OS-assigned port (`--remote-debugging-port=0`)
- * bound explicitly to loopback, so two concurrent sessions never collide and
- * the endpoint is never reachable off-host. The port is discovered afterwards
- * by reading `<profile>/DevToolsActivePort`.
+ * DevTools runs over `--remote-debugging-pipe` on fds 3 and 4, which the
+ * browser supervisor owns, so Chrome opens no TCP port at all. Callers cannot
+ * add their own remote debugging flags.
  */
 export function buildChromeArgs(opts: BuildChromeArgsOptions): string[] {
   if (opts.profileDir === "") {
     throw new Error("buildChromeArgs requires a non-empty profileDir");
-  }
-  const address = opts.cdpAddress ?? "127.0.0.1";
-  if (!LOOPBACK_ADDRESSES.has(address)) {
-    throw new Error(
-      `Refusing to bind the DevTools endpoint to non-loopback address "${address}"`,
-    );
   }
   const startUrl = opts.startUrl ?? "about:blank";
   assertSafeStartUrl(startUrl);
@@ -68,8 +58,7 @@ export function buildChromeArgs(opts: BuildChromeArgsOptions): string[] {
   }
   const args = [
     `--user-data-dir=${opts.profileDir}`,
-    "--remote-debugging-port=0",
-    `--remote-debugging-address=${address}`,
+    "--remote-debugging-pipe",
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-background-networking",
