@@ -52,7 +52,10 @@ export async function retainSessionLogs(
       let names = await handle.readEntryNames();
       if (await restoreAbandonedRemovals(handle, names)) names = await handle.readEntryNames();
       for (const name of names) {
-        if (!LEASE_STAGING.test(name) && !isOrphanMarkerTemp(name)) continue;
+        // One that cannot go back, because its name was taken again, is still
+        // the staging file it was.
+        const original = abandonedRemoval(name) ?? name;
+        if (!LEASE_STAGING.test(original) && !isOrphanMarkerTemp(original)) continue;
         const stat = await handle.lstatChild(name);
         if (stat?.isDirectory() === false) await unlinkStaleFile(handle, name, stat);
       }

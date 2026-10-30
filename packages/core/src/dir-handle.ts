@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { isPidAlive } from "./proc.js";
@@ -384,13 +385,9 @@ export class DirHandle {
    */
   async unlinkOwnedFile(name: string, expected: fs.Stats): Promise<void> {
     assertSafeEntryName(name);
-    // Only a process with this pid makes these names. A stopped one that this
-    // process reuses the pid of may have left one, so never move onto it.
-    let removal: string;
-    do {
-      atomicTmpCounter += 1;
-      removal = `.${name}.remove-${process.pid}-${atomicTmpCounter}`;
-    } while (await this.lstatChild(removal) !== undefined);
+    // The random part keeps the move off any entry that a stopped remover
+    // left under a removal name, or that a restore puts back under one.
+    const removal = `.${name}.remove-${process.pid}-${randomUUID()}`;
     removalsInFlight.add(removal);
     try {
       try {
@@ -498,7 +495,7 @@ export class DirHandle {
 
 let atomicTmpCounter = 0;
 
-const REMOVAL_NAME = /^\.(.+)\.remove-(\d+)-\d+$/;
+const REMOVAL_NAME = /^\.(.+)\.remove-(\d+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** Removal names whose unlinkOwnedFile call in this process has not returned. */
 const removalsInFlight = new Set<string>();

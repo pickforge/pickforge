@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -156,6 +157,8 @@ describe("DirHandle lifecycle", () => {
 });
 
 describe("owned file removal", () => {
+  const REMOVAL = /\.remove-\d+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
   /** Puts new content under `name`, from a file made first, so ext4 cannot reuse the old inode. */
   function replace(name: string, content: string): void {
     fs.writeFileSync(path.join(project, `${name}.new`), content);
@@ -203,7 +206,7 @@ describe("owned file removal", () => {
     let removal: string | undefined;
     vi.spyOn(fs.promises, "rename").mockImplementation(async (source, target) => {
       await rename(source, target);
-      if (removal === undefined && /\.remove-\d+-\d+$/.test(String(target))) {
+      if (removal === undefined && REMOVAL.test(String(target))) {
         removal = path.basename(String(target));
         after();
       }
@@ -217,11 +220,11 @@ describe("owned file removal", () => {
     afterMove(() => replace("app.log", "newest"));
     await withDirHandle(DirHandle.open(project), async (dir) => {
       await expect(dir.unlinkOwnedFile("app.log", stat)).rejects.toThrow(
-        /^File to remove was replaced, and the replacement was kept as .*\/\.app\.log\.remove-\d+-\d+$/,
+        new RegExp(`^File to remove was replaced, and the replacement was kept as .*/\\.app\\.log${REMOVAL.source}`),
       );
     });
     const names = fs.readdirSync(project).sort();
-    expect(names).toEqual([expect.stringMatching(/^\.app\.log\.remove-\d+-\d+$/), "app.log"]);
+    expect(names).toEqual([expect.stringMatching(new RegExp(`^\\.app\\.log${REMOVAL.source}`)), "app.log"]);
     expect(fs.readFileSync(path.join(project, names[0]!), "utf8")).toBe("replacement");
     expect(fs.readFileSync(path.join(project, "app.log"), "utf8")).toBe("newest");
   });
@@ -237,16 +240,19 @@ describe("owned file removal", () => {
     });
   });
 
-  it("never moves onto a removal name that a stopped remover with this pid left", async () => {
-    const first = await owned("app.log");
-    const removal = afterMove(() => {});
-    await withDirHandle(DirHandle.open(project), (dir) => dir.unlinkOwnedFile("app.log", first));
-    const counter = Number(/-(\d+)$/.exec(removal()!)![1]);
-    vi.restoreAllMocks();
-    const left = [1, 2, 3].map((step) => `.app.log.remove-${process.pid}-${counter + step}`);
+  it("moves each removal to a fresh name, off entries kept under earlier ones", async () => {
+    const left = [`.app.log.remove-${process.pid}-${crypto.randomUUID()}`, `.app.log.remove-${process.pid}-1`];
     for (const name of left) fs.writeFileSync(path.join(project, name), "kept");
-    const second = await owned("app.log");
-    await withDirHandle(DirHandle.open(project), (dir) => dir.unlinkOwnedFile("app.log", second));
+    const removals: string[] = [];
+    for (let round = 0; round < 2; round += 1) {
+      const stat = await owned("app.log");
+      const removal = afterMove(() => {});
+      await withDirHandle(DirHandle.open(project), (dir) => dir.unlinkOwnedFile("app.log", stat));
+      removals.push(removal()!);
+      vi.restoreAllMocks();
+    }
+    expect(removals[0]).not.toBe(removals[1]);
+    expect(left).not.toContain(removals[0]);
     expect(fs.readdirSync(project).sort()).toEqual(left.sort());
     for (const name of left) expect(fs.readFileSync(path.join(project, name), "utf8")).toBe("kept");
   });
@@ -262,13 +268,14 @@ describe("owned file removal", () => {
       await expect(dir.unlinkOwnedFile("app.log", stat)).rejects.toThrow("crash");
     });
     const [left] = fs.readdirSync(project);
-    expect(left).toMatch(new RegExp(`^\\.app\\.log\\.remove-${process.pid}-\\d+$`));
+    expect(left).toMatch(new RegExp(`^\\.app\\.log\\.remove-${process.pid}-[0-9a-f-]{36}$`));
     expect(seen).toEqual([undefined]);
     expect(abandonedRemoval(left!)).toBe("app.log");
     const dead = spawnSync("true").pid!;
-    expect(abandonedRemoval(`.app.log.remove-${dead}-1`)).toBe("app.log");
-    expect(abandonedRemoval(`.app.log.remove-${process.ppid}-1`)).toBeUndefined();
-    for (const name of ["app.log", ".app.log.tmp-1-2", "...remove-1-2", "....remove-1-2", ".app.log.remove-x-2"]) {
+    const uuid = crypto.randomUUID();
+    expect(abandonedRemoval(`.app.log.remove-${dead}-${uuid}`)).toBe("app.log");
+    expect(abandonedRemoval(`.app.log.remove-${process.ppid}-${uuid}`)).toBeUndefined();
+    for (const name of ["app.log", ".app.log.tmp-1-2", `...remove-1-${uuid}`, `....remove-1-${uuid}`, `.app.log.remove-x-${uuid}`, `.app.log.remove-${dead}-1`]) {
       expect(abandonedRemoval(name)).toBeUndefined();
     }
   });

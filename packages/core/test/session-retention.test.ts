@@ -248,7 +248,7 @@ describe("explicit session log pruning", () => {
 
   it("prunes a retained log that a stopped remover left after a writer took its name again", async () => {
     const { record, dir } = await stopped();
-    const removal = `.xvfb.log.remove-${spawnSync("true").pid!}-1`;
+    const removal = `.xvfb.log.remove-${spawnSync("true").pid!}-${crypto.randomUUID()}`;
     fs.renameSync(path.join(dir, "xvfb.log"), path.join(dir, removal));
     fs.writeFileSync(path.join(dir, "xvfb.log"), "newer");
     expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
@@ -261,7 +261,7 @@ describe("explicit session log pruning", () => {
     ["xvfb.log", "is live", () => process.ppid, false],
   ] as const)("puts back a retained %s whose remover %s only then", async (name, _, pid, pruned) => {
     const { record, dir } = await stopped();
-    const removal = `.${name}.remove-${pid()}-1`;
+    const removal = `.${name}.remove-${pid()}-${crypto.randomUUID()}`;
     fs.renameSync(path.join(dir, name), path.join(dir, removal));
     expect(await pruneSessionLogs(0, env)).toEqual(pruned ? [record.id] : []);
     if (!pruned) expect(fs.readdirSync(dir).sort()).toEqual([removal, "stopped.json"].sort());
@@ -283,7 +283,20 @@ describe("explicit session log pruning", () => {
     const record = await createSession({ type: "desktop", projectDir: home }, env);
     const dir = sessionDataDir(record.id, env);
     fs.mkdirSync(dir);
-    fs.writeFileSync(path.join(dir, `..human-lease-${crypto.randomUUID()}.remove-${spawnSync("true").pid!}-1`), "{}\n");
+    fs.writeFileSync(path.join(dir, `..human-lease-${crypto.randomUUID()}.remove-${spawnSync("true").pid!}-${crypto.randomUUID()}`), "{}\n");
+    await retainSessionLogs(record, env);
+    await destroySessionRecord(record.id, env);
+    expect(fs.readdirSync(dir)).toEqual(["stopped.json"]);
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+  });
+
+  it("removes a lease staging file that a stopped teardown left after its name was taken again", async () => {
+    const record = await createSession({ type: "desktop", projectDir: home }, env);
+    const dir = sessionDataDir(record.id, env);
+    fs.mkdirSync(dir);
+    const name = `.human-lease-${crypto.randomUUID()}`;
+    fs.writeFileSync(path.join(dir, `.${name}.remove-${spawnSync("true").pid!}-${crypto.randomUUID()}`), "{}\n");
+    fs.writeFileSync(path.join(dir, name), "{}\n");
     await retainSessionLogs(record, env);
     await destroySessionRecord(record.id, env);
     expect(fs.readdirSync(dir)).toEqual(["stopped.json"]);
@@ -630,7 +643,7 @@ describe("session marker horizon", () => {
 
   it("puts back a marker that a stopped remover left, and removes it past the horizon", async () => {
     const files = orphanMarkers("desk-0badc0de");
-    const removal = path.join(sessionsDir(env), `.${path.basename(files[0]!)}.remove-${spawnSync("true").pid!}-1`);
+    const removal = path.join(sessionsDir(env), `.${path.basename(files[0]!)}.remove-${spawnSync("true").pid!}-${crypto.randomUUID()}`);
     fs.renameSync(files[0]!, removal);
     expect(await pruneSessionLogs(0, env)).toEqual([]);
     expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
@@ -942,7 +955,7 @@ describe("session marker horizon", () => {
   it("prunes a stranded permit that a stopped remover left after its name was taken again", async () => {
     const { id, dir, permits } = await strandedDirectory();
     const name = `${crypto.randomUUID()}.json`;
-    const removal = path.join(permits, `.${name}.remove-${deadPid()}-1`);
+    const removal = path.join(permits, `.${name}.remove-${deadPid()}-${crypto.randomUUID()}`);
     fs.writeFileSync(removal, permitRecord(id, deadPid()));
     fs.writeFileSync(path.join(permits, name), permitRecord(id, deadPid()));
     backdate([removal, path.join(permits, name), permits, dir, markers(id)[0]!]);
@@ -1013,7 +1026,7 @@ describe("session marker horizon", () => {
     vi.spyOn(DirHandle.prototype, "unlinkChild").mockRejectedValueOnce(new Error("crash"));
     await expect(pruneSessionLogs(0, env)).rejects.toThrow("crash");
     // The teardown time stays, under the removal name of the stopped unlink.
-    expect(fs.readdirSync(sessionDataDir(record.id, env))).toEqual([expect.stringMatching(/^\.stopped\.json\.remove-\d+-\d+$/)]);
+    expect(fs.readdirSync(sessionDataDir(record.id, env))).toEqual([expect.stringMatching(/^\.stopped\.json\.remove-\d+-[0-9a-f-]{36}$/)]);
     vi.restoreAllMocks();
     expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
     expect(exist(markers(record.id))).toEqual([true, true]);
