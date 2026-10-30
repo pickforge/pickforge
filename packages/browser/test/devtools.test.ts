@@ -186,6 +186,28 @@ describe("waitForCdpEndpoint", () => {
     expect(result.diagnostics).toContain("cold Chrome marker");
   });
 
+  it("says why it refused an unsafe endpoint file in the timeout diagnostics", async () => {
+    publish("/tmp/a/cdp.sock");
+    fs.chmodSync(endpointFile, 0o640);
+
+    const result = await waitForCdpEndpoint({
+      endpointFile,
+      timeoutMs: 60,
+      isAlive: () => true,
+      pollIntervalMs: 10,
+    });
+
+    expect(result).toMatchObject({ ok: false, reason: "timeout" });
+    if (result.ok || result.reason === "aborted") {
+      throw new Error("Expected timeout diagnostics");
+    }
+    expect(result.diagnostics).toContain(
+      "file exists but does not hold a valid endpoint before timeout: " +
+        `Refusing unsafe CDP endpoint file ${endpointFile}: must be a regular file of this user with mode 0600`,
+    );
+    expect(result.diagnostics).not.toContain(BROWSER_PATH);
+  });
+
   it("reports endpoint readiness only after timeout probes ran", async () => {
     publish("/tmp/a/cdp.sock");
     let probes = 0;

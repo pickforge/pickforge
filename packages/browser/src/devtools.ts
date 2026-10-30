@@ -315,6 +315,7 @@ function startupFailure(
   reason: "exited" | "timeout",
   opts: WaitForCdpEndpointOptions,
   published: boolean,
+  endpointError?: string,
 ): CdpEndpointResult {
   return {
     ok: false,
@@ -324,6 +325,7 @@ function startupFailure(
       reason,
       published,
       ...(opts.logPath === undefined ? {} : { logPath: opts.logPath }),
+      ...(endpointError === undefined ? {} : { endpointError }),
     }),
   };
 }
@@ -354,7 +356,13 @@ export async function waitForCdpEndpoint(
     if (creationAborted()) {
       return { ok: false, reason: "aborted" };
     }
-    const endpoint = await readCdpEndpoint(opts.endpointFile).catch(() => undefined);
+    // The supervisor replaces an unsafe file when it publishes, so keep
+    // polling, but report why the last read refused it.
+    let endpointError: string | undefined;
+    const endpoint = await readCdpEndpoint(opts.endpointFile).catch((error: unknown) => {
+      endpointError = error instanceof Error ? error.message : String(error);
+      return undefined;
+    });
     if (endpoint !== undefined) {
       if (!opts.isAlive()) {
         return startupFailure("exited", opts, true);
@@ -367,10 +375,10 @@ export async function waitForCdpEndpoint(
         return { ok: true, endpoint };
       }
     } else if (!opts.isAlive()) {
-      return startupFailure("exited", opts, false);
+      return startupFailure("exited", opts, false, endpointError);
     }
     if (Date.now() >= deadline) {
-      return startupFailure("timeout", opts, endpoint !== undefined);
+      return startupFailure("timeout", opts, endpoint !== undefined, endpointError);
     }
     try {
       await sleep(poll, opts.signal);

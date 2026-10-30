@@ -256,25 +256,27 @@ describe("resolveLiveBrowserSession", () => {
     );
   });
 
-  it("fails closed when the session's own browser endpoint is unreadable", async () => {
+  it("fails closed when the session's own browser endpoint is missing or unsafe", async () => {
     const project = path.resolve("/wanted");
     const one = browserRecord("brow-aaaaaa11", project);
-    for (const endpoint of [
-      async () => undefined,
-      async () => {
-        throw new Error("ENOENT");
-      },
-    ]) {
-      await expect(
-        resolveLiveBrowserSession({
-          projectDir: project,
-          env: {},
-          list: async () => [one],
-          status: async () => browserStatus(one, true),
-          endpoint,
-        }),
-      ).rejects.toThrow("No live browser session for this project");
-    }
+    const resolve = (endpoint: () => Promise<CdpEndpoint | undefined>) =>
+      resolveLiveBrowserSession({
+        projectDir: project,
+        env: {},
+        list: async () => [one],
+        status: async () => browserStatus(one, true),
+        endpoint,
+      });
+    await expect(resolve(async () => undefined)).rejects.toThrow("No live browser session for this project");
+    // An unsafe file says why instead of claiming no session exists.
+    await expect(
+      resolve(async () => {
+        throw new Error("Refusing unsafe CDP endpoint file /s/cdp-endpoint: must be a regular file of this user with mode 0600");
+      }),
+    ).rejects.toThrow(
+      `The DevTools endpoint file of browser session ${one.id} is unsafe: ` +
+        "Refusing unsafe CDP endpoint file /s/cdp-endpoint: must be a regular file of this user with mode 0600",
+    );
   });
 
   it("fails closed for dead, other-project, and ambiguous sessions", async () => {

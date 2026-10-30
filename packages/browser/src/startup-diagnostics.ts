@@ -40,6 +40,8 @@ export interface ChromeStartupDiagnosticsOptions {
   reason: ChromeStartupFailureReason;
   /** The endpoint file was valid, so only its socket failed to answer. */
   published?: boolean;
+  /** Why the last read refused the endpoint file, such as unsafe permissions. */
+  endpointError?: string;
 }
 
 function endpointStatus(opts: ChromeStartupDiagnosticsOptions): string {
@@ -51,9 +53,12 @@ function endpointStatus(opts: ChromeStartupDiagnosticsOptions): string {
   const fileStatus = fs.existsSync(opts.endpointFile)
     ? "file exists but does not hold a valid endpoint"
     : "file was not created";
-  return opts.reason === "exited"
+  const status = opts.reason === "exited"
     ? `${fileStatus} before the Chrome process exited`
     : `${fileStatus} before timeout`;
+  return opts.endpointError === undefined
+    ? status
+    : `${status}: ${opts.endpointError}`;
 }
 
 /** Build bounded, redacted diagnostics that survive ephemeral cleanup. */

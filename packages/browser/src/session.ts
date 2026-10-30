@@ -138,7 +138,7 @@ export async function readBrowserSessionCdpEndpoint(
   const layout = browserRuntimeLayout(browserSessionLogDir(id, registryEnv));
   const endpoint = await readCdpEndpoint(layout.cdpEndpointFile);
   if (endpoint !== undefined && endpoint.socketPath !== layout.cdpSocketPath) {
-    throw new Error(`The CDP endpoint of browser session ${id} names a foreign socket`);
+    throw new Error(`Refusing CDP endpoint file ${layout.cdpEndpointFile}: it names a socket outside browser session ${id}`);
   }
   return endpoint;
 }

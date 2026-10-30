@@ -293,6 +293,11 @@ function isLegacyTcpSession(record: SessionRecord): boolean {
   return record.browser !== undefined && "cdpPort" in record.browser;
 }
 
+function unsafeEndpointError(record: SessionRecord, error: unknown): Error {
+  const reason = error instanceof Error ? error.message : String(error);
+  return new Error(`The DevTools endpoint file of browser session ${record.id} is unsafe: ${reason}`);
+}
+
 function legacySessionError(record: SessionRecord): Error {
   return new Error(
     `Browser session ${record.id} was created by an older Pickforge that served DevTools on a TCP port, ` +
@@ -314,6 +319,7 @@ export async function resolveLiveBrowserSession(
   );
   const live: LiveBrowserSession[] = [];
   const legacy: SessionRecord[] = [];
+  const unsafe: Array<{ record: SessionRecord; error: Error }> = [];
   for (const record of projectBrowsers) {
     let status: BrowserSessionStatus;
     try {
@@ -326,9 +332,15 @@ export async function resolveLiveBrowserSession(
       legacy.push(record);
       continue;
     }
-    const cdpEndpoint = await (
-      opts.endpoint ?? ((own: SessionRecord, ownEnv: EnvLike) => readBrowserSessionCdpEndpoint(own.id, ownEnv))
-    )(record, env).catch(() => undefined);
+    let cdpEndpoint: CdpEndpoint | undefined;
+    try {
+      cdpEndpoint = await (
+        opts.endpoint ?? ((own: SessionRecord, ownEnv: EnvLike) => readBrowserSessionCdpEndpoint(own.id, ownEnv))
+      )(record, env);
+    } catch (error) {
+      unsafe.push({ record, error: unsafeEndpointError(record, error) });
+      continue;
+    }
     if (cdpEndpoint === undefined) continue;
     live.push({
       record,
@@ -336,7 +348,7 @@ export async function resolveLiveBrowserSession(
       browserEndpoint: cdpWebSocketUrl(cdpEndpoint.socketPath, cdpEndpoint.browserPath),
     });
   }
-  const found = [...live.map(({ record }) => record), ...legacy];
+  const found = [...live.map(({ record }) => record), ...legacy, ...unsafe.map(({ record }) => record)];
   if (found.length === 0) {
     throw new Error(
       "No live browser session for this project; create one with: pickforge-lab session create --type browser",
@@ -348,6 +360,7 @@ export async function resolveLiveBrowserSession(
     );
   }
   if (legacy[0] !== undefined) throw legacySessionError(legacy[0]);
+  if (unsafe[0] !== undefined) throw unsafe[0].error;
   return live[0] as LiveBrowserSession;
 }
 
