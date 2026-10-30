@@ -331,6 +331,36 @@ function startupFailure(
 }
 
 /**
+ * One readiness check. Returns the final result, or undefined to poll again.
+ */
+async function checkCdpEndpointOnce(
+  opts: WaitForCdpEndpointOptions,
+  isReady: (endpoint: CdpEndpoint) => boolean | Promise<boolean>,
+  creationAborted: () => boolean,
+  deadline: number,
+): Promise<CdpEndpointResult | undefined> {
+  // The supervisor replaces an unsafe file when it publishes, so keep
+  // polling, but report why the last read refused it.
+  let endpointError: string | undefined;
+  const endpoint = await readCdpEndpoint(opts.endpointFile).catch((error: unknown) => {
+    endpointError = error instanceof Error ? error.message : String(error);
+    return undefined;
+  });
+  if (endpoint === undefined) {
+    if (!opts.isAlive()) return startupFailure("exited", opts, false, endpointError);
+  } else {
+    if (!opts.isAlive()) return startupFailure("exited", opts, true);
+    const ready = await isReady(endpoint);
+    if (creationAborted()) return { ok: false, reason: "aborted" };
+    if (ready && opts.isAlive()) return { ok: true, endpoint };
+  }
+  if (Date.now() >= deadline) {
+    return startupFailure("timeout", opts, endpoint !== undefined, endpointError);
+  }
+  return undefined;
+}
+
+/**
  * Poll for a published endpoint file, a live recorded browser identity, and a
  * socket that answers `/json/version`. Fails fast if Chrome exits and returns
  * `timeout` if the complete readiness contract is not met in time.
@@ -356,30 +386,8 @@ export async function waitForCdpEndpoint(
     if (creationAborted()) {
       return { ok: false, reason: "aborted" };
     }
-    // The supervisor replaces an unsafe file when it publishes, so keep
-    // polling, but report why the last read refused it.
-    let endpointError: string | undefined;
-    const endpoint = await readCdpEndpoint(opts.endpointFile).catch((error: unknown) => {
-      endpointError = error instanceof Error ? error.message : String(error);
-      return undefined;
-    });
-    if (endpoint !== undefined) {
-      if (!opts.isAlive()) {
-        return startupFailure("exited", opts, true);
-      }
-      const ready = await isReady(endpoint);
-      if (creationAborted()) {
-        return { ok: false, reason: "aborted" };
-      }
-      if (ready && opts.isAlive()) {
-        return { ok: true, endpoint };
-      }
-    } else if (!opts.isAlive()) {
-      return startupFailure("exited", opts, false, endpointError);
-    }
-    if (Date.now() >= deadline) {
-      return startupFailure("timeout", opts, endpoint !== undefined, endpointError);
-    }
+    const result = await checkCdpEndpointOnce(opts, isReady, creationAborted, deadline);
+    if (result !== undefined) return result;
     try {
       await sleep(poll, opts.signal);
     } catch (error) {

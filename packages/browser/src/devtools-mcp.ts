@@ -305,6 +305,48 @@ function legacySessionError(record: SessionRecord): Error {
   );
 }
 
+type BrowserSessionCandidate =
+  | { kind: "live"; record: SessionRecord; session: LiveBrowserSession }
+  | { kind: "legacy"; record: SessionRecord }
+  | { kind: "unsafe"; record: SessionRecord; error: Error };
+
+/** Live sessions are listed first, then legacy ones, then unsafe ones. */
+const CANDIDATE_ORDER = { live: 0, legacy: 1, unsafe: 2 } as const;
+
+/** What a running browser record of the project is, or undefined when it is not live. */
+async function classifyBrowserSession(
+  record: SessionRecord,
+  opts: ResolveLiveBrowserSessionOptions,
+  env: EnvLike,
+): Promise<BrowserSessionCandidate | undefined> {
+  let status: BrowserSessionStatus;
+  try {
+    status = await (opts.status ?? getBrowserSessionStatus)(record.id, env);
+  } catch {
+    return undefined;
+  }
+  if (!status.alive) return undefined;
+  if (isLegacyTcpSession(record)) return { kind: "legacy", record };
+  let cdpEndpoint: CdpEndpoint | undefined;
+  try {
+    cdpEndpoint = await (
+      opts.endpoint ?? ((own: SessionRecord, ownEnv: EnvLike) => readBrowserSessionCdpEndpoint(own.id, ownEnv))
+    )(record, env);
+  } catch (error) {
+    return { kind: "unsafe", record, error: unsafeEndpointError(record, error) };
+  }
+  if (cdpEndpoint === undefined) return undefined;
+  return {
+    kind: "live",
+    record,
+    session: {
+      record,
+      cdpEndpoint,
+      browserEndpoint: cdpWebSocketUrl(cdpEndpoint.socketPath, cdpEndpoint.browserPath),
+    },
+  };
+}
+
 export async function resolveLiveBrowserSession(
   opts: ResolveLiveBrowserSessionOptions,
 ): Promise<LiveBrowserSession> {
@@ -317,51 +359,26 @@ export async function resolveLiveBrowserSession(
       record.browser !== undefined &&
       path.resolve(record.projectDir) === projectDir,
   );
-  const live: LiveBrowserSession[] = [];
-  const legacy: SessionRecord[] = [];
-  const unsafe: Array<{ record: SessionRecord; error: Error }> = [];
+  const found: BrowserSessionCandidate[] = [];
   for (const record of projectBrowsers) {
-    let status: BrowserSessionStatus;
-    try {
-      status = await (opts.status ?? getBrowserSessionStatus)(record.id, env);
-    } catch {
-      continue;
-    }
-    if (!status.alive) continue;
-    if (isLegacyTcpSession(record)) {
-      legacy.push(record);
-      continue;
-    }
-    let cdpEndpoint: CdpEndpoint | undefined;
-    try {
-      cdpEndpoint = await (
-        opts.endpoint ?? ((own: SessionRecord, ownEnv: EnvLike) => readBrowserSessionCdpEndpoint(own.id, ownEnv))
-      )(record, env);
-    } catch (error) {
-      unsafe.push({ record, error: unsafeEndpointError(record, error) });
-      continue;
-    }
-    if (cdpEndpoint === undefined) continue;
-    live.push({
-      record,
-      cdpEndpoint,
-      browserEndpoint: cdpWebSocketUrl(cdpEndpoint.socketPath, cdpEndpoint.browserPath),
-    });
+    const candidate = await classifyBrowserSession(record, opts, env);
+    if (candidate !== undefined) found.push(candidate);
   }
-  const found = [...live.map(({ record }) => record), ...legacy, ...unsafe.map(({ record }) => record)];
-  if (found.length === 0) {
+  found.sort((a, b) => CANDIDATE_ORDER[a.kind] - CANDIDATE_ORDER[b.kind]);
+  const [only] = found;
+  if (only === undefined) {
     throw new Error(
       "No live browser session for this project; create one with: pickforge-lab session create --type browser",
     );
   }
   if (found.length > 1) {
     throw new Error(
-      `Multiple live browser sessions for this project (${found.map(({ id }) => id).join(", ")}); destroy all but one`,
+      `Multiple live browser sessions for this project (${found.map(({ record }) => record.id).join(", ")}); destroy all but one`,
     );
   }
-  if (legacy[0] !== undefined) throw legacySessionError(legacy[0]);
-  if (unsafe[0] !== undefined) throw unsafe[0].error;
-  return live[0] as LiveBrowserSession;
+  if (only.kind === "legacy") throw legacySessionError(only.record);
+  if (only.kind === "unsafe") throw only.error;
+  return only.session;
 }
 
 export interface RelayHooks {

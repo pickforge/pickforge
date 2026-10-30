@@ -324,16 +324,18 @@ function readChromeChunk(chunk) {
   }
 }
 
+/**
+ * An empty session id would address Chrome's root session.
+ * @param {unknown} sessionId
+ */
+function isClientSessionId(sessionId) {
+  return sessionId === undefined || (typeof sessionId === "string" && sessionId !== "");
+}
+
 /** @param {any} message */
 function isClientCommand(message) {
-  return (
-    typeof message === "object" &&
-    message !== null &&
-    Number.isSafeInteger(message.id) &&
-    typeof message.method === "string" &&
-    // An empty session id would address Chrome's root session.
-    (message.sessionId === undefined || (typeof message.sessionId === "string" && message.sessionId !== ""))
-  );
+  if (typeof message !== "object" || message === null) return false;
+  return Number.isSafeInteger(message.id) && typeof message.method === "string" && isClientSessionId(message.sessionId);
 }
 
 /**

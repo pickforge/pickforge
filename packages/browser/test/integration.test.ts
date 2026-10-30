@@ -121,8 +121,8 @@ async function openCdpClient(session: BrowserSessionHandle): Promise<CdpClient> 
   };
 }
 
-/** Loopback and wildcard TCP ports that any process of the group listens on. */
-function listeningTcpPorts(pgid: number): number[] {
+/** Socket inodes that any process of the group holds open. */
+function groupSocketInodes(pgid: number): Set<string> {
   const inodes = new Set<string>();
   for (const pid of listProcessGroupMembers(pgid)) {
     let fds: string[];
@@ -140,6 +140,12 @@ function listeningTcpPorts(pgid: number): number[] {
       }
     }
   }
+  return inodes;
+}
+
+/** Loopback and wildcard TCP ports that any process of the group listens on. */
+function listeningTcpPorts(pgid: number): number[] {
+  const inodes = groupSocketInodes(pgid);
   const ports: number[] = [];
   for (const table of ["/proc/net/tcp", "/proc/net/tcp6"]) {
     for (const line of fs.readFileSync(table, "utf8").split("\n").slice(1)) {
