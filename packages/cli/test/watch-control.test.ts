@@ -166,7 +166,17 @@ describe("watch --control (mocked)", () => {
     const id = await createDesktop();
     const handle = fakeHandle({ sessionId: id, heartbeatMs: 10_000 });
     startHumanTakeover.mockResolvedValue(handle);
-    openVncViewer.mockImplementation(() => delayedResolve(fakeViewer({ signal: "SIGTERM" }), 60));
+    // The watch opens the viewer after it installs its signal handlers, and
+    // the viewer stays open until the SIGINT ends it.
+    let closeViewer!: () => void;
+    const viewerOpen = new Promise<void>((opened) => {
+      openVncViewer.mockImplementation(() => {
+        opened();
+        return new Promise((resolve) => {
+          closeViewer = () => resolve(fakeViewer({ signal: "SIGTERM" }));
+        });
+      });
+    });
     endHumanTakeover.mockImplementation(async (_handle, opts) => ({
       reason: opts.reason,
     }));
@@ -177,8 +187,9 @@ describe("watch --control (mocked)", () => {
       control: true,
       _spawnWatchdog: spawnWatchdog,
     });
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await viewerOpen;
     process.emit("SIGINT");
+    closeViewer();
     const result = await pending;
 
     expect(endHumanTakeover).toHaveBeenCalledWith(
