@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { DirHandle, withDirHandle } from "./dir-handle.js";
+import { abandonedRemoval, DirHandle, withDirHandle } from "./dir-handle.js";
 import { legacySessionsDirs, sessionsDir, type EnvLike } from "./paths.js";
 import { identityIsAlive, isPidAlive } from "./proc.js";
 import { sessionDataDir, sessionInputClosedName, takeoverIdentityName, type SessionRecord } from "./session.js";
@@ -48,10 +48,13 @@ export async function retainSessionLogs(
         await fs.promises.rm(handle.resolve(name), { recursive: true, force: true });
       }
       // A lease publisher or an earlier teardown killed before its cleanup
-      // leaves staging files behind.
-      for (const name of await handle.readEntryNames()) {
+      // leaves staging files behind, possibly under a removal name.
+      let names = await handle.readEntryNames();
+      if (await restoreAbandonedRemovals(handle, names)) names = await handle.readEntryNames();
+      for (const name of names) {
         if (!LEASE_STAGING.test(name) && !isOrphanMarkerTemp(name)) continue;
-        if ((await handle.lstatChild(name))?.isDirectory() === false) await handle.unlinkChild(name);
+        const stat = await handle.lstatChild(name);
+        if (stat?.isDirectory() === false) await unlinkStaleFile(handle, name, stat);
       }
       await handle.writeFileAtomic(MARKER, JSON.stringify({
         id: record.id,
@@ -103,6 +106,29 @@ async function entriesIfPresent(dir: DirHandle): Promise<string[] | undefined> {
   });
 }
 
+/**
+ * A remover stopped between its rename and its unlink leaves the entry under
+ * its removal name. Putting it back lets prune check it again. If a live
+ * process reuses the remover's pid, the entry stays, which keeps only its
+ * directory. Returns whether an entry went back.
+ */
+async function restoreAbandonedRemovals(dir: DirHandle, names: string[]): Promise<boolean> {
+  let restored = false;
+  for (const name of names) {
+    const original = abandonedRemoval(name);
+    if (original !== undefined && await dir.restoreRemoved(name, original)) restored = true;
+  }
+  return restored;
+}
+
+/** {@link entriesIfPresent}, with abandoned removals put back first. */
+async function entriesAfterRestore(dir: DirHandle): Promise<string[] | undefined> {
+  const names = await entriesIfPresent(dir);
+  if (names === undefined || !await restoreAbandonedRemovals(dir, names)) return names;
+  await restoreTimes(dir);
+  return entriesIfPresent(dir);
+}
+
 /** Runs `fn` on a directory prune just lstat'ed; false when a concurrent prune removed it. */
 async function withChildIfPresent(dir: DirHandle, name: string, fn: (child: DirHandle) => Promise<boolean>): Promise<boolean> {
   const child = await dir.openChild(name).catch((error: unknown) => {
@@ -130,6 +156,14 @@ async function retainedStoppedAt(dir: DirHandle, id: string): Promise<number | u
   } finally {
     await file.close();
   }
+}
+
+// A prune stopped while it removed stopped.json leaves it under a removal name.
+async function restoredStoppedAt(dir: DirHandle, id: string): Promise<number | undefined> {
+  const names = await entriesIfPresent(dir);
+  if (names === undefined || !await restoreAbandonedRemovals(dir, names)) return undefined;
+  await restoreTimes(dir);
+  return retainedStoppedAt(dir, id);
 }
 
 async function registryHasSession(id: string, roots: string[]): Promise<boolean> {
@@ -202,15 +236,11 @@ async function restoreTimes(dir: DirHandle): Promise<void> {
   await fs.promises.utimes(dir.resolve(), dir.stat.atime, dir.stat.mtime);
 }
 
-/**
- * Removes a file that prune checked, unless it was replaced since. The check
- * and the unlink by name are two syscalls, and POSIX has no unlink by inode,
- * so a replacement made between them is still removed.
- */
+/** Removes a file that was checked, and keeps a replacement made at any point. */
 async function unlinkStaleFile(dir: DirHandle, name: string, stat: fs.Stats): Promise<void> {
   // A concurrent prune may have removed it first; a replaced entry still fails.
-  await dir.unlinkOwnedFile(name, stat).catch(async (error: unknown) => {
-    if (await dir.lstatChild(name) !== undefined) throw error;
+  await dir.unlinkOwnedFile(name, stat).catch((error: unknown) => {
+    if (((error as Error).cause as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") throw error;
   });
 }
 
@@ -233,7 +263,7 @@ async function rmdirIfEmpty(target: string): Promise<boolean> {
 
 async function stalePermitFiles(permits: DirHandle): Promise<StaleFiles | undefined> {
   if (!isOld(permits.stat)) return undefined;
-  const names = await entriesIfPresent(permits);
+  const names = await entriesAfterRestore(permits);
   if (names === undefined) return undefined;
   const files: StaleFiles = [];
   for (const name of names) {
@@ -318,10 +348,10 @@ async function removeRetainedDirectory(
 async function pruneDirectory(root: DirHandle, id: string, roots: string[], age: number): Promise<boolean> {
   if (await registryHasSession(id, roots)) return false;
   return withChildIfPresent(root, id, async (dir) => {
-    const stoppedAt = await retainedStoppedAt(dir, id);
+    const stoppedAt = await retainedStoppedAt(dir, id) ?? await restoredStoppedAt(dir, id);
     if (stoppedAt === undefined) return pruneCoordinationDirectory(root, dir, id, roots);
     if (Date.now() - stoppedAt < age) return false;
-    const names = await entriesIfPresent(dir);
+    const names = await entriesAfterRestore(dir);
     if (names === undefined) return false;
     const files: StaleFiles = [];
     // Unknown data is not ours to delete. Never traverse a child directory or link.
@@ -382,12 +412,7 @@ async function pruneMarkers(root: DirHandle, id: string, roots: string[]): Promi
     markers.push([name, stat]);
   }
   if (await sessionEntryExists(id, roots)) return;
-  for (const [name, stat] of markers) {
-    // A concurrent prune may have removed it first; a replaced entry still fails.
-    await root.unlinkOwnedFile(name, stat).catch(async (error: unknown) => {
-      if (await root.lstatChild(name) !== undefined) throw error;
-    });
-  }
+  for (const [name, stat] of markers) await unlinkStaleFile(root, name, stat);
 }
 
 /**
@@ -407,7 +432,8 @@ export async function pruneSessionLogs(
   for (const rootPath of roots) {
     if (!fs.existsSync(rootPath)) continue;
     await withDirHandle(DirHandle.open(rootPath), async (root) => {
-      const names = await root.readEntryNames();
+      let names = await root.readEntryNames();
+      if (await restoreAbandonedRemovals(root, names)) names = await root.readEntryNames();
       for (const id of names) {
         if (!SESSION_ID.test(id)) continue;
         if ((await root.lstatChild(id))?.isDirectory() !== true) continue;

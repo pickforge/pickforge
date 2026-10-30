@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { isPidAlive } from "./proc.js";
 
 /**
  * Raised when a run-storage write would go through a symlink, a non-directory,
@@ -374,10 +375,63 @@ export class DirHandle {
     }
   }
 
-  /** Remove only the known regular entry in this held directory. Substitutions are refused. */
+  /**
+   * Remove the entry `name`, which is not a directory, only if it is still
+   * `expected`. POSIX has no unlink by inode, so the entry first moves to a
+   * removal name that only this call uses, and is checked and unlinked there.
+   * An entry that replaced the checked one goes back under `name`. If `name`
+   * was taken again in the meantime, the entry stays under its removal name.
+   */
   async unlinkOwnedFile(name: string, expected: fs.Stats): Promise<void> {
-    await this.#assertFileIdentity(name, expected);
-    await this.unlinkChild(name);
+    assertSafeEntryName(name);
+    atomicTmpCounter += 1;
+    const removal = `.${name}.remove-${process.pid}-${atomicTmpCounter}`;
+    removalsInFlight.add(removal);
+    try {
+      try {
+        await fs.promises.rename(this.resolve(name), this.resolve(removal));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        throw new RunStorageAccessError(`File to remove is gone: ${this.dir}/${name}`, { cause: error });
+      }
+      const moved = await this.lstatChild(removal);
+      if (moved?.isDirectory() === false && moved.dev === expected.dev && moved.ino === expected.ino) {
+        await this.unlinkChild(removal);
+        return;
+      }
+      if (!await this.restoreRemoved(removal, name)) {
+        throw new RunStorageAccessError(
+          `File to remove was replaced, and it was kept as ${this.dir}/${removal} because ${name} was taken again`,
+        );
+      }
+      throw new RunStorageAccessError(`File to remove was replaced, so it was kept: ${this.dir}/${name}`);
+    } finally {
+      removalsInFlight.delete(removal);
+    }
+  }
+
+  /**
+   * Move an entry from a removal name back to `name`, without replacing
+   * another entry. Returns false when `name` holds another entry, and the
+   * entry then stays under its removal name.
+   */
+  async restoreRemoved(removal: string, name: string): Promise<boolean> {
+    assertSafeEntryName(name);
+    const moved = await this.lstatChild(removal);
+    if (moved === undefined) return true;
+    try {
+      // A link never replaces an entry. Renaming a directory replaces only an
+      // empty directory, and a directory cannot be linked.
+      if (moved.isDirectory()) await fs.promises.rename(this.resolve(removal), this.resolve(name));
+      else await fs.promises.link(this.resolve(removal), this.resolve(name));
+    } catch (error) {
+      if (!["EEXIST", "ENOTEMPTY", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+      // A remover stopped between its link and its unlink leaves both names.
+      const current = await this.lstatChild(name);
+      if (current?.dev !== moved.dev || current.ino !== moved.ino) return false;
+    }
+    if (!moved.isDirectory()) await this.unlinkChild(removal);
+    return true;
   }
 
   async #assertFileIdentity(name: string, expected: fs.Stats): Promise<void> {
@@ -438,6 +492,24 @@ export class DirHandle {
 }
 
 let atomicTmpCounter = 0;
+
+const REMOVAL_NAME = /^\.(.+)\.remove-(\d+)-\d+$/;
+
+/** Removal names whose unlinkOwnedFile call in this process has not returned. */
+const removalsInFlight = new Set<string>();
+
+/**
+ * The entry name in a removal name whose remover stopped before it finished:
+ * its process is gone, or its call in this process has returned. Undefined
+ * for any other name.
+ */
+export function abandonedRemoval(removal: string): string | undefined {
+  const match = REMOVAL_NAME.exec(removal);
+  if (match === null || UNSAFE_ENTRY_NAME.test(match[1]!)) return undefined;
+  const pid = Number(match[2]);
+  const stopped = pid === process.pid ? !removalsInFlight.has(removal) : !isPidAlive(pid);
+  return stopped ? match[1] : undefined;
+}
 
 /** Run `fn` with an open directory handle, always closing the descriptor. */
 export async function withDirHandle<T>(

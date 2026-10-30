@@ -210,6 +210,84 @@ describe("explicit session log pruning", () => {
     expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
   });
 
+  /** Replaces `dir/name` when the first unlink for it runs, from a file made first, so ext4 cannot reuse the old inode. */
+  function replaceAtUnlink(dir: string, name: string) {
+    const unlink = DirHandle.prototype.unlinkChild;
+    let replaced = false;
+    vi.spyOn(DirHandle.prototype, "unlinkChild").mockImplementation(async function (this: DirHandle, target) {
+      if (!replaced && (target === name || target.startsWith(`.${name}.remove-`))) {
+        replaced = true;
+        fs.writeFileSync(path.join(dir, `${name}.new`), "replacement");
+        fs.renameSync(path.join(dir, `${name}.new`), path.join(dir, name));
+      }
+      return unlink.call(this, target);
+    });
+  }
+
+  it.each(["xvfb.log", "stopped.json"])("keeps a retained %s that is replaced at the last step", async (name) => {
+    const { record, dir } = await stopped();
+    replaceAtUnlink(dir, name);
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(fs.readdirSync(dir)).toEqual([name]);
+    expect(fs.readFileSync(path.join(dir, name), "utf8")).toBe("replacement");
+    vi.restoreAllMocks();
+    fs.writeFileSync(path.join(dir, "stopped.json"), JSON.stringify({ id: record.id, stoppedAt: new Date(0).toISOString() }));
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+  });
+
+  it.each([
+    ["xvfb.log", "is gone", () => spawnSync("true").pid!, true],
+    ["stopped.json", "is gone", () => spawnSync("true").pid!, true],
+    ["stopped.json", "is this one and stopped", () => process.pid, true],
+    ["xvfb.log", "is live", () => process.ppid, false],
+  ] as const)("puts back a retained %s whose remover %s only then", async (name, _, pid, pruned) => {
+    const { record, dir } = await stopped();
+    const removal = `.${name}.remove-${pid()}-1`;
+    fs.renameSync(path.join(dir, name), path.join(dir, removal));
+    expect(await pruneSessionLogs(0, env)).toEqual(pruned ? [record.id] : []);
+    if (!pruned) expect(fs.readdirSync(dir).sort()).toEqual([removal, "stopped.json"].sort());
+  });
+
+  it("keeps a lease staging file that is replaced at the last step of teardown", async () => {
+    const record = await createSession({ type: "desktop", projectDir: home }, env);
+    const dir = sessionDataDir(record.id, env);
+    fs.mkdirSync(dir);
+    const name = `.human-lease-${crypto.randomUUID()}`;
+    fs.writeFileSync(path.join(dir, name), "{}\n");
+    replaceAtUnlink(dir, name);
+    await retainSessionLogs(record, env);
+    expect(fs.readdirSync(dir).sort()).toEqual([name, "stopped.json"]);
+    expect(fs.readFileSync(path.join(dir, name), "utf8")).toBe("replacement");
+  });
+
+  it("removes a lease staging file that a stopped teardown left under its removal name", async () => {
+    const record = await createSession({ type: "desktop", projectDir: home }, env);
+    const dir = sessionDataDir(record.id, env);
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, `..human-lease-${crypto.randomUUID()}.remove-${spawnSync("true").pid!}-1`), "{}\n");
+    await retainSessionLogs(record, env);
+    await destroySessionRecord(record.id, env);
+    expect(fs.readdirSync(dir)).toEqual(["stopped.json"]);
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+  });
+
+  it("refuses to finish teardown when a lease staging file is replaced after its check", async () => {
+    const record = await createSession({ type: "desktop", projectDir: home }, env);
+    const dir = sessionDataDir(record.id, env);
+    fs.mkdirSync(dir);
+    const name = `.human-lease-${crypto.randomUUID()}`;
+    fs.writeFileSync(path.join(dir, name), "{}\n");
+    const unlink = DirHandle.prototype.unlinkOwnedFile;
+    vi.spyOn(DirHandle.prototype, "unlinkOwnedFile").mockImplementation(async function (this: DirHandle, target, stat) {
+      fs.writeFileSync(path.join(dir, `${name}.new`), "replacement");
+      fs.renameSync(path.join(dir, `${name}.new`), path.join(dir, name));
+      return unlink.call(this, target, stat);
+    });
+    await expect(retainSessionLogs(record, env)).rejects.toThrow(`File to remove was replaced, so it was kept: ${dir}/${name}`);
+    expect(fs.readdirSync(dir)).toEqual([name]);
+    expect(fs.readFileSync(path.join(dir, name), "utf8")).toBe("replacement");
+  });
+
   it.each(["not json", "{}", JSON.stringify({ id: "desk-000000", stoppedAt: "invalid" })])("keeps malformed retention metadata %s", async (marker) => {
     const { dir } = await stopped();
     fs.writeFileSync(path.join(dir, "stopped.json"), marker);
@@ -529,6 +607,14 @@ describe("session marker horizon", () => {
     });
     await expect(pruneSessionLogs(0, env)).rejects.toThrow("replaced");
     expect(exist(replaced)).toEqual([true, true]);
+  });
+
+  it("puts back a marker that a stopped remover left, and removes it past the horizon", async () => {
+    const files = orphanMarkers("desk-0badc0de");
+    const removal = path.join(sessionsDir(env), `.${path.basename(files[0]!)}.remove-${spawnSync("true").pid!}-1`);
+    fs.renameSync(files[0]!, removal);
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
   });
 
   it("stays closed and reserved when prune stops between the two markers", async () => {
@@ -896,7 +982,8 @@ describe("session marker horizon", () => {
     setStoppedAt(record.id, new Date(Date.now() - 3_600_000));
     vi.spyOn(DirHandle.prototype, "unlinkChild").mockRejectedValueOnce(new Error("crash"));
     await expect(pruneSessionLogs(0, env)).rejects.toThrow("crash");
-    expect(fs.existsSync(path.join(sessionDataDir(record.id, env), "stopped.json"))).toBe(true);
+    // The teardown time stays, under the removal name of the stopped unlink.
+    expect(fs.readdirSync(sessionDataDir(record.id, env))).toEqual([expect.stringMatching(/^\.stopped\.json\.remove-\d+-\d+$/)]);
     vi.restoreAllMocks();
     expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
     expect(exist(markers(record.id))).toEqual([true, true]);
