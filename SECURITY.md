@@ -317,7 +317,9 @@ What Pickforge does do:
   reply, one websocket client at a time, and `POST /close`, which closes Chrome
   so a named profile flushes its cookies. A second client is refused.
 - Each client gets its own browser session, and its top-level commands run
-  there. Chrome's own pipe session stays with the supervisor. When the client
+  there. Chrome's own pipe session stays with the supervisor. A command for a
+  session the client did not attach, such as one an earlier client attached,
+  is refused before it reaches Chrome. When the client
   leaves, the supervisor detaches the client's session, and Chrome ends it.
   This also ends the sessions below it and the client's auto-attach, target
   discovery, tracing and download behavior. It closes the browser contexts the
