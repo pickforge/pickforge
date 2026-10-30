@@ -540,7 +540,7 @@ describe("browser supervisor CDP bridge", () => {
     // Refusals come from the bridge, so the pipe does not hold them back.
     client.socket.pause();
     const sessionId = "X".repeat(128);
-    for (let id = 1; id <= 10 * MAX_PENDING_COMMANDS; id += 1) {
+    for (let id = 1; id <= 50 * MAX_PENDING_COMMANDS; id += 1) {
       client.socket.send(JSON.stringify({ id, method: "Test.echo", sessionId }));
     }
     await expect.poll(() => client.socket.bufferedAmount).toBe(0);
@@ -553,7 +553,7 @@ describe("browser supervisor CDP bridge", () => {
       code: 1008,
       reason: `Too many pending CDP commands (over ${MAX_PENDING_COMMANDS})`,
     });
-    expect(client.messages.length).toBeLessThan(10 * MAX_PENDING_COMMANDS);
+    expect(client.messages.length).toBeLessThan(50 * MAX_PENDING_COMMANDS);
     expect(bridge.commands().filter(({ method }) => method === "Test.echo")).toHaveLength(1);
   });
 
