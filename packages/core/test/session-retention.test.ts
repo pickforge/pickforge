@@ -210,6 +210,122 @@ describe("explicit session log pruning", () => {
     expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
   });
 
+  /** Replaces `dir/name` when the first unlink for it runs, from a file made first, so ext4 cannot reuse the old inode. */
+  function replaceAtUnlink(dir: string, name: string) {
+    const unlink = DirHandle.prototype.unlinkChild;
+    let replaced = false;
+    vi.spyOn(DirHandle.prototype, "unlinkChild").mockImplementation(async function (this: DirHandle, target) {
+      if (!replaced && (target === name || target.startsWith(`.${name}.remove-`))) {
+        replaced = true;
+        fs.writeFileSync(path.join(dir, `${name}.new`), "replacement");
+        fs.renameSync(path.join(dir, `${name}.new`), path.join(dir, name));
+      }
+      return unlink.call(this, target);
+    });
+  }
+
+  it("keeps a retained log that is replaced at the last step, and the teardown time with it", async () => {
+    const { record, dir } = await stopped();
+    replaceAtUnlink(dir, "xvfb.log");
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(fs.readdirSync(dir).sort()).toEqual(["stopped.json", "xvfb.log"]);
+    expect(fs.readFileSync(path.join(dir, "xvfb.log"), "utf8")).toBe("replacement");
+    vi.restoreAllMocks();
+    // A later prune checks the replacement, and removes it with the directory.
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+  });
+
+  it("keeps a retained stopped.json that is replaced at the last step", async () => {
+    const { record, dir } = await stopped();
+    replaceAtUnlink(dir, "stopped.json");
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(fs.readdirSync(dir)).toEqual(["stopped.json"]);
+    expect(fs.readFileSync(path.join(dir, "stopped.json"), "utf8")).toBe("replacement");
+    vi.restoreAllMocks();
+    fs.writeFileSync(path.join(dir, "stopped.json"), JSON.stringify({ id: record.id, stoppedAt: new Date(0).toISOString() }));
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+  });
+
+  it("prunes a retained log whose name is near the length limit", async () => {
+    const { record, dir } = await stopped();
+    fs.writeFileSync(path.join(dir, `${"x".repeat(251)}.log`), "diagnostics");
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+  });
+
+  it("prunes a retained log that a stopped remover left after a writer took its name again", async () => {
+    const { record, dir } = await stopped();
+    const removal = `.xvfb.log.remove-${spawnSync("true").pid!}-${crypto.randomUUID()}`;
+    fs.renameSync(path.join(dir, "xvfb.log"), path.join(dir, removal));
+    fs.writeFileSync(path.join(dir, "xvfb.log"), "newer");
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+  });
+
+  it.each([
+    ["xvfb.log", "is gone", () => spawnSync("true").pid!, true],
+    ["stopped.json", "is gone", () => spawnSync("true").pid!, true],
+    ["stopped.json", "is this one and stopped", () => process.pid, true],
+    ["xvfb.log", "is live", () => process.ppid, false],
+  ] as const)("puts back a retained %s whose remover %s only then", async (name, _, pid, pruned) => {
+    const { record, dir } = await stopped();
+    const removal = `.${name}.remove-${pid()}-${crypto.randomUUID()}`;
+    fs.renameSync(path.join(dir, name), path.join(dir, removal));
+    expect(await pruneSessionLogs(0, env)).toEqual(pruned ? [record.id] : []);
+    if (!pruned) expect(fs.readdirSync(dir).sort()).toEqual([removal, "stopped.json"].sort());
+  });
+
+  it("keeps a lease staging file that is replaced at the last step of teardown", async () => {
+    const record = await createSession({ type: "desktop", projectDir: home }, env);
+    const dir = sessionDataDir(record.id, env);
+    fs.mkdirSync(dir);
+    const name = `.human-lease-${crypto.randomUUID()}`;
+    fs.writeFileSync(path.join(dir, name), "{}\n");
+    replaceAtUnlink(dir, name);
+    await retainSessionLogs(record, env);
+    expect(fs.readdirSync(dir).sort()).toEqual([name, "stopped.json"]);
+    expect(fs.readFileSync(path.join(dir, name), "utf8")).toBe("replacement");
+  });
+
+  it("removes a lease staging file that a stopped teardown left under its removal name", async () => {
+    const record = await createSession({ type: "desktop", projectDir: home }, env);
+    const dir = sessionDataDir(record.id, env);
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, `..human-lease-${crypto.randomUUID()}.remove-${spawnSync("true").pid!}-${crypto.randomUUID()}`), "{}\n");
+    await retainSessionLogs(record, env);
+    await destroySessionRecord(record.id, env);
+    expect(fs.readdirSync(dir)).toEqual(["stopped.json"]);
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+  });
+
+  it("removes a lease staging file that a stopped teardown left after its name was taken again", async () => {
+    const record = await createSession({ type: "desktop", projectDir: home }, env);
+    const dir = sessionDataDir(record.id, env);
+    fs.mkdirSync(dir);
+    const name = `.human-lease-${crypto.randomUUID()}`;
+    fs.writeFileSync(path.join(dir, `.${name}.remove-${spawnSync("true").pid!}-${crypto.randomUUID()}`), "{}\n");
+    fs.writeFileSync(path.join(dir, name), "{}\n");
+    await retainSessionLogs(record, env);
+    await destroySessionRecord(record.id, env);
+    expect(fs.readdirSync(dir)).toEqual(["stopped.json"]);
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+  });
+
+  it("refuses to finish teardown when a lease staging file is replaced after its check", async () => {
+    const record = await createSession({ type: "desktop", projectDir: home }, env);
+    const dir = sessionDataDir(record.id, env);
+    fs.mkdirSync(dir);
+    const name = `.human-lease-${crypto.randomUUID()}`;
+    fs.writeFileSync(path.join(dir, name), "{}\n");
+    const unlink = DirHandle.prototype.unlinkOwnedFile;
+    vi.spyOn(DirHandle.prototype, "unlinkOwnedFile").mockImplementation(async function (this: DirHandle, target, stat) {
+      fs.writeFileSync(path.join(dir, `${name}.new`), "replacement");
+      fs.renameSync(path.join(dir, `${name}.new`), path.join(dir, name));
+      return unlink.call(this, target, stat);
+    });
+    await expect(retainSessionLogs(record, env)).rejects.toThrow(`File to remove was replaced, so it was kept: ${dir}/${name}`);
+    expect(fs.readdirSync(dir)).toEqual([name]);
+    expect(fs.readFileSync(path.join(dir, name), "utf8")).toBe("replacement");
+  });
+
   it.each(["not json", "{}", JSON.stringify({ id: "desk-000000", stoppedAt: "invalid" })])("keeps malformed retention metadata %s", async (marker) => {
     const { dir } = await stopped();
     fs.writeFileSync(path.join(dir, "stopped.json"), marker);
@@ -531,6 +647,14 @@ describe("session marker horizon", () => {
     expect(exist(replaced)).toEqual([true, true]);
   });
 
+  it("puts back a marker that a stopped remover left, and removes it past the horizon", async () => {
+    const files = orphanMarkers("desk-0badc0de");
+    const removal = path.join(sessionsDir(env), `.${path.basename(files[0]!)}.remove-${spawnSync("true").pid!}-${crypto.randomUUID()}`);
+    fs.renameSync(files[0]!, removal);
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+  });
+
   it("stays closed and reserved when prune stops between the two markers", async () => {
     const files = orphanMarkers("desk-0badc0de");
     const unlink = DirHandle.prototype.unlinkOwnedFile;
@@ -834,6 +958,17 @@ describe("session marker horizon", () => {
     expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
   });
 
+  it("prunes a stranded permit that a stopped remover left after its name was taken again", async () => {
+    const { id, dir, permits } = await strandedDirectory();
+    const name = `${crypto.randomUUID()}.json`;
+    const removal = path.join(permits, `.${name}.remove-${deadPid()}-${crypto.randomUUID()}`);
+    fs.writeFileSync(removal, permitRecord(id, deadPid()));
+    fs.writeFileSync(path.join(permits, name), permitRecord(id, deadPid()));
+    backdate([removal, path.join(permits, name), permits, dir, markers(id)[0]!]);
+    expect(await pruneSessionLogs(0, env)).toEqual([id]);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+  });
+
   it("keeps a stranded directory while a coordination file is young", async () => {
     const { id, dir, permits } = await strandedDirectory();
     const permit = path.join(permits, `${crypto.randomUUID()}.json`);
@@ -896,7 +1031,8 @@ describe("session marker horizon", () => {
     setStoppedAt(record.id, new Date(Date.now() - 3_600_000));
     vi.spyOn(DirHandle.prototype, "unlinkChild").mockRejectedValueOnce(new Error("crash"));
     await expect(pruneSessionLogs(0, env)).rejects.toThrow("crash");
-    expect(fs.existsSync(path.join(sessionDataDir(record.id, env), "stopped.json"))).toBe(true);
+    // The teardown time stays, under the removal name of the stopped unlink.
+    expect(fs.readdirSync(sessionDataDir(record.id, env))).toEqual([expect.stringMatching(/^\.stopped\.json\.remove-\d+-[0-9a-f-]{36}$/)]);
     vi.restoreAllMocks();
     expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
     expect(exist(markers(record.id))).toEqual([true, true]);
