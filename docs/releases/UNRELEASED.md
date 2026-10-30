@@ -23,6 +23,9 @@
 - The native viewer spaces a long word evenly. Before, a long word in the attention banner showed an empty column about every 31 letters. (#450)
 - Two `session prune` runs at the same time no longer make the slower one fail. Each pruned session is reported once. (#453)
 - Session teardown now waits for DevTools relay calls in flight before it stops Chrome. The relay ends those calls with the session-ended error and exits. (#454)
+- An Android session start no longer refuses an AVD as in use when its lock names a process that only mentions an emulator in its arguments, such as an editor or a test runner. (#458)
+- `session prune` no longer removes a retained session file that was replaced after prune checked it. It reports an error and keeps the file and its directory. (#463)
+- A Pickforge command that pauses while another one publishes the layout marker no longer refuses the marker as a hard link. (#468)
 
 ## Validation
 
