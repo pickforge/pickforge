@@ -370,13 +370,14 @@ function handleClientMessage(client, data) {
 /**
  * Forward a client command under a bridge id, so the bridge can send its own
  * commands on the same pipe without an id collision. A top-level command runs
- * in the client's own browser-target session. A command for a session the
- * client does not own gets the error Chrome gives for an unknown session.
+ * in the client's own browser-target session, which the client sees as the
+ * root session. A command for any session the client did not attach gets the
+ * error Chrome gives for an unknown session.
  * @param {WebSocket} client
  * @param {any} message
  */
 function forwardClientCommand(client, message) {
-  if (message.sessionId !== undefined && !isClientSession(message.sessionId)) {
+  if (message.sessionId !== undefined && !bridge.sessions.has(message.sessionId)) {
     const error = { code: -32001, message: "Session with given id not found." };
     sendToClient(client, JSON.stringify({ id: message.id, sessionId: message.sessionId, error }));
     return;

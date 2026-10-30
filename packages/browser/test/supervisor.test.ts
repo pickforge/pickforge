@@ -364,19 +364,23 @@ describe("browser supervisor CDP bridge", () => {
     await first.next((message) => message.id === 1);
     await closeClient(first);
 
-    // B1 and T1 were the first client's sessions, and OTHER was never attached.
+    // B1 and T1 were the first client's sessions, B2 is the second client's
+    // own browser session, which it sees as the root, and OTHER was never attached.
     const second = await connect(url);
     for (const [id, sessionId] of [[1, "B1"], [2, "T1"], [3, "OTHER"]] as const) {
       second.socket.send(JSON.stringify({ id, method: "Test.echo", sessionId }));
     }
     second.socket.send(JSON.stringify({ id: 4, method: "Test.echo" }));
     await second.next((message) => message.id === 4);
+    second.socket.send(JSON.stringify({ id: 5, method: "Test.echo", sessionId: "B2" }));
+    await second.next((message) => message.id === 5);
     const error = { code: -32001, message: "Session with given id not found." };
     expect(second.messages).toEqual([
       { id: 1, sessionId: "B1", error },
       { id: 2, sessionId: "T1", error },
       { id: 3, sessionId: "OTHER", error },
       { id: 4, result: {} },
+      { id: 5, sessionId: "B2", error },
     ]);
     const echoes = bridge.commands().filter(({ method }) => method === "Test.echo");
     expect(echoes.map(({ sessionId }) => sessionId)).toEqual(["B2"]);
