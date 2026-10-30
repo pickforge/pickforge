@@ -197,16 +197,28 @@ describe("owned file removal", () => {
     expect(fs.readFileSync(path.join(project, "app.log"), "utf8")).toBe("replacement");
   });
 
+  /** Runs `after` once the first move to a removal name is done, and returns that name. */
+  function afterMove(after: () => void): () => string | undefined {
+    const rename = fs.promises.rename.bind(fs.promises);
+    let removal: string | undefined;
+    vi.spyOn(fs.promises, "rename").mockImplementation(async (source, target) => {
+      await rename(source, target);
+      if (removal === undefined && /\.remove-\d+-\d+$/.test(String(target))) {
+        removal = path.basename(String(target));
+        after();
+      }
+    });
+    return () => removal;
+  }
+
   it("keeps a replacement under its removal name when the name is taken again", async () => {
     const stat = await owned("app.log");
     replace("app.log", "replacement");
-    const lstat = DirHandle.prototype.lstatChild;
-    vi.spyOn(DirHandle.prototype, "lstatChild").mockImplementationOnce(async function (this: DirHandle, name) {
-      replace("app.log", "newest");
-      return lstat.call(this, name);
-    });
+    afterMove(() => replace("app.log", "newest"));
     await withDirHandle(DirHandle.open(project), async (dir) => {
-      await expect(dir.unlinkOwnedFile("app.log", stat)).rejects.toThrow(/was kept as .*\.app\.log\.remove-\d+-\d+ because app\.log was taken again/);
+      await expect(dir.unlinkOwnedFile("app.log", stat)).rejects.toThrow(
+        /^File to remove was replaced, and the replacement was kept as .*\/\.app\.log\.remove-\d+-\d+$/,
+      );
     });
     const names = fs.readdirSync(project).sort();
     expect(names).toEqual([expect.stringMatching(/^\.app\.log\.remove-\d+-\d+$/), "app.log"]);
@@ -225,10 +237,24 @@ describe("owned file removal", () => {
     });
   });
 
+  it("never moves onto a removal name that a stopped remover with this pid left", async () => {
+    const first = await owned("app.log");
+    const removal = afterMove(() => {});
+    await withDirHandle(DirHandle.open(project), (dir) => dir.unlinkOwnedFile("app.log", first));
+    const counter = Number(/-(\d+)$/.exec(removal()!)![1]);
+    vi.restoreAllMocks();
+    const left = [1, 2, 3].map((step) => `.app.log.remove-${process.pid}-${counter + step}`);
+    for (const name of left) fs.writeFileSync(path.join(project, name), "kept");
+    const second = await owned("app.log");
+    await withDirHandle(DirHandle.open(project), (dir) => dir.unlinkOwnedFile("app.log", second));
+    expect(fs.readdirSync(project).sort()).toEqual(left.sort());
+    for (const name of left) expect(fs.readFileSync(path.join(project, name), "utf8")).toBe("kept");
+  });
+
   it("names a removal abandoned only once its remover stopped", async () => {
     const stat = await owned("app.log");
     const seen: Array<string | undefined> = [];
-    vi.spyOn(DirHandle.prototype, "lstatChild").mockImplementationOnce(async (name) => {
+    vi.spyOn(DirHandle.prototype, "unlinkChild").mockImplementationOnce(async (name) => {
       seen.push(abandonedRemoval(name));
       throw new Error("crash");
     });
@@ -255,17 +281,37 @@ describe("owned file removal", () => {
     fs.linkSync(path.join(project, ".c.log.remove-1-3"), path.join(project, "c.log"));
     fs.mkdirSync(path.join(project, ".d.remove-1-4"));
     fs.writeFileSync(path.join(project, ".d.remove-1-4", "inside"), "kept");
+    fs.mkdirSync(path.join(project, "d"));
+    fs.mkdirSync(path.join(project, ".e.remove-1-5"));
     await withDirHandle(DirHandle.open(project), async (dir) => {
       expect(await dir.restoreRemoved(".a.log.remove-1-1", "a.log")).toBe(true);
       expect(await dir.restoreRemoved(".b.log.remove-1-2", "b.log")).toBe(false);
       expect(await dir.restoreRemoved(".c.log.remove-1-3", "c.log")).toBe(true);
-      expect(await dir.restoreRemoved(".d.remove-1-4", "d")).toBe(true);
+      // A directory cannot be linked, and renaming it could replace an empty one.
+      expect(await dir.restoreRemoved(".d.remove-1-4", "d")).toBe(false);
+      expect(await dir.restoreRemoved(".e.remove-1-5", "e")).toBe(false);
     });
-    expect(fs.readdirSync(project).sort()).toEqual([".b.log.remove-1-2", "a.log", "b.log", "c.log", "d"]);
+    expect(fs.readdirSync(project).sort()).toEqual([".b.log.remove-1-2", ".d.remove-1-4", ".e.remove-1-5", "a.log", "b.log", "c.log", "d"]);
     expect(fs.readFileSync(path.join(project, "a.log"), "utf8")).toBe("moved");
     expect(fs.readFileSync(path.join(project, "b.log"), "utf8")).toBe("other");
     expect(fs.readFileSync(path.join(project, "c.log"), "utf8")).toBe("linked");
-    expect(fs.readFileSync(path.join(project, "d", "inside"), "utf8")).toBe("kept");
+    expect(fs.readdirSync(path.join(project, "d"))).toEqual([]);
+    expect(fs.readFileSync(path.join(project, ".d.remove-1-4", "inside"), "utf8")).toBe("kept");
+  });
+
+  it("accepts a restore that a concurrent restore of the same entry finished first", async () => {
+    fs.writeFileSync(path.join(project, ".a.log.remove-1-1"), "moved");
+    const link = fs.promises.link.bind(fs.promises);
+    vi.spyOn(fs.promises, "link").mockImplementationOnce(async (source, target) => {
+      fs.linkSync(String(source), String(target));
+      fs.unlinkSync(String(source));
+      return link(source, target);
+    });
+    await withDirHandle(DirHandle.open(project), async (dir) => {
+      expect(await dir.restoreRemoved(".a.log.remove-1-1", "a.log")).toBe(true);
+    });
+    expect(fs.readdirSync(project)).toEqual(["a.log"]);
+    expect(fs.readFileSync(path.join(project, "a.log"), "utf8")).toBe("moved");
   });
 });
 

@@ -379,13 +379,18 @@ export class DirHandle {
    * Remove the entry `name`, which is not a directory, only if it is still
    * `expected`. POSIX has no unlink by inode, so the entry first moves to a
    * removal name that only this call uses, and is checked and unlinked there.
-   * An entry that replaced the checked one goes back under `name`. If `name`
-   * was taken again in the meantime, the entry stays under its removal name.
+   * An entry that replaced the checked one goes back under `name`, or stays
+   * under its removal name when that could replace another entry.
    */
   async unlinkOwnedFile(name: string, expected: fs.Stats): Promise<void> {
     assertSafeEntryName(name);
-    atomicTmpCounter += 1;
-    const removal = `.${name}.remove-${process.pid}-${atomicTmpCounter}`;
+    // Only a process with this pid makes these names. A stopped one that this
+    // process reuses the pid of may have left one, so never move onto it.
+    let removal: string;
+    do {
+      atomicTmpCounter += 1;
+      removal = `.${name}.remove-${process.pid}-${atomicTmpCounter}`;
+    } while (await this.lstatChild(removal) !== undefined);
     removalsInFlight.add(removal);
     try {
       try {
@@ -400,9 +405,7 @@ export class DirHandle {
         return;
       }
       if (!await this.restoreRemoved(removal, name)) {
-        throw new RunStorageAccessError(
-          `File to remove was replaced, and it was kept as ${this.dir}/${removal} because ${name} was taken again`,
-        );
+        throw new RunStorageAccessError(`File to remove was replaced, and the replacement was kept as ${this.dir}/${removal}`);
       }
       throw new RunStorageAccessError(`File to remove was replaced, so it was kept: ${this.dir}/${name}`);
     } finally {
@@ -411,26 +414,28 @@ export class DirHandle {
   }
 
   /**
-   * Move an entry from a removal name back to `name`, without replacing
-   * another entry. Returns false when `name` holds another entry, and the
-   * entry then stays under its removal name.
+   * Move an entry from a removal name back to `name` with a link, which never
+   * replaces another entry. Returns false when `name` holds another entry, or
+   * when the entry is a directory, which cannot be linked. The entry then
+   * stays under its removal name.
    */
   async restoreRemoved(removal: string, name: string): Promise<boolean> {
     assertSafeEntryName(name);
     const moved = await this.lstatChild(removal);
     if (moved === undefined) return true;
+    if (moved.isDirectory()) return false;
     try {
-      // A link never replaces an entry. Renaming a directory replaces only an
-      // empty directory, and a directory cannot be linked.
-      if (moved.isDirectory()) await fs.promises.rename(this.resolve(removal), this.resolve(name));
-      else await fs.promises.link(this.resolve(removal), this.resolve(name));
+      await fs.promises.link(this.resolve(removal), this.resolve(name));
     } catch (error) {
-      if (!["EEXIST", "ENOTEMPTY", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+      const code = (error as NodeJS.ErrnoException).code;
+      // A concurrent restore of the same entry finished first.
+      if (code === "ENOENT") return true;
+      if (code !== "EEXIST") throw error;
       // A remover stopped between its link and its unlink leaves both names.
       const current = await this.lstatChild(name);
       if (current?.dev !== moved.dev || current.ino !== moved.ino) return false;
     }
-    if (!moved.isDirectory()) await this.unlinkChild(removal);
+    await this.unlinkChild(removal);
     return true;
   }
 

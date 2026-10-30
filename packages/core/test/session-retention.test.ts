@@ -224,14 +224,33 @@ describe("explicit session log pruning", () => {
     });
   }
 
-  it.each(["xvfb.log", "stopped.json"])("keeps a retained %s that is replaced at the last step", async (name) => {
+  it("keeps a retained log that is replaced at the last step, and the teardown time with it", async () => {
     const { record, dir } = await stopped();
-    replaceAtUnlink(dir, name);
+    replaceAtUnlink(dir, "xvfb.log");
     expect(await pruneSessionLogs(0, env)).toEqual([]);
-    expect(fs.readdirSync(dir)).toEqual([name]);
-    expect(fs.readFileSync(path.join(dir, name), "utf8")).toBe("replacement");
+    expect(fs.readdirSync(dir).sort()).toEqual(["stopped.json", "xvfb.log"]);
+    expect(fs.readFileSync(path.join(dir, "xvfb.log"), "utf8")).toBe("replacement");
+    vi.restoreAllMocks();
+    // A later prune checks the replacement, and removes it with the directory.
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+  });
+
+  it("keeps a retained stopped.json that is replaced at the last step", async () => {
+    const { record, dir } = await stopped();
+    replaceAtUnlink(dir, "stopped.json");
+    expect(await pruneSessionLogs(0, env)).toEqual([]);
+    expect(fs.readdirSync(dir)).toEqual(["stopped.json"]);
+    expect(fs.readFileSync(path.join(dir, "stopped.json"), "utf8")).toBe("replacement");
     vi.restoreAllMocks();
     fs.writeFileSync(path.join(dir, "stopped.json"), JSON.stringify({ id: record.id, stoppedAt: new Date(0).toISOString() }));
+    expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
+  });
+
+  it("prunes a retained log that a stopped remover left after a writer took its name again", async () => {
+    const { record, dir } = await stopped();
+    const removal = `.xvfb.log.remove-${spawnSync("true").pid!}-1`;
+    fs.renameSync(path.join(dir, "xvfb.log"), path.join(dir, removal));
+    fs.writeFileSync(path.join(dir, "xvfb.log"), "newer");
     expect(await pruneSessionLogs(0, env)).toEqual([record.id]);
   });
 
@@ -917,6 +936,17 @@ describe("session marker horizon", () => {
     const other = pruneConcurrentlyAt(step === "openFile" ? name : "permits", step);
     expect(await pruneSessionLogs(0, env)).toEqual([]);
     expect(await other()).toEqual([id]);
+    expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
+  });
+
+  it("prunes a stranded permit that a stopped remover left after its name was taken again", async () => {
+    const { id, dir, permits } = await strandedDirectory();
+    const name = `${crypto.randomUUID()}.json`;
+    const removal = path.join(permits, `.${name}.remove-${deadPid()}-1`);
+    fs.writeFileSync(removal, permitRecord(id, deadPid()));
+    fs.writeFileSync(path.join(permits, name), permitRecord(id, deadPid()));
+    backdate([removal, path.join(permits, name), permits, dir, markers(id)[0]!]);
+    expect(await pruneSessionLogs(0, env)).toEqual([id]);
     expect(fs.readdirSync(sessionsDir(env))).toEqual([]);
   });
 

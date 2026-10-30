@@ -218,9 +218,10 @@ function ownerIsGone(raw: string): boolean {
 async function staleCoordinationFile(dir: DirHandle, name: string, records: RegExp, temps: RegExp): Promise<fs.Stats | undefined> {
   const stat = await dir.lstatChild(name);
   if (stat?.isFile() !== true || !isOld(stat)) return undefined;
-  const pid = temps.exec(name)?.[1];
+  const original = abandonedRemoval(name) ?? name;
+  const pid = temps.exec(original)?.[1];
   if (pid !== undefined) return isPidAlive(Number(pid)) ? undefined : stat;
-  if (!records.test(name)) return undefined;
+  if (!records.test(original)) return undefined;
   const file = await openIfPresent(dir, name);
   if (file === undefined) return undefined;
   try {
@@ -338,11 +339,20 @@ async function removeRetainedDirectory(
   await carryStoppedAt(root, id, stoppedAt);
   // stopped.json goes last, so a prune that stops midway leaves the next one
   // the teardown time. A file replaced since its check is not removed.
-  const marker = files.filter(([name]) => name === MARKER);
-  for (const [name, stat] of [...files.filter(([name]) => name !== MARKER), ...marker]) await unlinkStaleFile(dir, name, stat);
+  for (const [name, stat] of files.filter(([name]) => name !== MARKER)) await unlinkStaleFile(dir, name, stat);
+  // An entry that arrived meanwhile keeps the teardown time for a later prune.
+  if ((await entriesIfPresent(dir))?.some((name) => name !== MARKER) === true) return false;
+  for (const [name, stat] of files.filter(([name]) => name === MARKER)) await unlinkStaleFile(dir, name, stat);
   // The sibling markers stay until the horizon: late callers for this id
   // keep failing closed, and createSession never reuses a reserved id.
   return rmdirIfEmpty(root.resolve(id));
+}
+
+// An abandoned removal that could not go back, because a writer took its name
+// again, counts as the retained file it was.
+function isRetainedFileName(name: string): boolean {
+  const original = abandonedRemoval(name) ?? name;
+  return original === MARKER || LOG_FILE.test(original);
 }
 
 async function pruneDirectory(root: DirHandle, id: string, roots: string[], age: number): Promise<boolean> {
@@ -356,7 +366,7 @@ async function pruneDirectory(root: DirHandle, id: string, roots: string[], age:
     const files: StaleFiles = [];
     // Unknown data is not ours to delete. Never traverse a child directory or link.
     for (const name of names.filter((name) => name !== "permits")) {
-      if (name !== MARKER && !LOG_FILE.test(name)) return false;
+      if (!isRetainedFileName(name)) return false;
       const stat = await dir.lstatChild(name);
       if (stat?.isFile() !== true) return false;
       files.push([name, stat]);
