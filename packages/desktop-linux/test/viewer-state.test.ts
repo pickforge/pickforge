@@ -197,7 +197,9 @@ async function record(): Promise<ViewerLaunchRecord> {
 async function vnc(): Promise<number> {
   const server = net.createServer((socket) => {
     socket.on("error", () => {});
-    socket.end("RFB");
+    // Destroy after the write so a local port prober that keeps its end open,
+    // such as an IDE port detector, cannot hold server.close() open (#480).
+    socket.end("RFB", () => socket.destroy());
   });
   servers.push(server);
   server.listen(0, "127.0.0.1");
