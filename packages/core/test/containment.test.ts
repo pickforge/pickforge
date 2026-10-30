@@ -1792,15 +1792,18 @@ describe("containment supervisor", () => {
       await waitFor(() => listProcessGroupMembers(supervisor).length >= 2),
     ).toBe(true);
 
+    // Waiting out the SIGTERM budget takes at least the whole budget. A slow
+    // host only slows the /proc scans, so the budget is far above their cost.
+    const termTimeoutMs = 10_000;
     const started = Date.now();
     const result = await destroyContainmentScope(scope, {
-      termTimeoutMs: 3_000,
+      termTimeoutMs,
       killTimeoutMs: 2_000,
     });
     expect(result.confirmed).toBe(true);
     expect(result.survivors).toEqual([]);
-    expect(Date.now() - started).toBeLessThan(2_000);
-  }, 10_000);
+    expect(Date.now() - started).toBeLessThan(termTimeoutMs);
+  }, 20_000);
 
   it("refuses to run the app when a cgroup.procs write is not reflected in membership (false join)", async () => {
     // A regular directory with a writable `cgroup.procs` accepts the write
