@@ -27,6 +27,7 @@
 - `session prune` no longer removes a retained session file that was replaced after prune checked it. It reports an error and keeps the file and its directory. (#463)
 - A Pickforge command that pauses while another one publishes the layout marker no longer refuses the marker as a hard link. (#468)
 - Browser sessions serve DevTools through a pipe and a private Unix socket instead of a loopback TCP port, so other local processes can no longer find it on a port. Session output no longer shows `cdpPort`. Only one DevTools relay can attach to a session at a time. Recreate browser sessions made by an older version to use the relay. (#459)
+- Pickforge no longer removes a session file, evidence file or screenshot that another process put in its place during removal. It keeps the new file, and `session prune` reports an error that names it. A later `session prune` puts back a file that a killed run left half removed. (#472)
 
 ## Validation
 
