@@ -356,6 +356,24 @@ describe("browser supervisor CDP bridge", () => {
     expect(bridge.commands().map(({ method }) => method)).not.toContain("Test.echo");
   });
 
+  it("refuses an unknown session id of up to 128 characters and closes the client on a longer one", async () => {
+    const bridge = await startBridge();
+    const client = await connect(cdpWebSocketUrl(bridge.endpoint.socketPath, bridge.endpoint.browserPath));
+    const longest = "X".repeat(128);
+    client.socket.send(JSON.stringify({ id: 1, method: "Test.echo", sessionId: longest }));
+    expect(await client.next((message) => message.id === 1)).toMatchObject({
+      sessionId: longest,
+      error: { code: -32001 },
+    });
+
+    // A refusal echoes the id, so a longer one is not accepted at all.
+    const closed = once(client.socket, "close");
+    client.socket.send(JSON.stringify({ id: 2, method: "Test.echo", sessionId: `${longest}X` }));
+    const [code, reason] = (await closed) as [number, Buffer];
+    expect({ code, reason: reason.toString() }).toEqual({ code: 1008, reason: "Invalid CDP message" });
+    expect(bridge.commands().map(({ method }) => method)).not.toContain("Test.echo");
+  });
+
   it("answers a command for a session the client does not own without forwarding it", async () => {
     const bridge = await startBridge();
     const url = cdpWebSocketUrl(bridge.endpoint.socketPath, bridge.endpoint.browserPath);
@@ -521,8 +539,8 @@ describe("browser supervisor CDP bridge", () => {
     const closed = once(client.socket, "close");
     // Refusals come from the bridge, so the pipe does not hold them back.
     client.socket.pause();
-    const sessionId = "X".repeat(2048);
-    for (let id = 1; id <= 3 * MAX_PENDING_COMMANDS; id += 1) {
+    const sessionId = "X".repeat(128);
+    for (let id = 1; id <= 10 * MAX_PENDING_COMMANDS; id += 1) {
       client.socket.send(JSON.stringify({ id, method: "Test.echo", sessionId }));
     }
     await expect.poll(() => client.socket.bufferedAmount).toBe(0);
@@ -535,7 +553,7 @@ describe("browser supervisor CDP bridge", () => {
       code: 1008,
       reason: `Too many pending CDP commands (over ${MAX_PENDING_COMMANDS})`,
     });
-    expect(client.messages.length).toBeLessThan(3 * MAX_PENDING_COMMANDS);
+    expect(client.messages.length).toBeLessThan(10 * MAX_PENDING_COMMANDS);
     expect(bridge.commands().filter(({ method }) => method === "Test.echo")).toHaveLength(1);
   });
 

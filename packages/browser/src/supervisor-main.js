@@ -42,6 +42,8 @@ const CLIENT_HIGH_WATER_BYTES = 16 * 1024 * 1024;
 const RESET_TIMEOUT_MS = 5_000;
 /** Most commands a client may have waiting for Chrome's reply. */
 const MAX_PENDING_COMMANDS = 1024;
+/** Chrome's session ids are 32 hex digits, so a longer one names no session. */
+const MAX_SESSION_ID_LENGTH = 128;
 const MAX_STDERR_BUFFER_BYTES = 64 * 1024;
 const ALREADY_ATTACHED = "A CDP client is already attached to this browser session";
 const ATTACH_METHODS = new Set(["Target.attachToTarget", "Target.attachToBrowserTarget"]);
@@ -327,11 +329,13 @@ function readChromeChunk(chunk) {
 }
 
 /**
- * An empty session id would address Chrome's root session.
+ * An empty session id would address Chrome's root session. A refusal echoes
+ * the id, so its length is bounded too.
  * @param {unknown} sessionId
  */
 function isClientSessionId(sessionId) {
-  return sessionId === undefined || (typeof sessionId === "string" && sessionId !== "");
+  if (sessionId === undefined) return true;
+  return typeof sessionId === "string" && sessionId.length > 0 && sessionId.length <= MAX_SESSION_ID_LENGTH;
 }
 
 /** @param {any} message */
