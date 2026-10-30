@@ -513,6 +513,32 @@ describe("browser supervisor CDP bridge", () => {
     expect(hangs()).toBe(2 * MAX_PENDING_COMMANDS);
   });
 
+  it("caps the refusals a client sends faster than it reads", async () => {
+    const bridge = await startBridge();
+    const client = await connect(cdpWebSocketUrl(bridge.endpoint.socketPath, bridge.endpoint.browserPath));
+    client.socket.send(JSON.stringify({ id: 0, method: "Test.echo" }));
+    await client.next((message) => message.id === 0);
+    const closed = once(client.socket, "close");
+    // Refusals come from the bridge, so the pipe does not hold them back.
+    client.socket.pause();
+    const sessionId = "X".repeat(2048);
+    for (let id = 1; id <= 3 * MAX_PENDING_COMMANDS; id += 1) {
+      client.socket.send(JSON.stringify({ id, method: "Test.echo", sessionId }));
+    }
+    await expect.poll(() => client.socket.bufferedAmount).toBe(0);
+    await delay(200);
+    client.socket.resume();
+
+    const stillOpen = delay(2_000).then(() => [0, Buffer.from("still open")]);
+    const [code, reason] = (await Promise.race([closed, stillOpen])) as [number, Buffer];
+    expect({ code, reason: reason.toString() }).toEqual({
+      code: 1008,
+      reason: `Too many pending CDP commands (over ${MAX_PENDING_COMMANDS})`,
+    });
+    expect(client.messages.length).toBeLessThan(3 * MAX_PENDING_COMMANDS);
+    expect(bridge.commands().filter(({ method }) => method === "Test.echo")).toHaveLength(1);
+  });
+
   it("closes its client and removes the socket and endpoint file when the browser exits", async () => {
     const bridge = await startBridge();
     const { endpointFile, socketPath } = cdpPaths(bridge.dir);

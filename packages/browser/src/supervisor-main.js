@@ -144,6 +144,8 @@ const bridge = {
   queued: [],
   /** @type {Set<string>} Sessions the current client attached below its own session. */
   sessions: new Set(),
+  /** Refusals sent to the current client that are not yet written out. */
+  refusals: 0,
   /** @type {Promise<void> | undefined} */
   resetting: undefined,
   /** @type {http.Server | undefined} */
@@ -356,7 +358,8 @@ function handleClientMessage(client, data) {
   }
   // Chrome may never answer a command, such as an await of a promise that
   // never settles, so the commands a client may have pending are capped.
-  if (inflight.size + bridge.queued.length >= MAX_PENDING_COMMANDS) {
+  // Refusals come from the bridge, not the pipe, so they count until written.
+  if (inflight.size + bridge.queued.length + bridge.refusals >= MAX_PENDING_COMMANDS) {
     client.close(1008, `Too many pending CDP commands (over ${MAX_PENDING_COMMANDS})`);
     return;
   }
@@ -379,7 +382,10 @@ function handleClientMessage(client, data) {
 function forwardClientCommand(client, message) {
   if (message.sessionId !== undefined && !bridge.sessions.has(message.sessionId)) {
     const error = { code: -32001, message: "Session with given id not found." };
-    sendToClient(client, JSON.stringify({ id: message.id, sessionId: message.sessionId, error }));
+    bridge.refusals += 1;
+    client.send(JSON.stringify({ id: message.id, sessionId: message.sessionId, error }), () => {
+      if (bridge.client === client) bridge.refusals -= 1;
+    });
     return;
   }
   const id = nextId++;
@@ -426,6 +432,7 @@ function detachClient(client) {
   bridge.clientSessionReady = undefined;
   bridge.queued = [];
   bridge.sessions = new Set();
+  bridge.refusals = 0;
   fromChrome.resume();
   // Chrome may never answer these. An attach stays until the reset, so a late
   // reply still releases its session.
