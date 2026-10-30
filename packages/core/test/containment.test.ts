@@ -109,6 +109,10 @@ function writeEscapingScript(name: string, pidFile: string): string {
     script,
     [
       "#!/bin/sh",
+      // The trace and any error, such as a failed setsid or pid file write,
+      // go to a log that escapeReport shows when the pid file never appears.
+      `exec 2>>"${script}.log"`,
+      "set -x",
       `setsid /bin/sh -c 'echo $$ > "${pidFile}"; exec /bin/sleep 300' &`,
       "sleep 300",
       "",
@@ -116,6 +120,24 @@ function writeEscapingScript(name: string, pidFile: string): string {
     { mode: 0o755 },
   );
   return script;
+}
+
+/** What an escaping script left behind when its pid file never appeared (#464). */
+function escapeReport(leader: number, script: string, pidFile: string): string {
+  const read = (file: string): string => {
+    try {
+      return fs.readFileSync(file, "utf8").trim();
+    } catch (error) {
+      return `unreadable (${(error as NodeJS.ErrnoException).code})`;
+    }
+  };
+  return [
+    `pid file ${pidFile} ${fs.existsSync(pidFile) ? "exists" : "is missing"}`,
+    `leader ${leader} stat: ${read(`/proc/${leader}/stat`)}`,
+    `leader group: ${listProcessGroupMembers(leader).join(" ") || "empty"}`,
+    `loadavg: ${read("/proc/loadavg")}`,
+    `script log:\n${read(`${script}.log`)}`,
+  ].join("\n");
 }
 
 function spawnInScope(
@@ -439,9 +461,11 @@ describe("containment cleanup of daemonising descendants", () => {
   it("kills a setsid escapee that left the process group (marker)", async () => {
     const scope = createContainmentScope({ id: "desk-esc01", useCgroup: false });
     const pidFile = path.join(root, "escapee-marker.pid");
-    const leader = spawnInScope(scope, writeEscapingScript("escape-marker.sh", pidFile));
+    const script = writeEscapingScript("escape-marker.sh", pidFile);
+    const leader = spawnInScope(scope, script);
 
-    expect(await waitFor(() => readPidFile(pidFile) !== undefined)).toBe(true);
+    const started = await waitFor(() => readPidFile(pidFile) !== undefined);
+    expect(started, started ? undefined : escapeReport(leader, script, pidFile)).toBe(true);
     const escapee = readPidFile(pidFile) as number;
     strays.add(escapee);
     // The escapee really is outside the launched process group: this is the
@@ -462,8 +486,10 @@ describe("containment cleanup of daemonising descendants", () => {
     const scope = createContainmentScope({ id: runScopeId("desk-esc02") });
     expect(scope.mechanism).toBe("cgroup");
     const pidFile = path.join(root, "escapee-cgroup.pid");
-    const leader = spawnInScope(scope, writeEscapingScript("escape-cgroup.sh", pidFile));
-    expect(await waitFor(() => readPidFile(pidFile) !== undefined)).toBe(true);
+    const script = writeEscapingScript("escape-cgroup.sh", pidFile);
+    const leader = spawnInScope(scope, script);
+    const started = await waitFor(() => readPidFile(pidFile) !== undefined);
+    expect(started, started ? undefined : escapeReport(leader, script, pidFile)).toBe(true);
     const escapee = readPidFile(pidFile) as number;
     strays.add(escapee);
 
