@@ -180,8 +180,8 @@ function chromeBrowserArgv(session: BrowserSessionHandle): string[] | undefined 
   return undefined;
 }
 
-async function pageUrls(session: BrowserSessionHandle): Promise<string[]> {
-  const { targetInfos } = await browserCdp(session, "Target.getTargets");
+async function pageUrls(client: CdpClient): Promise<string[]> {
+  const { targetInfos } = await client.send("Target.getTargets");
   return (targetInfos as Array<{ type: string; url: string }>)
     .filter((info) => info.type === "page")
     .map((info) => info.url);
@@ -290,15 +290,20 @@ describe.skipIf(!ready)("real headed Chrome under Xvfb", () => {
       const pages = await startPageServer();
       const session = await createBrowserSession({ projectDir, registryEnv, env: spawnEnv, profile: "ops" });
       try {
-        await browserCdp(session, "Storage.setCookies", { cookies: [{
-          name: "pickforge_handoff", value: "kept", domain: "example.test", path: "/",
-          expires: Math.floor(Date.now() / 1000) + 3600,
-        }] });
         const urls = [`${pages.origin}/one`, `${pages.origin}/two`];
-        for (const url of urls) await browserCdp(session, "Target.createTarget", { url });
-        await vi.waitFor(async () => expect(await pageUrls(session)).toEqual(expect.arrayContaining(urls)), {
-          timeout: 10_000,
-        });
+        const before = await openCdpClient(session);
+        try {
+          await before.send("Storage.setCookies", { cookies: [{
+            name: "pickforge_handoff", value: "kept", domain: "example.test", path: "/",
+            expires: Math.floor(Date.now() / 1000) + 3600,
+          }] });
+          for (const url of urls) await before.send("Target.createTarget", { url });
+          await vi.waitFor(async () => expect(await pageUrls(before)).toEqual(expect.arrayContaining(urls)), {
+            timeout: 10_000,
+          });
+        } finally {
+          await before.close();
+        }
         const lease = await acquireHumanLease(session.id, registryEnv);
         try {
           expect(await enterPlainBrowser(session.id, registryEnv)).toBe(true);
@@ -319,13 +324,18 @@ describe.skipIf(!ready)("real headed Chrome under Xvfb", () => {
         }
         expect((await readBrowserSessionCdpEndpoint(session.id, registryEnv))?.mode).toBe("cdp");
         expect(chromeBrowserArgv(session)).toContain("--remote-debugging-pipe");
-        expect((await browserCdp(session, "Browser.getVersion")).product).toMatch(/Chrome/);
-        expect((await browserCdp(session, "Storage.getCookies")).cookies).toEqual(expect.arrayContaining([
-          expect.objectContaining({ name: "pickforge_handoff", value: "kept" }),
-        ]));
-        await vi.waitFor(async () => expect(await pageUrls(session)).toEqual(expect.arrayContaining(urls)), {
-          timeout: 10_000,
-        });
+        const after = await vi.waitFor(() => openCdpClient(session), { timeout: 10_000, interval: 100 });
+        try {
+          expect((await after.send("Browser.getVersion")).product).toMatch(/Chrome/);
+          expect((await after.send("Storage.getCookies")).cookies).toEqual(expect.arrayContaining([
+            expect.objectContaining({ name: "pickforge_handoff", value: "kept" }),
+          ]));
+          await vi.waitFor(async () => expect(await pageUrls(after)).toEqual(expect.arrayContaining(urls)), {
+            timeout: 10_000,
+          });
+        } finally {
+          await after.close();
+        }
         expect((await getBrowserSessionStatus(session.id, registryEnv)).alive).toBe(true);
         // A session that ended is no longer restored.
         await destroyBrowserSession(session.id, registryEnv);
