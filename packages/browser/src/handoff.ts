@@ -2,6 +2,7 @@ import {
   getSession,
   processIdentityMatches,
   type EnvLike,
+  type SessionRecord,
 } from "@pickforge/lab-core";
 import { requestCdpSupervisorMode, type CdpEndpoint, type CdpSupervisorMode } from "./devtools.js";
 import { readBrowserSessionCdpEndpoint } from "./session.js";
@@ -10,18 +11,22 @@ import { sleep } from "./util.js";
 /** The supervisor answers once it switched; the file is checked right after. */
 const MODE_PUBLISH_TIMEOUT_MS = 5_000;
 
-/**
- * The supervisor's endpoint of a running browser session whose supervisor is
- * still alive, or undefined for any other session.
- */
-async function runningBrowserEndpoint(sessionId: string, env: EnvLike): Promise<CdpEndpoint | undefined> {
+/** The record of a browser session that its registry says is running. */
+async function runningBrowserRecord(sessionId: string, env: EnvLike): Promise<SessionRecord | undefined> {
   const record = await getSession(sessionId, env);
-  const browser = record?.browser;
-  if (record?.type !== "browser" || record.status !== "running" || browser === undefined) return undefined;
+  return record?.type === "browser" && record.status === "running" && record.browser !== undefined
+    ? record
+    : undefined;
+}
+
+/** The endpoint of a running session's supervisor, or undefined when the supervisor is gone. */
+async function liveSupervisorEndpoint(record: SessionRecord, env: EnvLike): Promise<CdpEndpoint | undefined> {
+  const browser = record.browser;
+  if (browser === undefined) return undefined;
   if (!processIdentityMatches({ pid: browser.browserPid, startTicks: browser.browserStartTimeTicks })) {
     return undefined;
   }
-  return readBrowserSessionCdpEndpoint(sessionId, env);
+  return readBrowserSessionCdpEndpoint(record.id, env);
 }
 
 async function waitForPublishedMode(
@@ -47,7 +52,8 @@ async function waitForPublishedMode(
  * plain Chrome did not start; the supervisor then reopened it under CDP.
  */
 export async function enterPlainBrowser(sessionId: string, env: EnvLike): Promise<boolean> {
-  const endpoint = await runningBrowserEndpoint(sessionId, env);
+  const record = await runningBrowserRecord(sessionId, env);
+  const endpoint = record === undefined ? undefined : await liveSupervisorEndpoint(record, env);
   if (endpoint === undefined) return false;
   await requestCdpSupervisorMode(endpoint.socketPath, "plain");
   await waitForPublishedMode(sessionId, env, ["plain", "plain-idle"]);
@@ -56,18 +62,23 @@ export async function enterPlainBrowser(sessionId: string, env: EnvLike): Promis
 
 /**
  * Close the plain Chrome and reopen the profile under CDP with its last tabs.
- * Resolves false when the session is not a browser session, or no longer
- * runs, even if it ended during the switch.
+ * Resolves false when the session is not a browser session, or its record no
+ * longer says running, even if it ended during the switch. Throws while the
+ * record says running but the supervisor is gone or the switch failed.
  */
 export async function restoreCdpBrowser(sessionId: string, env: EnvLike): Promise<boolean> {
-  const endpoint = await runningBrowserEndpoint(sessionId, env);
-  if (endpoint === undefined) return false;
+  const record = await runningBrowserRecord(sessionId, env);
+  if (record === undefined) return false;
   try {
+    const endpoint = await liveSupervisorEndpoint(record, env);
+    if (endpoint === undefined) throw new Error(`The browser supervisor of session ${sessionId} is gone`);
     await requestCdpSupervisorMode(endpoint.socketPath, "cdp");
     await waitForPublishedMode(sessionId, env, ["cdp"]);
     return true;
   } catch (error) {
-    if (await runningBrowserEndpoint(sessionId, env).catch(() => undefined) === undefined) return false;
+    // A failed registry read proves nothing; report the switch's own failure.
+    const running = await runningBrowserRecord(sessionId, env).then((current) => current !== undefined, () => true);
+    if (!running) return false;
     throw error;
   }
 }
