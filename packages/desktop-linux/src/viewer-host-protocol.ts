@@ -8,6 +8,7 @@ export type NativeViewerCommand =
   | { cmd: "shutdown" }
   | { cmd: "attention"; message: string }
   | { cmd: "clearAttention" }
+  | { cmd: "setTitle"; title: string }
   | { cmd: "pulse"; x: number; y: number }
   | { cmd: "control"; state: "granted"; leaseId: string; grantMs: number }
   | { cmd: "control"; state: "revoked"; leaseId: string; reason: ControlRevokeReason };
@@ -18,6 +19,8 @@ export type NativeViewerEvent =
   | { event: "expandRequested" | "collapseRequested" | "closed" }
   | { event: "sessionEnded"; reason: "x11-eof" | "xvfb-gone" }
   | { event: "takeRequested" }
+  /** Thumbnail mode only. Hover never grants control or reaches the session. */
+  | { event: "hover"; inside: boolean }
   | { event: "returnRequested"; reason: "button" | "closed" }
   | { event: "controlAck"; leaseId: string; state: "granted" | "revoked" }
   | { event: "error"; code: string; message: string };

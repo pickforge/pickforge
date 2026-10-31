@@ -16,6 +16,8 @@ import { runNativeViewerHost, type NativeHostOptions } from "../src/viewer/nativ
 import { createViewerFakes, monitor, type ViewerFakes, type FakeViewerBehavior } from "./viewer-fakes.js";
 import { unusedTestDisplay } from "../../desktop-linux/test/test-resources.js";
 import { nativeViewerVersion } from "../src/viewer/native.js";
+import { stackDir, STACK_GAP, STACK_PEEK, type StackMember } from "../src/viewer/stack.js";
+import { buildMoveLua, THUMBNAIL_MARGIN } from "../src/viewer/hyprland.js";
 
 const available = findOnPath("Xvfb") !== null;
 let root: string;
@@ -130,6 +132,101 @@ describe.skipIf(!available)("native host source behavior", () => {
     running = runNativeViewerHost({ session: sessionId, binary, viewerVersion: nativeViewerVersion });
     await expect(running).rejects.toThrow("readiness identity");
   });
+});
+
+describe.skipIf(!available)("native host session title", () => {
+  it("passes the title at launch and sends setTitle when the record changes", async () => {
+    await updateSession(sessionId, { title: "Checkout flow test" });
+    const host = await start();
+    const args = fakes.calls().find((entry) => entry.tool === "viewer")!.args as string[];
+    expect(args.slice(args.indexOf("--title"), args.indexOf("--title") + 2)).toEqual(["--title", "Checkout flow test"]);
+    const titles = (): unknown[] => fakes.calls().filter((entry) => entry.cmd === "setTitle").map((entry) => entry.title);
+    await sleep(600);
+    expect(titles()).toEqual([]);
+    await updateSession(sessionId, { title: "Pickforge GitHub issues" });
+    await until(() => titles().length === 1);
+    await updateSession(sessionId, { title: undefined });
+    await until(() => titles().length === 2);
+    expect(titles()).toEqual(["Pickforge GitHub issues", ""]);
+    await requestNativeViewerHost(host, { op: "shutdown" });
+    await running;
+  });
+
+  it("omits the title flag for a session without a title", async () => {
+    const host = await start();
+    expect(fakes.calls().find((entry) => entry.tool === "viewer")!.args).not.toContain("--title");
+    await requestNativeViewerHost(host, { op: "shutdown" });
+    await running;
+  });
+});
+
+describe.skipIf(!available)("native host viewer stack", () => {
+  const instance = "test_native";
+  let runtime: string;
+  beforeEach(() => {
+    runtime = path.join(root, "runtime");
+    fs.mkdirSync(runtime, { mode: 0o700 });
+    fakes.installHyprctl();
+    fakes.setState({ status: { configProvider: "lua" }, monitors: [monitor()] });
+    vi.stubEnv("HYPRLAND_INSTANCE_SIGNATURE", instance);
+    vi.stubEnv("XDG_RUNTIME_DIR", runtime);
+  });
+  const memberFile = (launchId: string): string => path.join(stackDir({ xdgRuntimeDir: runtime, instance }), `${launchId}.json`);
+  const readMember = (launchId: string): StackMember | undefined =>
+    fs.existsSync(memberFile(launchId)) ? JSON.parse(fs.readFileSync(memberFile(launchId), "utf8")) as StackMember : undefined;
+  const evals = (): string[] => fakes.calls().filter((entry) => entry.tool === "hyprctl" && (entry.args as string[])[2] === "eval")
+    .map((entry) => (entry.args as string[])[3]!);
+  const moved = (y: number, x: number): boolean => evals().includes(buildMoveLua("0xabc001", { x, y }));
+
+  it("joins after mapping, fans out on hover, folds after leave, and leaves the stack while expanded", async () => {
+    const host = await start();
+    await until(() => readMember(host.launchId) !== undefined);
+    const own = readMember(host.launchId)!;
+    expect(own).toMatchObject({ launchId: host.launchId, sessionId, hostPid: host.pid, monitor: 0, mode: "thumbnail", hover: false, width: 384, height: 288 });
+    expect(fs.statSync(memberFile(host.launchId)).mode & 0o777).toBe(0o600);
+    const x = 1920 - 384 - THUMBNAIL_MARGIN;
+    const top0 = 1080 - 288 - THUMBNAIL_MARGIN;
+    // A newer live member stacked after this host: this host becomes the back card.
+    const other = "f".repeat(32);
+    const identity = readProcessIdentity(process.pid)!;
+    fs.writeFileSync(memberFile(other), JSON.stringify({ ...own, launchId: other, sessionId: "desk-ffffff", hostPid: identity.pid,
+      hostStartTicks: identity.startTicks, stackedAt: new Date(Date.parse(own.stackedAt) + 1_000).toISOString() }), { mode: 0o600 });
+    await until(() => moved(top0 - STACK_PEEK, x));
+    fakes.cueViewer({ event: "hover", inside: true });
+    await until(() => readMember(host.launchId)?.hover === true);
+    await until(() => moved(top0 - 288 - STACK_GAP, x));
+    fakes.cueViewer({ event: "hover", inside: false });
+    await sleep(100);
+    expect(readMember(host.launchId)?.hover).toBe(true);
+    await until(() => readMember(host.launchId)?.hover === false);
+    await until(() => evals().filter((lua) => lua === buildMoveLua("0xabc001", { x, y: top0 - STACK_PEEK })).length === 2);
+    fakes.cueViewer({ event: "expandRequested" });
+    await until(() => fakes.calls().some((entry) => entry.cmd === "setMode" && entry.mode === "expanded"));
+    expect(readMember(host.launchId)?.mode).toBe("away");
+    fakes.cueViewer({ event: "collapseRequested" });
+    await until(() => fakes.calls().some((entry) => entry.cmd === "setMode" && entry.mode === "thumbnail"));
+    await until(() => readMember(host.launchId)?.mode === "thumbnail");
+    expect(Date.parse(readMember(host.launchId)!.stackedAt)).toBeGreaterThan(Date.parse(readMember(other)!.stackedAt));
+    // Every dispatch went to this host's own window.
+    expect(evals().filter((lua) => lua.includes("address:")).every((lua) => lua.includes("address:0xabc001") && !lua.includes(other))).toBe(true);
+    expect(controlCommands()).toEqual([]);
+    expect(await readHumanLease(sessionId)).toBeUndefined();
+    await requestNativeViewerHost(host, { op: "shutdown" });
+    await running;
+    expect(readMember(host.launchId)).toBeUndefined();
+  }, 20_000);
+
+  it("marks the card away in fullscreen and ignores hover there", async () => {
+    const host = await start();
+    await until(() => readMember(host.launchId) !== undefined);
+    fakes.cueViewer({ event: "mode", mode: "fullscreen" });
+    await until(() => readMember(host.launchId)?.mode === "away");
+    fakes.cueViewer({ event: "hover", inside: true });
+    await sleep(200);
+    expect(readMember(host.launchId)?.hover).toBe(false);
+    await requestNativeViewerHost(host, { op: "shutdown" });
+    await running;
+  }, 15_000);
 });
 
 async function take(): Promise<string> {
