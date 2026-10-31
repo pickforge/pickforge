@@ -24,6 +24,13 @@ const timeoutArg = z.number().int().min(0).max(3_600_000).optional()
 
 interface HeldControl { since?: number; until?: number }
 
+const BROWSER_NOTE = " A browser session reopens its browser around human control; list pages again afterwards.";
+
+/** A browser session's Chrome reopened when a person held and returned control. */
+function relaunched(type: string, outcome: string, held: HeldControl): { browserRelaunched?: true } {
+  return type === "browser" && outcome === "returned" && held.since !== undefined ? { browserRelaunched: true } : {};
+}
+
 function heldMs(held: HeldControl): number {
   return held.since === undefined ? 0 : Math.max(0, (held.until ?? Date.now()) - held.since);
 }
@@ -53,7 +60,8 @@ function registerWaitTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool("takeover_wait", {
     title: "Wait for human control to return",
     description: "Wait until no human lease is active, then capture a fresh desktop screenshot. " +
-      "Timeout and cancellation leave control unchanged; screenshot is null while a human lease remains active.",
+      "Timeout and cancellation leave control unchanged; screenshot is null while a human lease remains active." +
+      BROWSER_NOTE,
     inputSchema: {
       ...sessionArg,
       timeoutMs: timeoutArg,
@@ -77,7 +85,8 @@ function registerWaitTool(server: McpServer, ctx: ServerContext): void {
           desktop: record.desktop, actionId, run,
         }) : undefined;
       return {
-        data: { sessionId: record.id, outcome, heldMs: duration, screenshot: capture?.data ?? null },
+        data: { sessionId: record.id, outcome, heldMs: duration, ...relaunched(record.type, outcome, held),
+          screenshot: capture?.data ?? null },
         extraContent: capture?.extraContent,
         evidenceStatus: outcome === "returned" ? "ok" as const : outcome,
       };
@@ -141,7 +150,8 @@ function registerRequestTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool("request_takeover", {
     title: "Ask the human to take control",
     description: "Ask for help in the native viewer without taking focus. Wait for return, then capture a fresh screenshot. " +
-      "Only viewer.mode auto may open a viewer. Timeout and cancellation leave live human control unchanged.",
+      "Only viewer.mode auto may open a viewer. Timeout and cancellation leave live human control unchanged." +
+      BROWSER_NOTE,
     inputSchema: {
       ...sessionArg,
       message: z.string().refine(validTakeoverMessage, "Use at most 500 characters without control, formatting or line separator characters"),
@@ -166,7 +176,8 @@ function registerRequestTool(server: McpServer, ctx: ServerContext): void {
       const capture = await checkHumanLeaseBusy(record.id, ctx.env) === undefined
         ? await captureDesktopScreenshot({ ctx, id: record.id, display: requireDisplay(record), type: record.type,
           desktop: record.desktop, actionId, run }) : undefined;
-      return { data: { sessionId: record.id, outcome, heldMs: duration, screenshot: capture?.data ?? null },
+      return { data: { sessionId: record.id, outcome, heldMs: duration, ...relaunched(record.type, outcome, held),
+        screenshot: capture?.data ?? null },
         extraContent: capture?.extraContent,
         evidenceStatus: outcome === "timeout" || outcome === "cancelled" ? outcome : "ok" };
     });

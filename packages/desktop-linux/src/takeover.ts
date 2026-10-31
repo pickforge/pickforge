@@ -66,6 +66,12 @@ interface ViewerTakeoverHandle extends TakeoverHandle {
 
 export type HumanTakeoverHandle = VncTakeoverHandle | ViewerTakeoverHandle;
 
+/** The lease a takeover hook runs under. */
+export interface HeldLeaseRef {
+  sessionId: string;
+  leaseId: string;
+}
+
 export interface StartHumanTakeoverOptions {
   transport?: "x11vnc" | "viewer";
   viewerPid?: number;
@@ -75,6 +81,11 @@ export interface StartHumanTakeoverOptions {
   ttlMs?: number;
   heartbeatMs?: number;
   drainTimeoutMs?: number;
+  /**
+   * Runs after the lease is acquired and before the person gets input. A
+   * throw releases the lease and is rethrown.
+   */
+  afterLease?(lease: HeldLeaseRef): Promise<unknown>;
 }
 
 async function requireRunningDesktopSession(
@@ -124,6 +135,37 @@ export async function recoverStaleHumanLease(
   });
 }
 
+async function runAfterLease(
+  hook: (lease: HeldLeaseRef) => Promise<unknown>,
+  held: HeldLeaseRef,
+  registryEnv: EnvLike,
+): Promise<void> {
+  try {
+    await hook({ sessionId: held.sessionId, leaseId: held.leaseId });
+  } catch (error) {
+    await releaseHumanLease(held.sessionId, held.leaseId, registryEnv).catch(() => {});
+    throw error;
+  }
+}
+
+async function renewHeldLease(handle: HeldLeaseRef, registryEnv: EnvLike): Promise<HumanLease> {
+  const renewed = await renewHumanLease(handle.sessionId, handle.leaseId, registryEnv).catch(() => undefined);
+  if (renewed !== undefined) return renewed;
+  await releaseHumanLease(handle.sessionId, handle.leaseId, registryEnv).catch(() => {});
+  throw new Error(`Human lease ${handle.leaseId} for session ${handle.sessionId} went stale before input could start`);
+}
+
+async function startViewerInput(handle: ViewerTakeoverHandle, afterLease: StartHumanTakeoverOptions["afterLease"],
+  registryEnv: EnvLike): Promise<ViewerTakeoverHandle> {
+  if (afterLease !== undefined) {
+    await runAfterLease(afterLease, handle, registryEnv);
+    // The hook may outlast part of the TTL before the heartbeat starts.
+    handle.expiresAt = (await renewHeldLease(handle, registryEnv)).expiresAt;
+  }
+  await recordTakeoverEvidence(handle.projectDir, handle.sessionId, "takeover_start", { env: registryEnv });
+  return handle;
+}
+
 function viewerHandle(sessionId: string, display: string, projectDir: string, lease: HumanLease): ViewerTakeoverHandle {
   return {
     transport: "viewer", sessionId, display, projectDir,
@@ -168,8 +210,11 @@ export async function startHumanTakeover(
     }
 
     if (opts.transport === "viewer") {
-      await recordTakeoverEvidence(record.projectDir, id, "takeover_start", { env: registryEnv });
-      return viewerHandle(id, desktop.display, record.projectDir, lease);
+      return startViewerInput(viewerHandle(id, desktop.display, record.projectDir, lease), opts.afterLease, registryEnv);
+    }
+
+    if (opts.afterLease !== undefined) {
+      await runAfterLease(opts.afterLease, { sessionId: id, leaseId: lease.leaseId }, registryEnv);
     }
 
     let vnc: VncHandle;
@@ -271,6 +316,12 @@ export interface EndHumanTakeoverOptions {
   registryEnv?: EnvLike;
   env?: EnvLike;
   reason: TakeoverEndReason;
+  /**
+   * Runs on every end reason after input stops and before the lease is
+   * released, while the lease is still this handle's. A throw still
+   * releases the lease and is rethrown afterwards.
+   */
+  beforeRelease?(handle: HumanTakeoverHandle): Promise<unknown>;
 }
 
 export interface EndHumanTakeoverResult {
@@ -282,6 +333,26 @@ async function releaseViewerInput(handle: HumanTakeoverHandle, desktop: DesktopS
   if (desktop?.xvfbPid !== undefined && desktop.xvfbStartTimeTicks !== undefined &&
       !processIdentityMatches({ pid: desktop.xvfbPid, startTicks: desktop.xvfbStartTimeTicks })) return;
   await releaseStuckInput(handle.display, env);
+}
+
+/** Run the hook only while this handle still owns the lease, and capture its failure. */
+async function runBeforeRelease(handle: HumanTakeoverHandle, opts: EndHumanTakeoverOptions,
+  registryEnv: EnvLike): Promise<{ error: unknown } | undefined> {
+  if (opts.beforeRelease === undefined) return undefined;
+  try {
+    if ((await readHumanLease(handle.sessionId, registryEnv))?.leaseId !== handle.leaseId) return undefined;
+    await opts.beforeRelease(handle);
+    return undefined;
+  } catch (error) {
+    return { error };
+  }
+}
+
+/** Release the lease, then surface a beforeRelease failure. */
+async function releaseLeaseAfterHook(handle: HumanTakeoverHandle, registryEnv: EnvLike,
+  hookFailure: { error: unknown } | undefined): Promise<void> {
+  await releaseHumanLease(handle.sessionId, handle.leaseId, registryEnv).catch(() => {});
+  if (hookFailure !== undefined) throw hookFailure.error;
 }
 
 /**
@@ -343,6 +414,8 @@ export async function endHumanTakeover(
       }
     }
 
+    const hookFailure = await runBeforeRelease(handle, opts, registryEnv);
+
     // The lifecycle-transition evidence entry is recorded regardless of
     // whether the fresh-state screenshot can be captured (e.g. no screenshot
     // tool on PATH) — a missing screenshot must never silently drop the
@@ -388,9 +461,7 @@ export async function endHumanTakeover(
       }
     }
 
-    await releaseHumanLease(handle.sessionId, handle.leaseId, registryEnv).catch(
-      () => {},
-    );
+    await releaseLeaseAfterHook(handle, registryEnv, hookFailure);
 
     return { screenshotPath, reason: opts.reason };
   };
