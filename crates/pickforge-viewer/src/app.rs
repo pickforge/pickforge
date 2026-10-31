@@ -277,6 +277,11 @@ struct App {
     /// True after a `hover` event with `inside: true` until the one with
     /// `inside: false`.
     hovering: bool,
+    /// Set by a pointer entry until the motion that winit reports with it.
+    entering: bool,
+    /// Where the pointer entered. A window that moves under a still pointer
+    /// gets an entry and a motion there, which must not start a hover.
+    entry_point: Option<(f64, f64)>,
     ime_allowed: bool,
     modifiers: Modifiers,
     /// What each held physical key sent, so its release matches.
@@ -353,6 +358,8 @@ impl App {
             banner: None,
             strip: None,
             hovering: false,
+            entering: false,
+            entry_point: None,
             ime_allowed: false,
             modifiers: Modifiers::default(),
             keys: HashMap::new(),
@@ -467,6 +474,21 @@ impl App {
         }
         self.hovering = inside;
         Some(Event::Hover { inside })
+    }
+
+    /// Winit reports a motion with every pointer entry. Only motion away
+    /// from the entry point starts a hover.
+    fn pointer_motion(&mut self, point: (f64, f64)) -> Option<Event> {
+        if self.entering {
+            self.entering = false;
+            self.entry_point = Some(point);
+            return None;
+        }
+        if self.entry_point == Some(point) {
+            return None;
+        }
+        self.entry_point = None;
+        self.hover_change(true)
     }
 
     fn request_redraw(&mut self) {
@@ -1488,16 +1510,22 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.draw();
             }
+            WindowEvent::CursorEntered { .. } => {
+                self.entering = true;
+                self.entry_point = None;
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer = Some((position.x, position.y));
                 self.update_hover();
                 self.on_pointer_moved();
-                if let Some(event) = self.hover_change(true) {
+                if let Some(event) = self.pointer_motion((position.x, position.y)) {
                     emit(&event);
                 }
             }
             WindowEvent::CursorLeft { .. } => {
                 self.pointer = None;
+                self.entering = false;
+                self.entry_point = None;
                 self.update_hover();
                 if let Some(event) = self.hover_change(false) {
                     emit(&event);

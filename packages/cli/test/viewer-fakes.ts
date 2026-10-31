@@ -16,6 +16,8 @@ export interface FakeHyprlandState {
   monitors?: unknown;
   /** Substring of a Lua chunk that makes `eval` fail like Hyprland does. */
   evalFailOn?: string;
+  /** Each eval waits this long, so compositor placements overlap. */
+  evalDelayMs?: number;
   /** Substring of a `keyword` or `dispatch` request that Hyprland refuses. */
   requestFailOn?: string;
 }
@@ -79,6 +81,7 @@ if (rest[0] === "-j") {
   process.exit(0);
 }
 if (rest[0] === "eval") {
+  if (state.evalDelayMs !== undefined) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, state.evalDelayMs);
   if (state.evalFailOn !== undefined && rest[1].includes(state.evalFailOn)) {
     process.stdout.write("error: refused\\n");
     process.exit(7);

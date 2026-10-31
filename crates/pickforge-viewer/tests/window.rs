@@ -282,12 +282,16 @@ fn shows_the_title_and_reports_hover() {
     viewer.send(r#"{"cmd":"setTitle","title":"Checkout flow"}"#);
 
     // Hover: motion inside reports once, leaving reports once.
+    // An entry alone, as when a window moves under a still pointer, is no hover.
     screen.move_to(thumb.x + 200, thumb.y + 150);
+    viewer.expect_silent(Duration::from_millis(400));
+    screen.move_to(thumb.x + 205, thumb.y + 155);
     assert_eq!(viewer.expect("hover")["inside"], true);
     screen.move_to(thumb.x + 210, thumb.y + 160);
     screen.move_to(thumb.x + 600, thumb.y + 600);
     assert_eq!(viewer.expect("hover")["inside"], false, "no repeat");
     screen.move_to(thumb.x + 200, thumb.y + 150);
+    screen.move_to(thumb.x + 205, thumb.y + 155);
     assert_eq!(viewer.expect("hover")["inside"], true);
 
     // Expanding ends the hover; the bar shows the caption.

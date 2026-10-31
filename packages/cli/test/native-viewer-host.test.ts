@@ -216,6 +216,25 @@ describe.skipIf(!available)("native host viewer stack", () => {
     expect(readMember(host.launchId)).toBeUndefined();
   }, 20_000);
 
+  it("queues a request timeout collapse behind a click expand, so an expanded card never stays in the stack", async () => {
+    const host = await start();
+    await until(() => readMember(host.launchId) !== undefined);
+    const response = await requestNativeViewerHost(host, { op: "requestTakeover", message: "Help", timeoutMs: 100 });
+    expect(response.ok).toBe(true);
+    // Slow placements: the timeout collapse is still placing when the click arrives.
+    fakes.setState({ status: { configProvider: "lua" }, monitors: [monitor()], evalDelayMs: 300 });
+    await sleep(150);
+    fakes.cueViewer({ event: "expandRequested" });
+    const modes = (): unknown[] => fakes.calls().filter((entry) => entry.cmd === "setMode").map((entry) => entry.mode);
+    await until(() => modes().length >= 3, 10_000);
+    await sleep(500);
+    expect(modes()).toEqual(["expanded", "thumbnail", "expanded"]);
+    expect(readMember(host.launchId)?.mode).toBe("away");
+    fakes.setState({ status: { configProvider: "lua" }, monitors: [monitor()] });
+    await requestNativeViewerHost(host, { op: "shutdown" });
+    await running;
+  }, 20_000);
+
   it("marks the card away in fullscreen and ignores hover there", async () => {
     const host = await start();
     await until(() => readMember(host.launchId) !== undefined);

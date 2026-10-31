@@ -132,8 +132,11 @@ class NativeHost {
     private readonly xvfb: { pid: number; startTicks: number },
     private sentTitle: string,
   ) {
+    // A request expands from inside the serial requestTakeover operation. Its
+    // end collapses from a timer or the cancelRequest operation, so it queues.
     this.requests = new NativeRequests({ env, send: (command) => this.send(command),
-      mode: (mode) => this.setMode(mode), currentMode: () => this.mode, controlling: () => this.control.active });
+      mode: (mode) => mode === "expanded" ? this.setMode(mode) : this.queued(() => this.setMode(mode)),
+      currentMode: () => this.mode, controlling: () => this.control.active });
     this.control = new NativeControl({ sessionId: record.sessionId, env, send: (command) => this.send(command),
       kill: () => { if (!this.exited) this.child.kill("SIGKILL"); },
       taken: () => this.requests.taken(), returned: (reason) => this.requests.returned(reason),
@@ -149,8 +152,15 @@ class NativeHost {
     if (!this.exited && !this.child.stdin.destroyed) this.child.stdin.write(`${JSON.stringify(command)}\n`);
   }
 
+  /** Runs after every queued operation, so placements never interleave. */
+  private queued(operation: () => Promise<void>): Promise<void> {
+    const run = this.actions.then(operation);
+    this.actions = run.catch(() => { console.error("Native viewer operation failed"); });
+    return run;
+  }
+
   private enqueue(operation: () => Promise<void>): void {
-    this.actions = this.actions.then(operation).catch(() => { console.error("Native viewer operation failed"); });
+    this.queued(operation).catch(() => {});
   }
 
   /** The single choke point for host placement, and for the card's place in the stack. */

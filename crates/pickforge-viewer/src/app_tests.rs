@@ -185,6 +185,26 @@ fn set_title_shows_the_title_and_falls_back_to_the_label() {
 }
 
 #[test]
+fn hover_starts_only_after_motion_away_from_the_entry_point() {
+    let mut app = app();
+    // A card that folds under a still pointer gets an entry and a motion there.
+    app.entering = true;
+    assert_eq!(app.pointer_motion((10.0, 10.0)), None);
+    assert_eq!(app.pointer_motion((10.0, 10.0)), None, "still pointer");
+    assert_eq!(
+        app.pointer_motion((11.0, 10.0)),
+        Some(Event::Hover { inside: true })
+    );
+    assert_eq!(app.pointer_motion((12.0, 10.0)), None, "no repeat");
+    // Without an entry, as when the pointer was inside at launch, motion hovers.
+    let mut app = self::app();
+    assert_eq!(
+        app.pointer_motion((5.0, 5.0)),
+        Some(Event::Hover { inside: true })
+    );
+}
+
+#[test]
 fn hover_reports_thumbnail_changes_once() {
     let mut app = app();
     assert_eq!(app.mode, Mode::Thumbnail);

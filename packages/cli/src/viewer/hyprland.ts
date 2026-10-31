@@ -298,6 +298,18 @@ export function buildMoveLua(address: string, point: Pick<Rect, "x" | "y">): str
   return `hl.dispatch(hl.dsp.window.move({x=${luaInt(point.x)},y=${luaInt(point.y)},window=${windowSelector(address)}}))`;
 }
 
+/** Lua that puts exactly one client above the other floating windows, without focus. */
+export function buildRaiseLua(address: string): string {
+  assertAddress(address);
+  return `hl.dispatch(hl.dsp.window.alter_zorder({mode="top",window=${windowSelector(address)}}))`;
+}
+
+/** The hyprlang dispatcher for {@link buildRaiseLua}. */
+export function buildRaiseDispatch(address: string): [string, string] {
+  assertAddress(address);
+  return ["alterzorder", `top,address:${address}`];
+}
+
 /** Lua that resizes and then moves exactly one client, by address. */
 export function buildPlacementLua(address: string, rect: Rect): string {
   assertAddress(address);
@@ -583,8 +595,14 @@ export async function applyHyprlandWindowMode(
     const applied = isHyprlang(ctx)
       ? await dispatchAll(ctx, buildPlacementDispatches(found.client.address, rect))
       : await hyprctlEval(ctx, buildPlacementLua(found.client.address, rect));
-    if (applied) onPlaced?.(rect, found.client.monitor);
-    return applied;
+    if (!applied) return false;
+    // A placed window goes on top, so a collapsed card is the visible front
+    // card. The raise is cosmetic, so its failure never fails the placement.
+    await (isHyprlang(ctx)
+      ? dispatchAll(ctx, [buildRaiseDispatch(found.client.address)])
+      : hyprctlEval(ctx, buildRaiseLua(found.client.address))).catch(() => false);
+    onPlaced?.(rect, found.client.monitor);
+    return true;
   } catch {
     return false;
   }
