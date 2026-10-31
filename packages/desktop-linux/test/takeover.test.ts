@@ -783,6 +783,16 @@ describe("takeover hooks (#380)", () => {
     await endHumanTakeover(handle, { registryEnv: env, env, reason: "return" });
   });
 
+  it("stops renewing and releases the lease when afterLease throws synchronously", async () => {
+    const id = await createDesktop();
+    await expect(startHumanTakeover(id, {
+      transport: "viewer", registryEnv: env, env, ttlMs: 400, heartbeatMs: 100,
+      afterLease: () => { throw new Error("sync failure"); },
+    })).rejects.toThrow("sync failure");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await readHumanLease(id, env)).toBeUndefined();
+  });
+
   it("releases the lease and rethrows when beforeRelease throws", async () => {
     const id = await createDesktop();
     const handle = await startHumanTakeover(id, { transport: "viewer", registryEnv: env, env });

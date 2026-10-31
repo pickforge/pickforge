@@ -144,7 +144,9 @@ async function runAfterLease(
   const renewal = setInterval(() => {
     void renewHumanLease(held.sessionId, held.leaseId, registryEnv).catch(() => {});
   }, held.heartbeatMs);
-  const failure = await hook({ sessionId: held.sessionId, leaseId: held.leaseId })
+  // Calling inside then() turns a synchronous throw into a rejection.
+  const failure = await Promise.resolve()
+    .then(() => hook({ sessionId: held.sessionId, leaseId: held.leaseId }))
     .then(() => undefined, (error: unknown) => ({ error }))
     .finally(() => clearInterval(renewal));
   if (failure === undefined) return;
