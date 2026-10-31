@@ -6,7 +6,13 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import WebSocket from "ws";
-import { HUMAN_LEASE_FILE, runCommand } from "@pickforge/lab-core";
+import {
+  HUMAN_LEASE_FILE,
+  isHumanLeaseStale,
+  readProcessIdentity,
+  runCommand,
+  type HumanLease,
+} from "@pickforge/lab-core";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   CdpAlreadyAttachedError,
@@ -61,13 +67,14 @@ function cdpPaths(dir: string) {
  * event and its reply in one write, so the supervisor must split and join NUL
  * frames itself. `Target.attachToBrowserTarget` opens sessions B1, B2 and so
  * on, and `Target.attachToTarget` opens T1, T2 and so on. `Test.hang` is never
- * answered. `Browser.close` exits, and `Target.getTargets` lists `pages.json`.
+ * answered. `Browser.close` exits.
  *
  * Each start appends its pid and argv to `launches.jsonl`. Like Chrome, it
  * opens the pipe only with `--remote-debugging-pipe`. Without it, it is a
  * plain browser: it opens no pipe, exits 0
  * on SIGTERM and logs that in `sigterm.log`, and exits 1 at once when
- * `plain-fails` exists.
+ * `plain-fails` exists. When `cdp-hangs` exists, a CDP relaunch with
+ * `--restore-last-session` ignores SIGTERM and never answers its pipe.
  */
 function writePipeBrowser(dir: string): string {
   const script = path.join(dir, "pipe-browser.cjs");
@@ -79,7 +86,11 @@ function writePipeBrowser(dir: string): string {
       'const path = require("node:path");',
       'const log = path.join(__dirname, "commands.jsonl");',
       'fs.appendFileSync(path.join(__dirname, "launches.jsonl"), JSON.stringify({ pid: process.pid, argv: process.argv.slice(2) }) + "\\n");',
-      'if (!process.argv.includes("--remote-debugging-pipe")) {',
+      'const relaunch = process.argv.includes("--restore-last-session");',
+      'if (process.argv.includes("--remote-debugging-pipe") && relaunch && fs.existsSync(path.join(__dirname, "cdp-hangs"))) {',
+      '  process.on("SIGTERM", () => {});',
+      "  setInterval(() => {}, 1000);",
+      '} else if (!process.argv.includes("--remote-debugging-pipe")) {',
       '  if (fs.existsSync(path.join(__dirname, "plain-fails"))) process.exit(1);',
       '  process.on("SIGTERM", () => { fs.appendFileSync(path.join(__dirname, "sigterm.log"), process.pid + "\\n"); process.exit(0); });',
       "  setInterval(() => {}, 1000);",
@@ -118,10 +129,6 @@ function writePipeBrowser(dir: string): string {
       '  } else if (message.method === "Browser.close") {',
       "    output.write(frame(reply));",
       "    setTimeout(() => process.exit(0), 10);",
-      '  } else if (message.method === "Target.getTargets") {',
-      '    const pages = path.join(__dirname, "pages.json");',
-      "    const targetInfos = fs.existsSync(pages) ? JSON.parse(fs.readFileSync(pages, \"utf8\")) : [];",
-      "    output.write(frame({ ...reply, result: { targetInfos } }));",
       "  } else {",
       "    output.write(frame(reply));",
       "  }",
@@ -155,12 +162,13 @@ interface Bridge {
 
 async function startBridge(
   browserArgs: (dir: string) => string[] = () => ["--remote-debugging-pipe"],
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<Bridge> {
   const dir = temporaryDirectory();
   const script = writePipeBrowser(dir);
   const paths = cdpPaths(dir);
   const command = buildSupervisedBrowserCommand(process.execPath, process.execPath, [script, ...browserArgs(dir)], paths);
-  const child = spawn(command.command, command.args, { detached: true, stdio: ["ignore", "ignore", "inherit"] });
+  const child = spawn(command.command, command.args, { detached: true, env, stdio: ["ignore", "ignore", "inherit"] });
   supervisors.push(child);
   const waited = await waitForCdpEndpoint({
     endpointFile: paths.endpointFile,
@@ -636,9 +644,33 @@ function lastLaunch(bridge: Bridge): Launch {
   return all[all.length - 1]!;
 }
 
-function holdHumanLease(bridge: Bridge, expiresInMs = 60_000): void {
-  const expiresAt = new Date(Date.now() + expiresInMs).toISOString();
-  fs.writeFileSync(path.join(bridge.dir, HUMAN_LEASE_FILE), `${JSON.stringify({ leaseId: "test", expiresAt })}\n`);
+interface LeaseOwner {
+  expiresInMs?: number;
+  ownerPid?: number;
+  ownerStartTicks?: number;
+}
+
+/** Write a human lease as lab-core does. Its owner is this test process by default. */
+function holdHumanLease(bridge: Bridge, owner: LeaseOwner = {}): HumanLease {
+  const now = Date.now();
+  const lease: HumanLease = {
+    leaseId: "test",
+    sessionId: "test",
+    ownerPid: owner.ownerPid ?? process.pid,
+    ownerStartTicks: owner.ownerStartTicks ?? readProcessIdentity(process.pid)!.startTicks,
+    createdAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + (owner.expiresInMs ?? 60_000)).toISOString(),
+    ttlMs: 30_000,
+    heartbeatMs: 5_000,
+  };
+  fs.writeFileSync(path.join(bridge.dir, HUMAN_LEASE_FILE), `${JSON.stringify(lease)}\n`);
+  return lease;
+}
+
+async function deadPid(): Promise<number> {
+  const child = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  await once(child, "exit");
+  return child.pid!;
 }
 
 function publishedMode(bridge: Bridge): Promise<string | undefined> {
@@ -669,15 +701,8 @@ describe("browser supervisor plain handoff", { timeout: 20_000 }, () => {
     expect(HUMAN_LEASE_FILE).toBe("human.lease.json");
   });
 
-  it("reopens the profile without remote debugging and with its pages, then restores CDP", async () => {
+  it("reopens the profile without remote debugging and with its last session, then restores CDP", async () => {
     const bridge = await startHandoffBridge();
-    const pages = [
-      { type: "page", url: "https://example.com/a" },
-      { type: "page", url: "chrome://settings/" },
-      { type: "service_worker", url: "https://example.com/sw.js" },
-      { type: "page", url: "http://example.org/b?c=d" },
-    ];
-    fs.writeFileSync(path.join(bridge.dir, "pages.json"), JSON.stringify(pages));
     expect(await publishedMode(bridge)).toBe("cdp");
 
     expect(await requestCdpSupervisorMode(bridge.endpoint.socketPath, "plain")).toBe("plain");
@@ -686,12 +711,11 @@ describe("browser supervisor plain handoff", { timeout: 20_000 }, () => {
       `--user-data-dir=${path.join(bridge.dir, "profile")}`,
       "--password-store=basic",
       "--use-mock-keychain",
-      "https://example.com/a",
-      "http://example.org/b?c=d",
+      "--restore-last-session",
     ]);
     expect(await publishedMode(bridge)).toBe("plain");
     const methods = bridge.commands().map(({ method }) => method);
-    expect(methods.slice(-2)).toEqual(["Target.getTargets", "Browser.close"]);
+    expect(methods.slice(-2)).toEqual(["Browser.getVersion", "Browser.close"]);
     // The supervisor stays the session's browser process, and its socket stays up.
     expect(bridge.child.exitCode).toBeNull();
     expect(await readDevToolsBrowserVersion(bridge.endpoint.socketPath)).toBe("Chrome/1.2.3");
@@ -712,12 +736,6 @@ describe("browser supervisor plain handoff", { timeout: 20_000 }, () => {
     client.socket.send(JSON.stringify({ id: 1, method: "Test.echo" }));
     expect(await client.next((message) => message.id === 1)).toEqual({ id: 1, result: {} });
     expect(bridge.child.exitCode).toBeNull();
-  });
-
-  it("opens about:blank when no page can be reopened", async () => {
-    const bridge = await startHandoffBridge();
-    await requestCdpSupervisorMode(bridge.endpoint.socketPath, "plain");
-    expect(lastLaunch(bridge).argv.slice(-2)).toEqual(["--use-mock-keychain", "about:blank"]);
   });
 
   it("keeps a relay lease across both relaunches and holds its websocket until CDP is back", async () => {
@@ -818,23 +836,56 @@ describe("browser supervisor plain handoff", { timeout: 20_000 }, () => {
     expect(bridge.child.exitCode).toBeNull();
   });
 
-  it("returns to CDP by itself once the human lease is gone or expired", async () => {
+  it("keeps the plain browser while the lease owner lives and the lease has not expired", async () => {
     const bridge = await startHandoffBridge();
     await requestCdpSupervisorMode(bridge.endpoint.socketPath, "plain");
-    // A lease within the grace past its expiry still holds.
-    holdHumanLease(bridge, -1_000);
-    await delay(1_500);
+    expect(isHumanLeaseStale(holdHumanLease(bridge, { expiresInMs: 10_000 }))).toBe(false);
+    await delay(2_500);
     expect(await publishedMode(bridge)).toBe("plain");
+  });
 
-    holdHumanLease(bridge, -10_000);
-    await expect.poll(() => publishedMode(bridge), { timeout: 10_000 }).toBe("cdp");
-    expect(lastLaunch(bridge).argv).toContain("--restore-last-session");
+  it("returns to CDP by itself the moment lab-core calls the lease stale, or once it is gone", async () => {
+    const bridge = await startHandoffBridge();
+    const startTicks = readProcessIdentity(process.pid)!.startTicks;
+    const stale: Array<[string, LeaseOwner]> = [
+      ["an expired lease", { expiresInMs: -1 }],
+      ["a dead owner", { ownerPid: await deadPid() }],
+      ["a reused owner pid", { ownerStartTicks: startTicks + 1 }],
+    ];
+    for (const [name, owner] of stale) {
+      holdHumanLease(bridge);
+      expect(await requestCdpSupervisorMode(bridge.endpoint.socketPath, "plain")).toBe("plain");
+      expect(isHumanLeaseStale(holdHumanLease(bridge, owner)), name).toBe(true);
+      // The supervisor polls each second; no grace follows the stale moment.
+      await expect.poll(() => publishedMode(bridge), { timeout: 2_500, message: name }).toBe("cdp");
+      expect(lastLaunch(bridge).argv).toContain("--remote-debugging-pipe");
+    }
 
     holdHumanLease(bridge);
     await requestCdpSupervisorMode(bridge.endpoint.socketPath, "plain");
     fs.rmSync(path.join(bridge.dir, HUMAN_LEASE_FILE));
-    await expect.poll(() => publishedMode(bridge), { timeout: 10_000 }).toBe("cdp");
+    await expect.poll(() => publishedMode(bridge), { timeout: 2_500 }).toBe("cdp");
     expect(bridge.child.exitCode).toBeNull();
+  });
+
+  it("kills a relaunched CDP browser that ignores SIGTERM after it did not answer, and ends", async () => {
+    const env = { ...process.env, PICKFORGE_SUPERVISOR_TEST_BUDGET_MS: "500" };
+    const bridge = await startBridge(handoffArgs, env);
+    holdHumanLease(bridge);
+    await requestCdpSupervisorMode(bridge.endpoint.socketPath, "plain");
+    fs.writeFileSync(path.join(bridge.dir, "cdp-hangs"), "");
+    const exited = once(bridge.child, "exit");
+
+    const answer = await postStatus(bridge.endpoint.socketPath, "/cdp");
+    expect(answer.status).toBe(500);
+    expect(JSON.parse(answer.body)).toMatchObject({
+      error: "The browser did not answer Browser.getVersion after its relaunch",
+    });
+    const hung = lastLaunch(bridge);
+    expect(hung.argv).toContain("--remote-debugging-pipe");
+    await exited;
+    expect(() => process.kill(hung.pid, 0)).toThrow();
+    expect(fs.existsSync(cdpPaths(bridge.dir).endpointFile)).toBe(false);
   });
 });
 

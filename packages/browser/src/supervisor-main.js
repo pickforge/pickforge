@@ -73,21 +73,43 @@ const MAX_STDERR_BUFFER_BYTES = 64 * 1024;
 const ALREADY_ATTACHED = "A CDP client is already attached to this browser session";
 const ATTACH_METHODS = new Set(["Target.attachToTarget", "Target.attachToBrowserTarget"]);
 const browserPath = `/devtools/browser/${randomUUID()}`;
+/** Tests shorten the stop and CDP start budgets with this variable. */
+const testBudgetMs = Number(process.env.PICKFORGE_SUPERVISOR_TEST_BUDGET_MS);
 /** How long a closing browser may take before it is killed. */
-const STOP_TIMEOUT_MS = 15_000;
+const STOP_TIMEOUT_MS = testBudgetMs > 0 ? testBudgetMs : 15_000;
 /** How long a relaunch waits for the old browser's helpers to exit. */
 const GROUP_DRAIN_TIMEOUT_MS = 5_000;
 /** A plain browser that exits this soon did not start. */
 const PLAIN_START_GRACE_MS = 1_000;
 /** How long a relaunched CDP browser may take to answer Browser.getVersion. */
-const CDP_START_TIMEOUT_MS = 45_000;
+const CDP_START_TIMEOUT_MS = testBudgetMs > 0 ? testBudgetMs : 45_000;
 const LEASE_POLL_MS = 1_000;
-/** A human lease this far past its expiry has ended. */
-const LEASE_EXPIRY_GRACE_MS = 5_000;
-const MAX_PLAIN_URLS = 50;
-const MAX_PLAIN_URL_LENGTH = 8 * 1024;
 /** HUMAN_LEASE_FILE of @pickforge/lab-core, in the session directory. */
 const humanLeaseFile = path.join(path.dirname(endpointFile), "human.lease.json");
+
+/**
+ * The state, process group and start ticks (fields 3, 5 and 22) of
+ * `/proc/<pid>/stat`, or undefined when it cannot be read or parsed.
+ * @param {number} pid
+ * @returns {{ state: string, pgrp: number, startTicks: number } | undefined}
+ */
+function readProcStat(pid) {
+  let content;
+  try {
+    content = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+  } catch {
+    return undefined;
+  }
+  // The command name may hold spaces and parentheses; fields follow the last ")".
+  const close = content.lastIndexOf(")");
+  if (close === -1) return undefined;
+  const fields = content.slice(close + 1).trim().split(/\s+/);
+  const state = fields[0];
+  const pgrp = Number(fields[2]);
+  const startTicks = Number(fields[19]);
+  if (state === undefined || !Number.isFinite(pgrp) || !Number.isFinite(startTicks)) return undefined;
+  return { state, pgrp, startTicks };
+}
 
 function hasLiveGroupMembers() {
   let entries;
@@ -100,20 +122,28 @@ function hasLiveGroupMembers() {
     if (!/^\d+$/.test(entry)) continue;
     const pid = Number(entry);
     if (pid === process.pid) continue;
-    let content;
-    try {
-      content = fs.readFileSync("/proc/" + pid + "/stat", "utf8");
-    } catch {
-      continue;
-    }
-    const close = content.lastIndexOf(")");
-    if (close === -1) continue;
-    const fields = content.slice(close + 1).trim().split(/\s+/);
-    const state = fields[0];
-    const pgrp = Number(fields[2]);
-    if (state !== "Z" && pgrp === process.pid) return true;
+    const stat = readProcStat(pid);
+    if (stat !== undefined && stat.state !== "Z" && stat.pgrp === process.pid) return true;
   }
   return false;
+}
+
+/**
+ * identityIsAlive of @pickforge/lab-core: a zombie or a start ticks mismatch
+ * is dead. An unreadable stat falls back to a signal probe, where only ESRCH
+ * is dead.
+ * @param {number} pid
+ * @param {number | undefined} startTicks
+ */
+function identityIsAlive(pid, startTicks) {
+  const stat = startTicks === undefined ? undefined : readProcStat(pid);
+  if (stat !== undefined) return stat.state !== "Z" && stat.startTicks === startTicks;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return /** @type {NodeJS.ErrnoException} */ (error).code === "EPERM";
+  }
 }
 
 /**
@@ -697,13 +727,18 @@ function reply(response, status, body) {
 }
 
 /**
- * Ask the current browser to shut down cleanly, so profile cookies flush.
- * Chrome under CDP gets Browser.close; a plain one gets SIGTERM.
+ * Ask a browser to shut down cleanly, so profile cookies flush. Chrome under
+ * CDP gets Browser.close on its own pipe; a plain one gets SIGTERM.
+ * @param {Browser} target
  */
+function askToStop(target) {
+  if (target.exited) return;
+  if (target.pipe === undefined) target.process.kill("SIGTERM");
+  else target.pipe.toChrome.write(`${JSON.stringify({ id: nextId++, method: "Browser.close" })}\0`);
+}
+
 function stopCurrentBrowser() {
-  if (browser === undefined || browser.exited) return;
-  if (browser.pipe === undefined) browser.process.kill("SIGTERM");
-  else void command("Browser.close");
+  if (browser !== undefined) askToStop(browser);
 }
 
 /** POST /close: the session is ending. A relaunch in flight ends with it. */
@@ -870,49 +905,28 @@ async function exitsWithin(target, timeoutMs) {
 }
 
 /**
+ * Stop a browser, and kill it if it does not exit within the stop budget.
+ * @param {Browser} target
+ * @param {(target: Browser) => void} ask How to ask it to exit.
+ */
+async function stopWithin(target, ask) {
+  if (target.exited) return;
+  ask(target);
+  if (await exitsWithin(target, STOP_TIMEOUT_MS)) return;
+  target.process.kill("SIGKILL");
+  await target.exit;
+}
+
+/**
  * Stop a browser for a relaunch: ask it to close, kill it if it hangs, then
  * give its helper processes a moment to leave the group. A profile can be
  * open in only one Chrome at a time.
  * @param {Browser} target
  */
 async function stopForRelaunch(target) {
-  if (!target.exited) {
-    stopCurrentBrowser();
-    if (!(await exitsWithin(target, STOP_TIMEOUT_MS))) {
-      target.process.kill("SIGKILL");
-      await target.exit;
-    }
-  }
+  await stopWithin(target, askToStop);
   const deadline = Date.now() + GROUP_DRAIN_TIMEOUT_MS;
   while (hasLiveGroupMembers() && Date.now() < deadline) await delay(50);
-}
-
-/**
- * Whether a page URL may be reopened in the plain browser. Only web pages
- * are; a URL is passed as an argument, so it must never read as a flag.
- * @param {unknown} url
- * @returns {url is string}
- */
-function isReopenableUrl(url) {
-  if (typeof url !== "string" || url.length > MAX_PLAIN_URL_LENGTH) return false;
-  try {
-    const { protocol } = new URL(url);
-    return protocol === "http:" || protocol === "https:";
-  } catch {
-    return false;
-  }
-}
-
-/** @returns {Promise<string[]>} The open pages' URLs, or none if Chrome does not say. */
-async function openPageUrls() {
-  const answer = await Promise.race([command("Target.getTargets"), delay(RESET_TIMEOUT_MS)]);
-  const infos = answer?.result?.targetInfos;
-  if (!Array.isArray(infos)) return [];
-  return infos
-    .filter((info) => info?.type === "page")
-    .map((info) => info.url)
-    .filter(isReopenableUrl)
-    .slice(0, MAX_PLAIN_URLS);
 }
 
 /** @returns {string[]} The browser flags without the start URL. */
@@ -922,20 +936,18 @@ function browserFlags() {
 }
 
 /**
- * The plain browser's argv: every flag but remote debugging, and the pages
- * in place of the start URL.
- * @param {string[]} urls
+ * The plain browser's argv: every flag but remote debugging. It reopens the
+ * tabs that Browser.close saved, so no page URL shows in its command line.
  */
-function plainArgs(urls) {
+function plainArgs() {
   const flags = browserFlags().filter((arg) => !arg.startsWith("--remote-debugging-"));
-  return [...flags, ...(urls.length === 0 ? ["about:blank"] : urls)];
+  return [...flags, "--restore-last-session"];
 }
 
 async function enterPlain() {
-  const urls = await openPageUrls();
   dropClient();
   if (browser !== undefined) await stopForRelaunch(browser);
-  const plain = spawnBrowser(plainArgs(urls), false);
+  const plain = spawnBrowser(plainArgs(), false);
   browser = plain;
   if (!(await exitsWithin(plain, PLAIN_START_GRACE_MS))) {
     setMode("plain");
@@ -957,9 +969,10 @@ async function enterCdp() {
   pipe = next.pipe;
   const answer = await Promise.race([command("Browser.getVersion"), delay(CDP_START_TIMEOUT_MS)]);
   if (answer?.result === undefined) {
-    // The supervisor ends once this browser is gone.
+    // The supervisor ends once this browser is gone. Until then upgrades
+    // wait, so a browser that ignores SIGTERM is killed.
     closing = true;
-    next.process.kill("SIGTERM");
+    await stopWithin(next, (target) => target.process.kill("SIGTERM"));
     throw new Error("The browser did not answer Browser.getVersion after its relaunch");
   }
   setMode("cdp");
@@ -1005,16 +1018,56 @@ function requestMode(target) {
   return run;
 }
 
-/** Whether a person still holds the session's human lease. */
-function humanLeaseHeld() {
+/**
+ * The fields of a human lease that its staleness depends on, or undefined for
+ * a file that parseHumanLease of @pickforge/lab-core rejects. Core lets agent
+ * input go on under such a lease, so it holds nothing here either.
+ * @param {string} raw
+ * @returns {{ ownerPid: number, ownerStartTicks: number | undefined, expiresAt: string } | undefined}
+ */
+function parseHumanLease(raw) {
   let lease;
   try {
-    lease = JSON.parse(fs.readFileSync(humanLeaseFile, "utf8"));
+    lease = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (typeof lease !== "object" || lease === null) return undefined;
+  const strings = ["leaseId", "sessionId", "createdAt", "expiresAt"];
+  const numbers = ["ownerPid", "ttlMs", "heartbeatMs"];
+  if (!strings.every((key) => typeof lease[key] === "string")) return undefined;
+  if (!numbers.every((key) => typeof lease[key] === "number")) return undefined;
+  if (lease.inputTransport !== undefined && lease.inputTransport !== "x11vnc" && lease.inputTransport !== "viewer") {
+    return undefined;
+  }
+  if (!validOptionalIdentity(lease.viewerPid, 1) || !validOptionalIdentity(lease.viewerStartTicks, 0)) return undefined;
+  const ownerStartTicks = typeof lease.ownerStartTicks === "number" ? lease.ownerStartTicks : undefined;
+  return { ownerPid: lease.ownerPid, ownerStartTicks, expiresAt: lease.expiresAt };
+}
+
+/**
+ * @param {unknown} value
+ * @param {number} minimum
+ */
+function validOptionalIdentity(value, minimum) {
+  return value === undefined || (typeof value === "number" && Number.isSafeInteger(value) && value >= minimum);
+}
+
+/**
+ * Whether a person still holds the session's human lease. This is
+ * isHumanLeaseStale of @pickforge/lab-core with no grace: agent input
+ * resumes the moment the lease is stale, so CDP must come back then too.
+ */
+function humanLeaseHeld() {
+  let raw;
+  try {
+    raw = fs.readFileSync(humanLeaseFile, "utf8");
   } catch {
     return false;
   }
-  const expires = Date.parse(lease?.expiresAt);
-  return Number.isFinite(expires) && Date.now() <= expires + LEASE_EXPIRY_GRACE_MS;
+  const lease = parseHumanLease(raw);
+  if (lease === undefined || !identityIsAlive(lease.ownerPid, lease.ownerStartTicks)) return false;
+  return !(Date.now() > Date.parse(lease.expiresAt));
 }
 
 /**
