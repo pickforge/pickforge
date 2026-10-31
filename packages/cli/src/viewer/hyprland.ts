@@ -46,7 +46,7 @@ interface HyprlandMonitor {
   reserved: [number, number, number, number];
 }
 
-interface Rect {
+export interface Rect {
   x: number;
   y: number;
   width: number;
@@ -286,15 +286,24 @@ function windowSelector(address: string): string {
   return luaString(`address:${address}`);
 }
 
-/** Lua that resizes and then moves exactly one client, by address. */
-export function buildPlacementLua(address: string, rect: Rect): string {
+function assertAddress(address: string): void {
   if (!ADDRESS_PATTERN.test(address)) {
     throw new Error("Refusing an invalid Hyprland client address");
   }
-  const target = windowSelector(address);
+}
+
+/** Lua that moves exactly one client, by address, without a resize. */
+export function buildMoveLua(address: string, point: Pick<Rect, "x" | "y">): string {
+  assertAddress(address);
+  return `hl.dispatch(hl.dsp.window.move({x=${luaInt(point.x)},y=${luaInt(point.y)},window=${windowSelector(address)}}))`;
+}
+
+/** Lua that resizes and then moves exactly one client, by address. */
+export function buildPlacementLua(address: string, rect: Rect): string {
+  assertAddress(address);
   return (
-    `hl.dispatch(hl.dsp.window.resize({x=${luaInt(rect.width)},y=${luaInt(rect.height)},window=${target}})); ` +
-    `hl.dispatch(hl.dsp.window.move({x=${luaInt(rect.x)},y=${luaInt(rect.y)},window=${target}}))`
+    `hl.dispatch(hl.dsp.window.resize({x=${luaInt(rect.width)},y=${luaInt(rect.height)},window=${windowSelector(address)}})); ` +
+    buildMoveLua(address, rect)
   );
 }
 
@@ -400,14 +409,18 @@ export function buildOpacityRuleKeywords(ruleName: string, classPattern: string)
   ];
 }
 
+/** The dispatcher argument that moves exactly one client, by address, without a resize. */
+export function buildMoveDispatch(address: string, point: Pick<Rect, "x" | "y">): [string, string] {
+  assertAddress(address);
+  return ["movewindowpixel", `exact ${luaInt(point.x)} ${luaInt(point.y)},address:${address}`];
+}
+
 /** Dispatcher arguments that resize and then move exactly one client, by address. */
 export function buildPlacementDispatches(address: string, rect: Rect): Array<[string, string]> {
-  if (!ADDRESS_PATTERN.test(address)) {
-    throw new Error("Refusing an invalid Hyprland client address");
-  }
+  assertAddress(address);
   return [
     ["resizewindowpixel", `exact ${luaInt(rect.width)} ${luaInt(rect.height)},address:${address}`],
-    ["movewindowpixel", `exact ${luaInt(rect.x)} ${luaInt(rect.y)},address:${address}`],
+    buildMoveDispatch(address, rect),
   ];
 }
 
@@ -535,32 +548,68 @@ async function readMonitor(ctx: HyprlandContext, id: number): Promise<HyprlandMo
 }
 
 /**
+ * This launch's window when it is safe to dispatch to: it matches the launch
+ * class pattern and the recorded process pid, and it is floating (the launch
+ * rule floated it), so a dispatch never reaches another window or rearranges
+ * a tiled layout. Also returns the work area of the client's monitor.
+ */
+async function verifiedViewerWindow(
+  ctx: HyprlandContext & Pick<ViewerHyprlandLaunch, "classPattern">,
+  pid: number | undefined,
+): Promise<{ client: HyprlandClient; area: Rect } | undefined> {
+  const client = await findViewerWindow(ctx, ctx.classPattern, pid);
+  if (client === undefined || !client.floating) return undefined;
+  const monitor = await readMonitor(ctx, client.monitor);
+  return monitor === undefined ? undefined : { client, area: monitorWorkArea(monitor) };
+}
+
+/**
  * Resize and place this launch's window for `mode` through the compositor.
  * Resolves true when applied, false when the launch has no Hyprland context
  * or the window cannot be verified. Never throws for an absent window.
- *
- * The window must match the launch class pattern and the recorded browser
- * pid, and must be floating (the launch rule floated it), so a dispatch
- * never reaches another window or rearranges a tiled layout.
+ * `onPlaced` gets the applied rect and the client's monitor id.
  */
 export async function applyHyprlandWindowMode(
   launch: ViewerLaunchRecord,
   mode: ViewerWindowMode,
-  onPlaced?: (size: ViewerWindowSize) => void,
+  onPlaced?: (rect: Rect, monitor: number) => void,
 ): Promise<boolean> {
   const ctx = launch.hyprland;
   if (ctx === undefined) return false;
   try {
-    const client = await findViewerWindow(ctx, ctx.classPattern, launch.pid);
-    if (client === undefined || !client.floating) return false;
-    const monitor = await readMonitor(ctx, client.monitor);
-    if (monitor === undefined) return false;
-    const rect = placeViewerWindow(launch, mode, monitorWorkArea(monitor));
+    const found = await verifiedViewerWindow(ctx, launch.pid);
+    if (found === undefined) return false;
+    const rect = placeViewerWindow(launch, mode, found.area);
     const applied = isHyprlang(ctx)
-      ? await dispatchAll(ctx, buildPlacementDispatches(client.address, rect))
-      : await hyprctlEval(ctx, buildPlacementLua(client.address, rect));
-    if (applied) onPlaced?.(rect);
+      ? await dispatchAll(ctx, buildPlacementDispatches(found.client.address, rect))
+      : await hyprctlEval(ctx, buildPlacementLua(found.client.address, rect));
+    if (applied) onPlaced?.(rect, found.client.monitor);
     return applied;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Move this launch's own window without a resize. The window is verified like
+ * in {@link applyHyprlandWindowMode}. `place` gets the work area and the
+ * monitor id of the client and returns the target position, or undefined to
+ * leave the window where it is. Resolves true only when a move was applied.
+ */
+export async function moveHyprlandViewerWindow(
+  launch: ViewerLaunchRecord,
+  place: (area: Rect, monitor: number) => Pick<Rect, "x" | "y"> | undefined,
+): Promise<boolean> {
+  const ctx = launch.hyprland;
+  if (ctx === undefined) return false;
+  try {
+    const found = await verifiedViewerWindow(ctx, launch.pid);
+    if (found === undefined) return false;
+    const point = place(found.area, found.client.monitor);
+    if (point === undefined) return false;
+    return isHyprlang(ctx)
+      ? await dispatchAll(ctx, [buildMoveDispatch(found.client.address, point)])
+      : await hyprctlEval(ctx, buildMoveLua(found.client.address, point));
   } catch {
     return false;
   }

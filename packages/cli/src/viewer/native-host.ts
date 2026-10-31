@@ -4,14 +4,14 @@ import net from "node:net";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import { setTimeout as sleep } from "node:timers/promises";
-import { getSession, readProcessIdentity, processIdentityMatches } from "@pickforge/lab-core";
+import { getSession, readProcessIdentity, processIdentityMatches, sanitizeSessionTitle, SESSION_TITLE_MAX_CHARS } from "@pickforge/lab-core";
 import {
   prepareViewerLaunch, writeViewerLaunchRecord, verifyOwnedDisplayTarget,
   withViewerDir, writeViewerPrivateFile, sessionViewerDir, withSessionVncLock, lstatViewerSocket, viewerSocketIdentity,
   VIEWER_MESSAGE_MAX_BYTES, validTakeoverMessage, validTakeoverTimeout,
   type StartHumanTakeoverOptions,
   type NativeViewerCommand, type NativeViewerHostIdentity, type NativeViewerLaunchRecord,
-  type NativeViewerMode, type ViewerHostResponse, type ViewerWindowSize,
+  type NativeViewerMode, type ViewerHostResponse,
 } from "@pickforge/lab-desktop-linux";
 import { NativeControl } from "./native-control.js";
 import { NativeRequests } from "./native-requests.js";
@@ -20,8 +20,21 @@ import { viewerWindowSizes, viewerWindowClass } from "./launch.js";
 import { viewerLabel } from "./contract.js";
 import {
   detectHyprland, hyprlandRuleName, viewerClassPattern, installViewerRule,
-  disableViewerRule, disableViewerOpacityRule, waitForViewerWindow, applyHyprlandWindowMode,
+  disableViewerRule, disableViewerOpacityRule, waitForViewerWindow, applyHyprlandWindowMode, moveHyprlandViewerWindow,
+  type HyprlandClient, type Rect,
 } from "./hyprland.js";
+import {
+  StackMembership, stackFanned, stackLayout, FOLD_COOLDOWN_MS, LEAVE_DEBOUNCE_MS, type StackUpdate,
+} from "./stack.js";
+
+/** The session title as the viewer shows it: cleaned and at most 80 characters. */
+function viewerTitle(raw: string | undefined): string {
+  return [...sanitizeSessionTitle(raw ?? "")].slice(0, SESSION_TITLE_MAX_CHARS).join("");
+}
+
+function sameRect(a: Rect, b: Rect | undefined): boolean {
+  return b !== undefined && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+}
 
 /** One bounded JSON object per line. Unknown discriminants are ignored by the caller. */
 export function readViewerLines(stream: NodeJS.ReadableStream, onMessage: (message: Record<string, unknown>) => void, onError: () => void): void {
@@ -98,6 +111,17 @@ class NativeHost {
   private readonly ready = new Promise<void>((resolve, reject) => { this.readyResolve = resolve; this.readyReject = reject; });
   private readonly exit: Promise<void>;
   private readonly onSignal = (): void => { void this.stop(); };
+  // Stack of collapsed viewers; set only under Hyprland after the window mapped.
+  private stack?: StackMembership;
+  private unwatchStack?: () => void;
+  private stackArea?: Rect;
+  private ownRect?: Rect;
+  private restackQueued = false;
+  private stackFailed = false;
+  private fanned = false;
+  private foldedAt = Number.NEGATIVE_INFINITY;
+  private hovering = false;
+  private hoverTimer?: NodeJS.Timeout;
 
   constructor(
     private readonly child: ChildProcessWithoutNullStreams,
@@ -106,6 +130,7 @@ class NativeHost {
     private readonly env: NodeJS.ProcessEnv,
     private readonly options: NativeHostOptions,
     private readonly xvfb: { pid: number; startTicks: number },
+    private sentTitle: string,
   ) {
     this.requests = new NativeRequests({ env, send: (command) => this.send(command),
       mode: (mode) => this.setMode(mode), currentMode: () => this.mode, controlling: () => this.control.active });
@@ -128,13 +153,134 @@ class NativeHost {
     this.actions = this.actions.then(operation).catch(() => { console.error("Native viewer operation failed"); });
   }
 
+  /** The single choke point for host placement, and for the card's place in the stack. */
   private async setMode(next: NativeViewerMode): Promise<void> {
-    let size: ViewerWindowSize | undefined;
-    if (this.record.hyprland !== undefined && !await applyHyprlandWindowMode(this.record, next, (placed) => { size = placed; })) {
+    let size: Rect | undefined;
+    let monitor: number | undefined;
+    // The card leaves the stack first, so the others close the gap.
+    if (next === "expanded") await this.markAway();
+    if (this.record.hyprland !== undefined && !await applyHyprlandWindowMode(this.record, next, (placed, on) => { size = placed; monitor = on; })) {
+      if (next === "expanded" && this.mode === "thumbnail") await this.stackWrite({ mode: "thumbnail" });
       throw new Error("Native viewer window could not be placed");
     }
     this.send({ cmd: "setMode", mode: next, ...(size === undefined ? {} : { width: size.width, height: size.height }) });
     this.mode = next;
+    if (next === "thumbnail" && size !== undefined) {
+      // The compositor raised the placed window, so it becomes the front card.
+      const placed: Rect = size;
+      this.ownRect = placed;
+      await this.stackWrite({ mode: "thumbnail", stackedAt: new Date().toISOString(), hover: false,
+        width: placed.width, height: placed.height, ...(monitor === undefined ? {} : { monitor }) });
+    }
+  }
+
+  private clearHover(): void {
+    if (this.hoverTimer !== undefined) clearTimeout(this.hoverTimer);
+    this.hoverTimer = undefined;
+    this.hovering = false;
+  }
+
+  private async markAway(): Promise<void> {
+    this.clearHover();
+    this.ownRect = undefined;
+    await this.stackWrite({ mode: "away", hover: false });
+  }
+
+  /** Stacking is cosmetic: a failed write never fails a mode change. */
+  private async stackWrite(patch: StackUpdate): Promise<void> {
+    await this.stack?.update(patch).catch(() => { this.stackFailure(); });
+  }
+
+  private stackFailure(): void {
+    if (!this.stackFailed) console.error("Native viewer stack update failed");
+    this.stackFailed = true;
+  }
+
+  private async joinStack(client: HyprlandClient): Promise<void> {
+    const hyprland = this.record.hyprland!;
+    const stack = new StackMembership(hyprland);
+    try {
+      await stack.join({ launchId: this.record.launchId, sessionId: this.record.sessionId,
+        hostPid: this.record.hostPid, hostStartTicks: this.record.hostStartTicks, monitor: client.monitor,
+        mode: "thumbnail", stackedAt: new Date().toISOString(), hover: false, ...this.record.thumbnail });
+    } catch {
+      this.stackFailure();
+      await stack.leave().catch(() => {});
+      return;
+    }
+    this.stack = stack;
+    this.unwatchStack = stack.watch(() => this.scheduleRestack());
+    this.scheduleRestack();
+  }
+
+  private scheduleRestack(): void {
+    if (this.restackQueued || this.stopped) return;
+    this.restackQueued = true;
+    this.enqueue(async () => {
+      this.restackQueued = false;
+      await this.restack().catch(() => { this.stackFailure(); });
+    });
+  }
+
+  /**
+   * Read the stack and move only this host's own window to its card. Runs in
+   * the host's action queue, so it never interleaves with setMode.
+   */
+  private async restack(): Promise<void> {
+    const stack = this.stack;
+    let self = stack?.current;
+    if (stack === undefined || self === undefined || this.stopped) return;
+    const members = await stack.read();
+    const recorded = members.find((member) => member.launchId === self!.launchId);
+    if (recorded === undefined) {
+      await stack.update({});
+      members.push(self);
+    } else self = recorded;
+    const fanned = stackFanned(members, self);
+    if (this.fanned && !fanned) this.foldedAt = Date.now();
+    this.fanned = fanned;
+    if (this.mode !== "thumbnail" || self.mode !== "thumbnail") return;
+    const cached = this.stackArea === undefined ? undefined : stackLayout(members, self.launchId, this.stackArea);
+    if (cached !== undefined && sameRect(cached, this.ownRect)) return;
+    const monitor = self.monitor;
+    let target: Rect | undefined;
+    const moved = await moveHyprlandViewerWindow(this.record, (area, on) => {
+      this.stackArea = area;
+      if (on !== monitor) return undefined;
+      target = stackLayout(members, self!.launchId, area);
+      return target === undefined || sameRect(target, this.ownRect) ? undefined : target;
+    });
+    if (moved) this.ownRect = target;
+  }
+
+  /** Hover only fans the stack out. It never reaches control or the session. */
+  private hoverEvent(inside: unknown): void {
+    if (this.stack === undefined || typeof inside !== "boolean") return;
+    if (this.hoverTimer !== undefined) clearTimeout(this.hoverTimer);
+    this.hoverTimer = undefined;
+    if (!inside) {
+      this.hoverTimer = setTimeout(() => this.setHover(false), LEAVE_DEBOUNCE_MS);
+      return;
+    }
+    if (this.mode !== "thumbnail") return;
+    // A fold moves cards under a still pointer; a hover right after it waits.
+    const wait = this.foldedAt + FOLD_COOLDOWN_MS - Date.now();
+    if (wait > 0) this.hoverTimer = setTimeout(() => this.setHover(true), wait);
+    else this.setHover(true);
+  }
+
+  private setHover(hover: boolean): void {
+    this.hoverTimer = undefined;
+    if (this.hovering === hover || this.stopped || (hover && this.mode !== "thumbnail")) return;
+    this.hovering = hover;
+    void this.stackWrite({ hover });
+  }
+
+  private syncTitle(raw: string | undefined): void {
+    const title = viewerTitle(raw);
+    if (title === this.sentTitle) return;
+    this.sentTitle = title;
+    this.send({ cmd: "setTitle", title });
   }
 
   private controlEvent(message: Record<string, unknown>): boolean {
@@ -166,7 +312,9 @@ class NativeHost {
       case "collapseRequested": this.requestMode("thumbnail"); break;
       case "mode":
         if (["thumbnail", "expanded", "fullscreen"].includes(String(message.mode))) this.mode = message.mode as typeof this.mode;
+        if (message.mode === "fullscreen") this.enqueue(() => this.markAway());
         break;
+      case "hover": this.hoverEvent(message.inside); break;
       case "sessionEnded": this.endSession(); break;
       case "closed": this.requests.beginClose(); void this.stop(); break;
       case "error": this.readyReject(new Error("Native viewer reported an error")); void this.stop(); break;
@@ -283,7 +431,8 @@ class NativeHost {
       polling = true;
       const read = (): ReturnType<typeof getSession> => getSession(this.record.sessionId, this.env);
       void withSessionVncLock(this.record.sessionId, this.env, read, { signal: this.sessionMonitor.signal }).catch(read).then((current) => {
-        if (!this.stopped && current?.status !== "running") { this.endSession(); }
+        if (!this.stopped && current?.status !== "running") { this.endSession(); return; }
+        if (!this.stopped) this.syncTitle(current?.title);
       }).catch(() => {}).finally(() => { polling = false; });
     }, 500);
     this.timer.unref();
@@ -295,6 +444,9 @@ class NativeHost {
       this.requests.beginClose();
       this.sessionMonitor.abort();
       if (this.timer !== undefined) clearInterval(this.timer);
+      this.unwatchStack?.();
+      if (this.hoverTimer !== undefined) clearTimeout(this.hoverTimer);
+      await this.stack?.leave().catch(() => {});
       await this.control.end("stopping", true).catch(() => { if (!this.exited) this.child.kill("SIGKILL"); });
       this.requests.close();
       this.send({ cmd: "status", code: "stopping" });
@@ -326,8 +478,9 @@ class NativeHost {
       if (startupError !== undefined) { console.error("Native viewer could not take control"); return 1; }
       const hyprland = this.record.hyprland;
       if (hyprland !== undefined) {
-        await waitForViewerWindow(hyprland, hyprland.classPattern, this.record.viewerPid, { stopped: () => this.exited || this.stopped });
+        const client = await waitForViewerWindow(hyprland, hyprland.classPattern, this.record.viewerPid, { stopped: () => this.exited || this.stopped });
         await disableViewerRule(hyprland, hyprland.ruleName);
+        if (client !== undefined && !this.exited && !this.stopped) await this.joinStack(client);
       }
       if (this.exited || this.stopped) throw new Error("Native viewer stopped during startup");
       await this.listen();
@@ -370,12 +523,14 @@ export async function runNativeViewerHost(options: NativeHostOptions): Promise<n
     if (await installViewerRule(ctx, ruleName, classPattern, sizes.thumbnail)) hyprland = { ...ctx, ruleName, classPattern };
     else await disableViewerRule(ctx, ruleName);
   }
+  const title = viewerTitle(session.title);
   try {
     const child = spawn(options.binary, [
       "--display", target.display, "--xvfb-pid", String(target.pid), "--xvfb-start-ticks", String(target.startTicks),
       "--width", String(sizes.expanded.width), "--height", String(sizes.expanded.height - 32),
       "--class", viewerWindowClass(launchId), "--thumbnail-width", "384", "--placement", hyprland === undefined ? "self" : "host",
       "--label", viewerLabel(options.session, session.projectDir),
+      ...(title === "" ? [] : ["--title", title]),
     ], { env, shell: false, detached: false, stdio: ["pipe", "pipe", "pipe"] });
     await once(child, "spawn");
     const viewerIdentity = readProcessIdentity(child.pid!);
@@ -384,7 +539,7 @@ export async function runNativeViewerHost(options: NativeHostOptions): Promise<n
       kind: "native", sessionId: options.session, launchId, createdAt: new Date().toISOString(), binary: options.binary,
       hostPid: hostIdentity.pid, hostStartTicks: hostIdentity.startTicks,
       viewerPid: viewerIdentity.pid, viewerStartTicks: viewerIdentity.startTicks, ...viewerIdentity, ...sizes, hyprland,
-    }, options.viewerVersion, env, options, { pid: target.pid, startTicks: target.startTicks }).run();
+    }, options.viewerVersion, env, options, { pid: target.pid, startTicks: target.startTicks }, title).run();
   } finally {
     if (hyprland !== undefined) {
       await disableViewerRule(hyprland, ruleName);
