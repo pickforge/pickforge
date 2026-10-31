@@ -247,16 +247,34 @@ export function stackFanned(members: readonly StackMember[], self: StackMember):
   return stackCards(members, self).some((member) => member.hover);
 }
 
+function collapsedTops(cards: readonly StackMember[], top0: number): number[] {
+  const bottom = top0 + cards[0]!.height;
+  const tops = [top0];
+  for (let k = 1; k < cards.length; k++) tops.push(Math.min(tops[k - 1]! - STACK_PEEK, bottom - cards[k]!.height));
+  return tops;
+}
+
+function fannedTops(cards: readonly StackMember[], top0: number, area: Rect): number[] {
+  const tops = [top0];
+  for (let k = 1; k < cards.length; k++) tops.push(tops[k - 1]! - cards[k]!.height);
+  if (tops.at(-1)! >= area.y + THUMBNAIL_MARGIN) return tops;
+  const spacing = Math.max(STACK_PEEK, Math.floor((top0 - area.y - THUMBNAIL_MARGIN) / (cards.length - 1)));
+  for (let k = 1; k < cards.length; k++) tops[k] = tops[k - 1]! - Math.min(spacing, cards[k]!.height);
+  return tops;
+}
+
 /**
  * Where this host's card goes, or undefined when it is not in the stack.
  *
  * The front card sits in the thumbnail corner of `area`. Collapsed, each back
  * card sits {@link STACK_PEEK} higher than the card in front, so only its
  * title strip shows, and never ends below the front card. Fanned, each card
- * sits right above the card in front, without a gap, so a pointer on any
- * collapsed strip stays on a card; when that runs past the top margin, the
- * cards share the space uniformly, at least {@link STACK_PEEK} apart. The
- * front card never moves. Cards align to the right margin.
+ * sits right above the card in front, without a gap; when that runs past the
+ * top margin, the cards share the space, at least {@link STACK_PEEK} apart,
+ * and a step never exceeds the card's height. No fanned card sits lower than
+ * its collapsed place. So the fanned cards cover every collapsed strip, and a
+ * pointer on a strip stays on the stack. The front card never moves. Cards
+ * align to the right margin.
  */
 export function stackLayout(members: readonly StackMember[], selfLaunchId: string, area: Rect): Rect | undefined {
   const self = members.find((member) => member.launchId === selfLaunchId);
@@ -264,17 +282,7 @@ export function stackLayout(members: readonly StackMember[], selfLaunchId: strin
   const cards = stackCards(members, self);
   const index = cards.indexOf(self);
   const top0 = area.y + area.height - cards[0]!.height - THUMBNAIL_MARGIN;
-  const tops = [top0];
-  if (stackFanned(members, self)) {
-    for (let k = 1; k < cards.length; k++) tops.push(tops[k - 1]! - cards[k]!.height);
-    if (tops.at(-1)! < area.y + THUMBNAIL_MARGIN) {
-      const spacing = Math.max(STACK_PEEK, Math.floor((top0 - area.y - THUMBNAIL_MARGIN) / (cards.length - 1)));
-      // A step never exceeds the card's height, so no gap opens below it.
-      for (let k = 1; k < cards.length; k++) tops[k] = tops[k - 1]! - Math.min(spacing, cards[k]!.height);
-    }
-  } else {
-    const bottom = top0 + cards[0]!.height;
-    for (let k = 1; k < cards.length; k++) tops.push(Math.min(tops[k - 1]! - STACK_PEEK, bottom - cards[k]!.height));
-  }
+  const collapsed = collapsedTops(cards, top0);
+  const tops = stackFanned(members, self) ? fannedTops(cards, top0, area).map((top, k) => Math.min(top, collapsed[k]!)) : collapsed;
   return { x: area.x + area.width - self.width - THUMBNAIL_MARGIN, y: tops[index]!, width: self.width, height: self.height };
 }

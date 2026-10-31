@@ -34,6 +34,13 @@ function ys(members: StackMember[], ids: number[] = members.map((_, index) => in
   return ids.map((n) => stackLayout(members, id(n), AREA)?.y);
 }
 
+/** 300 seeded stacks of 2 to 8 cards, 40 to 900 px tall. */
+function mixedHeights(): number[][] {
+  let seed = 497;
+  const next = (): number => { seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648; return seed / 2_147_483_648; };
+  return Array.from({ length: 300 }, () => Array.from({ length: 2 + Math.floor(next() * 7) }, () => 40 + Math.floor(next() * 861)));
+}
+
 describe("stackLayout", () => {
   it("puts a lone card in the thumbnail corner", () => {
     expect(stackLayout([card(1)], id(1), AREA)).toEqual({ x: X, y: TOP0, width: W, height: H });
@@ -58,7 +65,7 @@ describe("stackLayout", () => {
 
   it("keeps every collapsed strip on a card when the stack fans, so the pointer stays on the stack", () => {
     // The last two overflow the area, so the cards share it uniformly.
-    for (const heights of [[H, H, H, H], [100, 300, 160, 240], [240, 60, 400, 120], [H, 165, H, H, H, H], [H, 40, 40, H, H, H, H]]) {
+    for (const heights of [[H, H, H, H], [100, 300, 160, 240], [240, 60, 400, 120], [H, 165, H, H, H, H], [H, 40, 40, H, H, H, H], [H, 300, 40, 900], ...mixedHeights()]) {
       const collapsed = heights.map((height, k) => card(10 - k, { height }));
       const fanned = collapsed.map((member, k) => ({ ...member, hover: k === 0 }));
       const rows = (members: StackMember[]): Array<[number, number]> =>
