@@ -1,14 +1,17 @@
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import WebSocket from "ws";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  acquireHumanLease,
   getSession,
   isPidAlive,
   isProcessGroupAlive,
   listProcessGroupMembers,
   readPickforgeEnv,
+  releaseHumanLease,
   type EnvLike,
 } from "@pickforge/lab-core";
 import { findOnPath } from "@pickforge/lab-desktop-linux";
@@ -18,7 +21,9 @@ import {
   createBrowserSession,
   destroyBrowserSession,
   detectChromeBinary,
+  enterPlainBrowser,
   getBrowserSessionStatus,
+  restoreCdpBrowser,
   readBrowserSessionCdpEndpoint,
   type BrowserSessionHandle,
 } from "../src/index.js";
@@ -158,6 +163,69 @@ function listeningTcpPorts(pgid: number): number[] {
   return ports;
 }
 
+/** The Chrome browser process of a session: the group member without --type. */
+function chromeBrowserArgv(session: BrowserSessionHandle): string[] | undefined {
+  return chromeBrowserProcess(session)?.argv;
+}
+
+function chromeBrowserProcess(session: BrowserSessionHandle): { pid: number; argv: string[] } | undefined {
+  for (const pid of listProcessGroupMembers(session.browserPid)) {
+    if (pid === session.browserPid) continue;
+    let argv: string[];
+    try {
+      argv = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
+    } catch {
+      continue;
+    }
+    if (argv.includes(`--user-data-dir=${session.profileDir}`) && !argv.some((arg) => arg.startsWith("--type="))) {
+      return { pid, argv };
+    }
+  }
+  return undefined;
+}
+
+async function pageUrls(client: CdpClient): Promise<string[]> {
+  const { targetInfos } = await client.send("Target.getTargets");
+  return (targetInfos as Array<{ type: string; url: string }>)
+    .filter((info) => info.type === "page")
+    .map((info) => info.url);
+}
+
+/**
+ * Whether a Chrome holds open a session file that lists every URL. A Chrome
+ * without remote debugging tells its tabs only through this file, which each
+ * launch starts anew and keeps open.
+ */
+function openSessionFileHas(pid: number, urls: string[]): boolean {
+  const fdDir = `/proc/${pid}/fd`;
+  for (const fd of fs.readdirSync(fdDir)) {
+    let target: string;
+    try {
+      target = fs.readlinkSync(path.join(fdDir, fd));
+    } catch {
+      continue;
+    }
+    if (!path.basename(target).startsWith("Session_")) continue;
+    const content = fs.readFileSync(target).toString("latin1");
+    if (urls.every((url) => content.includes(url))) return true;
+  }
+  return false;
+}
+
+/** A loopback page server, so the tabs have web URLs to reopen. */
+async function startPageServer(): Promise<{ origin: string; close(): Promise<void> }> {
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { "Content-Type": "text/html" });
+    response.end("<title>page</title>");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as { port: number };
+  return {
+    origin: `http://127.0.0.1:${port}`,
+    close: () => new Promise((resolve) => server.close(() => resolve())),
+  };
+}
+
 async function answersJsonVersion(port: number): Promise<boolean> {
   try {
     const response = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(2_000) });
@@ -239,6 +307,77 @@ describe.skipIf(!ready)("real headed Chrome under Xvfb", () => {
       for (const session of sessions) await destroyBrowserSession(session.id, registryEnv).catch(() => {});
     }
   });
+
+  it(
+    "hands a named profile to a plain Chrome for a takeover and restores it under CDP",
+    { timeout: 120_000 },
+    async () => {
+      const pages = await startPageServer();
+      const session = await createBrowserSession({ projectDir, registryEnv, env: spawnEnv, profile: "ops" });
+      try {
+        const urls = [`${pages.origin}/one`, `${pages.origin}/two`];
+        const before = await openCdpClient(session);
+        try {
+          await before.send("Storage.setCookies", { cookies: [{
+            name: "pickforge_handoff", value: "kept", domain: "example.test", path: "/",
+            expires: Math.floor(Date.now() / 1000) + 3600,
+          }] });
+          for (const url of urls) await before.send("Target.createTarget", { url });
+          await vi.waitFor(async () => expect(await pageUrls(before)).toEqual(expect.arrayContaining(urls)), {
+            timeout: 10_000,
+          });
+        } finally {
+          await before.close();
+        }
+        const lease = await acquireHumanLease(session.id, registryEnv);
+        try {
+          expect(await enterPlainBrowser(session.id, registryEnv)).toBe(true);
+          expect((await readBrowserSessionCdpEndpoint(session.id, registryEnv))?.mode).toBe("plain");
+          const { pid: plainPid, argv: plain } = await vi.waitFor(() => {
+            const found = chromeBrowserProcess(session);
+            if (found === undefined) throw new Error("no plain Chrome yet");
+            return found;
+          }, { timeout: 10_000 });
+          expect(plain.some((arg) => arg.startsWith("--remote-debugging-"))).toBe(false);
+          expect(plain).toContain("--password-store=basic");
+          expect(plain).toContain("--restore-last-session");
+          // Page URLs stay out of /proc/<pid>/cmdline, which other local users can read.
+          expect(plain.filter((arg) => arg.includes(pages.origin))).toEqual([]);
+          // Browser.close saved the tabs, and the plain Chrome reopened them.
+          await vi.waitFor(() => expect(openSessionFileHas(plainPid, urls)).toBe(true), {
+            timeout: 20_000,
+            interval: 250,
+          });
+          expect((await getBrowserSessionStatus(session.id, registryEnv)).alive).toBe(true);
+
+          expect(await restoreCdpBrowser(session.id, registryEnv)).toBe(true);
+        } finally {
+          await releaseHumanLease(session.id, lease.leaseId, registryEnv);
+        }
+        expect((await readBrowserSessionCdpEndpoint(session.id, registryEnv))?.mode).toBe("cdp");
+        expect(chromeBrowserArgv(session)).toContain("--remote-debugging-pipe");
+        const after = await vi.waitFor(() => openCdpClient(session), { timeout: 10_000, interval: 100 });
+        try {
+          expect((await after.send("Browser.getVersion")).product).toMatch(/Chrome/);
+          expect((await after.send("Storage.getCookies")).cookies).toEqual(expect.arrayContaining([
+            expect.objectContaining({ name: "pickforge_handoff", value: "kept" }),
+          ]));
+          await vi.waitFor(async () => expect(await pageUrls(after)).toEqual(expect.arrayContaining(urls)), {
+            timeout: 10_000,
+          });
+        } finally {
+          await after.close();
+        }
+        expect((await getBrowserSessionStatus(session.id, registryEnv)).alive).toBe(true);
+        // A session that ended is no longer restored.
+        await destroyBrowserSession(session.id, registryEnv);
+        expect(await restoreCdpBrowser(session.id, registryEnv)).toBe(false);
+      } finally {
+        await destroyBrowserSession(session.id, registryEnv).catch(() => {});
+        await pages.close();
+      }
+    },
+  );
 
   it(
     "starts from a deeply nested home without exceeding Chrome socket limits",

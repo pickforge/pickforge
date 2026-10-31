@@ -718,3 +718,100 @@ describe("viewer takeover transport", () => {
     expect(await readArgvLog()).toEqual([]);
   });
 });
+
+describe("takeover hooks (#380)", () => {
+  it.each(["return", "timeout", "cancelled"] as const)("runs viewer hooks around input on %s", async (reason) => {
+    const id = await createDesktop();
+    const order: string[] = [];
+    const handle = await startHumanTakeover(id, {
+      transport: "viewer", registryEnv: env, env,
+      afterLease: async (lease) => {
+        expect(await readHumanLease(id, env)).toMatchObject({ leaseId: lease.leaseId });
+        order.push("afterLease");
+      },
+    });
+    order.push("input");
+    await endHumanTakeover(handle, {
+      registryEnv: env, env, reason,
+      beforeRelease: async (held) => {
+        expect(releaseStuckInput).toHaveBeenCalledWith(":42", env);
+        expect(await readHumanLease(id, env)).toMatchObject({ leaseId: held.leaseId });
+        order.push("beforeRelease");
+      },
+    });
+    expect(order).toEqual(["afterLease", "input", "beforeRelease"]);
+    expect(await readHumanLease(id, env)).toBeUndefined();
+  });
+
+  it.each(["return", "timeout", "cancelled"] as const)("runs x11vnc hooks outside writable input on %s", async (reason) => {
+    const id = await createDesktop({ vncPort: await freeLoopbackPort() });
+    let argvAtAfterLease: string[][] | undefined;
+    const handle = await startHumanTakeover(id, {
+      registryEnv: env, env,
+      afterLease: async () => { argvAtAfterLease = await readArgvLog(); },
+    });
+    expect(argvAtAfterLease).toEqual([]);
+    let viewOnlyAtRelease: boolean | undefined;
+    await endHumanTakeover(handle, {
+      registryEnv: env, env, reason,
+      beforeRelease: async () => {
+        viewOnlyAtRelease = (await getSession(id, env))?.desktop?.vncViewOnly;
+        expect(await readHumanLease(id, env)).toMatchObject({ leaseId: handle.leaseId });
+      },
+    });
+    expect(viewOnlyAtRelease).toBe(true);
+    expect(await readHumanLease(id, env)).toBeUndefined();
+  });
+
+  it.each(["viewer", "x11vnc"] as const)("releases the lease when afterLease throws (%s)", async (transport) => {
+    const id = await createDesktop({ vncPort: await freeLoopbackPort() });
+    await expect(startHumanTakeover(id, {
+      transport, registryEnv: env, env,
+      afterLease: async () => { throw new Error("plain launch failed"); },
+    })).rejects.toThrow("plain launch failed");
+    expect(await readHumanLease(id, env)).toBeUndefined();
+    expect(await readArgvLog()).toEqual([]);
+  });
+
+  it.each(["viewer", "x11vnc"] as const)("keeps the lease alive through an afterLease longer than its TTL (%s)", async (transport) => {
+    const id = await createDesktop({ vncPort: await freeLoopbackPort() });
+    const handle = await startHumanTakeover(id, {
+      transport, registryEnv: env, env, ttlMs: 400, heartbeatMs: 100,
+      afterLease: () => new Promise((resolve) => setTimeout(resolve, 1_000)),
+    });
+    expect(await readHumanLease(id, env)).toMatchObject({ leaseId: handle.leaseId });
+    await endHumanTakeover(handle, { registryEnv: env, env, reason: "return" });
+  });
+
+  it("stops renewing and releases the lease when afterLease throws synchronously", async () => {
+    const id = await createDesktop();
+    await expect(startHumanTakeover(id, {
+      transport: "viewer", registryEnv: env, env, ttlMs: 400, heartbeatMs: 100,
+      afterLease: () => { throw new Error("sync failure"); },
+    })).rejects.toThrow("sync failure");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await readHumanLease(id, env)).toBeUndefined();
+  });
+
+  it("releases the lease and rethrows when beforeRelease throws", async () => {
+    const id = await createDesktop();
+    const handle = await startHumanTakeover(id, { transport: "viewer", registryEnv: env, env });
+    await expect(endHumanTakeover(handle, {
+      registryEnv: env, env, reason: "return",
+      beforeRelease: async () => { throw new Error("restore failed"); },
+    })).rejects.toThrow("restore failed");
+    expect(await readHumanLease(id, env)).toBeUndefined();
+  });
+
+  it("skips beforeRelease for a handle whose lease another takeover holds", async () => {
+    const id = await createDesktop({ vncPort: await freeLoopbackPort() });
+    const first = await startHumanTakeover(id, { registryEnv: env, env });
+    await releaseHumanLease(id, first.leaseId, env);
+    const current = await startHumanTakeover(id, { transport: "viewer", registryEnv: env, env });
+    const beforeRelease = vi.fn(async () => {});
+    await endHumanTakeover(first, { registryEnv: env, env, reason: "timeout", beforeRelease });
+    expect(beforeRelease).not.toHaveBeenCalled();
+    expect(await readHumanLease(id, env)).toMatchObject({ leaseId: current.leaseId });
+    await endHumanTakeover(current, { registryEnv: env, env, reason: "return" });
+  });
+});

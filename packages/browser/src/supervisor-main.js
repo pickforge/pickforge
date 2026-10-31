@@ -8,15 +8,24 @@
  * browser-target session, and its top-level commands run there. Detaching that
  * session when the client leaves makes Chrome undo what the client set up.
  *
+ * During a human takeover (#380) Google refuses sign-in in any Chrome with
+ * remote debugging. POST /plain closes the CDP Chrome and opens the same
+ * profile in a plain Chrome without the pipe; POST /cdp closes it cleanly and
+ * reopens the profile under CDP with its last tabs. The socket, the endpoint
+ * file and a relay's lease stay across both relaunches; only the websocket
+ * client is dropped, and new ones wait until CDP is back.
+ *
  * This file runs as plain JavaScript under Node: the browser package starts it
  * from source in tests, and the CLI build copies it next to its bundle.
  *
  * argv: <endpoint file> <socket path> <browser binary> [browser args...]
+ * The last browser arg is the start URL, as buildChromeArgs puts it.
  */
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
+import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { WebSocketServer } from "ws";
 
@@ -31,6 +40,22 @@ import { WebSocketServer } from "ws";
  * @property {(message: any) => void} [resolve] Set for the bridge's own commands.
  */
 /** @typedef {{ path: string, response: http.ServerResponse }} Lease */
+/** @typedef {"cdp" | "plain" | "plain-idle" | "relaunching"} Mode */
+/**
+ * One CDP child's DevTools pipe.
+ * @typedef {object} Pipe
+ * @property {Writable} toChrome
+ * @property {Readable} fromChrome
+ */
+/**
+ * One browser child.
+ * @typedef {object} Browser
+ * @property {import("node:child_process").ChildProcess} process
+ * @property {Pipe | undefined} pipe Set for a CDP child only.
+ * @property {boolean} exited
+ * @property {number} code
+ * @property {Promise<void>} exit Resolves once the child exited.
+ */
 
 const [endpointFile, socketPath, binary, ...args] = process.argv.slice(2);
 if (!endpointFile || !socketPath || !binary) process.exit(127);
@@ -48,6 +73,43 @@ const MAX_STDERR_BUFFER_BYTES = 64 * 1024;
 const ALREADY_ATTACHED = "A CDP client is already attached to this browser session";
 const ATTACH_METHODS = new Set(["Target.attachToTarget", "Target.attachToBrowserTarget"]);
 const browserPath = `/devtools/browser/${randomUUID()}`;
+/** Tests shorten the stop and CDP start budgets with this variable. */
+const testBudgetMs = Number(process.env.PICKFORGE_SUPERVISOR_TEST_BUDGET_MS);
+/** How long a closing browser may take before it is killed. */
+const STOP_TIMEOUT_MS = testBudgetMs > 0 ? testBudgetMs : 15_000;
+/** How long a relaunch waits for the old browser's helpers to exit. */
+const GROUP_DRAIN_TIMEOUT_MS = 5_000;
+/** A plain browser that exits this soon did not start. */
+const PLAIN_START_GRACE_MS = 1_000;
+/** How long a relaunched CDP browser may take to answer Browser.getVersion. */
+const CDP_START_TIMEOUT_MS = testBudgetMs > 0 ? testBudgetMs : 45_000;
+const LEASE_POLL_MS = 1_000;
+/** HUMAN_LEASE_FILE of @pickforge/lab-core, in the session directory. */
+const humanLeaseFile = path.join(path.dirname(endpointFile), "human.lease.json");
+
+/**
+ * The state, process group and start ticks (fields 3, 5 and 22) of
+ * `/proc/<pid>/stat`, or undefined when it cannot be read or parsed.
+ * @param {number} pid
+ * @returns {{ state: string, pgrp: number, startTicks: number } | undefined}
+ */
+function readProcStat(pid) {
+  let content;
+  try {
+    content = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+  } catch {
+    return undefined;
+  }
+  // The command name may hold spaces and parentheses; fields follow the last ")".
+  const close = content.lastIndexOf(")");
+  if (close === -1) return undefined;
+  const fields = content.slice(close + 1).trim().split(/\s+/);
+  const state = fields[0];
+  const pgrp = Number(fields[2]);
+  const startTicks = Number(fields[19]);
+  if (state === undefined || !Number.isFinite(pgrp) || !Number.isFinite(startTicks)) return undefined;
+  return { state, pgrp, startTicks };
+}
 
 function hasLiveGroupMembers() {
   let entries;
@@ -60,77 +122,120 @@ function hasLiveGroupMembers() {
     if (!/^\d+$/.test(entry)) continue;
     const pid = Number(entry);
     if (pid === process.pid) continue;
-    let content;
-    try {
-      content = fs.readFileSync("/proc/" + pid + "/stat", "utf8");
-    } catch {
-      continue;
-    }
-    const close = content.lastIndexOf(")");
-    if (close === -1) continue;
-    const fields = content.slice(close + 1).trim().split(/\s+/);
-    const state = fields[0];
-    const pgrp = Number(fields[2]);
-    if (state !== "Z" && pgrp === process.pid) return true;
+    const stat = readProcStat(pid);
+    if (stat !== undefined && stat.state !== "Z" && stat.pgrp === process.pid) return true;
   }
   return false;
 }
 
-let childExited = false;
-let childCode = 1;
-const child = spawn(binary, args, {
-  env: process.env,
-  shell: false,
-  stdio: ["inherit", "inherit", "pipe", "pipe", "pipe"],
-});
-const toChrome = /** @type {Writable} */ (child.stdio[3]);
-const fromChrome = /** @type {Readable} */ (child.stdio[4]);
-const browserStderr = /** @type {Readable} */ (child.stderr);
-
-let stderrBuffer = "";
-/** @param {string} line */
-function forwardBrowserStderr(line) {
-  process.stderr.write(
-    line.replace(
-      /ws:\/\/[^\s]+\/devtools\/browser\/[^\s]+/g,
-      "[redacted DevTools capability URL]",
-    ),
-  );
-}
-function flushBrowserStderr(final = false) {
-  let newline = stderrBuffer.indexOf("\n");
-  while (newline !== -1) {
-    const line = stderrBuffer.slice(0, newline + 1);
-    stderrBuffer = stderrBuffer.slice(newline + 1);
-    forwardBrowserStderr(line);
-    newline = stderrBuffer.indexOf("\n");
-  }
-  if (final && stderrBuffer !== "") {
-    forwardBrowserStderr(stderrBuffer);
-    stderrBuffer = "";
+/**
+ * identityIsAlive of @pickforge/lab-core: a zombie or a start ticks mismatch
+ * is dead. An unreadable stat falls back to a signal probe, where only ESRCH
+ * is dead.
+ * @param {number} pid
+ * @param {number | undefined} startTicks
+ */
+function identityIsAlive(pid, startTicks) {
+  const stat = startTicks === undefined ? undefined : readProcStat(pid);
+  if (stat !== undefined) return stat.state !== "Z" && stat.startTicks === startTicks;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return /** @type {NodeJS.ErrnoException} */ (error).code === "EPERM";
   }
 }
-browserStderr.setEncoding("utf8");
-browserStderr.on("data", (chunk) => {
-  stderrBuffer += chunk;
-  flushBrowserStderr();
-  // No newline arrived to flush a complete line; bound the buffer so an
-  // unbounded stream of newline-free stderr can never grow it forever.
-  if (stderrBuffer.length > MAX_STDERR_BUFFER_BYTES) {
-    stderrBuffer = stderrBuffer.slice(-MAX_STDERR_BUFFER_BYTES);
-  }
-});
-browserStderr.once("end", () => flushBrowserStderr(true));
-child.once("error", (error) => {
-  console.error("Failed to launch browser:", error.message);
-  childExited = true;
-  childCode = 127;
-});
-child.once("exit", (code) => {
-  childExited = true;
-  childCode = code == null ? 1 : code;
-});
 
+/**
+ * Forward a browser's stderr line by line with DevTools capability URLs
+ * redacted.
+ * @param {Readable} stream
+ */
+function forwardBrowserStderr(stream) {
+  let buffered = "";
+  /** @param {string} line */
+  const forward = (line) => {
+    process.stderr.write(
+      line.replace(
+        /ws:\/\/[^\s]+\/devtools\/browser\/[^\s]+/g,
+        "[redacted DevTools capability URL]",
+      ),
+    );
+  };
+  const flush = (final = false) => {
+    let newline = buffered.indexOf("\n");
+    while (newline !== -1) {
+      forward(buffered.slice(0, newline + 1));
+      buffered = buffered.slice(newline + 1);
+      newline = buffered.indexOf("\n");
+    }
+    if (final && buffered !== "") {
+      forward(buffered);
+      buffered = "";
+    }
+  };
+  stream.setEncoding("utf8");
+  stream.on("data", (chunk) => {
+    buffered += chunk;
+    flush();
+    // No newline arrived to flush a complete line; bound the buffer so an
+    // unbounded stream of newline-free stderr can never grow it forever.
+    if (buffered.length > MAX_STDERR_BUFFER_BYTES) {
+      buffered = buffered.slice(-MAX_STDERR_BUFFER_BYTES);
+    }
+  });
+  stream.once("end", () => flush(true));
+}
+
+/**
+ * Start a browser child. A CDP child gets the DevTools pipe on fds 3 and 4;
+ * a plain one gets no pipe at all.
+ * @param {string[]} argv
+ * @param {boolean} withPipe
+ * @returns {Browser}
+ */
+function spawnBrowser(argv, withPipe) {
+  const child = spawn(binary, argv, {
+    env: process.env,
+    shell: false,
+    stdio: withPipe ? ["inherit", "inherit", "pipe", "pipe", "pipe"] : ["inherit", "inherit", "pipe"],
+  });
+  /** @type {Browser} */
+  const started = { process: child, pipe: undefined, exited: false, code: 1, exit: Promise.resolve() };
+  started.exit = new Promise((resolve) => {
+    /** @param {number} code */
+    const done = (code) => {
+      if (started.exited) return;
+      started.exited = true;
+      started.code = code;
+      resolve();
+      browserExited(started);
+    };
+    child.once("error", (error) => {
+      console.error("Failed to launch browser:", error.message);
+      done(127);
+    });
+    child.once("exit", (code) => done(code ?? 1));
+  });
+  forwardBrowserStderr(/** @type {Readable} */ (child.stderr));
+  if (withPipe) started.pipe = openPipe(child);
+  return started;
+}
+
+/** @type {Mode} */
+let mode = "cdp";
+/** @type {Browser | undefined} The current browser child. */
+let browser;
+/** @type {Pipe | undefined} The current CDP child's pipe. */
+let pipe;
+/** True while a relaunch runs; its child exits are planned. */
+let transitioning = false;
+/** Set by /close and by a failed relaunch: the supervisor is ending. */
+let closing = false;
+/** Relaunches run one at a time on this chain. */
+let transitions = Promise.resolve();
+/** @type {Array<() => void>} Websocket upgrades that wait for CDP. */
+let cdpWaiters = [];
 const bridge = {
   /** @type {WebSocket | undefined} */
   client: undefined,
@@ -159,12 +264,13 @@ let nextId = 1;
 /** @type {Map<number, Pending>} */
 const inflight = new Map();
 
-// Chrome's own end of the pipe closing is reported on the read side.
-toChrome.on("error", () => {});
-
-/** @param {object} message */
+/**
+ * Write a message to the current CDP child. Returns false when the pipe wants
+ * the writer to wait for `drain`.
+ * @param {object} message
+ */
 function writeToChrome(message) {
-  return toChrome.write(`${JSON.stringify(message)}\0`);
+  return pipe === undefined ? true : pipe.toChrome.write(`${JSON.stringify(message)}\0`);
 }
 
 /**
@@ -177,7 +283,7 @@ function writeToChrome(message) {
  */
 function command(method, params = {}, sessionId) {
   return new Promise((resolve) => {
-    if (bridge.closed) {
+    if (bridge.closed || pipe === undefined) {
       resolve(undefined);
       return;
     }
@@ -192,12 +298,13 @@ function command(method, params = {}, sessionId) {
  * @param {string} text
  */
 function sendToClient(client, text) {
+  const source = pipe;
   client.send(text, () => {
     if (bridge.client !== client || client.bufferedAmount < CLIENT_HIGH_WATER_BYTES) {
-      fromChrome.resume();
+      source?.fromChrome.resume();
     }
   });
-  if (client.bufferedAmount >= CLIENT_HIGH_WATER_BYTES) fromChrome.pause();
+  if (client.bufferedAmount >= CLIENT_HIGH_WATER_BYTES) source?.fromChrome.pause();
 }
 
 /** @param {any} message */
@@ -284,48 +391,84 @@ function handleChromeMessage(text) {
   sendToClient(client, message.sessionId === bridge.clientSession ? toClientText(message) : text);
 }
 
-/** @type {Buffer[]} */
-let frameParts = [];
-let frameBytes = 0;
-let discardingFrame = false;
-
-/** @param {Buffer} part */
-function appendFrame(part) {
-  if (part.length === 0 || discardingFrame) return;
-  if (frameBytes + part.length > MAX_MESSAGE_BYTES) {
-    discardingFrame = true;
-    frameParts = [];
-    frameBytes = 0;
-    return;
-  }
-  frameParts.push(part);
-  frameBytes += part.length;
+/**
+ * Split a pipe's byte stream into NUL-terminated CDP messages. Each pipe gets
+ * its own reader, so a message cut off by a relaunch never joins the next.
+ * @returns {(chunk: Buffer) => void}
+ */
+function frameReader() {
+  /** @type {Buffer[]} */
+  let parts = [];
+  let bytes = 0;
+  let discarding = false;
+  /** @param {Buffer} part */
+  const append = (part) => {
+    if (part.length === 0 || discarding) return;
+    if (bytes + part.length > MAX_MESSAGE_BYTES) {
+      discarding = true;
+      parts = [];
+      bytes = 0;
+      return;
+    }
+    parts.push(part);
+    bytes += part.length;
+  };
+  const finish = () => {
+    if (discarding) {
+      discarding = false;
+      console.error(`Dropped a CDP message over ${MAX_MESSAGE_BYTES} bytes from the browser`);
+      // The client now waits for a reply that never comes; end its connection.
+      bridge.client?.close(1009, "CDP message too large");
+      return;
+    }
+    const text = Buffer.concat(parts, bytes).toString("utf8");
+    parts = [];
+    bytes = 0;
+    if (text !== "") handleChromeMessage(text);
+  };
+  return (chunk) => {
+    let start = 0;
+    for (;;) {
+      const end = chunk.indexOf(0, start);
+      append(chunk.subarray(start, end === -1 ? chunk.length : end));
+      if (end === -1) return;
+      finish();
+      start = end + 1;
+    }
+  };
 }
 
-function finishFrame() {
-  if (discardingFrame) {
-    discardingFrame = false;
-    console.error(`Dropped a CDP message over ${MAX_MESSAGE_BYTES} bytes from the browser`);
-    // The client now waits for a reply that never comes; end its connection.
-    bridge.client?.close(1009, "CDP message too large");
-    return;
-  }
-  const text = Buffer.concat(frameParts, frameBytes).toString("utf8");
-  frameParts = [];
-  frameBytes = 0;
-  if (text !== "") handleChromeMessage(text);
+/**
+ * @param {import("node:child_process").ChildProcess} child
+ * @returns {Pipe}
+ */
+function openPipe(child) {
+  /** @type {Pipe} */
+  const opened = {
+    toChrome: /** @type {Writable} */ (child.stdio[3]),
+    fromChrome: /** @type {Readable} */ (child.stdio[4]),
+  };
+  // Chrome's own end of the pipe closing is reported on the read side.
+  opened.toChrome.on("error", () => {});
+  opened.fromChrome.on("data", frameReader());
+  opened.fromChrome.once("close", () => pipeClosed(opened));
+  return opened;
 }
 
-/** @param {Buffer} chunk */
-function readChromeChunk(chunk) {
-  let start = 0;
-  for (;;) {
-    const end = chunk.indexOf(0, start);
-    appendFrame(chunk.subarray(start, end === -1 ? chunk.length : end));
-    if (end === -1) return;
-    finishFrame();
-    start = end + 1;
-  }
+/**
+ * A CDP child's pipe closed: that Chrome is gone or going. Its commands get no
+ * reply and its client is dropped. Unless a relaunch planned this, every
+ * client is ended for good.
+ * @param {Pipe} closed
+ */
+function pipeClosed(closed) {
+  if (pipe !== closed) return;
+  pipe = undefined;
+  bridge.waitingForDrain = false;
+  for (const pending of inflight.values()) pending.resolve?.(undefined);
+  inflight.clear();
+  bridge.client?.terminate();
+  if (!transitioning) closeBridge();
 }
 
 /**
@@ -396,10 +539,10 @@ function forwardClientCommand(client, message) {
   inflight.set(id, { client, id: message.id, method: message.method });
   message.id = id;
   if (message.sessionId === undefined) message.sessionId = bridge.clientSession;
-  if (writeToChrome(message) || bridge.waitingForDrain) return;
+  if (writeToChrome(message) || bridge.waitingForDrain || pipe === undefined) return;
   bridge.waitingForDrain = true;
   client.pause();
-  toChrome.once("drain", () => {
+  pipe.toChrome.once("drain", () => {
     bridge.waitingForDrain = false;
     bridge.client?.resume();
   });
@@ -437,7 +580,7 @@ function detachClient(client) {
   bridge.queued = [];
   bridge.sessions = new Set();
   bridge.refusals = 0;
-  fromChrome.resume();
+  pipe?.fromChrome.resume();
   // Chrome may never answer these. An attach stays until the reset, so a late
   // reply still releases its session.
   for (const [id, pending] of inflight) {
@@ -505,8 +648,30 @@ function refuseUpgrade(socket, status, reason, body) {
  */
 function handleUpgrade(wss, request, socket, head) {
   socket.on("error", () => {});
-  if (bridge.resetting !== undefined) {
-    void bridge.resetting.then(() => handleUpgrade(wss, request, socket, head));
+  serveUpgrade(wss, request, socket, head);
+}
+
+/**
+ * While the browser is not under CDP, or a detached client's state is being
+ * reset, an upgrade waits.
+ * @returns {Promise<unknown> | undefined}
+ */
+function upgradeWait() {
+  if (bridge.closed) return undefined;
+  if (mode !== "cdp") return new Promise((resolve) => cdpWaiters.push(() => resolve(undefined)));
+  return bridge.resetting;
+}
+
+/**
+ * @param {WebSocketServer} wss
+ * @param {http.IncomingMessage} request
+ * @param {import("node:stream").Duplex} socket
+ * @param {Buffer} head
+ */
+function serveUpgrade(wss, request, socket, head) {
+  const wait = upgradeWait();
+  if (wait !== undefined) {
+    void wait.then(() => serveUpgrade(wss, request, socket, head));
     return;
   }
   const lease = bridge.lease;
@@ -562,6 +727,40 @@ function reply(response, status, body) {
 }
 
 /**
+ * Ask a browser to shut down cleanly, so profile cookies flush. Chrome under
+ * CDP gets Browser.close on its own pipe; a plain one gets SIGTERM.
+ * @param {Browser} target
+ */
+function askToStop(target) {
+  if (target.exited) return;
+  if (target.pipe === undefined) target.process.kill("SIGTERM");
+  else target.pipe.toChrome.write(`${JSON.stringify({ id: nextId++, method: "Browser.close" })}\0`);
+}
+
+function stopCurrentBrowser() {
+  if (browser !== undefined) askToStop(browser);
+}
+
+/** POST /close: the session is ending. A relaunch in flight ends with it. */
+function closeBrowser() {
+  closing = true;
+  if (!transitioning) stopCurrentBrowser();
+}
+
+/**
+ * POST /plain and POST /cdp answer once the browser runs in that mode.
+ * @param {http.ServerResponse} response
+ * @param {"plain" | "cdp"} target
+ */
+async function answerModeRequest(response, target) {
+  try {
+    reply(response, 200, { mode: await requestMode(target) });
+  } catch (error) {
+    reply(response, 500, { error: error instanceof Error ? error.message : String(error), mode });
+  }
+}
+
+/**
  * @param {any} version
  * @returns {http.RequestListener}
  */
@@ -573,28 +772,39 @@ function httpHandler(version) {
     "V8-Version": version.jsVersion,
     "WebKit-Version": version.revision,
   };
+  /** @type {Map<string, http.RequestListener>} */
+  const postRoutes = new Map([
+    ["/close", (_request, response) => {
+      closeBrowser();
+      reply(response, 202, {});
+    }],
+    ["/attach", attachLease],
+    ["/plain", (_request, response) => void answerModeRequest(response, "plain")],
+    ["/cdp", (_request, response) => void answerModeRequest(response, "cdp")],
+  ]);
   return (request, response) => {
+    const route = request.method === "POST" ? postRoutes.get(request.url ?? "") : undefined;
     if (request.method === "GET" && request.url === "/json/version") {
       reply(response, 200, versionBody);
-    } else if (request.method === "POST" && request.url === "/close") {
-      // Browser.close shuts Chrome down cleanly, so profile cookies flush.
-      void command("Browser.close");
-      reply(response, 202, {});
-    } else if (request.method === "POST" && request.url === "/attach") {
-      attachLease(request, response);
-    } else {
+    } else if (route === undefined) {
       reply(response, 404, { error: "Not found" });
+    } else {
+      route(request, response);
     }
   };
 }
 
-/** Publish the endpoint atomically: readers see the old file or the new one. */
+/**
+ * Publish the endpoint atomically: readers see the old file or the new one.
+ * `mode` tells a reader whether the browser is under CDP.
+ */
 function writeEndpointFile() {
   const temporary = `${endpointFile}.${process.pid}.tmp`;
+  fs.rmSync(temporary, { force: true });
   const fd = fs.openSync(temporary, "wx", 0o600);
   try {
     fs.fchmodSync(fd, 0o600);
-    fs.writeFileSync(fd, `${JSON.stringify({ socketPath, browserPath })}\n`);
+    fs.writeFileSync(fd, `${JSON.stringify({ socketPath, browserPath, mode })}\n`);
     fs.fsyncSync(fd);
   } finally {
     fs.closeSync(fd);
@@ -635,7 +845,7 @@ async function startBridge() {
   writeEndpointFile();
 }
 
-/** Chrome's pipe closed: Chrome is gone or going. End every client. */
+/** The browser is gone for good. End every client and the socket. */
 function closeBridge() {
   if (bridge.closed) return;
   bridge.closed = true;
@@ -645,23 +855,256 @@ function closeBridge() {
   bridge.lease?.response.end();
   bridge.server?.close();
   bridge.server?.closeAllConnections();
+  releaseCdpWaiters();
   removeEndpoint();
 }
 
-fromChrome.on("data", readChromeChunk);
-fromChrome.once("close", closeBridge);
+function releaseCdpWaiters() {
+  const waiters = cdpWaiters;
+  cdpWaiters = [];
+  for (const wake of waiters) wake();
+}
+
+/**
+ * Enter a mode and republish the endpoint file with it. Upgrades that waited
+ * for CDP go on once it is back.
+ * @param {Mode} next
+ */
+function setMode(next) {
+  mode = next;
+  if (next === "cdp") releaseCdpWaiters();
+  if (bridge.server === undefined || bridge.closed) return;
+  try {
+    writeEndpointFile();
+  } catch (error) {
+    console.error("Failed to publish the CDP endpoint:", error instanceof Error ? error.message : String(error));
+  }
+}
+
+/** @param {Browser} exited */
+function browserExited(exited) {
+  // The person closed the plain browser. Stay up for the return to CDP.
+  if (exited === browser && mode === "plain" && !transitioning && !closing) setMode("plain-idle");
+}
+
+/** Drop the websocket client. A relay's lease stays, so it can reconnect. */
+function dropClient() {
+  const client = bridge.client;
+  if (client === undefined) return;
+  client.terminate();
+  detachClient(client);
+}
+
+/**
+ * @param {Browser} target
+ * @param {number} timeoutMs
+ * @returns {Promise<boolean>}
+ */
+async function exitsWithin(target, timeoutMs) {
+  return Promise.race([target.exit.then(() => true), delay(timeoutMs).then(() => false)]);
+}
+
+/**
+ * Stop a browser, and kill it if it does not exit within the stop budget.
+ * @param {Browser} target
+ * @param {(target: Browser) => void} ask How to ask it to exit.
+ */
+async function stopWithin(target, ask) {
+  if (target.exited) return;
+  ask(target);
+  if (await exitsWithin(target, STOP_TIMEOUT_MS)) return;
+  target.process.kill("SIGKILL");
+  await target.exit;
+}
+
+/**
+ * Stop a browser for a relaunch: ask it to close, kill it if it hangs, then
+ * give its helper processes a moment to leave the group. A profile can be
+ * open in only one Chrome at a time.
+ * @param {Browser} target
+ */
+async function stopForRelaunch(target) {
+  await stopWithin(target, askToStop);
+  const deadline = Date.now() + GROUP_DRAIN_TIMEOUT_MS;
+  while (hasLiveGroupMembers() && Date.now() < deadline) await delay(50);
+}
+
+/** @returns {string[]} The browser flags without the start URL. */
+function browserFlags() {
+  const last = args.at(-1);
+  return last === undefined || last.startsWith("-") ? args : args.slice(0, -1);
+}
+
+/**
+ * The plain browser's argv: every flag but remote debugging. It reopens the
+ * tabs that Browser.close saved, so no page URL shows in its command line.
+ */
+function plainArgs() {
+  const flags = browserFlags().filter((arg) => !arg.startsWith("--remote-debugging-"));
+  return [...flags, "--restore-last-session"];
+}
+
+async function enterPlain() {
+  dropClient();
+  if (browser !== undefined) await stopForRelaunch(browser);
+  const plain = spawnBrowser(plainArgs(), false);
+  browser = plain;
+  if (!(await exitsWithin(plain, PLAIN_START_GRACE_MS))) {
+    setMode("plain");
+    return;
+  }
+  console.error("The plain browser exited during startup; reopening it under CDP");
+  await enterCdp();
+  throw new Error("The plain browser exited during startup; the browser is back under CDP");
+}
+
+/**
+ * Reopen the profile under CDP with the tabs of its last session. The start
+ * URL is left out: Chrome would open it as one more tab.
+ */
+async function enterCdp() {
+  if (browser !== undefined) await stopForRelaunch(browser);
+  const next = spawnBrowser([...browserFlags(), "--restore-last-session"], true);
+  browser = next;
+  pipe = next.pipe;
+  const answer = await Promise.race([command("Browser.getVersion"), delay(CDP_START_TIMEOUT_MS)]);
+  if (answer?.result === undefined) {
+    // The supervisor ends once this browser is gone. Until then upgrades
+    // wait, so a browser that ignores SIGTERM is killed.
+    closing = true;
+    await stopWithin(next, (target) => target.process.kill("SIGTERM"));
+    throw new Error("The browser did not answer Browser.getVersion after its relaunch");
+  }
+  setMode("cdp");
+}
+
+/**
+ * @param {"plain" | "cdp"} target
+ * @returns {Promise<Mode>}
+ */
+async function switchMode(target) {
+  if (closing || bridge.closed) throw new Error("The browser session is closing");
+  if (mode === target || (target === "plain" && mode === "plain-idle")) return mode;
+  transitioning = true;
+  setMode("relaunching");
+  try {
+    if (target === "plain") await enterPlain();
+    else await enterCdp();
+    return mode;
+  } finally {
+    transitioning = false;
+    settleAfterRelaunch();
+  }
+}
+
+/** Apply what happened while a relaunch ran: a /close, or a plain exit. */
+function settleAfterRelaunch() {
+  if (closing) stopCurrentBrowser();
+  else if (mode === "plain" && browser?.exited === true) setMode("plain-idle");
+}
+
+/**
+ * Queue a switch behind any relaunch in flight. A switch to the mode the
+ * browser is already in does nothing.
+ * @param {"plain" | "cdp"} target
+ * @returns {Promise<Mode>}
+ */
+function requestMode(target) {
+  const run = transitions.then(() => switchMode(target));
+  transitions = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+/**
+ * The fields of a human lease that its staleness depends on, or undefined for
+ * a file that parseHumanLease of @pickforge/lab-core rejects. Core lets agent
+ * input go on under such a lease, so it holds nothing here either.
+ * @param {string} raw
+ * @returns {{ ownerPid: number, ownerStartTicks: number | undefined, expiresAt: string } | undefined}
+ */
+function parseHumanLease(raw) {
+  let lease;
+  try {
+    lease = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (typeof lease !== "object" || lease === null) return undefined;
+  const strings = ["leaseId", "sessionId", "createdAt", "expiresAt"];
+  const numbers = ["ownerPid", "ttlMs", "heartbeatMs"];
+  if (!strings.every((key) => typeof lease[key] === "string")) return undefined;
+  if (!numbers.every((key) => typeof lease[key] === "number")) return undefined;
+  if (lease.inputTransport !== undefined && lease.inputTransport !== "x11vnc" && lease.inputTransport !== "viewer") {
+    return undefined;
+  }
+  if (!validOptionalIdentity(lease.viewerPid, 1) || !validOptionalIdentity(lease.viewerStartTicks, 0)) return undefined;
+  const ownerStartTicks = typeof lease.ownerStartTicks === "number" ? lease.ownerStartTicks : undefined;
+  return { ownerPid: lease.ownerPid, ownerStartTicks, expiresAt: lease.expiresAt };
+}
+
+/**
+ * @param {unknown} value
+ * @param {number} minimum
+ */
+function validOptionalIdentity(value, minimum) {
+  return value === undefined || (typeof value === "number" && Number.isSafeInteger(value) && value >= minimum);
+}
+
+/**
+ * Whether a person still holds the session's human lease. This is
+ * isHumanLeaseStale of @pickforge/lab-core with no grace: agent input
+ * resumes the moment the lease is stale, so CDP must come back then too.
+ */
+function humanLeaseHeld() {
+  let raw;
+  try {
+    raw = fs.readFileSync(humanLeaseFile, "utf8");
+  } catch {
+    return false;
+  }
+  const lease = parseHumanLease(raw);
+  if (lease === undefined || !identityIsAlive(lease.ownerPid, lease.ownerStartTicks)) return false;
+  return !(Date.now() > Date.parse(lease.expiresAt));
+}
+
+/**
+ * A takeover that ended without POST /cdp, such as one whose owner crashed,
+ * must not leave the session without CDP.
+ */
+function checkHumanLease() {
+  if ((mode !== "plain" && mode !== "plain-idle") || transitioning || closing) return;
+  if (humanLeaseHeld()) return;
+  console.error("The human lease ended; reopening the browser under CDP");
+  requestMode("cdp").catch((error) => {
+    console.error("Failed to reopen the browser under CDP:", error instanceof Error ? error.message : String(error));
+  });
+}
+
+browser = spawnBrowser(args, true);
+pipe = browser.pipe;
 startBridge().catch((error) => {
   console.error("Failed to serve the CDP socket:", error instanceof Error ? error.message : String(error));
-  child.kill("SIGTERM");
+  browser?.process.kill("SIGTERM");
 });
 
 for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
   process.on(signal, () => {});
 }
+setInterval(checkHumanLease, LEASE_POLL_MS);
+
+/** Exit once the browser is gone for good: not between relaunches, not while plain. */
+function readyToExit() {
+  if (transitioning || browser === undefined || !browser.exited) return false;
+  if (mode !== "cdp" && !closing) return false;
+  return !hasLiveGroupMembers();
+}
+
 const timer = setInterval(() => {
-  if (childExited && !hasLiveGroupMembers()) {
-    clearInterval(timer);
-    closeBridge();
-    process.exit(childCode);
-  }
+  if (!readyToExit()) return;
+  clearInterval(timer);
+  closeBridge();
+  process.exit(browser?.code ?? 1);
 }, 50);

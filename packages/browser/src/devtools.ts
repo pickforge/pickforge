@@ -16,6 +16,19 @@ const MAX_CDP_HTTP_BODY_BYTES = 64 * 1024;
 const BROWSER_PATH_PATTERN = /^\/devtools\/browser\/[0-9a-f-]{36}$/;
 
 /**
+ * What the supervisor runs: Chrome under CDP, a plain Chrome for a human
+ * takeover (#380), no Chrome after the person closed the plain one, or a
+ * relaunch between the two.
+ */
+export type CdpSupervisorMode = "cdp" | "plain" | "plain-idle" | "relaunching";
+
+const SUPERVISOR_MODES: ReadonlySet<string> = new Set(["cdp", "plain", "plain-idle", "relaunching"]);
+
+function isSupervisorMode(value: unknown): value is CdpSupervisorMode {
+  return typeof value === "string" && SUPERVISOR_MODES.has(value);
+}
+
+/**
  * The CDP endpoint the browser supervisor publishes in `cdp-endpoint` once
  * Chrome answers on its pipe. Chrome itself listens on no port.
  */
@@ -24,6 +37,8 @@ export interface CdpEndpoint {
   socketPath: string;
   /** This launch's browser websocket path. It is a capability; never log it. */
   browserPath: string;
+  /** Absent in a file from a supervisor that predates #380. */
+  mode?: CdpSupervisorMode;
 }
 
 /** Parse the supervisor's endpoint file; anything malformed is `undefined`. */
@@ -35,7 +50,7 @@ export function parseCdpEndpoint(content: string): CdpEndpoint | undefined {
     return undefined;
   }
   if (typeof value !== "object" || value === null) return undefined;
-  const { socketPath, browserPath } = value as Record<string, unknown>;
+  const { socketPath, browserPath, mode } = value as Record<string, unknown>;
   if (
     typeof socketPath !== "string" ||
     !path.isAbsolute(socketPath) ||
@@ -44,7 +59,8 @@ export function parseCdpEndpoint(content: string): CdpEndpoint | undefined {
   ) {
     return undefined;
   }
-  return { socketPath, browserPath };
+  if (mode === undefined) return { socketPath, browserPath };
+  return isSupervisorMode(mode) ? { socketPath, browserPath, mode } : undefined;
 }
 
 function hasErrnoCode(error: unknown, code: string): boolean {
@@ -193,6 +209,29 @@ export async function requestCdpBrowserClose(
 ): Promise<boolean> {
   const response = await cdpHttpRequest(socketPath, "POST", "/close", timeoutMs, signal);
   return response.status === 202;
+}
+
+/**
+ * Ask the supervisor to run the browser as a plain Chrome or under CDP. It
+ * answers once the relaunch finished. A failed switch throws with the
+ * supervisor's reason.
+ */
+export async function requestCdpSupervisorMode(
+  socketPath: string,
+  mode: "plain" | "cdp",
+  timeoutMs = 120_000,
+  signal?: AbortSignal,
+): Promise<CdpSupervisorMode> {
+  const response = await cdpHttpRequest(socketPath, "POST", `/${mode}`, timeoutMs, signal);
+  let body: { mode?: unknown; error?: unknown } = {};
+  try {
+    body = JSON.parse(response.body) as typeof body;
+  } catch {
+    // Reported below with the status.
+  }
+  if (response.status === 200 && isSupervisorMode(body.mode)) return body.mode;
+  const reason = typeof body.error === "string" ? body.error : `HTTP ${response.status}`;
+  throw new Error(`The browser supervisor could not switch to ${mode}: ${reason}`);
 }
 
 /** The supervisor refused a second client: one relay per session. */
