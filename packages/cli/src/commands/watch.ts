@@ -1,6 +1,7 @@
 import { holdHumanLease, defaultSpawnWatchdog, type SpawnWatchdogFn } from "./takeover-hold.js";
 export type { SpawnWatchdogFn, TakeoverWatchdogHandle } from "./takeover-hold.js";
 import { randomBytes } from "node:crypto";
+import { enterPlainBrowser, restoreCdpBrowser } from "@pickforge/lab-browser";
 import { getSession, resolveDesktopCapableSession, type DesktopSessionInfo } from "@pickforge/lab-core";
 import {
   startNativeViewerHost,
@@ -10,6 +11,7 @@ import {
   ensureSessionVnc,
   openVncViewer,
   startHumanTakeover,
+  type EndHumanTakeoverOptions,
   type HumanTakeoverHandle,
   type NativeViewerHostIdentity,
   type TakeoverEndReason,
@@ -48,6 +50,7 @@ async function runControlledViewer(
   port: number,
   registryEnv: NodeJS.ProcessEnv,
   spawnWatchdog: SpawnWatchdogFn,
+  beforeRelease: EndHumanTakeoverOptions["beforeRelease"],
 ): Promise<{
   viewer: Awaited<ReturnType<typeof openVncViewer>>;
   reason: TakeoverEndReason;
@@ -65,7 +68,7 @@ async function runControlledViewer(
   let ending: Promise<{ screenshotPath?: string }> | undefined;
   const endOnce = (reason: TakeoverEndReason): Promise<{ screenshotPath?: string }> => {
     if (ending === undefined) {
-      ending = endHumanTakeover(handle, { registryEnv, reason });
+      ending = endHumanTakeover(handle, { registryEnv, reason, beforeRelease });
     }
     return ending;
   };
@@ -95,12 +98,35 @@ async function runControlledViewer(
   }
 }
 
+/** Reopens a browser session under DevTools, and keeps a failure for the report. */
+function browserRestore(registryEnv: NodeJS.ProcessEnv): {
+  hook(handle: HumanTakeoverHandle): Promise<void>;
+  errors(): string[];
+} {
+  let failure: string | undefined;
+  return {
+    async hook(handle) {
+      try {
+        await restoreCdpBrowser(handle.sessionId, registryEnv);
+      } catch (error) {
+        failure = `Browser for session ${handle.sessionId} could not reopen under DevTools: ` +
+          (error instanceof Error ? error.message : String(error));
+      }
+    },
+    errors: () => (failure === undefined ? [] : [failure]),
+  };
+}
+
 async function watchWithControl(
   sessionId: string,
   registryEnv: NodeJS.ProcessEnv,
   spawnWatchdog: SpawnWatchdogFn,
 ): Promise<CommandResult> {
-  const handle = await startHumanTakeover(sessionId, { registryEnv });
+  const handle = await startHumanTakeover(sessionId, {
+    registryEnv,
+    afterLease: (lease) => enterPlainBrowser(lease.sessionId, registryEnv),
+  });
+  const restore = browserRestore(registryEnv);
   const data: Record<string, unknown> = {
     sessionId,
     leaseId: handle.leaseId,
@@ -110,7 +136,7 @@ async function watchWithControl(
 
   let controlled: Awaited<ReturnType<typeof runControlledViewer>>;
   try {
-    controlled = await runControlledViewer(handle, handle.vncPort, registryEnv, spawnWatchdog);
+    controlled = await runControlledViewer(handle, handle.vncPort, registryEnv, spawnWatchdog, restore.hook);
   } catch (error) {
     throw error instanceof Error
       ? new Error(`Human takeover for session ${sessionId} ended abnormally: ${error.message}`)
@@ -133,6 +159,7 @@ async function watchWithControl(
         `No writable VNC viewer could be opened for session ${sessionId}; ` +
           "control was granted and immediately returned. " +
           String(viewer.guidance ?? ""),
+        ...restore.errors(),
       ],
     };
   }
@@ -144,7 +171,8 @@ async function watchWithControl(
   if (screenshotPath !== undefined) {
     lines.push(`resume screenshot recorded: ${screenshotPath}`);
   }
-  return { data, lines };
+  const errors = restore.errors();
+  return errors.length === 0 ? { data, lines } : { data, lines, errors };
 }
 
 function remoteViewerResult(

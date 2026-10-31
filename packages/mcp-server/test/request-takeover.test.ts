@@ -40,6 +40,11 @@ afterEach(async () => {
   fs.rmSync(dirs.root, { recursive: true, force: true });
 });
 
+function makeBrowserSession(home: string, sessionId: string): void {
+  const file = path.join(home, "sessions", `${sessionId}.json`);
+  fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, "utf8")), type: "browser" }));
+}
+
 /** A stdio-free host fixture exercises the real authenticated socket client. */
 async function openFakeHost(beforeReply?: () => Promise<void>): Promise<{
   host: NativeViewerHostIdentity;
@@ -153,8 +158,20 @@ describe("request_takeover", () => {
     await new Promise((resolve) => setTimeout(resolve, 70));
     expect(fs.existsSync(captureLog)).toBe(false);
     await releaseHumanLease(id, lease.leaseId, env);
-    expect(parseToolJson(await pending)).toMatchObject({ ok: true, outcome: "returned", screenshot: { sessionId: id } });
+    const result = parseToolJson(await pending);
+    expect(result).toMatchObject({ ok: true, outcome: "returned", screenshot: { sessionId: id } });
+    expect(result.browserRelaunched).toBeUndefined();
     expect(launcher.launch).not.toHaveBeenCalled();
+  });
+
+  it("marks a browser relaunch when control returns on a browser session", async () => {
+    makeBrowserSession(dirs.home, id);
+    const lease = await acquireHumanLease(id, env);
+    const { client } = await connect({ available: vi.fn(), launch: vi.fn() });
+    const pending = client.callTool({ name: "request_takeover", arguments: { message: "Sign in" } });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await releaseHumanLease(id, lease.leaseId, env);
+    expect(parseToolJson(await pending)).toMatchObject({ ok: true, outcome: "returned", browserRelaunched: true });
   });
 
   it("returns a fresh screenshot after taken and returned, with message-free evidence", async () => {

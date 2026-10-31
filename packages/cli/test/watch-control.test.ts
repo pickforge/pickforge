@@ -8,13 +8,17 @@ import type {
   OpenVncViewerResult,
 } from "@pickforge/lab-desktop-linux";
 
-const { startHumanTakeover, endHumanTakeover, renewHumanTakeover, openVncViewer } =
+const { startHumanTakeover, endHumanTakeover, renewHumanTakeover, openVncViewer, enterPlainBrowser, restoreCdpBrowser } =
   vi.hoisted(() => ({
     startHumanTakeover: vi.fn(),
     endHumanTakeover: vi.fn(),
     renewHumanTakeover: vi.fn(),
     openVncViewer: vi.fn(),
+    enterPlainBrowser: vi.fn(),
+    restoreCdpBrowser: vi.fn(),
   }));
+
+vi.mock("@pickforge/lab-browser", () => ({ enterPlainBrowser, restoreCdpBrowser }));
 
 vi.mock("@pickforge/lab-desktop-linux", async (importOriginal) => {
   const actual =
@@ -99,6 +103,8 @@ beforeEach(async () => {
   endHumanTakeover.mockReset();
   renewHumanTakeover.mockReset();
   openVncViewer.mockReset();
+  enterPlainBrowser.mockReset().mockResolvedValue(false);
+  restoreCdpBrowser.mockReset().mockResolvedValue(false);
   endHumanTakeover.mockResolvedValue({ reason: "return" } satisfies EndHumanTakeoverResult);
   renewHumanTakeover.mockImplementation(async (handle: HumanTakeoverHandle) => fakeLease(handle));
   watchdogKill = vi.fn();
@@ -142,12 +148,13 @@ describe("watch --control (mocked)", () => {
       _spawnWatchdog: spawnWatchdog,
     });
 
-    expect(startHumanTakeover).toHaveBeenCalledWith(id, { registryEnv: process.env });
+    expect(startHumanTakeover).toHaveBeenCalledWith(id, { registryEnv: process.env, afterLease: expect.any(Function) });
     expect(spawnWatchdog).toHaveBeenCalledWith(handle);
     expect(openVncViewer).toHaveBeenCalledWith({ port: handle.vncPort, waitForExit: true });
     expect(endHumanTakeover).toHaveBeenCalledWith(handle, {
       registryEnv: process.env,
       reason: "return",
+      beforeRelease: expect.any(Function),
     });
     // The watchdog is stopped once control returns cleanly — it must not
     // linger polling a lease that no longer exists.
@@ -323,8 +330,51 @@ describe("watch --control (mocked)", () => {
     expect(endHumanTakeover).toHaveBeenCalledWith(handle, {
       registryEnv: process.env,
       reason: "return",
+      beforeRelease: expect.any(Function),
     });
     expect(result.errors?.join("\n")).toContain("No writable VNC viewer could be opened");
     expect(result.errors?.join("\n")).toContain("No graphical host session is available.");
+  });
+
+  describe("browser handoff (#380)", () => {
+    function runHooks(): string[] {
+      const order: string[] = [];
+      startHumanTakeover.mockImplementation(async (sessionId: string, opts: { afterLease(lease: unknown): Promise<unknown> }) => {
+        order.push("acquire");
+        await opts.afterLease({ sessionId, leaseId: "lease-1" });
+        order.push("input");
+        return fakeHandle({ sessionId });
+      });
+      endHumanTakeover.mockImplementation(async (handle: HumanTakeoverHandle, opts: { reason: string; beforeRelease(h: HumanTakeoverHandle): Promise<unknown> }) => {
+        await opts.beforeRelease(handle);
+        order.push("release");
+        return { reason: opts.reason };
+      });
+      enterPlainBrowser.mockImplementation(async () => { order.push("plain"); return true; });
+      restoreCdpBrowser.mockImplementation(async () => { order.push("cdp"); return true; });
+      return order;
+    }
+
+    it("opens plain Chrome after the lease and restores CDP before release", async () => {
+      const id = await createDesktop();
+      const order = runHooks();
+      openVncViewer.mockResolvedValue(fakeViewer());
+      const result = await watchDesktopSession({ session: id, projectDir: root, control: true, _spawnWatchdog: spawnWatchdog });
+      expect(order).toEqual(["acquire", "plain", "input", "cdp", "release"]);
+      expect(enterPlainBrowser).toHaveBeenCalledWith(id, process.env);
+      expect(restoreCdpBrowser).toHaveBeenCalledWith(id, process.env);
+      expect(result.errors).toBeUndefined();
+    });
+
+    it("reports a failed restore and still releases the lease", async () => {
+      const id = await createDesktop();
+      const order = runHooks();
+      restoreCdpBrowser.mockRejectedValue(new Error("supervisor gone"));
+      openVncViewer.mockResolvedValue(fakeViewer());
+      const result = await watchDesktopSession({ session: id, projectDir: root, control: true, _spawnWatchdog: spawnWatchdog });
+      expect(order).toContain("release");
+      expect(result.errors).toEqual([expect.stringContaining("could not reopen under DevTools: supervisor gone")]);
+      expect(watchdogKill).toHaveBeenCalledTimes(1);
+    });
   });
 });

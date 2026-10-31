@@ -4,6 +4,7 @@ import {
   type HumanTakeoverHandle, type NativeViewerCommand, type ControlRevokeReason,
   type StartHumanTakeoverOptions,
 } from "@pickforge/lab-desktop-linux";
+import { enterPlainBrowser, restoreCdpBrowser } from "@pickforge/lab-browser";
 import { holdHumanLease, type SpawnWatchdogFn } from "../commands/takeover-hold.js";
 
 /** Only viewer stdio and the explicit CLI startup path call take(). */
@@ -48,6 +49,7 @@ export class NativeControl {
     try {
       const handle = await startHumanTakeover(this.options.sessionId, {
         ...this.options.takeoverOptions, transport: "viewer", registryEnv: this.options.env, env: this.options.env,
+        afterLease: (lease) => enterPlainBrowser(lease.sessionId, this.options.env),
       });
       this.handle = handle;
       this.held = holdHumanLease(handle, {
@@ -93,6 +95,16 @@ export class NativeControl {
     if (!applied) this.options.kill();
   }
 
+  private async restoreBrowser(handle: HumanTakeoverHandle): Promise<void> {
+    try {
+      await restoreCdpBrowser(handle.sessionId, this.options.env);
+    } catch (error) {
+      console.error(`Browser could not reopen under DevTools: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      this.held?.stopRenewing();
+    }
+  }
+
   end(reason: ControlRevokeReason, final = false): Promise<void> {
     if (final) this.stopping = true;
     return this.ending ??= this.release(reason).finally(() => { this.ending = undefined; });
@@ -102,13 +114,18 @@ export class NativeControl {
     await this.starting;
     const handle = this.handle;
     if (handle === undefined) return;
-    // Stop grant renewal before revoking input. Keep the watchdog until cleanup finishes.
-    this.held?.stopRenewing();
+    // Grants stop while ending. The lease heartbeat runs until the browser is
+    // back under DevTools, since a relaunch can outlast the lease TTL.
     await this.revoke(handle, reason);
-    await endHumanTakeover(handle, {
-      registryEnv: this.options.env, env: this.options.env,
-      reason: reason === "returned" ? "return" : reason === "lease-lost" ? "timeout" : "cancelled",
-    });
+    try {
+      await endHumanTakeover(handle, {
+        registryEnv: this.options.env, env: this.options.env,
+        reason: reason === "returned" ? "return" : reason === "lease-lost" ? "timeout" : "cancelled",
+        beforeRelease: () => this.restoreBrowser(handle),
+      });
+    } finally {
+      this.held?.stopRenewing();
+    }
     this.handle = undefined;
     this.held?.stop();
     this.options.returned(reason);

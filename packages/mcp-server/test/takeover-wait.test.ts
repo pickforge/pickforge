@@ -30,6 +30,11 @@ afterEach(async () => {
   fs.rmSync(dirs.root, { recursive: true, force: true });
 });
 
+function makeBrowserSession(home: string, sessionId: string): void {
+  const file = path.join(home, "sessions", `${sessionId}.json`);
+  fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, "utf8")), type: "browser" }));
+}
+
 describe("takeover_wait", () => {
   it("waits for return, then captures through the observation and evidence path", async () => {
     const lease = await acquireHumanLease(id, env);
@@ -105,5 +110,22 @@ describe("takeover_wait", () => {
     const result = await lab.client.callTool({ name: "takeover_wait", arguments: { session: id, timeoutMs } });
     expect(result.isError).toBe(true);
     expect(fs.existsSync(captureLog)).toBe(false);
+  });
+
+  it("marks a browser relaunch only for a browser session whose control returned", async () => {
+    const desktop = await acquireHumanLease(id, env);
+    const pendingDesktop = lab.client.callTool({ name: "takeover_wait", arguments: { session: id } });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await releaseHumanLease(id, desktop.leaseId, env);
+    expect(parseToolJson(await pendingDesktop).browserRelaunched).toBeUndefined();
+
+    makeBrowserSession(dirs.home, id);
+    const idle = parseToolJson(await lab.client.callTool({ name: "takeover_wait", arguments: { session: id, timeoutMs: 0 } }));
+    expect(idle.browserRelaunched).toBeUndefined();
+    const lease = await acquireHumanLease(id, env);
+    const pending = lab.client.callTool({ name: "takeover_wait", arguments: { session: id } });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await releaseHumanLease(id, lease.leaseId, env);
+    expect(parseToolJson(await pending)).toMatchObject({ ok: true, outcome: "returned", browserRelaunched: true });
   });
 });
