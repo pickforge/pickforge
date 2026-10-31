@@ -29,6 +29,7 @@
 - Browser sessions serve DevTools through a pipe and a private Unix socket instead of a loopback TCP port, so other local processes can no longer find it on a port. Session output no longer shows `cdpPort`. Only one DevTools relay can attach to a session at a time. Recreate browser sessions made by an older version to use the relay. (#459)
 - Pickforge no longer removes a session file, evidence file or screenshot that another process put in its place during removal. It keeps the new file, and `session prune` reports an error that names it. A later `session prune` puts back a file that a killed run left half removed. (#472)
 - A takeover on a browser session now reopens the profile in Chrome without DevTools while the person has control, so Google and similar sites accept a sign-in. When control returns, Chrome reopens under DevTools with its tabs, and `request_takeover` and `takeover_wait` return `browserRelaunched: true`. (#380)
+- Agents can give each session a short activity title, such as "Pickforge GitHub issues", with `session_create`, `session_title` or `session title`. Viewers show it on the thumbnail and in the expanded bar, with the session id next to it. On Hyprland, collapsed native viewers form a stack in the corner that fans out when you point at it. (#497)
 
 ## Validation
 
