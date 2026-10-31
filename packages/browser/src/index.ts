@@ -111,3 +111,5 @@ export {
   validateBrowserProfileName,
   type BrowserProfileEntry,
 } from "./profiles.js";
+
+export { enterPlainBrowser, restoreCdpBrowser } from "./handoff.js";
