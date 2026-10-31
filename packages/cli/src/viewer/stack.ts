@@ -269,7 +269,8 @@ export function stackLayout(members: readonly StackMember[], selfLaunchId: strin
     for (let k = 1; k < cards.length; k++) tops.push(tops[k - 1]! - cards[k]!.height);
     if (tops.at(-1)! < area.y + THUMBNAIL_MARGIN) {
       const spacing = Math.max(STACK_PEEK, Math.floor((top0 - area.y - THUMBNAIL_MARGIN) / (cards.length - 1)));
-      for (let k = 1; k < cards.length; k++) tops[k] = top0 - k * spacing;
+      // A step never exceeds the card's height, so no gap opens below it.
+      for (let k = 1; k < cards.length; k++) tops[k] = tops[k - 1]! - Math.min(spacing, cards[k]!.height);
     }
   } else {
     const bottom = top0 + cards[0]!.height;

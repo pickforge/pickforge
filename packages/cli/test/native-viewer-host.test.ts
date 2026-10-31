@@ -265,6 +265,21 @@ describe.skipIf(!available)("native host viewer stack", () => {
     await running;
   }, 20_000);
 
+  it("still collapses an expanded viewer after a late thumbnail mode echo", async () => {
+    const host = await start();
+    await until(() => readMember(host.launchId) !== undefined);
+    expect((await requestNativeViewerHost(host, { op: "expand" })).ok).toBe(true);
+    // The viewer's echo of an earlier thumbnail arrives after the expand.
+    fakes.cueViewer({ event: "mode", mode: "thumbnail" });
+    await sleep(200);
+    const placements = evals().length;
+    expect((await requestNativeViewerHost(host, { op: "collapse" })).ok).toBe(true);
+    await until(() => evals().length > placements);
+    await until(() => readMember(host.launchId)?.mode === "thumbnail");
+    await requestNativeViewerHost(host, { op: "shutdown" });
+    await running;
+  }, 15_000);
+
   it("marks the card away in fullscreen and ignores hover there", async () => {
     const host = await start();
     await until(() => readMember(host.launchId) !== undefined);

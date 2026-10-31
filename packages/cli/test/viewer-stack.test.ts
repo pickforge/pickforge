@@ -57,7 +57,8 @@ describe("stackLayout", () => {
   });
 
   it("keeps every collapsed strip on a card when the stack fans, so the pointer stays on the stack", () => {
-    for (const heights of [[H, H, H, H], [100, 300, 160, 240], [240, 60, 400, 120]]) {
+    // The last two overflow the area, so the cards share it uniformly.
+    for (const heights of [[H, H, H, H], [100, 300, 160, 240], [240, 60, 400, 120], [H, 165, H, H, H, H], [H, 40, 40, H, H, H, H]]) {
       const collapsed = heights.map((height, k) => card(10 - k, { height }));
       const fanned = collapsed.map((member, k) => ({ ...member, hover: k === 0 }));
       const rows = (members: StackMember[]): Array<[number, number]> =>

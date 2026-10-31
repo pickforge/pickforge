@@ -104,6 +104,8 @@ class NativeHost {
   private stopped = false;
   private ended = false;
   private mode: NativeViewerMode | "fullscreen" = "thumbnail";
+  /** The mode of the host's last placement; the launch rule places a thumbnail. */
+  private placedMode: NativeViewerMode = "thumbnail";
   private receivedReady = false;
   private timer?: NodeJS.Timeout;
   private readonly sessionMonitor = new AbortController();
@@ -181,8 +183,9 @@ class NativeHost {
     let size: Rect | undefined;
     let monitor: number | undefined;
     const was = this.mode;
-    // A repeated collapse keeps the card's slot and its window order.
-    if (next === "thumbnail" && was === "thumbnail") return;
+    // A repeated collapse keeps the card's slot and its window order. The
+    // viewer's mode echo can lag, so the host's own last placement decides too.
+    if (next === "thumbnail" && was === "thumbnail" && this.placedMode === "thumbnail") return;
     // The card leaves the stack first, so the others close the gap.
     if (next === "expanded" && was === "thumbnail") await this.markAway();
     if (this.record.hyprland !== undefined && !await applyHyprlandWindowMode(this.record, next, (placed, on) => { size = placed; monitor = on; })) {
@@ -191,6 +194,7 @@ class NativeHost {
     }
     this.send({ cmd: "setMode", mode: next, ...(size === undefined ? {} : { width: size.width, height: size.height }) });
     this.mode = next;
+    this.placedMode = next;
     if (next === "thumbnail" && size !== undefined) {
       // The compositor raised the placed window, so it becomes the front card.
       const placed: Rect = size;
