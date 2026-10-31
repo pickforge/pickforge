@@ -628,11 +628,13 @@ If a site signs the session out again under DevTools, use desktop input instead.
 Destroy the browser session, because only one Chrome can open a profile. Create a
 `desktop` session with `--viewer`, open plain Chrome on the profile, and call
 `request_takeover`. Then drive the site with `desktop click`, `type`, `key` and
-`screenshot`:
+`screenshot`. Keep the password store flags, so a later browser session can
+still read the profile's cookies:
 
 ```sh
 pickforge-lab desktop launch --session <id> --wait-window Chrome -- google-chrome-stable \
-  --user-data-dir=$HOME/.pickforge/lab/profiles/<name> --no-first-run --no-default-browser-check <url>
+  --user-data-dir=$HOME/.pickforge/lab/profiles/<name> --no-first-run --no-default-browser-check \
+  --password-store=basic --use-mock-keychain <url>
 ```
 
 The viewer input transport uses the same lease and permit drain without
