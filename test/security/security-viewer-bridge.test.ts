@@ -8,6 +8,7 @@ import { createRequire } from "node:module";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import {
   createSession,
+  getSession,
   readProcessIdentity,
   updateSession,
 } from "@pickforge/lab-core";
@@ -154,6 +155,25 @@ function rawRequest(
       ),
     );
   });
+}
+
+/** The body of a raw response, decoding chunked transfer encoding. */
+function responseBody(response: string): string {
+  const [head = "", ...rest] = response.split("\r\n\r\n");
+  let body = rest.join("\r\n\r\n");
+  if (!/^transfer-encoding: chunked$/im.test(head)) {
+    return body;
+  }
+  let decoded = "";
+  for (;;) {
+    const end = body.indexOf("\r\n");
+    const size = Number.parseInt(body.slice(0, end), 16);
+    if (!(size > 0)) {
+      return decoded;
+    }
+    decoded += body.slice(end + 2, end + 2 + size);
+    body = body.slice(end + 4 + size);
+  }
 }
 
 function host(): string {
@@ -507,6 +527,101 @@ describe("viewer status API", () => {
           ),
         ).toContain("HTTP/1.1 405");
       }
+    },
+  );
+});
+
+describe("viewer session API", () => {
+  it("returns only the current title to the exact Bearer token", async () => {
+    const empty = await rawRequest("/api/session", [
+      host(),
+      `Authorization: Bearer ${token}`,
+    ]);
+    expect(empty).toContain("HTTP/1.1 200");
+    expect(responseBody(empty)).toBe('{"title":null}');
+    await updateSession(
+      sessionId,
+      { title: "Checkout flow test" },
+      registryEnv,
+    );
+    for (const origins of [[], [origin()]]) {
+      const response = await rawRequest("/api/session", [
+        host(),
+        ...origins,
+        `Authorization: Bearer ${token}`,
+      ]);
+      expect(response).toContain("HTTP/1.1 200");
+      const body = responseBody(response);
+      expect(JSON.parse(body)).toEqual({ title: "Checkout flow test" });
+      expect(body).not.toContain(token);
+      expect(body).not.toContain(sessionId);
+      expect(response).toContain("Cache-Control: no-store");
+      expect(response).toContain("X-Content-Type-Options: nosniff");
+      expect(response).toContain("Referrer-Policy: no-referrer");
+      expect(response).toContain(
+        "Content-Type: application/json; charset=utf-8",
+      );
+      expect(response).toContain(
+        "Content-Security-Policy: default-src 'none';",
+      );
+    }
+  });
+  it.each([
+    undefined,
+    "Bearer wrong",
+    `Bearer ${"x".repeat(43)}`,
+    "Basic wrong",
+    "bearer wrong",
+  ])("rejects invalid session authorization %s", async (authorization) => {
+    await updateSession(sessionId, { title: "Private title" }, registryEnv);
+    const headers = [host()];
+    if (authorization !== undefined) {
+      headers.push(`Authorization: ${authorization}`);
+    }
+    const response = await rawRequest("/api/session", headers);
+    expect(response).toContain("HTTP/1.1 401");
+    expect(response).toContain("Cache-Control: no-store");
+    expect(response).not.toContain("Private title");
+  });
+  it("rejects duplicate authorization, query capabilities and foreign Host or Origin", async () => {
+    expect(
+      await rawRequest("/api/session", [
+        host(),
+        `Authorization: Bearer ${token}`,
+        `Authorization: Bearer ${token}`,
+      ]),
+    ).toContain("HTTP/1.1 401");
+    expect(await rawRequest(`/api/session?token=${token}`, [host()])).toContain(
+      "HTTP/1.1 404",
+    );
+    for (const headers of [
+      [],
+      [host(), host()],
+      ["Host: localhost:123"],
+      [host(), "Origin: http://evil.example"],
+      [host(), origin(), origin()],
+    ]) {
+      expect(
+        await rawRequest("/api/session", [
+          ...headers,
+          `Authorization: Bearer ${token}`,
+        ]),
+      ).toContain("HTTP/1.1 403");
+    }
+  });
+  it.each(["HEAD", "POST", "PUT", "DELETE", "OPTIONS"])(
+    "rejects session method %s",
+    async (method) => {
+      for (const origins of [[], [origin()]]) {
+        const response = await rawRequest(
+          "/api/session",
+          [host(), ...origins, `Authorization: Bearer ${token}`],
+          method,
+          method === "POST" ? '{"title":"x"}' : "",
+        );
+        expect(response).toContain("HTTP/1.1 405");
+      }
+      expect((await getSession(sessionId, registryEnv))?.title).toBeUndefined();
     },
   );
 });

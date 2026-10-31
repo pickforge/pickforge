@@ -20,6 +20,7 @@ import { applyHyprlandWindowMode } from "./hyprland.js";
 import {
   VIEWER_HOST,
   VIEWER_CLOSE_CODES,
+  VIEWER_SESSION_API_PATH,
   VIEWER_STATUS_API_PATH,
   type ViewerWindowMode,
 } from "./contract.js";
@@ -336,6 +337,15 @@ async function windowRequest(
   respond(response, 200, JSON.stringify({ applied, size: launch[mode] }));
 }
 
+/** POSTs need an exact Origin; the bearer-only GET endpoints answer 405 instead. */
+function originRequired(method: string | undefined, url: string): boolean {
+  return (
+    method === "POST" &&
+    url !== VIEWER_STATUS_API_PATH &&
+    url !== VIEWER_SESSION_API_PATH
+  );
+}
+
 async function httpRequest(
   request: http.IncomingMessage,
   response: http.ServerResponse,
@@ -347,14 +357,16 @@ async function httpRequest(
     response.setHeader(name, value);
   }
   const url = request.url ?? "";
-  const requireOrigin =
-    request.method === "POST" && url !== VIEWER_STATUS_API_PATH;
-  if (!allowedRequest(request, port, requireOrigin)) {
+  if (!allowedRequest(request, port, originRequired(request.method, url))) {
     respond(response, 403);
     return;
   }
   if (url === VIEWER_STATUS_API_PATH) {
     statusRequest(request, response, options.token);
+    return;
+  }
+  if (url === VIEWER_SESSION_API_PATH) {
+    await sessionRequest(request, response, options);
     return;
   }
   const launchId = windowLaunchId(url);
@@ -395,6 +407,24 @@ function statusRequest(
     return;
   }
   respond(response, authorizedRequest(request, token) ? 204 : 401);
+}
+
+/** Only the session title, so the page can follow title changes. */
+async function sessionRequest(
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  options: ViewerBridgeOptions,
+): Promise<void> {
+  if (request.method !== "GET") {
+    respond(response, 405);
+    return;
+  }
+  if (!authorizedRequest(request, options.token)) {
+    respond(response, 401);
+    return;
+  }
+  const record = await getSession(options.sessionId, options.registryEnv);
+  respond(response, 200, JSON.stringify({ title: record?.title ?? null }));
 }
 
 function rejectUpgrade(socket: Duplex, status: number, port: number): void {

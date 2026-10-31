@@ -67,30 +67,58 @@ body[data-mode="expanded"] #shield {
   pointer-events: none;
 }
 
-/* The session label, in the thumbnail only. */
+/* The session title or label, in the thumbnail only. */
 #label {
   position: fixed;
   top: 8px;
   left: 8px;
   z-index: 20;
+  display: flex;
+  gap: 8px;
   box-sizing: border-box;
   max-width: calc(100vw - 16px);
   margin: 0;
   padding: 5px 10px;
-  overflow: hidden;
   border: 1px solid var(--color-hairline-strong);
   border-radius: var(--radius-pill);
   background: rgba(15, 15, 17, 0.88);
   font-size: 11px;
   font-weight: 500;
   line-height: 1.2;
-  text-overflow: ellipsis;
   white-space: nowrap;
   pointer-events: none;
 }
 
+/* With a title, the thumbnail gets a full-width top strip. */
+#label.titled {
+  top: 0;
+  left: 0;
+  right: 0;
+  max-width: none;
+  padding: 7px 10px;
+  border-width: 0 0 1px;
+  border-radius: 0;
+}
+
 #label[hidden],
 body[data-mode="expanded"] #label {
+  display: none;
+}
+
+.name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.muted {
+  flex: none;
+  color: var(--color-muted);
+  font-weight: 400;
+  white-space: pre;
+}
+
+.muted:empty {
   display: none;
 }
 
@@ -119,6 +147,7 @@ body[data-status="live"] #status {
   display: flex;
   align-items: center;
   gap: 6px;
+  max-width: calc(100vw - 16px);
 }
 
 #toolbar[hidden] {
@@ -127,6 +156,7 @@ body[data-status="live"] #status {
 
 .live,
 #collapse {
+  flex: none;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -138,6 +168,23 @@ body[data-status="live"] #status {
   font: 500 11px/1.2 var(--font-mono);
   letter-spacing: 0.1em;
   text-transform: uppercase;
+}
+
+/* The title, then the muted session id; only the caption shrinks. */
+#caption {
+  display: flex;
+  min-width: 0;
+  margin: 0;
+  padding: 5px 10px;
+  border: 1px solid var(--color-hairline-strong);
+  border-radius: var(--radius-pill);
+  background: rgba(15, 15, 17, 0.88);
+  font: 500 11px/1.2 var(--font-mono);
+  white-space: nowrap;
+}
+
+#caption[hidden] {
+  display: none;
 }
 
 /* The one ember on screen: the live dot while the view is live. */

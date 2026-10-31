@@ -410,7 +410,9 @@ async function startLocked(
   const { launchId, profileDir } = await prepareViewerLaunch(opts.sessionId, opts.registryEnv);
   const sizes = viewerWindowSizes(opts.desktop);
   const argsOptions = {
-    url: buildViewerUrl(opts.bridgePort, launchId, opts.token, viewerLabel(opts.sessionId, session.projectDir)),
+    url: buildViewerUrl(
+      opts.bridgePort, launchId, opts.token, viewerLabel(opts.sessionId, session.projectDir), session.title,
+    ),
     profileDir,
     launchId,
     size: sizes.thumbnail,
