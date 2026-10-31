@@ -134,7 +134,6 @@ function showLabel() {
   element("label-title").textContent = title === "" ? label : title;
   element("label-id").textContent = title === "" ? "" : sessionId;
   element("label").hidden = title === "" && label === "";
-  element("label").classList.toggle("titled", title !== "");
   element("caption-title").textContent = title === "" ? label : title;
   element("caption-id").textContent = title === "" || sessionId === "" ? "" : ` \u00b7 ${sessionId}`;
   element("caption").hidden = title === "" && label === "";

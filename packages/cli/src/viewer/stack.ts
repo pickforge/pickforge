@@ -16,12 +16,12 @@ import { THUMBNAIL_MARGIN, type HyprlandContext, type Rect } from "./hyprland.js
 
 /** Each back card shows this much of its top: the viewer's thumbnail title strip. */
 export const STACK_PEEK = 32;
-/** Space between fanned cards. */
-export const STACK_GAP = 12;
 /** A hover that starts this soon after the stack folded waits for the rest. */
 export const FOLD_COOLDOWN_MS = 400;
 /** A pointer leave folds the stack only after this delay. */
 export const LEAVE_DEBOUNCE_MS = 250;
+/** After a fold, each card raises this much later than the card behind it. */
+export const RAISE_STAGGER_MS = 60;
 const WATCH_DEBOUNCE_MS = 10;
 const WATCH_POLL_MS = 1_000;
 const MEMBER_FILE = /^([0-9a-f]{32})\.json$/;
@@ -254,10 +254,11 @@ export function stackFanned(members: readonly StackMember[], self: StackMember):
  *
  * The front card sits in the thumbnail corner of `area`. Collapsed, each back
  * card sits {@link STACK_PEEK} higher than the card in front, so only its
- * title strip shows. Fanned, each card sits fully above the card in front
- * with a {@link STACK_GAP} gap; when that runs past the top margin, the cards
- * share the space uniformly, at least {@link STACK_PEEK} apart. The front
- * card never moves. Cards align to the right margin.
+ * title strip shows, and never ends below the front card. Fanned, each card
+ * sits right above the card in front, without a gap, so a pointer on any
+ * collapsed strip stays on a card; when that runs past the top margin, the
+ * cards share the space uniformly, at least {@link STACK_PEEK} apart. The
+ * front card never moves. Cards align to the right margin.
  */
 export function stackLayout(members: readonly StackMember[], selfLaunchId: string, area: Rect): Rect | undefined {
   const self = members.find((member) => member.launchId === selfLaunchId);
@@ -267,13 +268,14 @@ export function stackLayout(members: readonly StackMember[], selfLaunchId: strin
   const top0 = area.y + area.height - cards[0]!.height - THUMBNAIL_MARGIN;
   const tops = [top0];
   if (stackFanned(members, self)) {
-    for (let k = 1; k < cards.length; k++) tops.push(tops[k - 1]! - cards[k]!.height - STACK_GAP);
+    for (let k = 1; k < cards.length; k++) tops.push(tops[k - 1]! - cards[k]!.height);
     if (tops.at(-1)! < area.y + THUMBNAIL_MARGIN) {
       const spacing = Math.max(STACK_PEEK, Math.floor((top0 - area.y - THUMBNAIL_MARGIN) / (cards.length - 1)));
       for (let k = 1; k < cards.length; k++) tops[k] = top0 - k * spacing;
     }
   } else {
-    for (let k = 1; k < cards.length; k++) tops.push(top0 - k * STACK_PEEK);
+    const bottom = top0 + cards[0]!.height;
+    for (let k = 1; k < cards.length; k++) tops.push(Math.min(tops[k - 1]! - STACK_PEEK, bottom - cards[k]!.height));
   }
   return { x: area.x + area.width - self.width - THUMBNAIL_MARGIN, y: tops[index]!, width: self.width, height: self.height };
 }

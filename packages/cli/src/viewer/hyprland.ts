@@ -598,11 +598,27 @@ export async function applyHyprlandWindowMode(
     if (!applied) return false;
     // A placed window goes on top, so a collapsed card is the visible front
     // card. The raise is cosmetic, so its failure never fails the placement.
-    await (isHyprlang(ctx)
-      ? dispatchAll(ctx, [buildRaiseDispatch(found.client.address)])
-      : hyprctlEval(ctx, buildRaiseLua(found.client.address))).catch(() => false);
+    await raiseClient(ctx, found.client.address);
     onPlaced?.(rect, found.client.monitor);
     return true;
+  } catch {
+    return false;
+  }
+}
+
+function raiseClient(ctx: HyprlandContext, address: string): Promise<boolean> {
+  return isHyprlang(ctx)
+    ? dispatchAll(ctx, [buildRaiseDispatch(address)])
+    : hyprctlEval(ctx, buildRaiseLua(address));
+}
+
+/** Raise this launch's own verified window without focus. True when applied. */
+export async function raiseHyprlandViewerWindow(launch: ViewerLaunchRecord): Promise<boolean> {
+  const ctx = launch.hyprland;
+  if (ctx === undefined) return false;
+  try {
+    const found = await verifiedViewerWindow(ctx, launch.pid);
+    return found !== undefined && await raiseClient(ctx, found.client.address);
   } catch {
     return false;
   }

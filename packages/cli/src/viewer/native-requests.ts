@@ -25,6 +25,8 @@ export class NativeRequests {
   }) {}
 
   state(id: string): ViewerControlEvent | undefined { return this.requests.get(id)?.state; }
+  /** True when no request waits for the human and the viewer is not closing. */
+  idle(): boolean { return !this.closing && ![...this.requests.values()].some((request) => request.state === undefined); }
   has(id: string): boolean { return this.requests.has(id); }
 
   subscribe(callback: (event: ViewerControlEvent) => void): () => void {

@@ -21,10 +21,11 @@ import { viewerLabel } from "./contract.js";
 import {
   detectHyprland, hyprlandRuleName, viewerClassPattern, installViewerRule,
   disableViewerRule, disableViewerOpacityRule, waitForViewerWindow, applyHyprlandWindowMode, moveHyprlandViewerWindow,
-  type HyprlandClient, type Rect,
+  raiseHyprlandViewerWindow, type HyprlandClient, type Rect,
 } from "./hyprland.js";
 import {
-  StackMembership, stackFanned, stackLayout, FOLD_COOLDOWN_MS, LEAVE_DEBOUNCE_MS, type StackUpdate,
+  StackMembership, stackCards, stackFanned, stackLayout, FOLD_COOLDOWN_MS, LEAVE_DEBOUNCE_MS, RAISE_STAGGER_MS,
+  type StackMember, type StackUpdate,
 } from "./stack.js";
 
 /** The session title as the viewer shows it: cleaned and at most 80 characters. */
@@ -122,6 +123,7 @@ class NativeHost {
   private foldedAt = Number.NEGATIVE_INFINITY;
   private hovering = false;
   private hoverTimer?: NodeJS.Timeout;
+  private raiseTimer?: NodeJS.Timeout;
 
   constructor(
     private readonly child: ChildProcessWithoutNullStreams,
@@ -133,9 +135,13 @@ class NativeHost {
     private sentTitle: string,
   ) {
     // A request expands from inside the serial requestTakeover operation. Its
-    // end collapses from a timer or the cancelRequest operation, so it queues.
+    // end collapses from a timer or the cancelRequest operation, so it queues,
+    // and decides again when its turn comes: a newer request or a take keeps
+    // the viewer expanded.
     this.requests = new NativeRequests({ env, send: (command) => this.send(command),
-      mode: (mode) => mode === "expanded" ? this.setMode(mode) : this.queued(() => this.setMode(mode)),
+      mode: (mode) => mode === "expanded" ? this.setMode(mode) : this.queued(async () => {
+        if (this.requests.idle() && !this.control.active) await this.setMode(mode);
+      }),
       currentMode: () => this.mode, controlling: () => this.control.active });
     this.control = new NativeControl({ sessionId: record.sessionId, env, send: (command) => this.send(command),
       kill: () => { if (!this.exited) this.child.kill("SIGKILL"); },
@@ -167,8 +173,9 @@ class NativeHost {
   private async setMode(next: NativeViewerMode): Promise<void> {
     let size: Rect | undefined;
     let monitor: number | undefined;
+    const was = this.mode;
     // The card leaves the stack first, so the others close the gap.
-    if (next === "expanded") await this.markAway();
+    if (next === "expanded" && was === "thumbnail") await this.markAway();
     if (this.record.hyprland !== undefined && !await applyHyprlandWindowMode(this.record, next, (placed, on) => { size = placed; monitor = on; })) {
       if (next === "expanded" && this.mode === "thumbnail") await this.stackWrite({ mode: "thumbnail" });
       throw new Error("Native viewer window could not be placed");
@@ -179,7 +186,8 @@ class NativeHost {
       // The compositor raised the placed window, so it becomes the front card.
       const placed: Rect = size;
       this.ownRect = placed;
-      await this.stackWrite({ mode: "thumbnail", stackedAt: new Date().toISOString(), hover: false,
+      // A repeated collapse keeps the card's place in the stack.
+      await this.stackWrite({ mode: "thumbnail", ...(was === "thumbnail" ? {} : { stackedAt: new Date().toISOString() }), hover: false,
         width: placed.width, height: placed.height, ...(monitor === undefined ? {} : { monitor }) });
     }
   }
@@ -247,7 +255,10 @@ class NativeHost {
       members.push(self);
     } else self = recorded;
     const fanned = stackFanned(members, self);
-    if (this.fanned && !fanned) this.foldedAt = Date.now();
+    if (this.fanned && !fanned) {
+      this.foldedAt = Date.now();
+      this.raiseAfterFold(stackCards(members, self), self);
+    }
     this.fanned = fanned;
     if (this.mode !== "thumbnail" || self.mode !== "thumbnail") return;
     const cached = this.stackArea === undefined ? undefined : stackLayout(members, self.launchId, this.stackArea);
@@ -261,6 +272,23 @@ class NativeHost {
       return target === undefined || sameRect(target, this.ownRect) ? undefined : target;
     });
     if (moved) this.ownRect = target;
+  }
+
+  /**
+   * The compositor raises a card that the pointer focuses while the stack is
+   * fanned. After the fold, every host raises its own card, the back card
+   * first and the front card last, so each strip shows again.
+   */
+  private raiseAfterFold(cards: readonly StackMember[], self: StackMember): void {
+    const index = cards.findIndex((card) => card.launchId === self.launchId);
+    if (index < 0) return;
+    if (this.raiseTimer !== undefined) clearTimeout(this.raiseTimer);
+    this.raiseTimer = setTimeout(() => {
+      this.raiseTimer = undefined;
+      this.enqueue(async () => {
+        if (this.mode === "thumbnail" && !this.stopped) await raiseHyprlandViewerWindow(this.record);
+      });
+    }, (cards.length - 1 - index) * RAISE_STAGGER_MS);
   }
 
   /** Hover only fans the stack out. It never reaches control or the session. */
@@ -456,6 +484,7 @@ class NativeHost {
       if (this.timer !== undefined) clearInterval(this.timer);
       this.unwatchStack?.();
       if (this.hoverTimer !== undefined) clearTimeout(this.hoverTimer);
+      if (this.raiseTimer !== undefined) clearTimeout(this.raiseTimer);
       await this.stack?.leave().catch(() => {});
       await this.control.end("stopping", true).catch(() => { if (!this.exited) this.child.kill("SIGKILL"); });
       this.requests.close();

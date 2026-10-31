@@ -16,8 +16,8 @@ import { runNativeViewerHost, type NativeHostOptions } from "../src/viewer/nativ
 import { createViewerFakes, monitor, type ViewerFakes, type FakeViewerBehavior } from "./viewer-fakes.js";
 import { unusedTestDisplay } from "../../desktop-linux/test/test-resources.js";
 import { nativeViewerVersion } from "../src/viewer/native.js";
-import { stackDir, STACK_GAP, STACK_PEEK, type StackMember } from "../src/viewer/stack.js";
-import { buildMoveLua, THUMBNAIL_MARGIN } from "../src/viewer/hyprland.js";
+import { stackDir, STACK_PEEK, type StackMember } from "../src/viewer/stack.js";
+import { buildMoveLua, buildRaiseLua, THUMBNAIL_MARGIN } from "../src/viewer/hyprland.js";
 
 const available = findOnPath("Xvfb") !== null;
 let root: string;
@@ -63,8 +63,8 @@ async function start(options: Partial<NativeHostOptions> = {}, behavior: FakeVie
   }
   throw new Error("Source host did not become ready");
 }
-async function until(check: () => boolean): Promise<void> {
-  for (let count = 0; count < 100 && !check(); count++) await sleep(25);
+async function until(check: () => boolean, timeoutMs = 2_500): Promise<void> {
+  for (let count = 0; count < timeoutMs / 25 && !check(); count++) await sleep(25);
   expect(check()).toBe(true);
 }
 
@@ -194,12 +194,14 @@ describe.skipIf(!available)("native host viewer stack", () => {
     await until(() => moved(top0 - STACK_PEEK, x));
     fakes.cueViewer({ event: "hover", inside: true });
     await until(() => readMember(host.launchId)?.hover === true);
-    await until(() => moved(top0 - 288 - STACK_GAP, x));
+    await until(() => moved(top0 - 288, x));
     fakes.cueViewer({ event: "hover", inside: false });
     await sleep(100);
     expect(readMember(host.launchId)?.hover).toBe(true);
     await until(() => readMember(host.launchId)?.hover === false);
     await until(() => evals().filter((lua) => lua === buildMoveLua("0xabc001", { x, y: top0 - STACK_PEEK })).length === 2);
+    // After the fold the back card raises itself, so the order shows each strip.
+    await until(() => evals().includes(buildRaiseLua("0xabc001")));
     fakes.cueViewer({ event: "expandRequested" });
     await until(() => fakes.calls().some((entry) => entry.cmd === "setMode" && entry.mode === "expanded"));
     expect(readMember(host.launchId)?.mode).toBe("away");
@@ -229,6 +231,28 @@ describe.skipIf(!available)("native host viewer stack", () => {
     await until(() => modes().length >= 3, 10_000);
     await sleep(500);
     expect(modes()).toEqual(["expanded", "thumbnail", "expanded"]);
+    expect(readMember(host.launchId)?.mode).toBe("away");
+    fakes.setState({ status: { configProvider: "lua" }, monitors: [monitor()] });
+    await requestNativeViewerHost(host, { op: "shutdown" });
+    await running;
+  }, 20_000);
+
+  it("keeps the viewer expanded when a newer request waits behind a timed-out one", async () => {
+    const host = await start();
+    await until(() => readMember(host.launchId) !== undefined);
+    const first = await requestNativeViewerHost(host, { op: "requestTakeover", message: "First", timeoutMs: 250 });
+    expect(first.ok).toBe(true);
+    // A slow placement holds the queue; the second request waits behind it,
+    // and the first one times out before the second one registers.
+    fakes.setState({ status: { configProvider: "lua" }, monitors: [monitor()], evalDelayMs: 150 });
+    fakes.cueViewer({ event: "expandRequested" });
+    await sleep(50);
+    const second = requestNativeViewerHost(host, { op: "requestTakeover", message: "Second", timeoutMs: 10_000 });
+    expect((await second).ok).toBe(true);
+    await sleep(1_500);
+    const modes = fakes.calls().filter((entry) => entry.cmd === "setMode").map((entry) => entry.mode);
+    expect(modes.at(-1)).toBe("expanded");
+    expect(fakes.calls().filter((entry) => entry.cmd === "attention").at(-1)).toMatchObject({ message: "Second" });
     expect(readMember(host.launchId)?.mode).toBe("away");
     fakes.setState({ status: { configProvider: "lua" }, monitors: [monitor()] });
     await requestNativeViewerHost(host, { op: "shutdown" });

@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { readProcessIdentity } from "@pickforge/lab-core";
 import {
-  StackMembership, readStack, stackDir, stackLayout, STACK_GAP, STACK_PEEK, type StackContext, type StackMember,
+  StackMembership, readStack, stackDir, stackLayout, STACK_PEEK, type StackContext, type StackMember,
 } from "../src/viewer/stack.js";
 import type { BrowserViewerLaunchRecord } from "@pickforge/lab-desktop-linux";
 import {
@@ -48,13 +48,40 @@ describe("stackLayout", () => {
 
   it("fans out fully above the front card when any card has hover, without moving the front card", () => {
     const members = [card(1), card(2, { hover: true }), card(3)];
-    expect(ys(members, [3, 2, 1])).toEqual([TOP0, TOP0 - H - STACK_GAP, TOP0 - 2 * (H + STACK_GAP)]);
-    expect(STACK_GAP).toBe(12);
+    expect(ys(members, [3, 2, 1])).toEqual([TOP0, TOP0 - H, TOP0 - 2 * H]);
   });
 
   it("fans cards of different heights by each card's own height", () => {
     const members = [card(1, { height: 100 }), card(2, { height: 300, hover: true }), card(3)];
-    expect(ys(members, [3, 2, 1])).toEqual([TOP0, TOP0 - 300 - STACK_GAP, TOP0 - 300 - STACK_GAP - 100 - STACK_GAP]);
+    expect(ys(members, [3, 2, 1])).toEqual([TOP0, TOP0 - 300, TOP0 - 300 - 100]);
+  });
+
+  it("keeps every collapsed strip on a card when the stack fans, so the pointer stays on the stack", () => {
+    for (const heights of [[H, H, H, H], [100, 300, 160, 240], [240, 60, 400, 120]]) {
+      const collapsed = heights.map((height, k) => card(10 - k, { height }));
+      const fanned = collapsed.map((member, k) => ({ ...member, hover: k === 0 }));
+      const rows = (members: StackMember[]): Array<[number, number]> =>
+        members.map((member) => { const y = stackLayout(members, member.launchId, AREA)!.y; return [y, y + member.height]; });
+      const cards = rows(fanned);
+      for (const [top] of rows(collapsed)) {
+        for (let y = top; y < top + STACK_PEEK; y++) {
+          expect(cards.some(([from, to]) => y >= from && y < to)).toBe(true);
+        }
+      }
+    }
+  });
+
+  it("never lets a taller back card end below the front card", () => {
+    const members = [card(1, { height: 288 }), card(2, { height: 160 }), card(3, { height: 216 })];
+    const front = TOP0;
+    const bottom = front + 216;
+    const tops = ys(members, [3, 2, 1]) as number[];
+    expect(tops[0]).toBe(front);
+    expect(tops[1]).toBe(front - STACK_PEEK);
+    expect(tops[2]).toBe(bottom - 288);
+    expect(tops[2]! + 288).toBeLessThanOrEqual(bottom);
+    // Each strip still sits above the card in front.
+    expect(tops[2]).toBeLessThanOrEqual(tops[1]! - STACK_PEEK);
   });
 
   it("spaces the fan uniformly when it would pass the top margin", () => {
@@ -82,7 +109,7 @@ describe("stackLayout", () => {
     const members = [card(1), card(2, { mode: "away", hover: true }), card(3, { monitor: 1, hover: true }), card(4, { monitor: 1 })];
     expect(stackLayout(members, id(1), AREA)?.y).toBe(TOP0);
     expect(stackLayout(members, id(2), AREA)).toBeUndefined();
-    expect(stackLayout(members, id(3), AREA)?.y).toBe(TOP0 - H - STACK_GAP);
+    expect(stackLayout(members, id(3), AREA)?.y).toBe(TOP0 - H);
     expect(stackLayout(members, id(7), AREA)).toBeUndefined();
   });
 
