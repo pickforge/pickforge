@@ -73,6 +73,7 @@ const EXPECTED_TOOLS = [
   "session_create",
   "session_destroy",
   "session_status",
+  "session_title",
   "takeover_status",
   "takeover_wait",
 ] as const;

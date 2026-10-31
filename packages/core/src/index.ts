@@ -354,6 +354,14 @@ export {
 } from "./session-retention.js";
 
 export {
+  HIDDEN_CHARACTERS,
+  parseSessionTitle,
+  sanitizeSessionTitle,
+  SESSION_TITLE_MAX_CHARS,
+  setSessionTitle,
+} from "./session-title.js";
+
+export {
   SESSION_VNC_LOCK_TIMEOUT_MS,
   withSessionVncLock,
   type SessionVncLockOptions,

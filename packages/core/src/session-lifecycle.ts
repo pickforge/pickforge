@@ -146,6 +146,7 @@ export interface LocalSessionStatusEntry extends Record<string, unknown> {
   status: string;
   createdAt: string;
   projectDir: string;
+  title?: string;
   desktop?: Record<string, unknown>;
   android?: Record<string, unknown>;
   browser?: Record<string, unknown>;
@@ -285,6 +286,7 @@ export async function localSessionStatusEntry(
     createdAt: record.createdAt,
     projectDir: record.projectDir,
   };
+  if (typeof record.title === "string") entry.title = record.title;
   if (record.type === "browser") {
     const browserStatus = await runtime.browser.status(record.id);
     const desktopStatus = await runtime.desktop.status(record.id);

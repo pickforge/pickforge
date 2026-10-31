@@ -84,6 +84,8 @@ function assertNotAborted(signal: AbortSignal | undefined): void {
 export interface CreateBrowserSessionOptions {
   projectDir: string;
   profile?: string;
+  /** Human-readable activity title, already parsed. */
+  title?: string;
   /** Registry env (PICKFORGE_HOME) for session records. */
   registryEnv?: EnvLike;
   /** Spawn env: source for PATH, locale, and Chrome binary detection. */
@@ -754,6 +756,7 @@ export async function createBrowserSession(
     {
       type: "browser",
       projectDir: opts.projectDir,
+      ...(opts.title === undefined ? {} : { title: opts.title }),
       ...(opts.profile === undefined ? {} : { meta: { browserProfile: opts.profile } }),
     },
     registryEnv,

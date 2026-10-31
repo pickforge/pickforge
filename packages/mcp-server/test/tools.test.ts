@@ -24,6 +24,7 @@ const EXPECTED_TOOLS = [
   "profile_list",
   "session_create",
   "session_status",
+  "session_title",
   "session_destroy",
   "desktop_windows",
   "desktop_focus",
@@ -565,6 +566,37 @@ describe("empty lab", () => {
     const report = parseToolJson(result);
     expect(report.errors[0]).toContain("No running desktop session");
     expect(report.errors[0]).toContain("session_create");
+  });
+});
+
+describe("session title", () => {
+  it("sets, shows and clears the title of a session", async () => {
+    const id = writeDesktopSessionRecord(dirs.home, dirs.projectDir);
+    const set = parseToolJson(await lab.client.callTool({
+      name: "session_title",
+      arguments: { sessionId: id, title: "  Pickforge\u202e GitHub issues " },
+    }));
+    expect(set).toMatchObject({ ok: true, sessionId: id, title: "Pickforge GitHub issues" });
+    const status = parseToolJson(await lab.client.callTool({ name: "session_status", arguments: { sessionId: id } }));
+    expect(status.sessions[0].title).toBe("Pickforge GitHub issues");
+    const cleared = parseToolJson(await lab.client.callTool({ name: "session_title", arguments: { sessionId: id, title: "" } }));
+    expect(cleared).toMatchObject({ ok: true, title: null });
+  });
+
+  it("refuses an over-long title and an unknown session", async () => {
+    const id = writeDesktopSessionRecord(dirs.home, dirs.projectDir);
+    const long = await lab.client.callTool({ name: "session_title", arguments: { sessionId: id, title: "x".repeat(81) } });
+    expect(long.isError).toBe(true);
+    expect(parseToolJson(long).errors.join("\n")).toMatch(/at most 80/);
+    const missing = await lab.client.callTool({ name: "session_title", arguments: { sessionId: "desk-ffffff", title: "x" } });
+    expect(missing.isError).toBe(true);
+    expect(parseToolJson(missing).errors.join("\n")).toMatch(/not found/);
+  });
+
+  it("refuses an over-long title at creation before starting anything", async () => {
+    const result = await lab.client.callTool({ name: "session_create", arguments: { type: "desktop", title: "x".repeat(81) } });
+    expect(result.isError).toBe(true);
+    expect(parseToolJson(result).errors.join("\n")).toMatch(/at most 80/);
   });
 });
 

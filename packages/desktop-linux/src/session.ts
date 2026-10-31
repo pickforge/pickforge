@@ -79,6 +79,8 @@ export interface CreateDesktopSessionOptions {
   vncControl?: boolean;
   /** Opt in once, at creation. Running sessions never change policy. */
   inheritHome?: boolean;
+  /** Human-readable activity title, already parsed. */
+  title?: string;
 }
 
 export interface DesktopSessionHandle {
@@ -480,7 +482,7 @@ export async function createDesktopSession(
     },
   });
   const record = await createSession(
-    { type: "desktop", projectDir: opts.projectDir },
+    { type: "desktop", projectDir: opts.projectDir, ...(opts.title === undefined ? {} : { title: opts.title }) },
     registryEnv,
   );
   const logDir = desktopSessionLogDir(record.id, registryEnv);

@@ -105,3 +105,26 @@ describe("pickforge-lab session status", () => {
     expect(text.stdout).toContain("xvfb=dead");
   }, cliSpawnTimeout(2));
 });
+
+describe("pickforge-lab session title", () => {
+  it("sets a title that status shows, refuses bad input, and clears it", async () => {
+    const id = await writeDesktopSessionRecord();
+
+    const set = parseJson(await runCli(["session", "title", id, "Pickforge GitHub issues", "--json"]));
+    expect(set).toMatchObject({ ok: true, sessionId: id, title: "Pickforge GitHub issues" });
+    const text = await runCli(["session", "status", id]);
+    expect(text.stdout).toContain(`${id}  desktop  dead  "Pickforge GitHub issues"`);
+    expect(parseJson(await runCli(["session", "status", id, "--json"])).sessions[0].title).toBe("Pickforge GitHub issues");
+
+    const both = await runCli(["session", "title", id, "x", "--clear", "--json"]);
+    expect(both.code).not.toBe(0);
+    expect(parseJson(both).errors.join("\n")).toContain("Pass either a title or --clear");
+    const long = await runCli(["session", "title", id, "x".repeat(81), "--json"]);
+    expect(long.code).not.toBe(0);
+    expect(parseJson(long).errors.join("\n")).toMatch(/at most 80/);
+
+    const cleared = parseJson(await runCli(["session", "title", id, "--clear", "--json"]));
+    expect(cleared).toMatchObject({ ok: true, title: null });
+    expect(parseJson(await runCli(["session", "status", id, "--json"])).sessions[0].title).toBeUndefined();
+  }, cliSpawnTimeout(7));
+});

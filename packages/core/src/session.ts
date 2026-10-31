@@ -80,6 +80,8 @@ export interface SessionRecord {
   createdAt: string;
   status: SessionStatus;
   projectDir: string;
+  /** What the session is doing, for the person watching. The id stays the agent's tag. */
+  title?: string;
   desktop?: DesktopSessionInfo;
   android?: AndroidSessionInfo;
   browser?: BrowserSessionInfo;
@@ -89,6 +91,7 @@ export interface SessionRecord {
 export interface CreateSessionInput {
   type: SessionType;
   projectDir: string;
+  title?: string;
   status?: SessionStatus;
   desktop?: DesktopSessionInfo;
   android?: AndroidSessionInfo;
@@ -182,6 +185,7 @@ export async function createSession(
     };
     // Retained directories and markers inside their horizon reserve IDs.
     if (isSessionIdReserved(record.id, env)) continue;
+    if (input.title !== undefined) record.title = input.title;
     if (input.desktop !== undefined) record.desktop = input.desktop;
     if (input.android !== undefined) record.android = input.android;
     if (input.browser !== undefined) record.browser = input.browser;

@@ -56,6 +56,7 @@ import {
   runSessionDestroy,
   runSessionPrune,
   runSessionStatus,
+  runSessionTitle,
 } from "./commands/session.js";
 import { runSetupAndroid } from "./commands/setup-android.js";
 import { runSetupLabUser } from "./commands/setup-lab-user.js";
@@ -190,6 +191,7 @@ function registerSessionCommands(program: Command): void {
             .makeOptionMandatory(),
         )
         .option("--profile <name>", "browser: persistent named login profile")
+        .option("--title <text>", "activity title that viewers show for the session")
         .option("--width <pixels>", "desktop display width")
         .option("--height <pixels>", "desktop display height")
         .option("--inherit-home", "desktop: consent to caller HOME/XDG homes for this session (immutable); human takeover pauses agent actions")
@@ -221,6 +223,17 @@ function registerSessionCommands(program: Command): void {
       .argument("[id]", "session id"),
   ).action(async (id, opts) => {
     process.exitCode = await runSessionStatus(id, opts);
+  });
+
+  withJson(
+    session
+      .command("title")
+      .description("Set or clear the activity title that viewers show for a session")
+      .argument("<id>", "session id")
+      .argument("[title]", "short activity title")
+      .option("--clear", "remove the title"),
+  ).action(async (id, title, opts) => {
+    process.exitCode = await runSessionTitle(id, title, opts);
   });
 
   withJson(
