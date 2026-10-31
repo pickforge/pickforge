@@ -241,9 +241,12 @@ export async function runSessionCreate(
   });
 }
 
+function titleParts(entry: LocalSessionStatusEntry): string[] {
+  return entry.title === undefined ? [] : [JSON.stringify(entry.title)];
+}
+
 function statusLine(entry: LocalSessionStatusEntry): string {
-  const parts = [`${entry.id}  ${entry.type}  ${entry.status}`];
-  if (entry.title !== undefined) parts.push(JSON.stringify(entry.title));
+  const parts = [`${entry.id}  ${entry.type}  ${entry.status}`, ...titleParts(entry)];
   const desktop = entry.desktop as Record<string, unknown> | undefined;
   if (desktop !== undefined) {
     parts.push(

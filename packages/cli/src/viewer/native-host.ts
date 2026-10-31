@@ -21,11 +21,10 @@ import { viewerLabel } from "./contract.js";
 import {
   detectHyprland, hyprlandRuleName, viewerClassPattern, installViewerRule,
   disableViewerRule, disableViewerOpacityRule, waitForViewerWindow, applyHyprlandWindowMode, moveHyprlandViewerWindow,
-  raiseHyprlandViewerWindow, type HyprlandClient, type Rect,
+  type HyprlandClient, type Rect,
 } from "./hyprland.js";
 import {
-  StackMembership, stackCards, stackFanned, stackLayout, FOLD_COOLDOWN_MS, LEAVE_DEBOUNCE_MS, RAISE_STAGGER_MS,
-  type StackMember, type StackUpdate,
+  StackMembership, stackFanned, stackLayout, FOLD_COOLDOWN_MS, LEAVE_DEBOUNCE_MS, type StackUpdate,
 } from "./stack.js";
 
 /** The session title as the viewer shows it: cleaned and at most 80 characters. */
@@ -34,7 +33,7 @@ function viewerTitle(raw: string | undefined): string {
 }
 
 function sameRect(a: Rect, b: Rect | undefined): boolean {
-  return b !== undefined && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+  return b !== undefined && (["x", "y", "width", "height"] as const).every((key) => a[key] === b[key]);
 }
 
 /** One bounded JSON object per line. Unknown discriminants are ignored by the caller. */
@@ -92,6 +91,12 @@ function watchOperation(run: () => Promise<void>, serial = false): HostOperation
   return { valid: (request) => Object.keys(request).every((key) => key === "op"), run, serial };
 }
 
+/** The session's Xvfb, and the title the viewer got at launch. */
+interface ShownSession {
+  xvfb: { pid: number; startTicks: number };
+  title: string;
+}
+
 class NativeHost {
   private readonly control: NativeControl;
   private readonly requests: NativeRequests;
@@ -123,7 +128,8 @@ class NativeHost {
   private foldedAt = Number.NEGATIVE_INFINITY;
   private hovering = false;
   private hoverTimer?: NodeJS.Timeout;
-  private raiseTimer?: NodeJS.Timeout;
+  private readonly xvfb: { pid: number; startTicks: number };
+  private sentTitle: string;
 
   constructor(
     private readonly child: ChildProcessWithoutNullStreams,
@@ -131,9 +137,10 @@ class NativeHost {
     private readonly version: string,
     private readonly env: NodeJS.ProcessEnv,
     private readonly options: NativeHostOptions,
-    private readonly xvfb: { pid: number; startTicks: number },
-    private sentTitle: string,
+    shown: ShownSession,
   ) {
+    this.xvfb = shown.xvfb;
+    this.sentTitle = shown.title;
     // A request expands from inside the serial requestTakeover operation. Its
     // end collapses from a timer or the cancelRequest operation, so it queues,
     // and decides again when its turn comes: a newer request or a take keeps
@@ -174,6 +181,8 @@ class NativeHost {
     let size: Rect | undefined;
     let monitor: number | undefined;
     const was = this.mode;
+    // A repeated collapse keeps the card's slot and its window order.
+    if (next === "thumbnail" && was === "thumbnail") return;
     // The card leaves the stack first, so the others close the gap.
     if (next === "expanded" && was === "thumbnail") await this.markAway();
     if (this.record.hyprland !== undefined && !await applyHyprlandWindowMode(this.record, next, (placed, on) => { size = placed; monitor = on; })) {
@@ -186,8 +195,7 @@ class NativeHost {
       // The compositor raised the placed window, so it becomes the front card.
       const placed: Rect = size;
       this.ownRect = placed;
-      // A repeated collapse keeps the card's place in the stack.
-      await this.stackWrite({ mode: "thumbnail", ...(was === "thumbnail" ? {} : { stackedAt: new Date().toISOString() }), hover: false,
+      await this.stackWrite({ mode: "thumbnail", stackedAt: new Date().toISOString(), hover: false,
         width: placed.width, height: placed.height, ...(monitor === undefined ? {} : { monitor }) });
     }
   }
@@ -255,10 +263,7 @@ class NativeHost {
       members.push(self);
     } else self = recorded;
     const fanned = stackFanned(members, self);
-    if (this.fanned && !fanned) {
-      this.foldedAt = Date.now();
-      this.raiseAfterFold(stackCards(members, self), self);
-    }
+    if (this.fanned && !fanned) this.foldedAt = Date.now();
     this.fanned = fanned;
     if (this.mode !== "thumbnail" || self.mode !== "thumbnail") return;
     const cached = this.stackArea === undefined ? undefined : stackLayout(members, self.launchId, this.stackArea);
@@ -272,23 +277,6 @@ class NativeHost {
       return target === undefined || sameRect(target, this.ownRect) ? undefined : target;
     });
     if (moved) this.ownRect = target;
-  }
-
-  /**
-   * The compositor raises a card that the pointer focuses while the stack is
-   * fanned. After the fold, every host raises its own card, the back card
-   * first and the front card last, so each strip shows again.
-   */
-  private raiseAfterFold(cards: readonly StackMember[], self: StackMember): void {
-    const index = cards.findIndex((card) => card.launchId === self.launchId);
-    if (index < 0) return;
-    if (this.raiseTimer !== undefined) clearTimeout(this.raiseTimer);
-    this.raiseTimer = setTimeout(() => {
-      this.raiseTimer = undefined;
-      this.enqueue(async () => {
-        if (this.mode === "thumbnail" && !this.stopped) await raiseHyprlandViewerWindow(this.record);
-      });
-    }, (cards.length - 1 - index) * RAISE_STAGGER_MS);
   }
 
   /** Hover only fans the stack out. It never reaches control or the session. */
@@ -484,7 +472,6 @@ class NativeHost {
       if (this.timer !== undefined) clearInterval(this.timer);
       this.unwatchStack?.();
       if (this.hoverTimer !== undefined) clearTimeout(this.hoverTimer);
-      if (this.raiseTimer !== undefined) clearTimeout(this.raiseTimer);
       await this.stack?.leave().catch(() => {});
       await this.control.end("stopping", true).catch(() => { if (!this.exited) this.child.kill("SIGKILL"); });
       this.requests.close();
@@ -578,7 +565,7 @@ export async function runNativeViewerHost(options: NativeHostOptions): Promise<n
       kind: "native", sessionId: options.session, launchId, createdAt: new Date().toISOString(), binary: options.binary,
       hostPid: hostIdentity.pid, hostStartTicks: hostIdentity.startTicks,
       viewerPid: viewerIdentity.pid, viewerStartTicks: viewerIdentity.startTicks, ...viewerIdentity, ...sizes, hyprland,
-    }, options.viewerVersion, env, options, { pid: target.pid, startTicks: target.startTicks }, title).run();
+    }, options.viewerVersion, env, options, { xvfb: { pid: target.pid, startTicks: target.startTicks }, title }).run();
   } finally {
     if (hyprland !== undefined) {
       await disableViewerRule(hyprland, ruleName);

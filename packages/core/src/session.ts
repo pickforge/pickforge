@@ -99,6 +99,11 @@ export interface CreateSessionInput {
   meta?: Record<string, unknown>;
 }
 
+/** `{ title }` when a title is set, so records and status omit an absent one. */
+export function titleField(title: string | undefined): { title?: string } {
+  return typeof title === "string" ? { title } : {};
+}
+
 export type SessionLivenessCheck = (
   record: SessionRecord,
 ) => boolean | Promise<boolean>;
@@ -182,10 +187,10 @@ export async function createSession(
       createdAt: new Date().toISOString(),
       status: input.status ?? "starting",
       projectDir: input.projectDir,
+      ...titleField(input.title),
     };
     // Retained directories and markers inside their horizon reserve IDs.
     if (isSessionIdReserved(record.id, env)) continue;
-    if (input.title !== undefined) record.title = input.title;
     if (input.desktop !== undefined) record.desktop = input.desktop;
     if (input.android !== undefined) record.android = input.android;
     if (input.browser !== undefined) record.browser = input.browser;

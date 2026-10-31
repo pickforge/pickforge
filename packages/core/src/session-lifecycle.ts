@@ -6,6 +6,7 @@ import {
   desktopHomePolicy,
   isSessionProcessAlive,
   listSessions,
+  titleField,
   type BrowserSessionInfo,
   type SessionLivenessCheck,
   type SessionRecord,
@@ -285,8 +286,8 @@ export async function localSessionStatusEntry(
     status: record.status,
     createdAt: record.createdAt,
     projectDir: record.projectDir,
+    ...titleField(record.title),
   };
-  if (typeof record.title === "string") entry.title = record.title;
   if (record.type === "browser") {
     const browserStatus = await runtime.browser.status(record.id);
     const desktopStatus = await runtime.desktop.status(record.id);

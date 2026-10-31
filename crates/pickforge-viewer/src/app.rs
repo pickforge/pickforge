@@ -491,6 +491,30 @@ impl App {
         self.hover_change(true)
     }
 
+    fn on_cursor_entered(&mut self) {
+        self.entering = true;
+        self.entry_point = None;
+    }
+
+    fn on_cursor_moved(&mut self, x: f64, y: f64) {
+        self.pointer = Some((x, y));
+        self.update_hover();
+        self.on_pointer_moved();
+        if let Some(event) = self.pointer_motion((x, y)) {
+            emit(&event);
+        }
+    }
+
+    fn on_cursor_left(&mut self) {
+        self.pointer = None;
+        self.entering = false;
+        self.entry_point = None;
+        self.update_hover();
+        if let Some(event) = self.hover_change(false) {
+            emit(&event);
+        }
+    }
+
     fn request_redraw(&mut self) {
         if let Some(window) = &self.window {
             if self.redraw_since.is_none() {
@@ -1510,27 +1534,11 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.draw();
             }
-            WindowEvent::CursorEntered { .. } => {
-                self.entering = true;
-                self.entry_point = None;
-            }
+            WindowEvent::CursorEntered { .. } => self.on_cursor_entered(),
             WindowEvent::CursorMoved { position, .. } => {
-                self.pointer = Some((position.x, position.y));
-                self.update_hover();
-                self.on_pointer_moved();
-                if let Some(event) = self.pointer_motion((position.x, position.y)) {
-                    emit(&event);
-                }
+                self.on_cursor_moved(position.x, position.y)
             }
-            WindowEvent::CursorLeft { .. } => {
-                self.pointer = None;
-                self.entering = false;
-                self.entry_point = None;
-                self.update_hover();
-                if let Some(event) = self.hover_change(false) {
-                    emit(&event);
-                }
-            }
+            WindowEvent::CursorLeft { .. } => self.on_cursor_left(),
             WindowEvent::MouseInput { state, button, .. } => self.on_mouse(state, button),
             WindowEvent::MouseWheel { delta, .. } => self.on_wheel(delta),
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers,

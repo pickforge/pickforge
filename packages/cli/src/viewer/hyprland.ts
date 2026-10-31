@@ -612,18 +612,6 @@ function raiseClient(ctx: HyprlandContext, address: string): Promise<boolean> {
     : hyprctlEval(ctx, buildRaiseLua(address));
 }
 
-/** Raise this launch's own verified window without focus. True when applied. */
-export async function raiseHyprlandViewerWindow(launch: ViewerLaunchRecord): Promise<boolean> {
-  const ctx = launch.hyprland;
-  if (ctx === undefined) return false;
-  try {
-    const found = await verifiedViewerWindow(ctx, launch.pid);
-    return found !== undefined && await raiseClient(ctx, found.client.address);
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Move this launch's own window without a resize. The window is verified like
  * in {@link applyHyprlandWindowMode}. `place` gets the work area and the

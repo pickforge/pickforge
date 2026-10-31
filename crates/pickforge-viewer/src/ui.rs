@@ -1222,9 +1222,8 @@ type Fitted = (String, f32);
 /// the main text fits.
 fn fit_pair(
     main: &str,
-    main_px: f32,
     second: Option<&str>,
-    second_px: f32,
+    (main_px, second_px): (f32, f32),
     gap: f32,
     max_w: f32,
     text: &mut Text,
@@ -1277,9 +1276,8 @@ impl TitleStrip {
         let max_w = area.w as f32 - 2.0 * pad;
         let (main, id) = fit_pair(
             &heading.main,
-            main_px,
             heading.id.as_deref(),
-            id_px,
+            (main_px, id_px),
             gap,
             max_w,
             text,
@@ -1339,9 +1337,8 @@ fn bar_caption(
     }
     let (main, id) = fit_pair(
         &heading.main,
-        main_px,
         id.as_deref(),
-        id_px,
+        (main_px, id_px),
         0.0,
         max_w,
         text,

@@ -20,8 +20,6 @@ export const STACK_PEEK = 32;
 export const FOLD_COOLDOWN_MS = 400;
 /** A pointer leave folds the stack only after this delay. */
 export const LEAVE_DEBOUNCE_MS = 250;
-/** After a fold, each card raises this much later than the card behind it. */
-export const RAISE_STAGGER_MS = 60;
 const WATCH_DEBOUNCE_MS = 10;
 const WATCH_POLL_MS = 1_000;
 const MEMBER_FILE = /^([0-9a-f]{32})\.json$/;
