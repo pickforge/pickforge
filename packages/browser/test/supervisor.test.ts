@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import WebSocket from "ws";
-import { runCommand } from "@pickforge/lab-core";
+import { HUMAN_LEASE_FILE, runCommand } from "@pickforge/lab-core";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   CdpAlreadyAttachedError,
@@ -15,6 +15,7 @@ import {
   probeCdpEndpoint,
   readCdpEndpoint,
   readDevToolsBrowserVersion,
+  requestCdpSupervisorMode,
   waitForCdpEndpoint,
   type CdpEndpoint,
 } from "../src/devtools.js";
@@ -60,7 +61,13 @@ function cdpPaths(dir: string) {
  * event and its reply in one write, so the supervisor must split and join NUL
  * frames itself. `Target.attachToBrowserTarget` opens sessions B1, B2 and so
  * on, and `Target.attachToTarget` opens T1, T2 and so on. `Test.hang` is never
- * answered.
+ * answered. `Browser.close` exits, and `Target.getTargets` lists `pages.json`.
+ *
+ * Each start appends its pid and argv to `launches.jsonl`. Like Chrome, it
+ * opens the pipe only with `--remote-debugging-pipe`. Without it, it is a
+ * plain browser: it opens no pipe, exits 0
+ * on SIGTERM and logs that in `sigterm.log`, and exits 1 at once when
+ * `plain-fails` exists.
  */
 function writePipeBrowser(dir: string): string {
   const script = path.join(dir, "pipe-browser.cjs");
@@ -71,6 +78,12 @@ function writePipeBrowser(dir: string): string {
       'const net = require("node:net");',
       'const path = require("node:path");',
       'const log = path.join(__dirname, "commands.jsonl");',
+      'fs.appendFileSync(path.join(__dirname, "launches.jsonl"), JSON.stringify({ pid: process.pid, argv: process.argv.slice(2) }) + "\\n");',
+      'if (!process.argv.includes("--remote-debugging-pipe")) {',
+      '  if (fs.existsSync(path.join(__dirname, "plain-fails"))) process.exit(1);',
+      '  process.on("SIGTERM", () => { fs.appendFileSync(path.join(__dirname, "sigterm.log"), process.pid + "\\n"); process.exit(0); });',
+      "  setInterval(() => {}, 1000);",
+      "} else {",
       "const input = new net.Socket({ fd: 3, readable: true, writable: false });",
       "const output = new net.Socket({ fd: 4, readable: false, writable: true });",
       'const frame = (message) => JSON.stringify(message) + "\\0";',
@@ -102,6 +115,13 @@ function writePipeBrowser(dir: string): string {
       '    output.write(frame(reply) + frame({ method: "Target.detachedFromTarget", params: { sessionId: message.params.sessionId }, ...on }));',
       '  } else if (message.method === "Test.exit") {',
       "    process.exit(3);",
+      '  } else if (message.method === "Browser.close") {',
+      "    output.write(frame(reply));",
+      "    setTimeout(() => process.exit(0), 10);",
+      '  } else if (message.method === "Target.getTargets") {',
+      '    const pages = path.join(__dirname, "pages.json");',
+      "    const targetInfos = fs.existsSync(pages) ? JSON.parse(fs.readFileSync(pages, \"utf8\")) : [];",
+      "    output.write(frame({ ...reply, result: { targetInfos } }));",
       "  } else {",
       "    output.write(frame(reply));",
       "  }",
@@ -120,6 +140,7 @@ function writePipeBrowser(dir: string): string {
       "});",
       'input.on("end", () => process.exit(0));',
       "setInterval(() => {}, 1000);",
+      "}",
     ].join("\n"),
   );
   return script;
@@ -132,11 +153,13 @@ interface Bridge {
   commands(): Array<{ id: number; method: string; params?: Record<string, unknown>; sessionId?: string }>;
 }
 
-async function startBridge(): Promise<Bridge> {
+async function startBridge(
+  browserArgs: (dir: string) => string[] = () => ["--remote-debugging-pipe"],
+): Promise<Bridge> {
   const dir = temporaryDirectory();
   const script = writePipeBrowser(dir);
   const paths = cdpPaths(dir);
-  const command = buildSupervisedBrowserCommand(process.execPath, process.execPath, [script], paths);
+  const command = buildSupervisedBrowserCommand(process.execPath, process.execPath, [script, ...browserArgs(dir)], paths);
   const child = spawn(command.command, command.args, { detached: true, stdio: ["ignore", "ignore", "inherit"] });
   supervisors.push(child);
   const waited = await waitForCdpEndpoint({
@@ -584,6 +607,237 @@ describe("browser supervisor CDP bridge", () => {
   });
 });
 
+/** The flags buildChromeArgs gives Chrome, cut down, with its start URL last. */
+function handoffArgs(dir: string): string[] {
+  return [
+    `--user-data-dir=${path.join(dir, "profile")}`,
+    "--remote-debugging-pipe",
+    "--password-store=basic",
+    "--use-mock-keychain",
+    "about:blank",
+  ];
+}
+
+interface Launch {
+  pid: number;
+  argv: string[];
+}
+
+function launches(bridge: Bridge): Launch[] {
+  return fs
+    .readFileSync(path.join(bridge.dir, "launches.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Launch);
+}
+
+function lastLaunch(bridge: Bridge): Launch {
+  const all = launches(bridge);
+  return all[all.length - 1]!;
+}
+
+function holdHumanLease(bridge: Bridge, expiresInMs = 60_000): void {
+  const expiresAt = new Date(Date.now() + expiresInMs).toISOString();
+  fs.writeFileSync(path.join(bridge.dir, HUMAN_LEASE_FILE), `${JSON.stringify({ leaseId: "test", expiresAt })}\n`);
+}
+
+function publishedMode(bridge: Bridge): Promise<string | undefined> {
+  return readCdpEndpoint(cdpPaths(bridge.dir).endpointFile).then((endpoint) => endpoint?.mode);
+}
+
+function postStatus(socketPath: string, requestPath: string): Promise<{ status: number | undefined; body: string }> {
+  return new Promise((resolve, reject) => {
+    const request = http.request({ socketPath, method: "POST", path: requestPath }, (response) => {
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk: string) => (body += chunk));
+      response.once("end", () => resolve({ status: response.statusCode, body }));
+    });
+    request.once("error", reject);
+    request.end();
+  });
+}
+
+async function startHandoffBridge(): Promise<Bridge> {
+  const bridge = await startBridge(handoffArgs);
+  holdHumanLease(bridge);
+  return bridge;
+}
+
+describe("browser supervisor plain handoff", { timeout: 20_000 }, () => {
+  it("reads the human lease file that lab-core writes", () => {
+    expect(HUMAN_LEASE_FILE).toBe("human.lease.json");
+  });
+
+  it("reopens the profile without remote debugging and with its pages, then restores CDP", async () => {
+    const bridge = await startHandoffBridge();
+    const pages = [
+      { type: "page", url: "https://example.com/a" },
+      { type: "page", url: "chrome://settings/" },
+      { type: "service_worker", url: "https://example.com/sw.js" },
+      { type: "page", url: "http://example.org/b?c=d" },
+    ];
+    fs.writeFileSync(path.join(bridge.dir, "pages.json"), JSON.stringify(pages));
+    expect(await publishedMode(bridge)).toBe("cdp");
+
+    expect(await requestCdpSupervisorMode(bridge.endpoint.socketPath, "plain")).toBe("plain");
+    const plain = lastLaunch(bridge);
+    expect(plain.argv).toEqual([
+      `--user-data-dir=${path.join(bridge.dir, "profile")}`,
+      "--password-store=basic",
+      "--use-mock-keychain",
+      "https://example.com/a",
+      "http://example.org/b?c=d",
+    ]);
+    expect(await publishedMode(bridge)).toBe("plain");
+    const methods = bridge.commands().map(({ method }) => method);
+    expect(methods.slice(-2)).toEqual(["Target.getTargets", "Browser.close"]);
+    // The supervisor stays the session's browser process, and its socket stays up.
+    expect(bridge.child.exitCode).toBeNull();
+    expect(await readDevToolsBrowserVersion(bridge.endpoint.socketPath)).toBe("Chrome/1.2.3");
+
+    expect(await requestCdpSupervisorMode(bridge.endpoint.socketPath, "cdp")).toBe("cdp");
+    expect(fs.readFileSync(path.join(bridge.dir, "sigterm.log"), "utf8").trim()).toBe(String(plain.pid));
+    expect(lastLaunch(bridge).argv).toEqual([
+      `--user-data-dir=${path.join(bridge.dir, "profile")}`,
+      "--remote-debugging-pipe",
+      "--password-store=basic",
+      "--use-mock-keychain",
+      "--restore-last-session",
+    ]);
+    const endpoint = await readCdpEndpoint(cdpPaths(bridge.dir).endpointFile);
+    expect(endpoint).toEqual({ ...bridge.endpoint, mode: "cdp" });
+    expect(bridge.commands().map(({ method }) => method).slice(-1)).toEqual(["Browser.getVersion"]);
+    const client = await connect(cdpWebSocketUrl(bridge.endpoint.socketPath, bridge.endpoint.browserPath));
+    client.socket.send(JSON.stringify({ id: 1, method: "Test.echo" }));
+    expect(await client.next((message) => message.id === 1)).toEqual({ id: 1, result: {} });
+    expect(bridge.child.exitCode).toBeNull();
+  });
+
+  it("opens about:blank when no page can be reopened", async () => {
+    const bridge = await startHandoffBridge();
+    await requestCdpSupervisorMode(bridge.endpoint.socketPath, "plain");
+    expect(lastLaunch(bridge).argv.slice(-2)).toEqual(["--use-mock-keychain", "about:blank"]);
+  });
+
+  it("keeps a relay lease across both relaunches and holds its websocket until CDP is back", async () => {
+    const bridge = await startHandoffBridge();
+    const lease = await attachCdpClient(bridge.endpoint);
+    try {
+      const leased = await connect(lease.browserEndpoint);
+      const dropped = once(leased.socket, "close");
+      await requestCdpSupervisorMode(bridge.endpoint.socketPath, "plain");
+      await dropped;
+      // The slot is still the relay's.
+      await expect(attachCdpClient(bridge.endpoint)).rejects.toBeInstanceOf(CdpAlreadyAttachedError);
+
+      const waiting = new WebSocket(lease.browserEndpoint);
+      let opened = false;
+      const open = once(waiting, "open").then(() => (opened = true));
+      waiting.on("error", () => {});
+      await delay(300);
+      expect(opened).toBe(false);
+
+      await requestCdpSupervisorMode(bridge.endpoint.socketPath, "cdp");
+      await open;
+      const messages: Array<Record<string, unknown>> = [];
+      waiting.on("message", (data) => messages.push(JSON.parse(data.toString()) as Record<string, unknown>));
+      waiting.send(JSON.stringify({ id: 7, method: "Test.echo" }));
+      await expect.poll(() => messages).toEqual([{ id: 7, result: {} }]);
+      waiting.close();
+    } finally {
+      lease.release();
+    }
+  });
+
+  it("does nothing for a switch to the mode it is in and runs concurrent switches once", async () => {
+    const bridge = await startHandoffBridge();
+    expect(await requestCdpSupervisorMode(bridge.endpoint.socketPath, "cdp")).toBe("cdp");
+    expect(launches(bridge)).toHaveLength(1);
+
+    const both = await Promise.all([
+      requestCdpSupervisorMode(bridge.endpoint.socketPath, "plain"),
+      requestCdpSupervisorMode(bridge.endpoint.socketPath, "plain"),
+    ]);
+    expect(both).toEqual(["plain", "plain"]);
+    expect(launches(bridge)).toHaveLength(2);
+
+    const back = await Promise.all([
+      requestCdpSupervisorMode(bridge.endpoint.socketPath, "cdp"),
+      requestCdpSupervisorMode(bridge.endpoint.socketPath, "cdp"),
+    ]);
+    expect(back).toEqual(["cdp", "cdp"]);
+    expect(launches(bridge)).toHaveLength(3);
+    expect(bridge.child.exitCode).toBeNull();
+  });
+
+  it("ends the plain browser and itself on POST /close", async () => {
+    const bridge = await startHandoffBridge();
+    const { endpointFile, socketPath } = cdpPaths(bridge.dir);
+    await requestCdpSupervisorMode(bridge.endpoint.socketPath, "plain");
+    const plain = lastLaunch(bridge);
+    const exited = once(bridge.child, "exit");
+
+    expect((await postStatus(bridge.endpoint.socketPath, "/close")).status).toBe(202);
+    await exited;
+    expect(fs.readFileSync(path.join(bridge.dir, "sigterm.log"), "utf8").trim()).toBe(String(plain.pid));
+    expect(fs.existsSync(socketPath)).toBe(false);
+    expect(fs.existsSync(endpointFile)).toBe(false);
+  });
+
+  it("stays up when the person closes the plain browser, and reopens the last session on /cdp", async () => {
+    const bridge = await startHandoffBridge();
+    await requestCdpSupervisorMode(bridge.endpoint.socketPath, "plain");
+    process.kill(lastLaunch(bridge).pid, "SIGTERM");
+
+    await expect.poll(() => publishedMode(bridge)).toBe("plain-idle");
+    await delay(200);
+    expect(bridge.child.exitCode).toBeNull();
+    expect(await requestCdpSupervisorMode(bridge.endpoint.socketPath, "plain")).toBe("plain-idle");
+
+    expect(await requestCdpSupervisorMode(bridge.endpoint.socketPath, "cdp")).toBe("cdp");
+    expect(lastLaunch(bridge).argv).toContain("--restore-last-session");
+    expect(await publishedMode(bridge)).toBe("cdp");
+  });
+
+  it("reopens CDP and answers an error when the plain browser does not start", async () => {
+    const bridge = await startHandoffBridge();
+    fs.writeFileSync(path.join(bridge.dir, "plain-fails"), "");
+
+    const answer = await postStatus(bridge.endpoint.socketPath, "/plain");
+    expect(answer.status).toBe(500);
+    expect(JSON.parse(answer.body)).toEqual({
+      error: "The plain browser exited during startup; the browser is back under CDP",
+      mode: "cdp",
+    });
+    await expect(requestCdpSupervisorMode(bridge.endpoint.socketPath, "plain")).rejects.toThrow(
+      "could not switch to plain: The plain browser exited during startup",
+    );
+    expect(lastLaunch(bridge).argv).toContain("--remote-debugging-pipe");
+    expect(await publishedMode(bridge)).toBe("cdp");
+    expect(bridge.child.exitCode).toBeNull();
+  });
+
+  it("returns to CDP by itself once the human lease is gone or expired", async () => {
+    const bridge = await startHandoffBridge();
+    await requestCdpSupervisorMode(bridge.endpoint.socketPath, "plain");
+    // A lease within the grace past its expiry still holds.
+    holdHumanLease(bridge, -1_000);
+    await delay(1_500);
+    expect(await publishedMode(bridge)).toBe("plain");
+
+    holdHumanLease(bridge, -10_000);
+    await expect.poll(() => publishedMode(bridge), { timeout: 10_000 }).toBe("cdp");
+    expect(lastLaunch(bridge).argv).toContain("--restore-last-session");
+
+    holdHumanLease(bridge);
+    await requestCdpSupervisorMode(bridge.endpoint.socketPath, "plain");
+    fs.rmSync(path.join(bridge.dir, HUMAN_LEASE_FILE));
+    await expect.poll(() => publishedMode(bridge), { timeout: 10_000 }).toBe("cdp");
+    expect(bridge.child.exitCode).toBeNull();
+  });
+});
+
 describe("readCdpEndpoint", () => {
   const valid = { socketPath: "/tmp/pickforge-browser-1/abc/cdp.sock", browserPath: "/devtools/browser/0b4a3f0e-1f6c-4c2e-9a77-2d2f6f1b9e10" };
 
@@ -593,6 +847,8 @@ describe("readCdpEndpoint", () => {
     await expect(readCdpEndpoint(file)).resolves.toBeUndefined();
     fs.writeFileSync(file, JSON.stringify(valid), { mode: 0o600 });
     await expect(readCdpEndpoint(file)).resolves.toEqual(valid);
+    fs.writeFileSync(file, JSON.stringify({ ...valid, mode: "plain-idle" }), { mode: 0o600 });
+    await expect(readCdpEndpoint(file)).resolves.toEqual({ ...valid, mode: "plain-idle" });
   });
 
   it("refuses a group-readable file, a symlink, and malformed content", async () => {
@@ -612,6 +868,7 @@ describe("readCdpEndpoint", () => {
       "45123\n/devtools/browser/abc\n",
       JSON.stringify({ ...valid, socketPath: "relative/cdp.sock" }),
       JSON.stringify({ ...valid, browserPath: "/json/version" }),
+      JSON.stringify({ ...valid, mode: "headless" }),
     ]) {
       fs.rmSync(file, { force: true });
       fs.writeFileSync(file, content, { mode: 0o600 });

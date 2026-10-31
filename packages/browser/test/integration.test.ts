@@ -1,14 +1,17 @@
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import WebSocket from "ws";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  acquireHumanLease,
   getSession,
   isPidAlive,
   isProcessGroupAlive,
   listProcessGroupMembers,
   readPickforgeEnv,
+  releaseHumanLease,
   type EnvLike,
 } from "@pickforge/lab-core";
 import { findOnPath } from "@pickforge/lab-desktop-linux";
@@ -18,7 +21,9 @@ import {
   createBrowserSession,
   destroyBrowserSession,
   detectChromeBinary,
+  enterPlainBrowser,
   getBrowserSessionStatus,
+  restoreCdpBrowser,
   readBrowserSessionCdpEndpoint,
   type BrowserSessionHandle,
 } from "../src/index.js";
@@ -158,6 +163,44 @@ function listeningTcpPorts(pgid: number): number[] {
   return ports;
 }
 
+/** The Chrome browser process of a session: the group member without --type. */
+function chromeBrowserArgv(session: BrowserSessionHandle): string[] | undefined {
+  for (const pid of listProcessGroupMembers(session.browserPid)) {
+    if (pid === session.browserPid) continue;
+    let argv: string[];
+    try {
+      argv = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
+    } catch {
+      continue;
+    }
+    if (argv.includes(`--user-data-dir=${session.profileDir}`) && !argv.some((arg) => arg.startsWith("--type="))) {
+      return argv;
+    }
+  }
+  return undefined;
+}
+
+async function pageUrls(session: BrowserSessionHandle): Promise<string[]> {
+  const { targetInfos } = await browserCdp(session, "Target.getTargets");
+  return (targetInfos as Array<{ type: string; url: string }>)
+    .filter((info) => info.type === "page")
+    .map((info) => info.url);
+}
+
+/** A loopback page server, so the tabs have web URLs to reopen. */
+async function startPageServer(): Promise<{ origin: string; close(): Promise<void> }> {
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { "Content-Type": "text/html" });
+    response.end("<title>page</title>");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as { port: number };
+  return {
+    origin: `http://127.0.0.1:${port}`,
+    close: () => new Promise((resolve) => server.close(() => resolve())),
+  };
+}
+
 async function answersJsonVersion(port: number): Promise<boolean> {
   try {
     const response = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(2_000) });
@@ -239,6 +282,60 @@ describe.skipIf(!ready)("real headed Chrome under Xvfb", () => {
       for (const session of sessions) await destroyBrowserSession(session.id, registryEnv).catch(() => {});
     }
   });
+
+  it(
+    "hands a named profile to a plain Chrome for a takeover and restores it under CDP",
+    { timeout: 120_000 },
+    async () => {
+      const pages = await startPageServer();
+      const session = await createBrowserSession({ projectDir, registryEnv, env: spawnEnv, profile: "ops" });
+      try {
+        await browserCdp(session, "Storage.setCookies", { cookies: [{
+          name: "pickforge_handoff", value: "kept", domain: "example.test", path: "/",
+          expires: Math.floor(Date.now() / 1000) + 3600,
+        }] });
+        const urls = [`${pages.origin}/one`, `${pages.origin}/two`];
+        for (const url of urls) await browserCdp(session, "Target.createTarget", { url });
+        await vi.waitFor(async () => expect(await pageUrls(session)).toEqual(expect.arrayContaining(urls)), {
+          timeout: 10_000,
+        });
+        const lease = await acquireHumanLease(session.id, registryEnv);
+        try {
+          expect(await enterPlainBrowser(session.id, registryEnv)).toBe(true);
+          expect((await readBrowserSessionCdpEndpoint(session.id, registryEnv))?.mode).toBe("plain");
+          const plain = await vi.waitFor(() => {
+            const argv = chromeBrowserArgv(session);
+            if (argv === undefined) throw new Error("no plain Chrome yet");
+            return argv;
+          }, { timeout: 10_000 });
+          expect(plain.some((arg) => arg.startsWith("--remote-debugging-"))).toBe(false);
+          expect(plain).toContain("--password-store=basic");
+          expect(plain).toEqual(expect.arrayContaining(urls));
+          expect((await getBrowserSessionStatus(session.id, registryEnv)).alive).toBe(true);
+
+          expect(await restoreCdpBrowser(session.id, registryEnv)).toBe(true);
+        } finally {
+          await releaseHumanLease(session.id, lease.leaseId, registryEnv);
+        }
+        expect((await readBrowserSessionCdpEndpoint(session.id, registryEnv))?.mode).toBe("cdp");
+        expect(chromeBrowserArgv(session)).toContain("--remote-debugging-pipe");
+        expect((await browserCdp(session, "Browser.getVersion")).product).toMatch(/Chrome/);
+        expect((await browserCdp(session, "Storage.getCookies")).cookies).toEqual(expect.arrayContaining([
+          expect.objectContaining({ name: "pickforge_handoff", value: "kept" }),
+        ]));
+        await vi.waitFor(async () => expect(await pageUrls(session)).toEqual(expect.arrayContaining(urls)), {
+          timeout: 10_000,
+        });
+        expect((await getBrowserSessionStatus(session.id, registryEnv)).alive).toBe(true);
+        // A session that ended is no longer restored.
+        await destroyBrowserSession(session.id, registryEnv);
+        expect(await restoreCdpBrowser(session.id, registryEnv)).toBe(false);
+      } finally {
+        await destroyBrowserSession(session.id, registryEnv).catch(() => {});
+        await pages.close();
+      }
+    },
+  );
 
   it(
     "starts from a deeply nested home without exceeding Chrome socket limits",
