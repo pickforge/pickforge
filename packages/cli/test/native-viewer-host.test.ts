@@ -190,7 +190,7 @@ describe.skipIf(!available)("native host viewer stack", () => {
     const other = "f".repeat(32);
     const identity = readProcessIdentity(process.pid)!;
     fs.writeFileSync(memberFile(other), JSON.stringify({ ...own, launchId: other, sessionId: "desk-ffffff", hostPid: identity.pid,
-      hostStartTicks: identity.startTicks, stackedAt: new Date(Date.parse(own.stackedAt) + 1_000).toISOString() }), { mode: 0o600 });
+      hostStartTicks: identity.startTicks, stackedAt: new Date(Math.max(Date.now(), Date.parse(own.stackedAt) + 1)).toISOString() }), { mode: 0o600 });
     await until(() => moved(top0 - STACK_PEEK, x));
     fakes.cueViewer({ event: "hover", inside: true });
     await until(() => readMember(host.launchId)?.hover === true);
