@@ -165,6 +165,10 @@ function listeningTcpPorts(pgid: number): number[] {
 
 /** The Chrome browser process of a session: the group member without --type. */
 function chromeBrowserArgv(session: BrowserSessionHandle): string[] | undefined {
+  return chromeBrowserProcess(session)?.argv;
+}
+
+function chromeBrowserProcess(session: BrowserSessionHandle): { pid: number; argv: string[] } | undefined {
   for (const pid of listProcessGroupMembers(session.browserPid)) {
     if (pid === session.browserPid) continue;
     let argv: string[];
@@ -174,7 +178,7 @@ function chromeBrowserArgv(session: BrowserSessionHandle): string[] | undefined 
       continue;
     }
     if (argv.includes(`--user-data-dir=${session.profileDir}`) && !argv.some((arg) => arg.startsWith("--type="))) {
-      return argv;
+      return { pid, argv };
     }
   }
   return undefined;
@@ -185,6 +189,27 @@ async function pageUrls(client: CdpClient): Promise<string[]> {
   return (targetInfos as Array<{ type: string; url: string }>)
     .filter((info) => info.type === "page")
     .map((info) => info.url);
+}
+
+/**
+ * Whether a Chrome holds open a session file that lists every URL. A Chrome
+ * without remote debugging tells its tabs only through this file, which each
+ * launch starts anew and keeps open.
+ */
+function openSessionFileHas(pid: number, urls: string[]): boolean {
+  const fdDir = `/proc/${pid}/fd`;
+  for (const fd of fs.readdirSync(fdDir)) {
+    let target: string;
+    try {
+      target = fs.readlinkSync(path.join(fdDir, fd));
+    } catch {
+      continue;
+    }
+    if (!path.basename(target).startsWith("Session_")) continue;
+    const content = fs.readFileSync(target).toString("latin1");
+    if (urls.every((url) => content.includes(url))) return true;
+  }
+  return false;
 }
 
 /** A loopback page server, so the tabs have web URLs to reopen. */
@@ -308,14 +333,21 @@ describe.skipIf(!ready)("real headed Chrome under Xvfb", () => {
         try {
           expect(await enterPlainBrowser(session.id, registryEnv)).toBe(true);
           expect((await readBrowserSessionCdpEndpoint(session.id, registryEnv))?.mode).toBe("plain");
-          const plain = await vi.waitFor(() => {
-            const argv = chromeBrowserArgv(session);
-            if (argv === undefined) throw new Error("no plain Chrome yet");
-            return argv;
+          const { pid: plainPid, argv: plain } = await vi.waitFor(() => {
+            const found = chromeBrowserProcess(session);
+            if (found === undefined) throw new Error("no plain Chrome yet");
+            return found;
           }, { timeout: 10_000 });
           expect(plain.some((arg) => arg.startsWith("--remote-debugging-"))).toBe(false);
           expect(plain).toContain("--password-store=basic");
-          expect(plain).toEqual(expect.arrayContaining(urls));
+          expect(plain).toContain("--restore-last-session");
+          // Page URLs stay out of /proc/<pid>/cmdline, which other local users can read.
+          expect(plain.filter((arg) => arg.includes(pages.origin))).toEqual([]);
+          // Browser.close saved the tabs, and the plain Chrome reopened them.
+          await vi.waitFor(() => expect(openSessionFileHas(plainPid, urls)).toBe(true), {
+            timeout: 20_000,
+            interval: 250,
+          });
           expect((await getBrowserSessionStatus(session.id, registryEnv)).alive).toBe(true);
 
           expect(await restoreCdpBrowser(session.id, registryEnv)).toBe(true);
