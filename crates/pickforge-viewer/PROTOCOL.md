@@ -15,7 +15,8 @@ pickforge-viewer \
   --width W --height H \
   --class pickforge-viewer-<launchId> \
   --thumbnail-width 384 \
-  --placement host|self
+  --placement host|self \
+  [--label TEXT] [--title TEXT]
 ```
 
 - `--display` is the session's owned Xvfb display. The host verifies it before
@@ -33,7 +34,14 @@ pickforge-viewer \
   compositor, so the viewer asks before it changes size. `--placement self`
   means the viewer resizes itself and reports the result. The default is
   `self`.
-- `--thumbnail-width` defaults to 384. All other flags are required.
+- `--label` is the session id and project folder, for example
+  `desk-1a2b3c · my-app`. The viewer removes control, format, bidi and line or
+  paragraph separator characters and keeps at most 256 characters.
+- `--title` is the activity title that the agent set for the session, for
+  example `Pickforge GitHub issues`. The viewer cleans it like `--label` and
+  keeps at most 80 characters. An empty title after cleaning means no title.
+- `--thumbnail-width` defaults to 384. `--label` and `--title` are optional.
+  All other flags are required.
 - The window and Paste use the caller's environment (`WAYLAND_DISPLAY` or
   `DISPLAY`) with its normal authorization. The session display is used only
   for capture and input.
@@ -76,6 +84,7 @@ Error codes in the `error` event: `display-refused`, `xvfb-mismatch`,
 | `error` | `code`, `message` | A fatal error. The viewer exits after this event. |
 | `takeRequested` | none | The user pressed Take control in the bar or the attention banner. Never sent while a grant is live. A second press within 10 s of an unanswered request sends nothing. |
 | `returnRequested` | `reason` (`"button"` or `"closed"`) | The user pressed Return control, or closed the window while holding control. Sent after the viewer released every held key and button. With `"closed"`, the viewer then sends `closed` and exits. |
+| `hover` | `inside` (boolean) | In thumbnail mode only: `true` on the first pointer motion inside the window, `false` when the pointer leaves it. The viewer also sends `false` when it leaves thumbnail mode while `inside` was `true`. It never repeats the same value. Motion, not pointer enter, starts a hover, so a window that moves under a still pointer does not report one. Hover never grants control and never sends input to the session. |
 | `controlAck` | `leaseId`, `state` (`"granted"` or `"revoked"`) | The viewer applied a `control` command. For `"revoked"` it is sent after the release of held input, with the command's `leaseId`, which is empty for `"unavailable"`. |
 
 ## Commands (host to viewer)
@@ -88,6 +97,7 @@ Error codes in the `error` event: `display-refused`, `xvfb-mismatch`,
 | `shutdown` | none | Exit cleanly. Held input is released first. |
 | `attention` | `message` | Show a banner with the message and a highlighted Take control button. It changes neither mode nor focus. The viewer refuses a message over 500 characters or with control characters. |
 | `clearAttention` | none | Remove the banner. |
+| `setTitle` | `title` (string) | Show this activity title. An empty string clears it, and the viewer shows the label alone. The viewer removes format and bidi characters as for `--title`, and refuses a title over 80 characters or with control characters. |
 | `pulse` | `x`, `y` | An agent click completed at this session pixel. The viewer draws a short ember ring there, only in its own window. A point past the session edge moves to the edge, as X moves the pointer there. The viewer ignores a pulse while the human holds control and after the session ended. `x` and `y` are integers from 0 to 32767. |
 | `control` | `state: "granted"`, `leaseId`, `grantMs` | Input is allowed until now plus `grantMs` on a monotonic clock. Each renewal re-sends it with the same `leaseId` and extends the grant. The viewer clears the banner. A grant in thumbnail mode expands the window as a thumbnail click does. `leaseId` is 1 to 128 bytes without control characters. `grantMs` is a positive integer; a value over 120000 counts as 120000. The viewer ignores a grant after the session ended or when it cannot send input. |
 | `control` | `state: "revoked"`, `leaseId`, `reason` (`"returned"`, `"lease-lost"`, `"session-ended"`, `"stopping"`, `"unavailable"`) | Release all held input, stop forwarding, acknowledge, and show the watch bar. `"unavailable"` answers a `takeRequested` that the host could not grant, with an empty `leaseId`. A revoke with a missing or unknown field still revokes. |
@@ -113,9 +123,17 @@ Error codes in the `error` event: `display-refused`, `xvfb-mismatch`,
 
 - Thumbnail: `--thumbnail-width` logical pixels wide, session aspect ratio, no
   controls. A click expands the window and is never forwarded, even while
-  controlling.
+  controlling. A 32 logical pixel strip at the top shows the title at the
+  left and the session id, muted, at the right. Without a title it shows the
+  label alone. The strip height is fixed, because the host stacks collapsed
+  viewers so that the strip of each one stays visible.
+- Window title: `<title> · <label> · Pickforge viewer`, without the parts that
+  are absent.
 - Expanded: a 32 logical pixel bar at the top with Fullscreen, Collapse and
-  Close, and Take control at the left when control is offered. Close sends
+  Close, and Take control at the left when control is offered. The free space
+  between the buttons shows the title and then the muted session id, or the
+  label alone without a title. The caption shortens the title with an ellipsis
+  first and is dropped before any button. The controlling bar shows it too. Close sends
   `closed`. Esc collapses in watch mode.
 - Controlling: the bar shows only Return control and Paste at the left and
   Fullscreen at the right, with an ember line under it. A narrow bar drops

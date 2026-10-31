@@ -28,6 +28,8 @@ pub struct Config {
     pub placement: Placement,
     /// Session id and project name for the title and the thumbnail.
     pub label: Option<String>,
+    /// The activity title that the agent set for the session.
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,7 +51,7 @@ impl fmt::Display for ArgError {
 
 pub const USAGE: &str = "usage: pickforge-viewer --display :N --xvfb-pid P --xvfb-start-ticks T \
 --width W --height H --class NAME [--thumbnail-width 384] [--placement host|self] \
-[--label TEXT]
+[--label TEXT] [--title TEXT]
        pickforge-viewer --version
        pickforge-viewer --self-test";
 
@@ -57,6 +59,9 @@ const DEFAULT_THUMBNAIL_WIDTH: u32 = 384;
 
 /// Longest `--label` in characters.
 pub const MAX_LABEL_CHARS: usize = 256;
+
+/// Longest `--title` and `setTitle` title in characters.
+pub const MAX_TITLE_CHARS: usize = 80;
 
 fn err(message: impl Into<String>) -> ArgError {
     ArgError(message.into())
@@ -92,6 +97,7 @@ where
     let mut thumbnail = None;
     let mut placement = None;
     let mut label = None;
+    let mut title = None;
 
     let mut iter = items.into_iter();
     while let Some(arg) = iter.next() {
@@ -109,6 +115,7 @@ where
             "--thumbnail-width" => &mut thumbnail,
             "--placement" => &mut placement,
             "--label" => &mut label,
+            "--title" => &mut title,
             "--version" | "--self-test" | "--help" => {
                 return Err(err(format!("{name} must be the only argument")))
             }
@@ -156,6 +163,7 @@ where
         },
         placement: parse_placement(placement.as_deref())?,
         label: label.as_deref().map(parse_label).transpose()?,
+        title: title.as_deref().and_then(parse_title),
     };
     Ok(Invocation::Run(config))
 }
@@ -225,9 +233,20 @@ fn parse_label(value: &str) -> Result<String, ArgError> {
     Ok(label)
 }
 
+/// The title cleaned like the label and cut to [`MAX_TITLE_CHARS`]. A
+/// title without visible text means no title.
+fn parse_title(value: &str) -> Option<String> {
+    let title: String = value
+        .chars()
+        .filter(|&c| !c.is_control() && !is_format(c))
+        .take(MAX_TITLE_CHARS)
+        .collect();
+    (!title.trim().is_empty()).then_some(title)
+}
+
 /// Unicode format characters (category Cf), bidi controls and the line
 /// and paragraph separators. They can hide or reorder the visible text.
-fn is_format(c: char) -> bool {
+pub(crate) fn is_format(c: char) -> bool {
     matches!(
         c,
         '\u{00ad}'
@@ -254,12 +273,13 @@ fn is_format(c: char) -> bool {
     )
 }
 
-/// The window title: the label first, so a short title keeps it.
-pub fn window_title(label: Option<&str>) -> String {
-    match label {
-        Some(label) => format!("{label} \u{b7} Pickforge viewer"),
-        None => "Pickforge viewer".into(),
-    }
+/// The window title: `<title> · <label> · Pickforge viewer`, without the
+/// absent parts. The session's own text comes first, so a short title keeps
+/// it.
+pub fn window_title(title: Option<&str>, label: Option<&str>) -> String {
+    let mut parts: Vec<&str> = title.into_iter().chain(label).collect();
+    parts.push("Pickforge viewer");
+    parts.join(" \u{b7} ")
 }
 
 /// The display number in a `DISPLAY` value such as `:0`, `:1.0` or
@@ -324,6 +344,7 @@ mod tests {
                 thumbnail_width: 384,
                 placement: Placement::Host,
                 label: None,
+                title: None,
             }
         );
     }
@@ -378,11 +399,62 @@ mod tests {
     }
 
     #[test]
-    fn title_shows_the_label() {
-        assert_eq!(window_title(None), "Pickforge viewer");
+    fn parses_and_cleans_the_title() {
+        let parsed = |title: &str| match run(&with(&["--title", title])) {
+            Ok(Invocation::Run(config)) => config.title,
+            other => panic!("{other:?}"),
+        };
         assert_eq!(
-            window_title(Some("desk-1a2b3c \u{b7} my-app")),
+            parsed("Pickforge GitHub issues").as_deref(),
+            Some("Pickforge GitHub issues")
+        );
+        assert_eq!(parsed("Análise 日本").as_deref(), Some("Análise 日本"));
+        for (raw, clean) in [
+            ("a\nb", "ab"),
+            ("a\u{1b}[31mb", "a[31mb"),
+            ("a\u{202e}b", "ab"),
+            ("a\u{2066}b", "ab"),
+            ("a\u{200b}b", "ab"),
+            ("a\u{2028}b", "ab"),
+        ] {
+            assert_eq!(parsed(raw).as_deref(), Some(clean), "{raw:?}");
+        }
+        let longest = "é".repeat(MAX_TITLE_CHARS);
+        assert_eq!(parsed(&longest), Some(longest.clone()));
+        assert_eq!(
+            parsed(&"é".repeat(MAX_TITLE_CHARS + 1)),
+            Some(longest),
+            "cut like --label"
+        );
+        for empty in ["", "   ", "\u{202e}\u{200b}", "\n"] {
+            assert_eq!(parsed(empty), None, "{empty:?}");
+        }
+        assert!(
+            run(&with(&["--title", "a", "--title", "b"])).is_err(),
+            "duplicate title"
+        );
+        assert!(run(&with(&["--title"])).is_err(), "missing value");
+        let Invocation::Run(config) = run(&with(&["--title=Checkout flow"])).unwrap() else {
+            panic!("expected run");
+        };
+        assert_eq!(config.title.as_deref(), Some("Checkout flow"));
+    }
+
+    #[test]
+    fn window_title_drops_absent_parts() {
+        let label = "desk-1a2b3c \u{b7} my-app";
+        assert_eq!(window_title(None, None), "Pickforge viewer");
+        assert_eq!(
+            window_title(None, Some(label)),
             "desk-1a2b3c \u{b7} my-app \u{b7} Pickforge viewer"
+        );
+        assert_eq!(
+            window_title(Some("Checkout flow"), Some(label)),
+            "Checkout flow \u{b7} desk-1a2b3c \u{b7} my-app \u{b7} Pickforge viewer"
+        );
+        assert_eq!(
+            window_title(Some("Checkout flow"), None),
+            "Checkout flow \u{b7} Pickforge viewer"
         );
     }
 

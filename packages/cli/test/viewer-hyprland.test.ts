@@ -8,6 +8,8 @@ import {
   buildOpacityRuleKeywords,
   buildPlacementDispatches,
   buildPlacementLua,
+  buildRaiseDispatch,
+  buildRaiseLua,
   buildRuleDisableKeyword,
   buildRuleDisableLua,
   buildOpacityRuleLua,
@@ -353,7 +355,9 @@ describe("applyHyprlandWindowMode", () => {
     expect(await applyHyprlandWindowMode(launch(), "thumbnail")).toBe(true);
     expect(evals()).toEqual([
       buildPlacementLua("0xabc123", { x: 64, y: 40, width: 1152, height: 720 }),
+      buildRaiseLua("0xabc123"),
       buildPlacementLua("0xabc123", { x: 872, y: 536, width: 384, height: 240 }),
+      buildRaiseLua("0xabc123"),
     ]);
     const call = fakes.calls().at(-1);
     expect(call).toMatchObject({ xdg: path.join(root, "runtime"), sig: "abc_123" });
@@ -370,7 +374,9 @@ describe("applyHyprlandWindowMode", () => {
     expect(evals()).toEqual([]);
     expect(requests()).toEqual([
       ...buildPlacementDispatches("0xabc123", { x: 64, y: 40, width: 1152, height: 720 }),
+      buildRaiseDispatch("0xabc123"),
       ...buildPlacementDispatches("0xabc123", { x: 872, y: 536, width: 384, height: 240 }),
+      buildRaiseDispatch("0xabc123"),
     ].map((dispatch) => ["dispatch", ...dispatch]));
     expect(placed).toEqual([{ x: 64, y: 40, width: 1152, height: 720 }]);
   });
@@ -382,6 +388,21 @@ describe("applyHyprlandWindowMode", () => {
     hyprlang.hyprland = { ...hyprlang.hyprland!, provider: "hyprlang" };
     expect(await applyHyprlandWindowMode(hyprlang, "expanded")).toBe(false);
     expect(requests().map((args) => args[1])).toEqual(["resizewindowpixel"]);
+  });
+
+  it("raises only the placed client and still reports a placement when the raise is refused", async () => {
+    expect(buildRaiseLua("0xabc123")).toBe('hl.dispatch(hl.dsp.window.alter_zorder({mode="top",window="address:0xabc123"}))');
+    expect(buildRaiseDispatch("0xabc123")).toEqual(["alterzorder", "top,address:0xabc123"]);
+    expect(() => buildRaiseDispatch("0x1,class:.*")).toThrow(/invalid Hyprland client address/);
+    setClients([client()]);
+    fakes.setState({ monitors: [monitor()], evalFailOn: "alter_zorder" });
+    const placed: unknown[] = [];
+    expect(await applyHyprlandWindowMode(launch(), "thumbnail", (size) => placed.push(size))).toBe(true);
+    expect(placed).toHaveLength(1);
+    fakes.setState({ monitors: [monitor()], requestFailOn: "alterzorder" });
+    const hyprlang = launch();
+    hyprlang.hyprland = { ...hyprlang.hyprland!, provider: "hyprlang" };
+    expect(await applyHyprlandWindowMode(hyprlang, "thumbnail")).toBe(true);
   });
 
   it("matches the X11 class too", async () => {

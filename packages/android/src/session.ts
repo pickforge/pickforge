@@ -25,6 +25,8 @@ export const ANDROID_START_FAILURE_META_KEY = "androidStartFailure";
 
 export interface CreateAndroidSessionOptions {
   projectDir: string;
+  /** Human-readable activity title, already parsed. */
+  title?: string;
   avdName?: string;
   registryEnv?: EnvLike;
   env?: EnvLike;
@@ -128,7 +130,7 @@ export async function createAndroidSession(
     },
   });
   const record = await createSession(
-    { type: "android", projectDir: opts.projectDir, android: { avdName } },
+    { type: "android", projectDir: opts.projectDir, android: { avdName }, ...(opts.title === undefined ? {} : { title: opts.title }) },
     registryEnv,
   );
   const logDir = androidSessionLogDir(record.id, registryEnv);

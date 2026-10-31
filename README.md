@@ -886,7 +886,7 @@ pickforge-lab agents add --name my-agent --mcp-command "pickforge-lab mcp serve"
 | Group | Commands |
 | --- | --- |
 | Setup | `doctor`, `init`, `setup lab-user`, `setup android` |
-| Sessions | `session create`, `session status [id]`, `session destroy <id\|--all>`, `session prune --older-than <duration>\|--all-stopped` |
+| Sessions | `session create [--title <text>]`, `session status [id]`, `session title <id> <text\|--clear>`, `session destroy <id\|--all>`, `session prune --older-than <duration>\|--all-stopped` |
 | Watch | `watch [--session <id>]` prefers the matching native viewer; `--control` starts with control and falls back to an external VNC client |
 | Takeover | `takeover status [--session <id>]` |
 | Desktop | `desktop windows`, `desktop focus --id <id>` / `--name <name>`, `desktop launch <cmd>`, `desktop exec <cmd>`, `desktop env`, `desktop screenshot`, `desktop wait`, `desktop click <x> <y>`, `desktop move <x> <y>`, `desktop scroll <deltaX> <deltaY>`, `desktop drag <fromX> <fromY> <toX> <toY>`, `desktop double-click <x> <y>`, `desktop type <text>`, `desktop key <keys>` |
@@ -916,6 +916,10 @@ When the project has more than one, it lists their ids and asks for `--session <
 `--session <id>` picks that session, also from another project.
 Each viewer shows its session id and project folder name in the window title and on the thumbnail, such as `desk-1a2b3c · my-app`.
 A long folder name ends with an ellipsis on the thumbnail.
+A session can also have an activity title of at most 80 characters, such as `Pickforge GitHub issues`.
+Set it with `session create --title`, change it with `session title <id> <text>`, and remove it with `session title <id> --clear`.
+Agents set it through `session_create` and `session_title`.
+The viewer shows the title on the thumbnail strip and in the expanded bar, with the session id muted next to it, and updates it within a few seconds of a change.
 Each viewer expands, collapses and closes on its own, so viewers for two sessions do not affect each other.
 
 The native window starts as a 384 pixel wide thumbnail.
@@ -927,7 +931,10 @@ During control, the bar has Return control, Paste, and Fullscreen. Escape goes t
 On Hyprland with a Lua or hyprlang config, the window floats and stays pinned in the bottom-right corner without taking initial focus.
 Pickforge installs a rule for this launch's exact class and disables it after mapping.
 Expand and collapse use `hyprctl` to resize and place the window.
-Other compositors place an ordinary resizable window.
+Collapsed native viewers on one monitor form a stack in that corner, with the title strip of each one visible.
+Pointing at the stack fans it out upward, and a click expands the chosen viewer.
+A viewer that collapses goes to the front of the stack.
+Other compositors and the browser fallback place each window on its own, without a stack.
 
 An npm-only install has no native binary and uses the existing noVNC path.
 A missing or mismatched viewer also selects that path before any native launch.
@@ -955,7 +962,7 @@ Automatic viewing is suppressed for an explicitly writable `--vnc-control` sessi
 
 `pickforge-lab mcp serve` exposes tools over stdio, including:
 
-- Sessions: `session_create`, `session_status`, `session_destroy`
+- Sessions: `session_create`, `session_status`, `session_title`, `session_destroy`. `session_create` takes an optional `title`, and `session_title` sets or clears it, so the person watching can tell sessions apart.
 - Desktop: `desktop_windows`, `desktop_focus`, `desktop_launch`, `desktop_exec`, `desktop_screenshot`, `desktop_wait`, `desktop_click`, `desktop_move`, `desktop_scroll`, `desktop_drag`, `desktop_double_click`, `desktop_type`, `desktop_key`. All fail closed with a busy error while a human lease is active except `desktop_windows` (window metadata). Screenshots and waits are gated too; each capture holds an agent permit, and a takeover stops a wait capture in flight. `desktop_launch` and `desktop_exec` are gated too: a newly launched client can grab input focus on the shared display, which is exactly what the lease protects against. `desktop_exec` applies the isolated X11 environment and waits for a client window; `desktop_launch` accepts `windowTimeoutMs` with the same 0-300000 ms bounds as `desktop_exec` when waiting for `waitWindow`. `desktop_screenshot` reports display size, image size, scale 1, image-pixel coordinates, and the client-window count, and warns when the count is zero or unavailable because `xdotool` is missing. `desktop_wait` polls until pixels differ from a baseline PNG, sampled pixels stay unchanged for N ms, or a window name substring appears, and records journal status `ok` or `timeout` from the reason it stopped. Pixel change and stability need ImageMagick `convert` or `magick` and compare 8-bit RGB plus dimensions, ignoring PNG timestamps. The wait budget covers captures, compares and window queries; a timed-out compare allows two seconds before SIGKILL and two more before forced pipe closure and settlement, and a capture or window query half a second for each, so at most four extra seconds excluding filesystem and scheduling delays.
 - Android: `android_start`, `android_install_apk`, `android_launch_app`, `android_screenshot`, `android_tap`, `android_swipe`, `android_type`, `android_back`, `android_home`, `android_get_ui_tree`, `android_logcat`, `android_run_adb`. `android_swipe` runs `input swipe` from `fromX`,`fromY` to `toX`,`toY` in device pixels, from 0 to 16383, with an optional `durationMs` from 0 to 10000; evidence records both endpoints. `android_get_ui_tree` returns a compact tree by default: one line per node that has text, a content description (`desc=`), a resource id or an action, indented under its kept ancestors. Bounds stay `[left,top][right,bottom]` in device pixels for `android_tap`, and `density` gives the dpi, so dp = px × 160 / density. The output stops at `maxChars` (default 20000) and says when it truncates. An empty dump is reported as `empty`. `raw: true` returns the redacted uiautomator XML, limited to 200000 characters by default. The CLI `android ui-tree` still prints the XML.
 - Artifacts: `artifact_list`, `artifact_report`

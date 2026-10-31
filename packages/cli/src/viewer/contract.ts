@@ -48,6 +48,13 @@ export function viewerWindowApiPath(launchId: string): string {
  */
 export const VIEWER_STATUS_API_PATH = "/api/status";
 
+/**
+ * `GET` with `Authorization: Bearer <token>`: `200` with
+ * `{"title": string | null}`, the session's current title, `401` otherwise.
+ * The page polls it to follow title changes.
+ */
+export const VIEWER_SESSION_API_PATH = "/api/session";
+
 /** WebSocket close codes the bridge sends after a successful upgrade. */
 export const VIEWER_CLOSE_CODES = {
   /** No usable read-only VNC server right now. The page retries with backoff. */
@@ -80,10 +87,17 @@ export function viewerLabel(sessionId: string, projectDir: string): string {
 }
 
 /**
- * The launch URL. The token and the label travel in the fragment, so they
- * are never sent in a page request.
+ * The launch URL. The token, the label and the session title travel in the
+ * fragment, so they are never sent in a page request.
  */
-export function buildViewerUrl(port: number, launchId: string, token: string, label?: string): string {
-  const fragment = label === undefined ? "" : `&label=${encodeURIComponent(label)}`;
+export function buildViewerUrl(
+  port: number,
+  launchId: string,
+  token: string,
+  label?: string,
+  title?: string,
+): string {
+  let fragment = label === undefined ? "" : `&label=${encodeURIComponent(label)}`;
+  if (title !== undefined && title !== "") fragment += `&title=${encodeURIComponent(title)}`;
   return `http://${VIEWER_HOST}:${port}${viewerPagePath(launchId)}#token=${token}${fragment}`;
 }

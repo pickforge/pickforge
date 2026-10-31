@@ -80,6 +80,8 @@ export interface SessionRecord {
   createdAt: string;
   status: SessionStatus;
   projectDir: string;
+  /** What the session is doing, for the person watching. The id stays the agent's tag. */
+  title?: string;
   desktop?: DesktopSessionInfo;
   android?: AndroidSessionInfo;
   browser?: BrowserSessionInfo;
@@ -89,11 +91,17 @@ export interface SessionRecord {
 export interface CreateSessionInput {
   type: SessionType;
   projectDir: string;
+  title?: string;
   status?: SessionStatus;
   desktop?: DesktopSessionInfo;
   android?: AndroidSessionInfo;
   browser?: BrowserSessionInfo;
   meta?: Record<string, unknown>;
+}
+
+/** `{ title }` when a title is set, so records and status omit an absent one. */
+export function titleField(title: string | undefined): { title?: string } {
+  return typeof title === "string" ? { title } : {};
 }
 
 export type SessionLivenessCheck = (
@@ -179,6 +187,7 @@ export async function createSession(
       createdAt: new Date().toISOString(),
       status: input.status ?? "starting",
       projectDir: input.projectDir,
+      ...titleField(input.title),
     };
     // Retained directories and markers inside their horizon reserve IDs.
     if (isSessionIdReserved(record.id, env)) continue;

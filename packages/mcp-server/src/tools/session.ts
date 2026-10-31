@@ -24,7 +24,10 @@ import {
   listSessions,
   loadConfig,
   localSessionStatusEntry,
+  parseSessionTitle,
   reapDeadRunningSessions,
+  SESSION_TITLE_MAX_CHARS,
+  setSessionTitle,
   type LocalSessionCreateRuntime,
   type LocalSessionDestroyRuntime,
   type LocalSessionLifecycle,
@@ -80,7 +83,9 @@ function createRuntime(
     readOnly?: boolean;
   },
   lifecycle: SessionLifecycle,
+  title: string | undefined,
 ): LocalSessionCreateRuntime {
+  const titled = title === undefined ? {} : { title };
   return {
     desktop: {
       create: () =>
@@ -93,6 +98,7 @@ function createRuntime(
           vnc: args.vnc,
           vncControl: args.vncControl,
           inheritHome: args.inheritHome,
+          ...titled,
         }),
       destroy: (id) => destroyDesktopSession(id, ctx.env),
     },
@@ -106,6 +112,7 @@ function createRuntime(
           height: args.height,
           signal: lifecycle.signal,
           profile: args.profile,
+          ...titled,
         }),
     },
     android: {
@@ -118,6 +125,7 @@ function createRuntime(
           env: ctx.env,
           onProgress: lifecycle.onProgress,
           signal: lifecycle.signal,
+          ...titled,
           ...(avdName === undefined ? {} : { avdName }),
           ...(args.coldBoot === true ? { coldBoot: true } : {}),
           ...(args.readOnly === true ? { readOnly: true } : {}),
@@ -180,16 +188,18 @@ export async function createSessions(
     avdName?: string;
     coldBoot?: boolean;
     readOnly?: boolean;
+    title?: string;
   },
   lifecycle: SessionLifecycle = {},
 ): Promise<LocalSessionSummary[]> {
   if (args.profile !== undefined && args.type !== "browser") {
     throw new Error("profile requires type browser");
   }
+  const title = args.title === undefined ? undefined : parseSessionTitle(args.title);
   await reapDeadRunningSessions(ctx.env, reaperRuntime(ctx));
   return createLocalSessions(
     args.type ?? "desktop",
-    createRuntime(ctx, args, lifecycle),
+    createRuntime(ctx, args, lifecycle, title),
     lifecycle,
   );
 }
@@ -225,6 +235,38 @@ export async function sessionStatusEntry(
   return entry;
 }
 
+const TITLE_DESCRIPTION =
+  `Short activity title for the person watching, such as "Pickforge GitHub issues". ` +
+  `At most ${SESSION_TITLE_MAX_CHARS} characters. The session id stays your tag for the session.`;
+
+function registerSessionTitleTool(
+  server: McpServer,
+  ctx: ServerContext,
+): void {
+  server.registerTool(
+    "session_title",
+    {
+      title: "Set session title",
+      description:
+        "Set the activity title that the viewer shows for a session. Set it when the session starts " +
+        "and update it when the task changes, so the person watching can tell sessions apart. " +
+        "An empty title clears it.",
+      inputSchema: {
+        sessionId: z.string().min(1).describe("Session id"),
+        title: z.string().describe(TITLE_DESCRIPTION),
+      },
+    },
+    (args) =>
+      runTool(async () => {
+        if (await getSession(args.sessionId, ctx.env) === undefined) {
+          throw new Error(`Session not found: ${args.sessionId}`);
+        }
+        const record = await setSessionTitle(args.sessionId, args.title, ctx.env);
+        return { data: { sessionId: record.id, title: record.title ?? null } };
+      }),
+  );
+}
+
 function registerSessionCreateTool(
   server: McpServer,
   ctx: ServerContext,
@@ -241,6 +283,7 @@ function registerSessionCreateTool(
           .enum(["desktop", "android", "desktop+android", "browser"])
           .optional()
           .describe('Session type (default "desktop")'),
+        title: z.string().optional().describe(TITLE_DESCRIPTION),
         width: z
           .number()
           .int()
@@ -405,5 +448,6 @@ export function registerSessionTools(
   }, () => runTool(async () => ({ data: { profiles: await listBrowserProfiles(ctx.env) } })));
   registerSessionCreateTool(server, ctx);
   registerSessionStatusTool(server, ctx);
+  registerSessionTitleTool(server, ctx);
   registerSessionDestroyTool(server, ctx);
 }

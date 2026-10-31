@@ -17,7 +17,9 @@ import {
   listSessions,
   loadConfig,
   localSessionStatusEntry,
+  parseSessionTitle,
   reapDeadRunningSessions,
+  setSessionTitle,
   pruneSessionLogs,
   parseSessionRetentionDuration,
   type LocalSessionCreateRuntime,
@@ -55,10 +57,13 @@ export interface SessionCreateOptions extends BaseCliOptions {
   coldBoot?: boolean;
   readOnly?: boolean;
   viewer?: boolean;
+  title?: string;
 }
 
 function createRuntime(opts: SessionCreateOptions): LocalSessionCreateRuntime {
   const projectDir = resolveProjectDir(opts);
+  const title = opts.title === undefined ? undefined : parseSessionTitle(opts.title);
+  const titled = title === undefined ? {} : { title };
   return {
     desktop: {
       create: () =>
@@ -75,6 +80,7 @@ function createRuntime(opts: SessionCreateOptions): LocalSessionCreateRuntime {
           vnc: opts.vnc,
           vncControl: opts.vncControl,
           inheritHome: opts.inheritHome,
+          ...titled,
         }),
       destroy: (id) => destroyDesktopSession(id),
     },
@@ -91,6 +97,7 @@ function createRuntime(opts: SessionCreateOptions): LocalSessionCreateRuntime {
             opts.height === undefined
               ? undefined
               : parseIntArg(opts.height, "--height"),
+          ...titled,
         }),
     },
     android: {
@@ -99,6 +106,7 @@ function createRuntime(opts: SessionCreateOptions): LocalSessionCreateRuntime {
         const avdName = opts.avdName ?? config.android?.avdName;
         return createAndroidSession({
           projectDir,
+          ...titled,
           ...(avdName === undefined ? {} : { avdName }),
           ...(opts.coldBoot === true ? { coldBoot: true } : {}),
           ...(opts.readOnly === true ? { readOnly: true } : {}),
@@ -233,8 +241,12 @@ export async function runSessionCreate(
   });
 }
 
+function titleParts(entry: LocalSessionStatusEntry): string[] {
+  return entry.title === undefined ? [] : [JSON.stringify(entry.title)];
+}
+
 function statusLine(entry: LocalSessionStatusEntry): string {
-  const parts = [`${entry.id}  ${entry.type}  ${entry.status}`];
+  const parts = [`${entry.id}  ${entry.type}  ${entry.status}`, ...titleParts(entry)];
   const desktop = entry.desktop as Record<string, unknown> | undefined;
   if (desktop !== undefined) {
     parts.push(
@@ -283,6 +295,29 @@ export async function runSessionStatus(
     return {
       data: { sessions },
       lines: sessions.length === 0 ? ["no sessions"] : sessions.map(statusLine),
+    };
+  });
+}
+
+export interface SessionTitleOptions extends BaseCliOptions {
+  clear?: boolean;
+}
+
+/** Sets or clears the activity title that viewers show for a session. */
+export async function runSessionTitle(
+  id: string,
+  title: string | undefined,
+  opts: SessionTitleOptions,
+): Promise<number> {
+  return runReported(opts, async () => {
+    if ((opts.clear === true) === (title !== undefined)) {
+      throw new Error("Pass either a title or --clear");
+    }
+    if (await getSession(id) === undefined) throw new Error(`Session not found: ${id}`);
+    const record = await setSessionTitle(id, title ?? "");
+    return {
+      data: { sessionId: record.id, title: record.title ?? null },
+      lines: [record.title === undefined ? `cleared title of session ${record.id}` : `session ${record.id} title: ${record.title}`],
     };
   });
 }

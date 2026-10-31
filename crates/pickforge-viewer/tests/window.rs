@@ -186,17 +186,132 @@ fn scales_with_the_host_scale_factor() {
 
 /// Bright text pixels in a `w` by `h` area at `(x, y)` of the window.
 fn ink(frame: &Frame, window: Placed, x: u32, y: u32, w: u32, h: u32) -> usize {
+    ink_over(frame, window, (x, y, w, h), 160)
+}
+
+/// Pixels in an area whose every channel is over `floor`.
+fn ink_over(frame: &Frame, window: Placed, area: (u32, u32, u32, u32), floor: u32) -> usize {
+    let (x, y, w, h) = area;
     let mut count = 0;
     for py in y..y + h {
         for px in x..x + w {
             let p = at(frame, window, px, py);
             let low = [p >> 16, p >> 8, p].map(|c| c & 0xff).into_iter().min();
-            if low.unwrap_or(0) > 160 {
+            if low.unwrap_or(0) > floor {
                 count += 1;
             }
         }
     }
     count
+}
+
+/// The muted session id is grey, between the dark strip and bright text.
+const MUTED_FLOOR: u32 = 64;
+
+#[test]
+fn shows_the_title_and_reports_hover() {
+    if !xvfb_ready("title_and_hover") {
+        return;
+    }
+    let session = Xvfb::start("640x480x24");
+    let host = Xvfb::start("1280x1024x24");
+    // A plain session, so only text is bright.
+    let _painter = Painter::new(session.display, 0, 0, 640, 480, BLUE);
+    let class = "pickforge-viewer-title";
+    let label = "desk-1a2b3c \u{b7} my-app";
+    let mut viewer = Viewer::spawn_with(
+        &session,
+        host.display,
+        class,
+        "self",
+        "1",
+        &["--label", label, "--title", "Checkout flow"],
+    );
+    viewer.expect("ready");
+    let mut screen = Screen::new(host.display);
+    let thumb = screen.wait_size(class, 384, 288);
+    assert_eq!(
+        screen.title(thumb),
+        "Checkout flow \u{b7} desk-1a2b3c \u{b7} my-app \u{b7} Pickforge viewer"
+    );
+
+    // The strip: dark over the image, the title left, the muted id right.
+    let mut shot = screen.shot();
+    let drawn = wait_until(WAIT, || {
+        shot = screen.shot();
+        ink(&shot, thumb, 8, 0, 120, 32) > INK
+    });
+    assert!(drawn, "title ink");
+    let dark = at(&shot, thumb, 200, 4);
+    assert!(
+        [dark >> 16, dark >> 8, dark]
+            .iter()
+            .all(|c| c & 0xff < 0x30),
+        "strip {dark:06x}"
+    );
+    assert_near(&shot, thumb, 200, 40, BLUE, "image below the strip");
+    let id = ink_over(&shot, thumb, (280, 0, 100, 32), MUTED_FLOOR);
+    assert!(id > INK, "id ink {id}");
+    assert_eq!(ink(&shot, thumb, 280, 0, 100, 32), 0, "the id is muted");
+    save(&shot, thumb, "title-strip.png");
+
+    // setTitle changes the window title and the strip.
+    viewer.send(r#"{"cmd":"setTitle","title":"YouTube channel analytics, a much longer title"}"#);
+    let mut title = String::new();
+    assert!(
+        wait_until(WAIT, || {
+            title = screen.title(thumb);
+            title.starts_with("YouTube channel analytics")
+        }),
+        "window title {title:?}"
+    );
+    let wide = wait_until(WAIT, || ink(&screen.shot(), thumb, 160, 0, 80, 32) > INK);
+    assert!(wide, "longer title ink");
+    save(&screen.shot(), thumb, "title-strip-long.png");
+    viewer.send(r#"{"cmd":"setTitle","title":""}"#);
+    assert!(
+        wait_until(WAIT, || screen.title(thumb)
+            == "desk-1a2b3c \u{b7} my-app \u{b7} Pickforge viewer"),
+        "label alone"
+    );
+    let gone = wait_until(WAIT, || {
+        ink_over(&screen.shot(), thumb, (280, 0, 100, 32), MUTED_FLOOR) == 0
+    });
+    assert!(gone, "no id at the right without a title");
+    save(&screen.shot(), thumb, "title-strip-label.png");
+    viewer.send(r#"{"cmd":"setTitle","title":"Checkout flow"}"#);
+
+    // Hover: motion inside reports once, leaving reports once.
+    // An entry alone, as when a window moves under a still pointer, is no hover.
+    screen.move_to(thumb.x + 200, thumb.y + 150);
+    viewer.expect_silent(Duration::from_millis(400));
+    screen.move_to(thumb.x + 205, thumb.y + 155);
+    assert_eq!(viewer.expect("hover")["inside"], true);
+    screen.move_to(thumb.x + 210, thumb.y + 160);
+    screen.move_to(thumb.x + 600, thumb.y + 600);
+    assert_eq!(viewer.expect("hover")["inside"], false, "no repeat");
+    screen.move_to(thumb.x + 200, thumb.y + 150);
+    screen.move_to(thumb.x + 205, thumb.y + 155);
+    assert_eq!(viewer.expect("hover")["inside"], true);
+
+    // Expanding ends the hover; the bar shows the caption.
+    screen.click(thumb.x + 200, thumb.y + 150);
+    assert_eq!(viewer.expect("hover")["inside"], false);
+    assert_eq!(viewer.expect("mode")["mode"], "expanded");
+    let expanded = screen.wait_size(class, 640, 512);
+    let mut shot = screen.wait_color(expanded, 4, 4, BAR);
+    let caption = wait_until(WAIT, || {
+        shot = screen.shot();
+        ink(&shot, expanded, 100, 4, 280, 24) > INK
+    });
+    assert!(caption, "bar caption");
+    save(&shot, expanded, "bar-caption.png");
+    screen.move_to(expanded.x + 300, expanded.y + 300);
+    screen.move_to(expanded.x + 900, expanded.y + 900);
+    viewer.expect_silent(Duration::from_millis(300));
+
+    viewer.send(r#"{"cmd":"shutdown"}"#);
+    assert_eq!(viewer.wait_exit(Duration::from_secs(3)), Some(0));
 }
 
 /// Bright pixels that drawn text leaves. The embedded font alone leaves
@@ -246,15 +361,15 @@ fn draws_label_and_banner_text_with_host_fonts() {
         let mut screen = Screen::new(host.display);
         let thumb = screen.wait_size(&class, 384, 288);
 
-        // The label pill: the session id and then the sample, where an
-        // ellipsis stood before.
+        // The title strip shows the label: the session id and then the
+        // sample, where an ellipsis stood before.
         let mut label_ink = 0;
         let drawn = wait_until(WAIT, || {
-            label_ink = ink(&screen.shot(), thumb, 78, 8, 298, 24);
+            label_ink = ink(&screen.shot(), thumb, 70, 0, 306, 32);
             label_ink > INK
         });
         assert!(drawn, "{name}: label ink {label_ink}");
-        let prefix = ink(&screen.shot(), thumb, 8, 8, 70, 24);
+        let prefix = ink(&screen.shot(), thumb, 8, 0, 62, 32);
         assert!(prefix > INK, "{name}: session id ink {prefix}");
 
         let message = format!(r#"{{"cmd":"attention","message":"{sample}"}}"#);
