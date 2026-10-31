@@ -14,7 +14,9 @@ use crate::protocol::{
 };
 use crate::pulse::Pulse;
 use crate::scale::Scaler;
-use crate::ui::{self, palette, Banner, Bar, BarKind, Button, Canvas, Metrics, Text};
+use crate::ui::{
+    self, palette, Banner, Bar, BarKind, Button, Canvas, Heading, Metrics, Text, TitleStrip,
+};
 use crate::{procstat, EXIT_DISPLAY, EXIT_NO_WINDOW_SYSTEM};
 use softbuffer::{Context, Surface};
 use std::collections::HashMap;
@@ -268,8 +270,13 @@ struct App {
 
     controller: Controller<Injector>,
     banner: Option<Banner>,
-    /// The thumbnail's session label pill and its fitted text.
-    label_pill: Option<(Rect, String)>,
+    /// The activity title from `--title` or `setTitle`.
+    title: Option<String>,
+    /// The thumbnail's title strip.
+    strip: Option<TitleStrip>,
+    /// True after a `hover` event with `inside: true` until the one with
+    /// `inside: false`.
+    hovering: bool,
     ime_allowed: bool,
     modifiers: Modifiers,
     /// What each held physical key sent, so its release matches.
@@ -310,6 +317,7 @@ impl App {
         injector: Option<Injector>,
     ) -> Self {
         Self {
+            title: config.title.clone(),
             config,
             session,
             shared,
@@ -343,7 +351,8 @@ impl App {
             thumb_press: false,
             controller: Controller::new(injector),
             banner: None,
-            label_pill: None,
+            strip: None,
+            hovering: false,
             ime_allowed: false,
             modifiers: Modifiers::default(),
             keys: HashMap::new(),
@@ -385,7 +394,7 @@ impl App {
         let (w, h) = self.thumbnail_logical();
         let class = self.config.class.clone();
         let attributes: WindowAttributes = Window::default_attributes()
-            .with_title(args::window_title(self.config.label.as_deref()))
+            .with_title(self.window_title())
             .with_decorations(false)
             .with_resizable(true)
             .with_active(false)
@@ -423,6 +432,41 @@ impl App {
         self.surface = Some(surface);
         self.relayout();
         Ok(())
+    }
+
+    fn window_title(&self) -> String {
+        args::window_title(self.title.as_deref(), self.config.label.as_deref())
+    }
+
+    /// The title and label as the bar and the strip draw them.
+    fn heading(&mut self) -> Option<Heading> {
+        let title = self.title.as_deref().map(|t| self.text.displayable(t));
+        let label = self
+            .config
+            .label
+            .as_deref()
+            .map(|l| self.text.displayable(l));
+        Heading::new(title.as_deref(), label.as_deref())
+    }
+
+    fn set_title(&mut self, title: Option<String>) {
+        self.title = title;
+        if let Some(window) = &self.window {
+            window.set_title(&self.window_title());
+        }
+        self.relayout();
+    }
+
+    /// The `hover` event for the pointer moving inside or leaving the
+    /// window, if any. Only a thumbnail hovers, and each change reports
+    /// once.
+    fn hover_change(&mut self, inside: bool) -> Option<Event> {
+        let inside = inside && self.mode == Mode::Thumbnail;
+        if inside == self.hovering {
+            return None;
+        }
+        self.hovering = inside;
+        Some(Event::Hover { inside })
     }
 
     fn request_redraw(&mut self) {
@@ -473,31 +517,32 @@ impl App {
                 take: self.controller.can_take(),
             }
         };
+        let heading = self.heading();
         self.bar = (self.mode != Mode::Thumbnail).then(|| {
             Bar::layout(
                 w,
                 self.metrics,
                 self.mode == Mode::Fullscreen,
                 kind,
+                heading.as_ref(),
                 &mut self.text,
             )
         });
         let top = self.bar.as_ref().map_or(0, |b| b.rect.h).min(h);
         let content = Rect::new(0, top as i32, w, h - top);
-        self.label_pill = match &self.config.label {
-            Some(label) if self.mode == Mode::Thumbnail => {
-                let shown = self.text.displayable(label);
-                ui::session_label(content, &shown, self.metrics, &mut self.text)
+        self.strip = match &heading {
+            Some(heading) if self.mode == Mode::Thumbnail => {
+                TitleStrip::layout(content, heading, self.metrics, &mut self.text)
             }
             _ => None,
         };
         // A thumbnail that asks for help still shows which session it is.
-        let banner_area = match &self.label_pill {
-            Some((pill, _)) => Rect::new(
+        let banner_area = match &self.strip {
+            Some(strip) => Rect::new(
                 content.x,
-                pill.bottom(),
+                strip.rect.bottom(),
                 content.w,
-                (content.bottom() - pill.bottom()).max(0) as u32,
+                (content.bottom() - strip.rect.bottom()).max(0) as u32,
             ),
             None => content,
         };
@@ -605,6 +650,12 @@ impl App {
             self.keys.clear();
         }
         self.mode = mode;
+        // A thumbnail that expands while hovered ends its hover.
+        if mode != Mode::Thumbnail {
+            if let Some(event) = self.hover_change(false) {
+                emit(&event);
+            }
+        }
         window.set_cursor(if mode == Mode::Thumbnail {
             CursorIcon::Pointer
         } else {
@@ -1091,6 +1142,7 @@ impl App {
             Command::SessionEnded => self.end_session(),
             Command::Shutdown => self.quit(),
             Command::Pulse { x, y } => self.start_pulse(x, y, Instant::now()),
+            Command::SetTitle { title } => self.set_title(title),
             Command::Unknown(name) => log(&format!("ignored unknown command {name:?}")),
             command @ (Command::Attention { .. }
             | Command::ClearAttention
@@ -1344,8 +1396,8 @@ impl App {
             let rect = ui::status_rect(area, label, self.metrics, &mut self.text);
             ui::draw_status(&mut canvas, rect, label, self.metrics, &mut self.text);
         }
-        if let Some((rect, label)) = &self.label_pill {
-            ui::draw_status(&mut canvas, *rect, label, self.metrics, &mut self.text);
+        if let Some(strip) = &self.strip {
+            strip.draw(&mut canvas, self.metrics, &mut self.text);
         }
         if let Some(banner) = &self.banner {
             banner.draw(
@@ -1440,10 +1492,16 @@ impl ApplicationHandler<UserEvent> for App {
                 self.pointer = Some((position.x, position.y));
                 self.update_hover();
                 self.on_pointer_moved();
+                if let Some(event) = self.hover_change(true) {
+                    emit(&event);
+                }
             }
             WindowEvent::CursorLeft { .. } => {
                 self.pointer = None;
                 self.update_hover();
+                if let Some(event) = self.hover_change(false) {
+                    emit(&event);
+                }
             }
             WindowEvent::MouseInput { state, button, .. } => self.on_mouse(state, button),
             WindowEvent::MouseWheel { delta, .. } => self.on_wheel(delta),
