@@ -137,15 +137,19 @@ export async function recoverStaleHumanLease(
 
 async function runAfterLease(
   hook: (lease: HeldLeaseRef) => Promise<unknown>,
-  held: HeldLeaseRef,
+  held: HeldLeaseRef & { heartbeatMs: number },
   registryEnv: EnvLike,
 ): Promise<void> {
-  try {
-    await hook({ sessionId: held.sessionId, leaseId: held.leaseId });
-  } catch (error) {
-    await releaseHumanLease(held.sessionId, held.leaseId, registryEnv).catch(() => {});
-    throw error;
-  }
+  // The heartbeat starts only after the takeover starts, so renew while the hook runs.
+  const renewal = setInterval(() => {
+    void renewHumanLease(held.sessionId, held.leaseId, registryEnv).catch(() => {});
+  }, held.heartbeatMs);
+  const failure = await hook({ sessionId: held.sessionId, leaseId: held.leaseId })
+    .then(() => undefined, (error: unknown) => ({ error }))
+    .finally(() => clearInterval(renewal));
+  if (failure === undefined) return;
+  await releaseHumanLease(held.sessionId, held.leaseId, registryEnv).catch(() => {});
+  throw failure.error;
 }
 
 async function renewHeldLease(handle: HeldLeaseRef, registryEnv: EnvLike): Promise<HumanLease> {
@@ -214,7 +218,7 @@ export async function startHumanTakeover(
     }
 
     if (opts.afterLease !== undefined) {
-      await runAfterLease(opts.afterLease, { sessionId: id, leaseId: lease.leaseId }, registryEnv);
+      await runAfterLease(opts.afterLease, { sessionId: id, leaseId: lease.leaseId, heartbeatMs: lease.heartbeatMs }, registryEnv);
     }
 
     let vnc: VncHandle;

@@ -773,6 +773,16 @@ describe("takeover hooks (#380)", () => {
     expect(await readArgvLog()).toEqual([]);
   });
 
+  it.each(["viewer", "x11vnc"] as const)("keeps the lease alive through an afterLease longer than its TTL (%s)", async (transport) => {
+    const id = await createDesktop({ vncPort: await freeLoopbackPort() });
+    const handle = await startHumanTakeover(id, {
+      transport, registryEnv: env, env, ttlMs: 400, heartbeatMs: 100,
+      afterLease: () => new Promise((resolve) => setTimeout(resolve, 1_000)),
+    });
+    expect(await readHumanLease(id, env)).toMatchObject({ leaseId: handle.leaseId });
+    await endHumanTakeover(handle, { registryEnv: env, env, reason: "return" });
+  });
+
   it("releases the lease and rethrows when beforeRelease throws", async () => {
     const id = await createDesktop();
     const handle = await startHumanTakeover(id, { transport: "viewer", registryEnv: env, env });
