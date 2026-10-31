@@ -14,8 +14,12 @@ const RETRY_MAX_MS = 10000;
 const WRITABLE_RETRY_MS = 5000;
 const STATUS_API_PATH = "/api/status";
 const STATUS_TIMEOUT_MS = 5000;
+const SESSION_API_PATH = "/api/session";
+const SESSION_POLL_MS = 5000;
 /** Mirrors VIEWER_LABEL_MAX_CHARS. */
 const LABEL_MAX_CHARS = 256;
+/** Mirrors SESSION_TITLE_MAX_CHARS. */
+const TITLE_MAX_CHARS = 80;
 /** Control, format, bidi and line or paragraph separator characters. */
 const HIDDEN_CHARACTERS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
 const TITLE = "Pickforge viewer";
@@ -62,6 +66,9 @@ const state = {
   connectedOnce: false,
   retryTimer: undefined,
   probeFailures: 0,
+  label: "",
+  title: "",
+  titleTimer: undefined,
 };
 
 function element(id) {
@@ -89,8 +96,8 @@ function writeStored(name, value) {
 }
 
 /**
- * The token and the label arrive in the fragment once, then live in
- * sessionStorage.
+ * The token, the label and the session title arrive in the fragment once,
+ * then live in sessionStorage.
  */
 function takeFragment() {
   const params = new URLSearchParams(location.hash.slice(1));
@@ -99,19 +106,80 @@ function takeFragment() {
   }
   const token = params.get("token");
   if (token) {
+    const label = params.get("label") ?? "";
+    const title = params.get("title") ?? "";
     writeStored("token", token);
-    writeStored("label", params.get("label") ?? "");
-    return { token, label: params.get("label") ?? "" };
+    writeStored("label", label);
+    writeStored("title", title);
+    return { token, label, title };
   }
-  return { token: readStored("token"), label: readStored("label") };
+  return { token: readStored("token"), label: readStored("label"), title: readStored("title") };
 }
 
-/** Shows the session label in the title and the thumbnail, as plain text. */
-function showLabel(raw) {
-  const label = [...raw.replace(HIDDEN_CHARACTERS, "").trim()].slice(0, LABEL_MAX_CHARS).join("");
-  document.title = label === "" ? TITLE : `${label} \u00b7 ${TITLE}`;
-  element("label").textContent = label;
-  element("label").hidden = label === "";
+function plainText(raw, maxChars) {
+  return [...raw.replace(HIDDEN_CHARACTERS, "").trim()].slice(0, maxChars).join("");
+}
+
+/**
+ * Shows the session title and label, as plain text, in the window title,
+ * the thumbnail strip and the toolbar caption. With a title, the session id
+ * (the label before " · ") is the muted part; without one, the label shows
+ * as it is.
+ */
+function showLabel() {
+  const label = plainText(state.label, LABEL_MAX_CHARS);
+  const title = plainText(state.title, TITLE_MAX_CHARS);
+  const sessionId = label.split(" \u00b7 ")[0];
+  document.title = [title, label, TITLE].filter((part) => part !== "").join(" \u00b7 ");
+  element("label-title").textContent = title === "" ? label : title;
+  element("label-id").textContent = title === "" ? "" : sessionId;
+  element("label").hidden = title === "" && label === "";
+  element("label").classList.toggle("titled", title !== "");
+  element("caption-title").textContent = title === "" ? label : title;
+  element("caption-id").textContent = title === "" || sessionId === "" ? "" : ` \u00b7 ${sessionId}`;
+  element("caption").hidden = title === "" && label === "";
+}
+
+/** Follows title changes while the view can still connect. */
+function scheduleTitlePoll() {
+  clearTimeout(state.titleTimer);
+  state.titleTimer = FINAL_STATES.has(state.status) ? undefined : setTimeout(pollTitle, SESSION_POLL_MS);
+}
+
+async function pollTitle() {
+  state.titleTimer = undefined;
+  if (FINAL_STATES.has(state.status)) return;
+  let response;
+  try {
+    response = await fetch(SESSION_API_PATH, {
+      headers: { Authorization: `Bearer ${state.token}` },
+      cache: "no-store",
+      signal: AbortSignal.timeout(STATUS_TIMEOUT_MS),
+    });
+  } catch {
+    response = null;
+  }
+  if (FINAL_STATES.has(state.status)) return;
+  if (response !== null && (response.status === 401 || response.status === 403)) {
+    finish("expired");
+    return;
+  }
+  const title = await readTitle(response);
+  if (title !== undefined && title !== state.title) {
+    state.title = title;
+    writeStored("title", title);
+    showLabel();
+  }
+  scheduleTitlePoll();
+}
+
+/** The title from a session response, "" when unset, undefined when unusable. */
+async function readTitle(response) {
+  if (response === null || !response.ok) return undefined;
+  const body = await response.json().catch(() => null);
+  if (body === null || typeof body !== "object") return undefined;
+  if (body.title === null) return "";
+  return typeof body.title === "string" ? body.title : undefined;
 }
 
 function setStatus(status) {
@@ -137,6 +205,8 @@ function stopConnection() {
 
 function finish(status) {
   stopConnection();
+  clearTimeout(state.titleTimer);
+  state.titleTimer = undefined;
   setStatus(status);
 }
 
@@ -299,9 +369,11 @@ function onKeyDown(event) {
 function start() {
   const match = /^\/viewer\/([^/]+)$/.exec(location.pathname);
   state.launchId = match !== null && LAUNCH_ID_PATTERN.test(match[1]) ? match[1] : "";
-  const fragment = state.launchId === "" ? { token: "", label: "" } : takeFragment();
+  const fragment = state.launchId === "" ? { token: "", label: "", title: "" } : takeFragment();
   state.token = fragment.token;
-  showLabel(fragment.label);
+  state.label = fragment.label;
+  state.title = fragment.title;
+  showLabel();
   const shield = element("shield");
   for (const type of SHIELDED_EVENTS) {
     shield.addEventListener(type, onShieldEvent, { capture: true, passive: false });
@@ -316,6 +388,7 @@ function start() {
   setMode(restored, restored === "expanded");
   setStatus("connecting");
   connect();
+  scheduleTitlePoll();
 }
 
 start();

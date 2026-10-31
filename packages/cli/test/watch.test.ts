@@ -276,6 +276,18 @@ describe("watch command in process", () => {
     expect(prepareViewerLaunch).not.toHaveBeenCalled();
   });
 
+  it("carries the session title in the printed URL fragment", async () => {
+    await installVnc();
+    const id = await createDesktop(syntheticDisplay());
+    await updateSession(id, { title: "YouTube channel analytics" });
+
+    const result = await watchDesktopSession({ session: id, projectDir: root });
+
+    const url = new URL(String(result.data?.url));
+    expect(url.search).toBe("");
+    expect(new URLSearchParams(url.hash.slice(1)).get("title")).toBe("YouTube channel analytics");
+  });
+
   it("prints the URL when a GUI has no supported browser", async () => {
     await installVnc();
     process.env.DISPLAY = ":0";

@@ -282,10 +282,24 @@ describe("viewer label", () => {
     );
   });
 
-  it("sets the page label as text only", () => {
+  it("puts the session title in the fragment, never in the path or query", () => {
+    const url = new URL(buildViewerUrl(1, "x", "t", "desk-1 \u00b7 app", "Checkout & ?flow#2"));
+    expect(url.pathname).toBe("/viewer/x");
+    expect(url.search).toBe("");
+    expect(url.hash).toBe("#token=t&label=desk-1%20%C2%B7%20app&title=Checkout%20%26%20%3Fflow%232");
+    expect(new URLSearchParams(url.hash.slice(1)).get("title")).toBe("Checkout & ?flow#2");
+    expect(buildViewerUrl(1, "x", "t", "desk-1", "")).toBe("http://127.0.0.1:1/viewer/x#token=t&label=desk-1");
+  });
+
+  it("sets the page label, title and session id as text only", () => {
     const page = fs.readFileSync(new URL("../src/viewer/page/viewer.js", import.meta.url), "utf8");
-    expect(page).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
-    expect(page).toContain('element("label").textContent = label;');
+    expect(page).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write|setAttribute|\.src\s*=|\.href\s*=/);
+    for (const id of ["label-title", "label-id", "caption-title", "caption-id"]) {
+      const writes = page.match(new RegExp(`element\\("${id}"\\)\\.[A-Za-z]+\\s*=`, "g"));
+      expect(writes).toEqual([`element("${id}").textContent =`]);
+    }
+    expect(page).toContain("plainText(state.title, TITLE_MAX_CHARS)");
+    expect(page).toContain("const TITLE_MAX_CHARS = 80;");
   });
 });
 
@@ -324,6 +338,20 @@ describe("launchViewerWindow", () => {
       String(result.pid),
     );
     expect(removeViewerLaunch).not.toHaveBeenCalled();
+  });
+
+  it("passes the session title to the page in the URL fragment", async () => {
+    fakes.setBrowser({});
+    getSession.mockResolvedValue({
+      id: "desk-aaaaaa11", status: "running", projectDir: "/work/my-app", title: "Checkout flow test",
+    });
+    await launch();
+
+    const browser = fakes.calls().find((call) => call.tool === "browser");
+    expect(browser?.args).toContain(
+      `--app=http://127.0.0.1:43210/viewer/${LAUNCH_ID}#token=${TOKEN}` +
+        "&label=desk-aaaaaa11%20%C2%B7%20my-app&title=Checkout%20flow%20test",
+    );
   });
 
   it("installs the Hyprland rule before spawning and disables it once the window maps", async () => {

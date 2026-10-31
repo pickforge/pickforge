@@ -176,7 +176,7 @@ async function watchWithControl(
 }
 
 function remoteViewerResult(
-  record: { id: string; projectDir: string },
+  record: { id: string; projectDir: string; title?: string },
   bridge: EnsuredViewerBridge,
   data: Record<string, unknown>,
   reason: "no-graphical-session" | "no-browser",
@@ -185,7 +185,7 @@ function remoteViewerResult(
   // the live view; it simply has no window to resize.
   const sessionId = record.id;
   const url = buildViewerUrl(
-    bridge.port, randomBytes(16).toString("hex"), bridge.token, viewerLabel(record.id, record.projectDir),
+    bridge.port, randomBytes(16).toString("hex"), bridge.token, viewerLabel(record.id, record.projectDir), record.title,
   );
   const tunnel =
     `ssh -N -L ${bridge.port}:127.0.0.1:${bridge.port} <host> and open the URL ` +
