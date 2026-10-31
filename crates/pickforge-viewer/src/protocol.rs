@@ -1,5 +1,6 @@
 //! The stdio JSON-lines protocol from `PROTOCOL.md`.
 
+use crate::args::{is_format, MAX_TITLE_CHARS};
 use serde::Serialize;
 use serde_json::Value;
 use std::io::{self, BufRead, Write};
@@ -61,6 +62,10 @@ pub enum Event {
         #[serde(rename = "leaseId")]
         lease_id: String,
         state: AckState,
+    },
+    /// The pointer moved into or left the thumbnail.
+    Hover {
+        inside: bool,
     },
 }
 
@@ -144,6 +149,10 @@ pub enum Command {
     Revoke {
         lease_id: String,
         reason: RevokeReason,
+    },
+    /// The activity title, or `None` to show the label alone.
+    SetTitle {
+        title: Option<String>,
     },
     /// An agent click completed at this session pixel.
     Pulse {
@@ -229,6 +238,9 @@ pub fn parse_command(line: &[u8]) -> Result<Command, ParseError> {
             message: attention_message(object.get("message"))?,
         },
         "clearAttention" => Command::ClearAttention,
+        "setTitle" => Command::SetTitle {
+            title: title(object.get("title"))?,
+        },
         "control" => control(object)?,
         "pulse" => Command::Pulse {
             x: session_coordinate(object.get("x"), "x")?,
@@ -257,6 +269,19 @@ fn attention_message(value: Option<&Value>) -> Result<String, ParseError> {
     }
     // An agent's message must not reorder what the human reads.
     Ok(message.chars().filter(|&c| !is_bidi_control(c)).collect())
+}
+
+/// A title within [`MAX_TITLE_CHARS`] without control characters. Format
+/// and bidi characters go, as for `--title`. An empty title means none.
+fn title(value: Option<&Value>) -> Result<Option<String>, ParseError> {
+    let title = value
+        .and_then(Value::as_str)
+        .ok_or(ParseError::BadField("title"))?;
+    if title.chars().count() > MAX_TITLE_CHARS || title.chars().any(char::is_control) {
+        return Err(ParseError::BadField("title"));
+    }
+    let title: String = title.chars().filter(|&c| !is_format(c)).collect();
+    Ok((!title.trim().is_empty()).then_some(title))
 }
 
 /// Characters that set the direction of the text around them.
@@ -662,6 +687,67 @@ mod tests {
                 lease_id: String::new(),
                 reason: RevokeReason::Unavailable
             })
+        );
+    }
+
+    #[test]
+    fn parses_set_title() {
+        let parsed = |line: &str| parse_command(line.as_bytes());
+        assert_eq!(
+            parsed(r#"{"cmd":"setTitle","title":"Pickforge GitHub issues","extra":1}"#),
+            Ok(Command::SetTitle {
+                title: Some("Pickforge GitHub issues".into())
+            })
+        );
+        assert_eq!(
+            parsed(r#"{"cmd":"setTitle","title":"\u202eAn\u2066\u200bálise\u2069 日本"}"#),
+            Ok(Command::SetTitle {
+                title: Some("Análise 日本".into())
+            })
+        );
+        for empty in ["", "  ", r"\u202e\u200f"] {
+            let line = format!(r#"{{"cmd":"setTitle","title":"{empty}"}}"#);
+            assert_eq!(
+                parsed(&line),
+                Ok(Command::SetTitle { title: None }),
+                "{line}"
+            );
+        }
+        let longest = "é".repeat(MAX_TITLE_CHARS);
+        assert_eq!(
+            parsed(&format!(r#"{{"cmd":"setTitle","title":"{longest}"}}"#)),
+            Ok(Command::SetTitle {
+                title: Some(longest)
+            })
+        );
+        let too_long = format!(
+            r#"{{"cmd":"setTitle","title":"{}"}}"#,
+            "a".repeat(MAX_TITLE_CHARS + 1)
+        );
+        for bad in [
+            too_long.as_str(),
+            r#"{"cmd":"setTitle"}"#,
+            r#"{"cmd":"setTitle","title":null}"#,
+            r#"{"cmd":"setTitle","title":5}"#,
+            r#"{"cmd":"setTitle","title":["a"]}"#,
+            r#"{"cmd":"setTitle","title":"two\nlines"}"#,
+            r#"{"cmd":"setTitle","title":"tab\there"}"#,
+            r#"{"cmd":"setTitle","title":"bell\u0007"}"#,
+            r#"{"cmd":"setTitle","title":"del\u007f"}"#,
+        ] {
+            assert_eq!(parsed(bad), Err(ParseError::BadField("title")), "{bad}");
+        }
+    }
+
+    #[test]
+    fn encodes_hover() {
+        assert_eq!(
+            encode_event(&Event::Hover { inside: true }),
+            "{\"event\":\"hover\",\"inside\":true}\n"
+        );
+        assert_eq!(
+            encode_event(&Event::Hover { inside: false }),
+            "{\"event\":\"hover\",\"inside\":false}\n"
         );
     }
 

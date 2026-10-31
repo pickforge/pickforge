@@ -135,15 +135,36 @@ impl Viewer {
     }
 
     /// Waits for the next event named `name`. Other events fail the test.
+    /// Pointer moves over a thumbnail send `hover` events, so they are
+    /// skipped unless `name` is `hover`.
     pub fn expect(&self, name: &str) -> Value {
-        match self.events.recv_timeout(WAIT) {
-            Ok(event) if event["event"] == name => event,
-            Ok(event) => panic!("expected {name}, got {event}"),
-            Err(_) => panic!("no {name} event"),
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.events.recv_timeout(left) {
+                Ok(event) if event["event"] == name => return event,
+                Ok(event) if event["event"] == "hover" => continue,
+                Ok(event) => panic!("expected {name}, got {event}"),
+                Err(_) => panic!("no {name} event"),
+            }
         }
     }
 
+    /// Fails on any event but `hover` within `wait`.
     pub fn expect_quiet(&self, wait: Duration) {
+        let deadline = Instant::now() + wait;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.events.recv_timeout(left) {
+                Ok(event) if event["event"] == "hover" => continue,
+                Ok(event) => panic!("unexpected event {event}"),
+                Err(_) => return,
+            }
+        }
+    }
+
+    /// Fails on any event within `wait`, `hover` included.
+    pub fn expect_silent(&self, wait: Duration) {
         if let Ok(event) = self.events.recv_timeout(wait) {
             panic!("unexpected event {event}");
         }
@@ -285,6 +306,26 @@ impl Screen {
         thread::sleep(Duration::from_millis(50));
         self.input(4, 1, 0, 0);
         self.input(5, 1, 0, 0);
+    }
+
+    /// The window's `_NET_WM_NAME`.
+    pub fn title(&self, window: Placed) -> String {
+        let atom = |name: &[u8]| {
+            self.conn
+                .intern_atom(false, name)
+                .unwrap()
+                .reply()
+                .unwrap()
+                .atom
+        };
+        let (name, utf8) = (atom(b"_NET_WM_NAME"), atom(b"UTF8_STRING"));
+        let prop = self
+            .conn
+            .get_property(false, window.id, name, utf8, 0, 1024)
+            .unwrap()
+            .reply()
+            .unwrap();
+        String::from_utf8(prop.value).unwrap()
     }
 
     /// Gives the window keyboard focus, as a window manager would after a

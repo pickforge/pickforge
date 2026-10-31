@@ -3,6 +3,10 @@ use crate::control;
 use crate::pulse;
 
 fn app() -> App {
+    app_with(None, None)
+}
+
+fn app_with(label: Option<&str>, title: Option<&str>) -> App {
     App::new(
         Config {
             display: 1,
@@ -13,7 +17,8 @@ fn app() -> App {
             class: "test".into(),
             thumbnail_width: 100,
             placement: Placement::SelfPlaced,
-            label: None,
+            label: label.map(Into::into),
+            title: title.map(Into::into),
         },
         (100, 100),
         Arc::new(Mutex::new(Shared::new(100, 100))),
@@ -112,7 +117,7 @@ fn x11_pause_refresh_observes_unmap_and_iconic_state_without_resize() {
 }
 
 #[test]
-fn thumbnail_keeps_the_session_label_above_an_attention_banner() {
+fn thumbnail_keeps_the_title_strip_above_an_attention_banner() {
     let mut app = app();
     app.config.label = Some("desk-1a2b3c \u{b7} my-app".into());
     app.size = PhysicalSize::new(384, 240);
@@ -120,10 +125,94 @@ fn thumbnail_keeps_the_session_label_above_an_attention_banner() {
     app.controller
         .on_command(&Command::Attention { message }, app.mode, Instant::now());
     app.relayout();
-    let (pill, shown) = app.label_pill.clone().expect("label");
+    let strip = app.strip.clone().expect("strip");
     let banner = app.banner.clone().expect("banner");
-    assert_eq!(shown, "desk-1a2b3c \u{b7} my-app");
-    assert!(banner.rect.y >= pill.bottom(), "{banner:?} {pill:?}");
+    assert_eq!(strip.pieces[0].text, "desk-1a2b3c \u{b7} my-app");
+    assert_eq!(strip.rect, Rect::new(0, 0, 384, 32));
+    assert!(banner.rect.y >= strip.rect.bottom(), "{banner:?} {strip:?}");
+}
+
+fn shown(pieces: &[ui::Piece]) -> Vec<&str> {
+    pieces.iter().map(|p| p.text.as_str()).collect()
+}
+
+#[test]
+fn set_title_shows_the_title_and_falls_back_to_the_label() {
+    let mut app = app_with(Some("desk-1a2b3c \u{b7} my-app"), Some("Checkout flow"));
+    app.size = PhysicalSize::new(384, 240);
+    app.relayout();
+    assert_eq!(app.title.as_deref(), Some("Checkout flow"));
+    assert_eq!(
+        app.window_title(),
+        "Checkout flow \u{b7} desk-1a2b3c \u{b7} my-app \u{b7} Pickforge viewer"
+    );
+    assert_eq!(
+        shown(&app.strip.as_ref().unwrap().pieces),
+        ["Checkout flow", "desk-1a2b3c"]
+    );
+
+    app.damage = None;
+    app.on_command(Command::SetTitle {
+        title: Some("YouTube channel analytics".into()),
+    });
+    assert_eq!(
+        shown(&app.strip.as_ref().unwrap().pieces),
+        ["YouTube channel analytics", "desk-1a2b3c"]
+    );
+    assert_eq!(app.damage, Some((0, 240)), "redraws");
+
+    app.on_command(Command::SetTitle { title: None });
+    assert_eq!(app.title, None);
+    assert_eq!(
+        app.window_title(),
+        "desk-1a2b3c \u{b7} my-app \u{b7} Pickforge viewer"
+    );
+    assert_eq!(
+        shown(&app.strip.as_ref().unwrap().pieces),
+        ["desk-1a2b3c \u{b7} my-app"]
+    );
+
+    // The expanded bar shows the same heading.
+    app.mode = Mode::Expanded;
+    app.on_command(Command::SetTitle {
+        title: Some("Checkout flow".into()),
+    });
+    assert!(app.strip.is_none());
+    assert_eq!(
+        shown(&app.bar.as_ref().unwrap().caption),
+        ["Checkout flow", " \u{b7} desk-1a2b3c"]
+    );
+}
+
+#[test]
+fn hover_reports_thumbnail_changes_once() {
+    let mut app = app();
+    assert_eq!(app.mode, Mode::Thumbnail);
+    assert_eq!(app.hover_change(false), None, "not hovering yet");
+    assert_eq!(app.hover_change(true), Some(Event::Hover { inside: true }));
+    assert_eq!(app.hover_change(true), None, "no repeat");
+    assert_eq!(
+        app.hover_change(false),
+        Some(Event::Hover { inside: false })
+    );
+    assert_eq!(app.hover_change(false), None, "no repeat");
+
+    // Leaving the thumbnail ends the hover.
+    assert!(app.hover_change(true).is_some());
+    app.mode = Mode::Expanded;
+    assert_eq!(
+        app.hover_change(false),
+        Some(Event::Hover { inside: false })
+    );
+    // Outside the thumbnail nothing hovers.
+    assert_eq!(app.hover_change(true), None);
+    app.mode = Mode::Fullscreen;
+    assert_eq!(app.hover_change(true), None);
+    assert!(!app.hovering);
+    // Hover never touches control or the click path.
+    assert!(!app.controller.controlling());
+    assert!(!app.thumb_press);
+    assert_eq!(app.pressed, None);
 }
 
 #[test]

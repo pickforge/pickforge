@@ -24,6 +24,8 @@ pub mod palette {
     pub const SURFACE_1: u32 = 0x000f_0f11;
     /// `--color-text`.
     pub const TEXT: u32 = 0x00f2_f2f3;
+    /// `--color-muted`, secondary text such as the session id.
+    pub const MUTED: u32 = 0x006e_6e75;
     /// White for the hairline and hover overlays.
     pub const WHITE: u32 = 0x00ff_ffff;
     /// `--color-hairline` opacity, 0.08.
@@ -665,6 +667,8 @@ pub struct Bar {
     pub buttons: Vec<(Button, Rect)>,
     pub fullscreen: bool,
     pub kind: BarKind,
+    /// The title and session id between the buttons. Clicks ignore it.
+    pub caption: Vec<Piece>,
 }
 
 /// Sizes in physical pixels for one scale factor.
@@ -689,6 +693,11 @@ impl Metrics {
     fn font_px(&self) -> f32 {
         // Whole pixels keep glyph edges crisp.
         self.px(12.0).round().max(8.0)
+    }
+
+    /// The smaller size of the muted session id.
+    fn small_font_px(&self) -> f32 {
+        self.px(11.0).round().max(8.0)
     }
 }
 
@@ -715,6 +724,7 @@ impl Bar {
         metrics: Metrics,
         fullscreen: bool,
         kind: BarKind,
+        heading: Option<&Heading>,
         text: &mut Text,
     ) -> Bar {
         let rect = Rect::new(0, 0, width, metrics.bar_height());
@@ -773,6 +783,17 @@ impl Bar {
         } else if !fits(&lefts, &rights) {
             lefts.clear();
         }
+        // The caption takes the space the buttons leave, so it goes before
+        // any button does.
+        let pad = metrics.round(8.0) as i32;
+        let start = lefts.last().map_or(0, |(_, r)| r.right()) + pad;
+        let end = rights.first().map_or(width as i32, |(_, r)| r.x) - pad;
+        let caption = heading
+            .and_then(|heading| {
+                let center_y = rect.h as f32 / 2.0;
+                bar_caption(heading, start, end, center_y, metrics, text)
+            })
+            .unwrap_or_default();
         let mut buttons = lefts;
         buttons.extend(rights);
         Bar {
@@ -780,6 +801,7 @@ impl Bar {
             buttons,
             fullscreen,
             kind,
+            caption,
         }
     }
 
@@ -806,6 +828,7 @@ impl Bar {
         } else {
             canvas.blend_fill(bottom, palette::WHITE, palette::HAIRLINE);
         }
+        draw_pieces(canvas, &self.caption, text);
         let font = metrics.font_px();
         for &(button, r) in &self.buttons {
             let color = if button == Button::ReturnControl {
@@ -1136,29 +1159,214 @@ pub fn status_rect(area: Rect, label: &str, metrics: Metrics, text: &mut Text) -
     Rect::new(area.x + margin, area.bottom() - margin - h as i32, w, h)
 }
 
-/// The session label pill in the top-left corner of `area`, with the text
-/// cut to fit and ending in an ellipsis. `None` when the area is too small
-/// for it beside the status pill.
-pub fn session_label(
-    area: Rect,
-    label: &str,
+/// What names the session: the title, or the label without one, and the
+/// session id beside a title. Both are ready to draw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Heading {
+    pub main: String,
+    pub id: Option<String>,
+}
+
+impl Heading {
+    pub fn new(title: Option<&str>, label: Option<&str>) -> Option<Heading> {
+        match (title, label) {
+            (Some(title), label) => Some(Heading {
+                main: title.to_owned(),
+                id: label.map(|label| session_id(label).to_owned()),
+            }),
+            (None, Some(label)) => Some(Heading {
+                main: label.to_owned(),
+                id: None,
+            }),
+            (None, None) => None,
+        }
+    }
+}
+
+/// The session id in a label of the form `<id> · <project>`, or the whole
+/// label without that separator.
+pub fn session_id(label: &str) -> &str {
+    label.split_once(" \u{b7} ").map_or(label, |(id, _)| id)
+}
+
+/// One line of text at a set place.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Piece {
+    pub text: String,
+    pub x: f32,
+    pub center_y: f32,
+    pub width: f32,
+    pub px: f32,
+    pub color: u32,
+}
+
+fn draw_pieces(canvas: &mut Canvas, pieces: &[Piece], text: &mut Text) {
+    for piece in pieces {
+        text.draw(
+            canvas,
+            &piece.text,
+            piece.x,
+            piece.center_y,
+            piece.px,
+            piece.color,
+        );
+    }
+}
+
+/// A text and its width in pixels.
+type Fitted = (String, f32);
+
+/// The main text cut to fit beside `second` in `max_w`, with the widths of
+/// both. The main text shortens first and needs room for one character
+/// and an ellipsis; without that room `second` goes. `None` when not even
+/// the main text fits.
+fn fit_pair(
+    main: &str,
+    main_px: f32,
+    second: Option<&str>,
+    second_px: f32,
+    gap: f32,
+    max_w: f32,
+    text: &mut Text,
+) -> Option<(Fitted, Option<Fitted>)> {
+    let least = text.width(&format!("M{ELLIPSIS}"), main_px);
+    let fit = |max_w: f32, text: &mut Text| {
+        let fitted = fit_line(main, max_w, |s| text.width(s, main_px));
+        let w = text.width(&fitted, main_px);
+        (fitted, w)
+    };
+    if let Some(second) = second {
+        let second_w = text.width(second, second_px);
+        let room = max_w - second_w - gap;
+        let main_w = text.width(main, main_px);
+        if room >= least.min(main_w) {
+            return Some((fit(room, text), Some((second.to_owned(), second_w))));
+        }
+    }
+    (max_w >= least).then(|| (fit(max_w, text), None))
+}
+
+/// The thumbnail's title strip at the top of `area`: the title at the
+/// left and the muted session id at the right, or the label alone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TitleStrip {
+    pub rect: Rect,
+    pub pieces: Vec<Piece>,
+}
+
+/// The strip height in logical pixels. The host stacks thumbnails so that
+/// this much of each stays visible.
+pub const STRIP_HEIGHT: f64 = 32.0;
+
+impl TitleStrip {
+    /// `None` when `area` is too small for the strip.
+    pub fn layout(
+        area: Rect,
+        heading: &Heading,
+        metrics: Metrics,
+        text: &mut Text,
+    ) -> Option<TitleStrip> {
+        let h = metrics.round(STRIP_HEIGHT);
+        if area.h < h {
+            return None;
+        }
+        let rect = Rect::new(area.x, area.y, area.w, h);
+        let pad = metrics.round(10.0) as f32;
+        let gap = metrics.round(12.0) as f32;
+        let (main_px, id_px) = (metrics.font_px(), metrics.small_font_px());
+        let max_w = area.w as f32 - 2.0 * pad;
+        let (main, id) = fit_pair(
+            &heading.main,
+            main_px,
+            heading.id.as_deref(),
+            id_px,
+            gap,
+            max_w,
+            text,
+        )?;
+        let center_y = rect.y as f32 + h as f32 / 2.0;
+        let left = rect.x as f32 + pad;
+        let mut pieces = vec![Piece {
+            text: main.0,
+            x: left,
+            center_y,
+            width: main.1,
+            px: main_px,
+            color: palette::TEXT,
+        }];
+        if let Some((id, width)) = id {
+            pieces.push(Piece {
+                text: id,
+                x: (rect.right() as f32 - pad - width).floor(),
+                center_y,
+                width,
+                px: id_px,
+                color: palette::MUTED,
+            });
+        }
+        Some(TitleStrip { rect, pieces })
+    }
+
+    pub fn draw(&self, canvas: &mut Canvas, metrics: Metrics, text: &mut Text) {
+        canvas.blend_fill(self.rect, palette::SURFACE, 224);
+        let line = metrics.round(1.0);
+        let bottom = Rect::new(
+            self.rect.x,
+            self.rect.bottom() - line as i32,
+            self.rect.w,
+            line,
+        );
+        canvas.blend_fill(bottom, palette::WHITE, palette::HAIRLINE);
+        draw_pieces(canvas, &self.pieces, text);
+    }
+}
+
+/// The bar caption centered between `start` and `end`: the title and then
+/// the muted session id, or the label alone. `None` when it does not fit.
+fn bar_caption(
+    heading: &Heading,
+    start: i32,
+    end: i32,
+    center_y: f32,
     metrics: Metrics,
     text: &mut Text,
-) -> Option<(Rect, String)> {
-    let font = metrics.font_px();
-    let pad = metrics.px(10.0);
-    let h = metrics.round(24.0);
-    let margin = metrics.round(8.0) as i32;
-    if (area.h as i32) < 2 * (h as i32 + margin) + margin {
+) -> Option<Vec<Piece>> {
+    let (main_px, id_px) = (metrics.font_px(), metrics.small_font_px());
+    let id = heading.id.as_ref().map(|id| format!(" \u{b7} {id}"));
+    let max_w = (end - start) as f32;
+    if max_w <= 0.0 {
         return None;
     }
-    let max_w = area.w as f32 - 2.0 * margin as f32 - 2.0 * pad;
-    if max_w < text.width(&format!("M{ELLIPSIS}"), font) {
-        return None;
+    let (main, id) = fit_pair(
+        &heading.main,
+        main_px,
+        id.as_deref(),
+        id_px,
+        0.0,
+        max_w,
+        text,
+    )?;
+    let total = main.1 + id.as_ref().map_or(0.0, |(_, w)| *w);
+    let left = (start as f32 + (max_w - total) / 2.0).round();
+    let mut pieces = vec![Piece {
+        text: main.0,
+        x: left,
+        center_y,
+        width: main.1,
+        px: main_px,
+        color: palette::TEXT,
+    }];
+    if let Some((id, width)) = id {
+        pieces.push(Piece {
+            text: id,
+            x: left + main.1,
+            center_y,
+            width,
+            px: id_px,
+            color: palette::MUTED,
+        });
     }
-    let fitted = fit_line(label, max_w, |s| text.width(s, font));
-    let w = (text.width(&fitted, font) + 2.0 * pad).ceil() as u32;
-    Some((Rect::new(area.x + margin, area.y + margin, w, h), fitted))
+    Some(pieces)
 }
 
 /// `line` as is when it fits `max_w`, otherwise cut to end in an ellipsis.
@@ -1229,6 +1437,7 @@ mod tests {
                 metrics,
                 false,
                 BarKind::Watch { take: false },
+                None,
                 &mut text,
             );
             assert_eq!(bar.buttons.len(), 3);
@@ -1259,6 +1468,12 @@ mod tests {
     #[test]
     fn control_bars_show_the_right_buttons() {
         let mut text = Text::new();
+        // A long caption never pushes a button out.
+        let heading = Heading::new(
+            Some(&"Pickforge GitHub issues ".repeat(4)),
+            Some("desk-1a2b3c \u{b7} my-app"),
+        );
+        let heading = heading.as_ref();
         let names = |bar: &Bar| bar.buttons.iter().map(|(b, _)| *b).collect::<Vec<_>>();
         for scale in [1.0, 2.0] {
             let metrics = Metrics { scale };
@@ -1268,6 +1483,7 @@ mod tests {
                 metrics,
                 false,
                 BarKind::Watch { take: true },
+                heading,
                 &mut text,
             );
             assert_eq!(
@@ -1280,7 +1496,7 @@ mod tests {
                 ]
             );
             assert_in_order(&watch.buttons, width);
-            let control = Bar::layout(width, metrics, true, BarKind::Control, &mut text);
+            let control = Bar::layout(width, metrics, true, BarKind::Control, heading, &mut text);
             assert_eq!(
                 names(&control),
                 vec![Button::ReturnControl, Button::Paste, Button::Fullscreen]
@@ -1294,7 +1510,8 @@ mod tests {
             let mut seen = Vec::new();
             for logical in (60..=640).step_by(4) {
                 let narrow = (logical as f64 * scale) as u32;
-                let control = Bar::layout(narrow, metrics, true, BarKind::Control, &mut text);
+                let control =
+                    Bar::layout(narrow, metrics, true, BarKind::Control, heading, &mut text);
                 let shown = names(&control);
                 assert_eq!(shown[0], Button::ReturnControl, "{logical}");
                 if shown.contains(&Button::Fullscreen) {
@@ -1321,12 +1538,20 @@ mod tests {
                 metrics,
                 false,
                 BarKind::Watch { take: true },
+                heading,
                 &mut text,
             );
             assert!(!names(&watch).contains(&Button::TakeControl));
             assert!(names(&watch).contains(&Button::Close));
             for take in [true, false] {
-                let watch = Bar::layout(width, metrics, false, BarKind::Watch { take }, &mut text);
+                let watch = Bar::layout(
+                    width,
+                    metrics,
+                    false,
+                    BarKind::Watch { take },
+                    heading,
+                    &mut text,
+                );
                 assert!(!names(&watch).contains(&Button::Paste), "no Paste in watch");
             }
         }
@@ -1755,30 +1980,168 @@ mod tests {
         );
     }
 
+    fn assert_inside(pieces: &[Piece], left: f32, right: f32) {
+        for piece in pieces {
+            assert!(piece.x >= left, "{piece:?} left of {left}");
+            assert!(piece.x + piece.width <= right, "{piece:?} right of {right}");
+        }
+    }
+
     #[test]
-    fn session_label_fits_the_thumbnail() {
-        let mut text = Text::new();
-        let long = format!(
-            "desk-1a2b3c \u{b7} {}",
-            "very-long-project-folder-name-".repeat(10)
+    fn session_id_is_the_label_before_the_separator() {
+        assert_eq!(session_id("desk-1a2b3c \u{b7} my-app"), "desk-1a2b3c");
+        assert_eq!(session_id("desk-1 \u{b7} a \u{b7} b"), "desk-1");
+        assert_eq!(session_id("desk-1a2b3c"), "desk-1a2b3c");
+        assert_eq!(Heading::new(None, None), None);
+        assert_eq!(
+            Heading::new(None, Some("desk-1 \u{b7} app")),
+            Some(Heading {
+                main: "desk-1 \u{b7} app".into(),
+                id: None
+            })
         );
+        assert_eq!(
+            Heading::new(Some("Checkout"), Some("desk-1 \u{b7} app")),
+            Some(Heading {
+                main: "Checkout".into(),
+                id: Some("desk-1".into())
+            })
+        );
+    }
+
+    #[test]
+    fn title_strip_fits_the_thumbnail() {
+        let mut text = Text::new();
+        let label = "desk-1a2b3c \u{b7} my-app";
+        let long =
+            Heading::new(Some(&"YouTube channel analytics ".repeat(3)), Some(label)).unwrap();
         for scale in [1.0, 1.25, 2.0] {
             let metrics = Metrics { scale };
-            let font = metrics.font_px();
             let area = Rect::new(0, 0, (384.0 * scale) as u32, (240.0 * scale) as u32);
-            let (rect, fitted) = session_label(area, &long, metrics, &mut text).unwrap();
-            assert_eq!(rect.intersect(&area), rect, "{scale}");
-            assert!(fitted.starts_with("desk-1a2b3c \u{b7} very"), "{fitted}");
-            assert!(fitted.ends_with('\u{2026}'), "{fitted}");
-            assert!(text.width(&fitted, font) <= rect.w as f32);
+            let strip = TitleStrip::layout(area, &long, metrics, &mut text).unwrap();
+            assert_eq!(
+                strip.rect,
+                Rect::new(0, 0, area.w, metrics.round(32.0)),
+                "{scale}"
+            );
+            let pad = metrics.round(10.0) as f32;
+            assert_inside(&strip.pieces, pad, area.w as f32 - pad);
+            let [title, id] = &strip.pieces[..] else {
+                panic!("{:?}", strip.pieces);
+            };
+            assert!(title.text.starts_with("YouTube channel"), "{title:?}");
+            assert!(title.text.ends_with('\u{2026}'), "{title:?}");
+            assert_eq!(title.color, palette::TEXT);
+            assert_eq!(id.text, "desk-1a2b3c");
+            assert_eq!(id.color, palette::MUTED);
+            assert!(id.px < title.px, "{scale}");
+            assert!(id.x >= title.x + title.width, "id right of the title");
+            for piece in &strip.pieces {
+                assert!(
+                    piece.center_y > 0.0 && piece.center_y < strip.rect.h as f32,
+                    "{piece:?}"
+                );
+            }
             let status = status_rect(area, "Live", metrics, &mut text);
-            assert!(rect.bottom() < status.y, "{scale}");
-            let (_, short) = session_label(area, "desk-1 \u{b7} app", metrics, &mut text).unwrap();
-            assert_eq!(short, "desk-1 \u{b7} app");
+            assert!(strip.rect.bottom() < status.y, "{scale}");
+
+            let short = Heading::new(Some("Checkout flow"), Some(label)).unwrap();
+            let strip = TitleStrip::layout(area, &short, metrics, &mut text).unwrap();
+            assert_eq!(strip.pieces[0].text, "Checkout flow");
+            assert_eq!(strip.pieces[1].text, "desk-1a2b3c");
+
+            let alone = Heading::new(None, Some(label)).unwrap();
+            let strip = TitleStrip::layout(area, &alone, metrics, &mut text).unwrap();
+            assert_eq!(strip.pieces.len(), 1);
+            assert_eq!(strip.pieces[0].text, label);
+            assert_eq!(strip.pieces[0].color, palette::TEXT);
         }
         let metrics = Metrics { scale: 1.0 };
-        assert!(session_label(Rect::new(0, 0, 384, 60), &long, metrics, &mut text).is_none());
-        assert!(session_label(Rect::new(0, 0, 30, 240), &long, metrics, &mut text).is_none());
+        // Too narrow for the id beside a cut title: the title stays alone.
+        let strip =
+            TitleStrip::layout(Rect::new(0, 0, 100, 60), &long, metrics, &mut text).unwrap();
+        assert_eq!(strip.pieces.len(), 1);
+        assert!(strip.pieces[0].text.ends_with('\u{2026}'));
+        assert_inside(&strip.pieces, 10.0, 90.0);
+        // Tiny areas show no strip.
+        assert!(TitleStrip::layout(Rect::new(0, 0, 384, 31), &long, metrics, &mut text).is_none());
+        assert!(TitleStrip::layout(Rect::new(0, 0, 30, 240), &long, metrics, &mut text).is_none());
+    }
+
+    #[test]
+    fn bar_caption_sits_between_the_buttons() {
+        let mut text = Text::new();
+        let label = "desk-1a2b3c \u{b7} my-app";
+        let short = Heading::new(Some("Checkout flow"), Some(label)).unwrap();
+        let long = Heading::new(Some(&"Pickforge GitHub issues ".repeat(4)), Some(label)).unwrap();
+        let alone = Heading::new(None, Some(label)).unwrap();
+        for scale in [1.0, 1.25, 2.0] {
+            let metrics = Metrics { scale };
+            let width = (640.0 * scale) as u32;
+            for kind in [
+                BarKind::Watch { take: true },
+                BarKind::Watch { take: false },
+                BarKind::Control,
+            ] {
+                let bar = Bar::layout(width, metrics, false, kind, Some(&short), &mut text);
+                let lefts = bar.buttons.iter().filter(|(_, r)| r.x < width as i32 / 2);
+                let start = lefts.map(|(_, r)| r.right()).max().unwrap_or(0) as f32;
+                let end = bar
+                    .buttons
+                    .iter()
+                    .filter(|(_, r)| r.x >= width as i32 / 2)
+                    .map(|(_, r)| r.x)
+                    .min()
+                    .unwrap() as f32;
+                assert_inside(&bar.caption, start, end);
+                let [title, id] = &bar.caption[..] else {
+                    panic!("{kind:?}: {:?}", bar.caption);
+                };
+                assert_eq!(title.text, "Checkout flow");
+                assert_eq!(title.color, palette::TEXT);
+                assert_eq!(id.text, " \u{b7} desk-1a2b3c");
+                assert_eq!(id.color, palette::MUTED);
+                assert_eq!(id.x, title.x + title.width);
+                // Centered in the free space.
+                let middle = (title.x + id.x + id.width) / 2.0;
+                assert!((middle - (start + end) / 2.0).abs() <= 1.0, "{kind:?}");
+                // Clicks ignore the caption.
+                assert_eq!(bar.hit((middle) as f64, bar.rect.h as f64 / 2.0), None);
+
+                let bar = Bar::layout(width, metrics, false, kind, Some(&long), &mut text);
+                assert_inside(&bar.caption, start, end);
+                assert!(bar.caption[0].text.ends_with('\u{2026}'), "{kind:?}");
+                assert_eq!(bar.caption[1].text, " \u{b7} desk-1a2b3c");
+
+                let bar = Bar::layout(width, metrics, false, kind, Some(&alone), &mut text);
+                assert_eq!(bar.caption.len(), 1);
+                assert_eq!(bar.caption[0].text, label);
+
+                let bar = Bar::layout(width, metrics, false, kind, None, &mut text);
+                assert!(bar.caption.is_empty());
+            }
+            // A narrow bar keeps every button and loses the caption.
+            let narrow = (200.0 * scale) as u32;
+            let plain = Bar::layout(
+                narrow,
+                metrics,
+                false,
+                BarKind::Watch { take: false },
+                None,
+                &mut text,
+            );
+            let titled = Bar::layout(
+                narrow,
+                metrics,
+                false,
+                BarKind::Watch { take: false },
+                Some(&long),
+                &mut text,
+            );
+            assert_eq!(titled.buttons, plain.buttons);
+            assert_eq!(titled.buttons.len(), 3);
+            assert!(titled.caption.is_empty(), "{:?}", titled.caption);
+        }
     }
 
     #[test]
