@@ -524,7 +524,7 @@ impl App {
         }
     }
 
-    fn damage_rows(&mut self, y0: i32, y1: i32) {
+    fn add_damage(&mut self, y0: i32, y1: i32) {
         let y0 = y0.max(0);
         let y1 = y1.min(self.size.height as i32);
         if y1 <= y0 {
@@ -534,6 +534,15 @@ impl App {
             self.damage
                 .map_or((y0, y1), |(a, b)| (a.min(y0), b.max(y1))),
         );
+    }
+
+    fn damage_rows(&mut self, y0: i32, y1: i32) {
+        let y0 = y0.max(0);
+        let y1 = y1.min(self.size.height as i32);
+        if y1 <= y0 {
+            return;
+        }
+        self.add_damage(y0, y1);
         self.request_redraw();
     }
 
@@ -1314,7 +1323,7 @@ impl App {
 
     fn draw(&mut self) {
         let (w, h) = (self.size.width, self.size.height);
-        if w == 0 || h == 0 || self.surface.is_none() || self.canvas.len() < (w * h) as usize {
+        if w == 0 || h == 0 || self.canvas.len() < (w * h) as usize {
             return;
         }
 
@@ -1324,14 +1333,12 @@ impl App {
         let cursor_rect = cursor.map(|(r, _)| r.intersect(&self.image));
         if cursor_rect != self.cursor_drawn {
             for r in [self.cursor_drawn, cursor_rect].into_iter().flatten() {
-                self.damage_rows(r.y, r.bottom());
+                self.add_damage(r.y, r.bottom());
             }
             self.cursor_drawn = cursor_rect;
         }
 
-        let Some((y0, y1)) = self.damage.take() else {
-            return;
-        };
+        let (y0, y1) = self.damage.take().unwrap_or((0, h as i32));
         self.compose(y0, y1, cursor.map(|(r, f)| (r.x, r.y, f)));
 
         let Some(surface) = self.surface.as_mut() else {
@@ -1398,7 +1405,7 @@ impl App {
                 );
                 drop(s);
                 let top = self.image.y;
-                self.damage_rows(top + rows.start as i32, top + rows.end as i32);
+                self.add_damage(top + rows.start as i32, top + rows.end as i32);
             }
         }
         self.rescale_all = false;
