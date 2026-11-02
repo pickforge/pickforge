@@ -550,3 +550,18 @@ fn paste_needs_control_in_an_expanded_window() {
     app.start_paste();
     assert!(app.paste.is_none());
 }
+
+#[test]
+fn redraw_without_damage_repaints_the_whole_window() {
+    let mut app = app_with(Some("desk-1a2b3c \u{b7} my-app"), Some("Checkout flow"));
+    app.size = PhysicalSize::new(384, 240);
+    app.shared.lock().unwrap().frame.pixels.fill(0x0024_58c8);
+    app.relayout();
+    app.draw();
+    let painted = app.canvas.clone();
+    assert_eq!(app.damage, None);
+
+    app.canvas.fill(0);
+    app.draw();
+    assert_eq!(app.canvas, painted);
+}

@@ -383,3 +383,51 @@ fn draws_label_and_banner_text_with_host_fonts() {
         save(&screen.shot(), thumb, &format!("fonts-{name}.png"));
     }
 }
+
+#[test]
+fn repaints_an_uncovered_thumbnail() {
+    if !xvfb_ready("uncovered_thumbnail") {
+        return;
+    }
+    let session = Xvfb::start("640x480x24");
+    let host = Xvfb::start("1280x1024x24");
+    let _painter = paint_session(&session);
+    let class = "pickforge-viewer-uncovered";
+    let label = "desk-1a2b3c \u{b7} my-app";
+    let mut viewer = Viewer::spawn_with(
+        &session,
+        host.display,
+        class,
+        "self",
+        "1",
+        &["--label", label, "--title", "Checkout flow"],
+    );
+    viewer.expect("ready");
+    let mut screen = Screen::new(host.display);
+    let thumb = screen.wait_size(class, 384, 288);
+    let drawn = wait_until(WAIT, || {
+        let shot = screen.shot();
+        near(at(&shot, thumb, 192, 200), YELLOW, 12) && ink(&shot, thumb, 8, 0, 120, 32) > INK
+    });
+    assert!(drawn, "initial thumbnail");
+
+    // Cover the top-left of the thumbnail, including the title strip, while
+    // leaving the rest visible so capture does not pause and refetch.
+    let (x, y) = (thumb.x as i16, thumb.y as i16);
+    let cover = Painter::new(host.display, x, y, 240, 160, RED);
+    screen.wait_color(thumb, 100, 16, RED);
+    screen.wait_color(thumb, 100, 80, RED);
+    drop(cover);
+
+    let mut shot = screen.shot();
+    let repainted = wait_until(WAIT, || {
+        shot = screen.shot();
+        near(at(&shot, thumb, 100, 80), BLUE, 12) && ink(&shot, thumb, 8, 0, 120, 32) > INK
+    });
+    assert!(repainted, "uncovered area and title strip repainted");
+    assert_near(&shot, thumb, 48, 48, WHITE, "uncovered white square");
+    assert_near(&shot, thumb, 192, 200, YELLOW, "bottom half kept");
+
+    viewer.send(r#"{"cmd":"shutdown"}"#);
+    assert_eq!(viewer.wait_exit(Duration::from_secs(3)), Some(0));
+}
