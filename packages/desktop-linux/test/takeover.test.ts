@@ -775,11 +775,21 @@ describe("takeover hooks (#380)", () => {
 
   it.each(["viewer", "x11vnc"] as const)("keeps the lease alive through an afterLease longer than its TTL (%s)", async (transport) => {
     const id = await createDesktop({ vncPort: await freeLoopbackPort() });
+    let initialExpiresAt = "";
     const handle = await startHumanTakeover(id, {
-      transport, registryEnv: env, env, ttlMs: 400, heartbeatMs: 100,
-      afterLease: () => new Promise((resolve) => setTimeout(resolve, 1_000)),
+      transport, registryEnv: env, env, heartbeatMs: 25,
+      afterLease: async () => {
+        // Wait for the in-hook heartbeat to advance the on-disk lease expiry,
+        // rather than racing a short TTL against scheduler and VNC startup delay (#500).
+        initialExpiresAt = (await readHumanLease(id, env))!.expiresAt;
+        await expect.poll(async () =>
+          Date.parse((await readHumanLease(id, env))?.expiresAt ?? ""),
+        ).toBeGreaterThan(Date.parse(initialExpiresAt));
+      },
     });
-    expect(await readHumanLease(id, env)).toMatchObject({ leaseId: handle.leaseId });
+    const lease = await readHumanLease(id, env);
+    expect(lease).toMatchObject({ leaseId: handle.leaseId });
+    expect(Date.parse(lease!.expiresAt)).toBeGreaterThan(Date.parse(initialExpiresAt));
     await endHumanTakeover(handle, { registryEnv: env, env, reason: "return" });
   });
 
