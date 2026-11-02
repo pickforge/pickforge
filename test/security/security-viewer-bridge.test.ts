@@ -1,3 +1,4 @@
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import net from "node:net";
@@ -38,6 +39,52 @@ const sockets: net.Socket[] = [];
 const clients: ViewerWebSocket[] = [];
 let controller: ReturnType<typeof vi.fn<() => Promise<boolean>>>;
 
+function loopbackEndpoint(port: number): string {
+  return `0100007F:${port.toString(16).toUpperCase().padStart(4, "0")}`;
+}
+
+function ownSocketInodes(): Set<string> {
+  const inodes = new Set<string>();
+  for (const descriptor of fsSync.readdirSync(`/proc/${process.pid}/fd`)) {
+    try {
+      const target = fsSync.readlinkSync(
+        `/proc/${process.pid}/fd/${descriptor}`,
+      );
+      if (target.startsWith("socket:[")) {
+        inodes.add(target.slice(8, -1));
+      }
+    } catch {
+      // A descriptor can close while scanning /proc/<pid>/fd.
+    }
+  }
+  return inodes;
+}
+
+/** True when the client side of an accepted loopback socket belongs to this process (#492). */
+function peerFromThisProcess(socket: net.Socket): boolean {
+  if (socket.localPort === undefined || socket.remotePort === undefined) {
+    return false;
+  }
+  const local = loopbackEndpoint(socket.remotePort);
+  const remote = loopbackEndpoint(socket.localPort);
+  const owned = ownSocketInodes();
+  for (const line of fsSync
+    .readFileSync("/proc/net/tcp", "utf8")
+    .split("\n")
+    .slice(1)) {
+    const fields = line.trim().split(/\s+/);
+    if (
+      fields[1] === local &&
+      fields[2] === remote &&
+      fields[9] !== undefined &&
+      owned.has(fields[9])
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 beforeEach(async () => {
   testRoot = await fs.mkdtemp(
     path.join(process.cwd(), ".viewer-security-test-"),
@@ -45,8 +92,14 @@ beforeEach(async () => {
   registryEnv = { ...process.env, PICKFORGE_HOME: testRoot };
   const identity = readProcessIdentity(process.pid)!;
   upstream = net.createServer((socket) => {
-    sockets.push(socket);
     socket.on("error", () => {});
+    // Ignore and destroy connections from a local port prober (#492), so
+    // sockets counts only bridge connections and upstream.close() cannot hang.
+    if (!peerFromThisProcess(socket)) {
+      socket.destroy();
+      return;
+    }
+    sockets.push(socket);
     socket.on("data", (data) => socket.write(data));
   });
   upstream.listen(0, "127.0.0.1");
